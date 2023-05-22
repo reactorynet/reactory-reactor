@@ -1,0 +1,1 @@
+///<reference path="./chat.types.d.ts" />

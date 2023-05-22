@@ -1,0 +1,8 @@
++---------------------------------------------------------------------------+
+| Welcome to the reactory ai helper utility. This utility will help you     |
+| perform some basic AI (chatgpt) specific operations against the code base.|
+| For more help on each question, respond with ? to get more help on the    |
+| use of each prompt.                                                       |
+|                                                                           |
+|                 !!This tool is still under development!!                  |
++---------------------------------------------------------------------------+

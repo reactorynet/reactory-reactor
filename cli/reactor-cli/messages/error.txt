@@ -1,0 +1,9 @@
++---------------------------------------------------------------------------+
+| Error: You must provide an apikey and apivalue to use this tool.          |
+| Add the following keys in your environment file                           |
+|    * OPENAI_API_KEY                                                       |
+|    * OPENAI_ORG                                                           |
+| or specify the values in the command line using the params                |
+|    * --apikey=<your api key>                                              |
+|    * --apiorg=<your api value>                                            |
++---------------------------------------------------------------------------+
