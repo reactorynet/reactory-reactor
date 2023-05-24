@@ -24,6 +24,7 @@ const INITIAL_CHAT_STATE: ChatState = {
     apiKey: process.env.OPENAI_API_KEY,
     organization: process.env.OPENAI_ORG,
   })),
+  botId: 'Reactor'
 }
 
 // Move this to a separate function
@@ -48,6 +49,7 @@ async function getAIResponse(ai: OpenAIApi, prompt: CreateChatCompletionRequest)
     const aiResponse = await ai.createChatCompletion(prompt);
     const parsed = await handleChatCompletionResponse(aiResponse.data, prompt);
     const { choices } = parsed;
+    //@ts-ignore
     return choices[0].message;
   } catch (error) {
     console.error(`Error getting AI response: ${error}`);
@@ -96,7 +98,7 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
     handler: async (response, state) => {
 
       const processedResponse = await handleUserResponse(response);
-      const userResponse = {
+      const userResponse: ChatCompletionResponseMessage = {
         role: 'user',
         content: processedResponse,
       };

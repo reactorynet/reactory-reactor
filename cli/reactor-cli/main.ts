@@ -3,9 +3,9 @@ import {
   ChatFactory, 
   SYSTEM_INITIALIZER_MESSAGE 
 } from '@reactory/server-modules/reactor/ai/openai/chat/questions/factory';
-import { colors } from '@reactory/server-modules/reactor/helpers';
+import { ask, colors } from '@reactory/server-modules/reactor/helpers';
 import { ChatState } from "@reactory/server-modules/reactor/types/chat.types";
-import readline, { ReadLine } from 'readline';
+import readline from 'readline';
 
 const DEFAULT_MODEL_ID = 'gpt-3.5-turbo-0301';
 
@@ -126,5 +126,6 @@ ${responseText}
   }
 };
 
+main(process.argv);
+
 export default main;
-// main(process.argv);
