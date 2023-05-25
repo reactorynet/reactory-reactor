@@ -1,6 +1,7 @@
 import Reactory from '@reactory/reactory-core';
 import ReactorGraphql from './graphql';
 import Workflows from './workflow';
+import ReactorCli from './cli';
 
 const ClientCertificate = require.resolve('./certs/reactory-web-client.cert');
 const {
@@ -33,8 +34,8 @@ const ReactorModule: Reactory.Server.IReactoryModule = {
       nameSpace: 'reactory',
       name: 'ReactorWebClient',
       version: '1.0.0',
+      description: 'Reactory Reactor Web Client',
       platform: 'web',
-      description: 'Reactor Web Client Plugin for Reactory',
       url: `${API_URI_ROOT}/plugins/reactor-web-client-plugin${NODE_ENV === 'production' ? '.min' : ''}.js`,
       enabled: true,
       id: 'reactor-web-client-plugin',
@@ -44,9 +45,7 @@ const ReactorModule: Reactory.Server.IReactoryModule = {
       roles: ['USER'],
     }
   ],
-  cli: [
-    // Define your CLI programs here
-  ],
+  cli: ReactorCli,
 };
 
 export default ReactorModule;
