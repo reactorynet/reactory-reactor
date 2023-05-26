@@ -5,11 +5,14 @@ import { ChatState, IQuestion, IQuestionCollection, QuestionHandlerResponse } fr
 import { 
   handleUserResponse, 
   handleChatCompletionResponse,
-} from '../macro'
+  MacroRegistry,
+  getMacro,
+} from '../macro';
+import { template } from 'lodash';
 
 export const SYSTEM_INITIALIZER_MESSAGE: ChatCompletionResponseMessage = {
   role: 'user',
-  content: fs.readFileSync(`${process.cwd()}/bin/utils/chatgpt/questions/initializer.md`, 'utf-8').toString(), 
+  content: fs.readFileSync(require.resolve('../macro/macros.md'), 'utf-8').toString(), 
 };
 
 const INITIAL_CHAT_STATE: ChatState = {
@@ -24,7 +27,8 @@ const INITIAL_CHAT_STATE: ChatState = {
     apiKey: process.env.OPENAI_API_KEY,
     organization: process.env.OPENAI_ORG,
   })),
-  botId: 'Reactor'
+  botId: 'Reactor',
+  macros: MacroRegistry,
 }
 
 // Move this to a separate function
@@ -44,10 +48,10 @@ function createPrompt(modelId: string, message: string, history: any[]): CreateC
 }
 
 // Move this to a separate function
-async function getAIResponse(ai: OpenAIApi, prompt: CreateChatCompletionRequest): Promise<ChatCompletionResponseMessage> {
+async function getAIResponse(ai: OpenAIApi, prompt: CreateChatCompletionRequest, state: ChatState): Promise<ChatCompletionResponseMessage> {
   try {
     const aiResponse = await ai.createChatCompletion(prompt);
-    const parsed = await handleChatCompletionResponse(aiResponse.data, prompt);
+    const parsed = await handleChatCompletionResponse(aiResponse.data, prompt, state);
     const { choices } = parsed;
     //@ts-ignore
     return choices[0].message;
@@ -77,16 +81,28 @@ function pruneHistory(history: any[]): any[] {
   return prunedHistory.reverse();
 }
 
-export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE): IQuestion => {
+const handleCommandAction = async (response: string, state: ChatState): Promise<any> => { 
+  const [command, ...params] = response.split(' ');
+  const macro = getMacro(command);
+  if(macro) {
+    return await macro(params, state);
+  }
+  return 'Command not found';
+}
 
-  let question = state.history.length === 1 ? 
-    'Hi, how can we build better applications today with reactory?' : 'What else can I help you with?'; 
+export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE): IQuestion => {
 
   const {
     modelId,
     started,
-    ai
+    ai,
+    context
   } = state;
+
+  const { user } = context;
+
+  let question = state.history.length === 1 ?
+    `Hi ${user?.firstName ? user.firstName : 'Anon'}, how can we build better applications today with reactory?` : 'What else can I help you with?'; 
 
   // Prune history before passing to createPrompt
   // let history = pruneHistory(state.history);
@@ -96,8 +112,11 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
   return {
     question,
     handler: async (response, state) => {
-
-      const processedResponse = await handleUserResponse(response);
+      if(response.indexOf('/') === 0) {
+        // handle command message
+        await handleCommandAction(response, state);
+      }
+      const processedResponse = await handleUserResponse(response, state);
       const userResponse: ChatCompletionResponseMessage = {
         role: 'user',
         content: processedResponse,
@@ -112,7 +131,7 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
       state.history.push(userResponse);
 
       // Get AI's response
-      const message = await getAIResponse(ai, prompt);
+      const message = await getAIResponse(ai, prompt, state);
 
       // Add the AI's response to the chat history
       nextState.history.push(message);

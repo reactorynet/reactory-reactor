@@ -1,11 +1,23 @@
-import { promises as fs } from 'fs';
+import { promises as fs, readFileSync } from 'fs';
+import { ChatState, Macro } from '@reactory/server-modules/reactor/types/chat.types';
 
-export const inFile = async (path: string): Promise<string> => {
+const CODE_BLOCK_REGEX = /```(.+?)\n([\s\S]+?)\n```/g;
+
+/**
+ * A macro that reads a file and returns its content as a code block
+ * @param args - string[] - [ path, id ] - id is optional
+ * @param state - ChatState
+ * @returns 
+ */
+export const ReadFile: Macro<string> = async (
+  args: any[],
+  state: ChatState): Promise<string> => {
+  const [path, id] = args;
   try {
     const data = await fs.readFile(path.trim(), 'utf-8');
     const mime = path.split('.').pop() || 'txt';
     return `
-    \`\`\`${mime}
+    \`\`\`${mime}${id ? ` id="${id}"` : ''}
     ${data.toString()}
     \`\`\`
     `;
@@ -15,10 +27,23 @@ export const inFile = async (path: string): Promise<string> => {
   }
 };
 
-const CODE_BLOCK_REGEX = /```(.+?)\n([\s\S]+?)\n```/g;
+export const ReadFileComponentRegister: Reactory.IReactoryComponentDefinition<typeof ReadFile> = {
+  component: ReadFile,
+  name: 'ReadFile',
+  nameSpace: 'reactor',
+  version: '1.0.0',
+  description: readFileSync(require.resolve('./docs/ReadFile.md'), 'utf-8').toString(),
+  domain: 'file',
+  features: [],
+  stem: 'file',
+  enabled: true,
+  tags: ['macro', 'file', 'read'],
+}
 
-export const outFile = async (args: string[]) => {
-  const [ path, content ] = args;
+export const WriteFile: Macro<string> = async (
+  args: string[],
+  state: ChatState) => {
+  const [path, content] = args;
   try {
     // Extract code blocks from content using regex    
     let match;
@@ -34,3 +59,159 @@ export const outFile = async (args: string[]) => {
     return '';
   }
 }
+
+export const WriteFileComponentRegister: Reactory.IReactoryComponentDefinition<typeof WriteFile> = {
+  component: WriteFile,
+  name: 'WriteFile',
+  nameSpace: 'reactor',
+  version: '1.0.0',
+  description: readFileSync(require.resolve('./docs/WriteFile.md'), 'utf-8').toString(),
+  domain: 'file',
+  features: [],
+  stem: 'file',
+  enabled: true,
+  tags: ['macro', 'file', 'write', 'save', 'output'],
+}
+
+// A macro that extracts the content of a directory and returns it as a list
+// when subfolders are set to true, it will also include subfolders
+// Usage: @ls(path, subfolders)
+export const ListDirectory: Macro<string> = async (
+  args: string[],
+  state: ChatState) => {
+  const [path, subfolders] = args;
+  const includeSubfolders = subfolders === 'true' || subfolders === '1';
+  try {
+    // Read the directory
+    const files = await fs.readdir(path.trim());
+
+    // Filter out the directories
+    const filteredFiles = includeSubfolders ? files : files.filter(file => !file.includes('.'));
+
+    // Convert to a list
+    const list = filteredFiles.map(file => `- ${file}`).join('\n');
+
+    return list;
+  } catch (err) {
+    console.error(`Error reading directory at ${path}:`, err);
+    return '';
+  }
+}
+
+export const ListDirectoryComponentRegister: Reactory.IReactoryComponentDefinition<typeof ListDirectory> = {
+  component: ListDirectory,
+  name: 'ListDirectory',
+  nameSpace: 'reactor',
+  version: '1.0.0',
+  description: readFileSync(require.resolve('./docs/ListDirectory.md'), 'utf-8').toString(),
+  domain: 'file',
+  features: [],
+  stem: 'file',
+  enabled: true,
+  tags: ['macro', 'file', 'list', 'ls', 'dir'],
+}
+
+
+// A macro that extracts a portion of a file and returns it as a text block
+// Usage: @extract(path, start, end)
+export const ExtractFile: Macro<string> = async (
+  args: string[],
+  state: ChatState
+) => {
+  // Check for valid input parameters
+  if (args.length !== 3 || isNaN(+args[1]) || isNaN(+args[2])) {
+    return `Invalid parameters. Usage: @extract(path, start, end)`;
+  }
+
+  const [path, start, end] = args;
+  try {
+    // Read the file
+    const data: string = (await fs.readFile(path.trim(), 'utf-8')).toString();
+    const mime = path.split('.').pop() || 'txt';
+    // Split the data into lines
+    const lines = data.split('\n');
+    const startLine = parseInt(start);
+    const endLine = parseInt(end);
+
+    // Extract the portion
+    const portion = lines.slice(startLine - 1, endLine).join('\n');
+
+    // Return it as a text block
+    return `\`\`\\${mime}
+    ${portion}
+    \`\`\``;
+  } catch (err) {
+    console.error(`Error reading file at ${path}:`, err);
+    return `Error reading file at ${path}: ${err?.message}`;
+  }
+};
+
+export const ExtractFileComponentRegister: Reactory.IReactoryComponentDefinition<typeof ExtractFile> = {
+  component: ExtractFile,
+  name: 'ExtractFile',
+  nameSpace: 'reactor',
+  version: '1.0.0',
+  description: readFileSync(require.resolve('./docs/ExtractFile.md'), 'utf-8').toString(),
+  domain: 'file',
+  features: [],
+  stem: 'file',
+  enabled: true,
+  tags: ['macro', 'file', 'extract', 'portion', 'slice'],
+}
+
+// A macro that inserts a snippet into a file starting from a specified line
+// Usage: @insertSnippet(path, start, [end], snippet)
+export const InsertSnippet: Macro<string> = async (
+  args: string[],
+  state: ChatState
+) => {
+  const [path, start, end, snippet] = args;
+  try {
+    // Read the file
+    const data: string = (await fs.readFile(path.trim(), 'utf-8')).toString();
+    // Split the data into lines
+    const lines = data.split('\n');
+    const startLine = parseInt(start);
+    const endLine = end ? parseInt(end) : startLine;
+
+    // Insert or replace the snippet
+    const modifiedLines = [
+      ...lines.slice(0, startLine - 1), // Lines before the start line
+      snippet, // Snippet to insert or replace with
+      ...lines.slice(endLine) // Lines after the end line (if any)
+    ];
+
+    // Join the modified lines back together
+    const modifiedData = modifiedLines.join('\n');
+
+    // Write the modified data back to the file
+    await fs.writeFile(path.trim(), modifiedData, 'utf-8');
+
+    return `Snippet inserted into ${path} successfully.`;
+  } catch (err) {
+    console.error(`Error writing file at ${path}:`, err);
+    return `Error writing file at ${path}: ${err?.message}`;
+  }
+};
+
+export const InsertSnippetComponentRegister: Reactory.IReactoryComponentDefinition<typeof InsertSnippet> = {
+  component: InsertSnippet,
+  name: 'InsertSnippet',
+  nameSpace: 'reactor',
+  version: '1.0.0',
+  description: readFileSync(require.resolve('./docs/InsertSnippet.md'), 'utf-8').toString(),
+  domain: 'file',
+  features: [],
+  stem: 'file',
+  enabled: true,
+  tags: ['macro', 'file', 'insert', 'snippet', 'replace'],
+}
+
+
+export const FileMacros: Reactory.IReactoryComponentDefinition<Macro<unknown>>[] = [
+  ReadFileComponentRegister,
+  WriteFileComponentRegister,
+  ListDirectoryComponentRegister,
+  ExtractFileComponentRegister,
+  InsertSnippetComponentRegister,
+];

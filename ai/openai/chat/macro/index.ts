@@ -1,24 +1,70 @@
-import  { inFile, outFile } from './file.ai.macro';
+import { ChatState, Macro, MacroFunctions } from '@reactory/server-core/modules/reactor/types/chat.types';
+import  { 
+  ReadFile, 
+  WriteFile,
+  ExtractFile,
+  ListDirectory,
+  InsertSnippet,
+  FileMacros,
+} from './file.ai.macro';
+import { FetchMacro } from './http.ai.macro';
+import { QueryGQL, MutationGQL } from './graphql.ai.macro';
+import { ServiceRegister } from './workflow.ai.macro';
+import { CreateUser, GetUser } from './user.ai.macro';
 import { CreateChatCompletionRequest, CreateCompletionResponse } from 'openai';
 
 export const REACTOR_MACRO_MD = require.resolve('./macros.md');
 
-type MacroFunctions = {
-  [macro: string]: (...params: any[]) => Promise<string>
-};
+export const MacroRegistry: Reactory.IReactoryComponentDefinition<Macro<unknown>>[] = [
+  ...FileMacros,
+];
+
+
+export const getMacrosMD = (): string => {
+  const macrosText = MacroRegistry.map((macro) => {
+    return `### ${macro.name}\n${macro.description}\n\n`;
+  }).join('');
+
+  return REACTOR_MACRO_MD.replace('{{macros}}', macrosText);
+}
+
+export const getMacro = (name: string): Macro<unknown> | undefined => { 
+  return MacroRegistry.find((macro) => macro.name === name)?.component;
+}
 
 // Usage
 const inputMacros: MacroFunctions = {
-  file: inFile,
-  inFile,
+  file: ReadFile,
+  ReadFile,
+  ExtractFile,
+  snip: ExtractFile,
+  ListDirectory,
+  read: ReadFile,
+  readFile: ReadFile,
+  ls: ListDirectory,
+  listDirectory: ListDirectory,
+  fetch: FetchMacro,
+  http: FetchMacro,
+  gql: QueryGQL,
+  ServiceRegister,
+  svc: ServiceRegister,
+  user: GetUser,
+  getUser: GetUser,
+  GetUser
 };
 
 const outputMacros: MacroFunctions = {
-  out: outFile,
-  outFile,
+  out: WriteFile,
+  outFile: WriteFile,
+  WriteFile,
+  gml: MutationGQL,
+  CreateUser,
+  createUser: CreateUser,
+  replace: InsertSnippet,
+  insert: InsertSnippet,
 };
 
-export async function handleUserResponse(userResponse: string): Promise<string> {
+export async function handleUserResponse(userResponse: string, state: ChatState): Promise<string> {
   // Extract macros and their parameters from the user response
   const regex = /@(\w+)\((.*?)\)/g;
   let match;
@@ -33,7 +79,7 @@ export async function handleUserResponse(userResponse: string): Promise<string> 
     // Check if there is a function for this macro
     if (inputMacros[macro]) {
       // Replace the macro with the result of its function
-      const replacement = await inputMacros[macro](...splitParams);
+      const replacement: string = await inputMacros[macro](splitParams, state) as string;
       result = result.replace(`@${macro}(${params[0]})`, replacement);      
     } else {
       // console.warn(`No function found for macro @${macro}`);
@@ -46,7 +92,9 @@ export async function handleUserResponse(userResponse: string): Promise<string> 
 
 export async function handleChatCompletionResponse(
   response: CreateCompletionResponse, 
-  prompt: CreateChatCompletionRequest): Promise<CreateCompletionResponse> {
+  prompt: CreateChatCompletionRequest,
+  state: ChatState
+  ): Promise<CreateCompletionResponse> {
 
   const regex = /@(\w+)\((.*?)\)/g;
 
@@ -64,7 +112,7 @@ export async function handleChatCompletionResponse(
     const splitParams = params[0].split(',');
 
     if (macros[macro]) {
-      const replacement = await macros[macro]([...splitParams, message.content]);
+      const replacement = await macros[macro]([...splitParams, message.content], state) as string;
       message.content = message.content.replace(`@${macro}(${params[0]})`, replacement);
     } else {
       console.warn(`No function found for macro @${macro}`);

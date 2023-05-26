@@ -2,9 +2,15 @@ import { ChatCompletionResponseMessage, OpenAIApi } from "openai"
 
 export type KnownCannedMessages = "welcome" | "help" | "goodbye" | "error"
 
+export type Macro<TResult> = (params: any[], state: ChatState) => Promise<TResult>
+
+export type MacroFunctions = {
+  [macro: string]: Macro<unknown>
+};
+
 export type CanedMessages = {
-  [key: KnownCannedMessages]: string
-}
+  [key in KnownCannedMessages]: string;
+};
 
 /**
  * Represents the state of a chat session.
@@ -65,6 +71,11 @@ export type ChatState = {
    * The date the chat session was last updated.
    */
   updated?: Date
+  /**
+   * 
+   * The macros that are available for the chat session.
+   * */
+  macros: Reactory.IReactoryComponentDefinition<Macro<unknown>>[]
 }
 
 export interface QuestionHandlerResponse {

@@ -1,6 +1,6 @@
 import Reactory from '@reactory/reactory-core';
-import ReactorCli from './reactor-cli/main';
-type ReactoryCliApp = (vargs: string[]) => Promise<void>
+import ReactorCli from './reactor-cli/ReactorCli';
+type ReactoryCliApp = (vargs: string[], context: Reactory.Server.IReactoryContext) => Promise<void>
 
 /**
  * ReactorCliApp definition
@@ -20,7 +20,7 @@ const ReactorCliApp: Reactory.IReactoryComponentDefinition<ReactoryCliApp> = {
   features: [{
     feature: 'chat',
     featureType: 'ai',
-    action: ["chat", "interact", "talk", "speak"],
+    action: ["chat", "interact", "talk", "speak", "generate", "automation", "ai", "assistant", "bot", "reactory"],
     description: 'Chat with the Reactory AI assistant',
     stem: 'chat',
   }],

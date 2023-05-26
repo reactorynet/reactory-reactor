@@ -19,8 +19,6 @@ export const ask = async (question: IQuestion, state: ChatState, rl: ReadLine): 
     const { i18n, log } = context;
     const { t } = i18n;
 
-    log(`Asking question: ${question.question}`, { botId }, 'debug');
-
     if (question !== null && question !== undefined) {
       const $response = await new Promise<string>((resolve) => {
         rl.question(`

@@ -1,5 +1,5 @@
 import * as fs from 'fs-extra';
-import { inFile, outFile } from '../file.ai.macro';
+import { inFile, WriteFile } from '../file.ai.macro';
 
 describe('file utilities', () => {
   describe('inFile', () => {
@@ -23,7 +23,7 @@ describe('file utilities', () => {
       const filePath = `${process.env.APP_DATA_ROOT}/tmp/test-file-${Date.now()}.txt`;
       const mockString = 'string to write to file';
       jest.spyOn(fs, 'writeFile').mockResolvedValue(undefined);
-      await outFile([filePath, mockString]);
+      await WriteFile([filePath, mockString]);
       const fileContents = await fs.readFile(filePath, 'utf-8');
       expect(fileContents.trim()).toEqual(mockString);
     });

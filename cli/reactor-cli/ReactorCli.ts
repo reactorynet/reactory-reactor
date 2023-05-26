@@ -6,29 +6,43 @@ import {
 import { ask, colors } from '@reactory/server-modules/reactor/helpers';
 import { ChatState } from "@reactory/server-modules/reactor/types/chat.types";
 import readline from 'readline';
+import { template } from 'lodash';
+import { MacroRegistry } from "@reactory/server-modules/reactor/ai/openai/chat/macro";
 
 const DEFAULT_MODEL_ID = 'gpt-3.5-turbo-0301';
 
-const main = async (kwargs: string[]) => {
+const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryContext): Promise<void> => {
 
   let apiKey = process.env.OPENAI_API_KEY;
   let apiOrg = process.env.OPENAI_ORG;
   let modelId = process.env.OPENAI_MODEL_ID || DEFAULT_MODEL_ID;
+
+  const getInitializerMessage = (state: ChatState) => {
+    const macros = state.macros.map(macro => `## ${macro.name}\n ## Usage\n${macro.description}`).join('\n');
+    return  {
+      role: SYSTEM_INITIALIZER_MESSAGE.role,
+      content: template(SYSTEM_INITIALIZER_MESSAGE.content)({ macros })
+    }
+  }
+
 
   const modelState: ChatState = {
     botId: 'Reactor',
     modelId: modelId || DEFAULT_MODEL_ID,
     started: new Date(),
     history: [
-      SYSTEM_INITIALIZER_MESSAGE
     ],
     apiKey,
     apiOrg,
+    context,
+    macros: MacroRegistry,
     ai: new OpenAIApi(new Configuration({
       organization: apiOrg,
       apiKey: apiKey,
     })),
   }
+
+  modelState.history.push(getInitializerMessage(modelState));
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -126,6 +140,4 @@ ${responseText}
   }
 };
 
-main(process.argv);
-
-export default main;
+export default ReactorCli;
