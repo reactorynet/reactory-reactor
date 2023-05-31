@@ -1,7 +1,8 @@
 import { promises as fs, readFileSync } from 'fs';
 import { ChatState, Macro } from '@reactory/server-modules/reactor/types/chat.types';
+import logger from '@reactory/server-core/logging';
 
-const CODE_BLOCK_REGEX = /```(.+?)\n([\s\S]+?)\n```/g;
+
 
 /**
  * A macro that reads a file and returns its content as a code block
@@ -16,14 +17,10 @@ export const ReadFile: Macro<string> = async (
   try {
     const data = await fs.readFile(path.trim(), 'utf-8');
     const mime = path.split('.').pop() || 'txt';
-    return `
-    \`\`\`${mime}${id ? ` id="${id}"` : ''}
-    ${data.toString()}
-    \`\`\`
-    `;
+    return `\`\`\`${mime}${id ? ` id="${id}"` : ''}\n${data.toString()}\n\`\`\``;
   } catch (err) {
-    console.error(`Error reading file at ${path}:`, err);
-    return '';
+    logger.error(`Error reading file at ${path}:`, err);
+    return `\`\`\`\n ## ERROR - Macro ReadFile Failed\'n${err.message}\n\`\`\``;;
   }
 };
 
@@ -36,9 +33,10 @@ export const ReadFileComponentRegister: Reactory.IReactoryComponentDefinition<ty
   domain: 'file',
   features: [],
   stem: 'file',
-  enabled: true,
   tags: ['macro', 'file', 'read'],
 }
+
+const CODE_BLOCK_REGEX = /```(.+?)\n([\s\S]+?)\n```/g;
 
 export const WriteFile: Macro<string> = async (
   args: string[],
@@ -47,16 +45,31 @@ export const WriteFile: Macro<string> = async (
   try {
     // Extract code blocks from content using regex    
     let match;
-    let codeBlocks = '';
-
-    while ((match = CODE_BLOCK_REGEX.exec(content)) !== null) {
-      codeBlocks += match[1] + '\n';
+    let codeBlocks = '';    
+    let codeBlockCount = 0;
+    while ((match = CODE_BLOCK_REGEX.exec(content)) !== null) {      
+      switch(match.length) {
+        case 3: {
+          codeBlocks += match[2];
+          break;
+        }
+        case 2: { 
+          codeBlocks += match[1];
+          break;
+        }
+        case 1: {
+          codeBlocks += match[0];
+          break;
+        }
+      }
+      codeBlockCount++;
+      if (codeBlockCount > 0) codeBlocks += '\n';
     }
     await fs.writeFile(path.trim(), codeBlocks.trim(), 'utf-8');
     return `File was written successfully at ${path.trim()}`;
   } catch (err) {
-    console.error(`Error writing to file at ${path}:`, err);
-    return '';
+    logger.error(`Error writing to file at ${path}:`, err);
+    return `Failed to write file at ${path}: ${err?.message}`;
   }
 }
 
@@ -69,17 +82,20 @@ export const WriteFileComponentRegister: Reactory.IReactoryComponentDefinition<t
   domain: 'file',
   features: [],
   stem: 'file',
-  enabled: true,
   tags: ['macro', 'file', 'write', 'save', 'output'],
 }
 
-// A macro that extracts the content of a directory and returns it as a list
-// when subfolders are set to true, it will also include subfolders
-// Usage: @ls(path, subfolders)
+/*
+ * A macro that extracts the content of a directory and returns it as a list
+ * when subfolders are set to true, it will also include subfolders
+ */
+
+// 
+// Usage: @ls(path, subfolders, format)
 export const ListDirectory: Macro<string> = async (
   args: string[],
   state: ChatState) => {
-  const [path, subfolders] = args;
+  const [path, subfolders, pattern = "*", format = 'text'] = args;
   const includeSubfolders = subfolders === 'true' || subfolders === '1';
   try {
     // Read the directory
@@ -107,7 +123,6 @@ export const ListDirectoryComponentRegister: Reactory.IReactoryComponentDefiniti
   domain: 'file',
   features: [],
   stem: 'file',
-  enabled: true,
   tags: ['macro', 'file', 'list', 'ls', 'dir'],
 }
 
@@ -155,7 +170,6 @@ export const ExtractFileComponentRegister: Reactory.IReactoryComponentDefinition
   domain: 'file',
   features: [],
   stem: 'file',
-  enabled: true,
   tags: ['macro', 'file', 'extract', 'portion', 'slice'],
 }
 
@@ -203,7 +217,6 @@ export const InsertSnippetComponentRegister: Reactory.IReactoryComponentDefiniti
   domain: 'file',
   features: [],
   stem: 'file',
-  enabled: true,
   tags: ['macro', 'file', 'insert', 'snippet', 'replace'],
 }
 
