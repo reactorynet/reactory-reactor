@@ -1,8 +1,15 @@
+import pathModule from 'path';
+import os from 'os';
 import { promises as fs, readFileSync } from 'fs';
 import { ChatState, Macro } from '@reactory/server-modules/reactor/types/chat.types';
 import logger from '@reactory/server-core/logging';
+import { R_OK, W_OK } from 'constants';
 
-
+/**
+ * A Regex that matches a fully qualified name or fqn
+ * i.e. core.System@1.0.0 or core.System will match
+ */
+const FQN_REGEX = /^(\w+)\.(\w+)(?:@(.*))?$/
 
 /**
  * A macro that reads a file and returns its content as a code block
@@ -85,35 +92,262 @@ export const WriteFileComponentRegister: Reactory.IReactoryComponentDefinition<t
   tags: ['macro', 'file', 'write', 'save', 'output'],
 }
 
+/**
+ * Defines a function that formats and array of pathInfos into a string
+ */
+type DirectoryListFormatter = (pathInfos: PathInfo[]) => string;
+
+type DirectoryListFormatterService = Reactory.Service.IReactoryService & {
+  formatter: DirectoryListFormatter;
+}
+/**
+ * Defines a Path Informaiton object that contains information about a file or directory
+ */
+type PathInfo = {
+  name: string;
+  extension: string;
+  size: number;
+  created?: Date;
+  modified?: Date;
+  accessed?: Date;
+  isDirectory: boolean;
+  isFile: boolean;
+  isSymbolicLink: boolean;
+  isBlockDevice?: boolean;
+  isCharacterDevice?: boolean;
+  isFIFO?: boolean;
+  isSocket?: boolean;
+  isWritable: boolean;
+  isReadable: boolean;
+  isExecutable: boolean;
+  owner: string;
+  group: string;
+  mode?: string;
+  path?: string;
+  absolutePath?: string;
+  relativePath?: string;
+  parentPath?: string;
+  parentAbsolutePath?: string;
+  parentRelativePath?: string;
+  error?: Error;
+}
+
+/**
+ * Gets the file info for the given path and returns it as a PathInfo object
+ * @param path - string - the path to get the file info for
+ * @returns - PathInfo - the file info for the given path
+ */
+const getFileInfo = async (path: string): Promise<PathInfo> => {
+  const pathInfo: PathInfo = {
+    name: '',
+    extension: '',
+    size: 0,
+    created: undefined,
+    modified: undefined,
+    accessed: undefined,
+    isDirectory: false,
+    isFile: false,
+    isSymbolicLink: false,
+    isWritable: false,
+    isReadable: false,
+    isExecutable: false,
+    owner: '',
+    group: '',
+    path: '',
+    absolutePath: '',
+    relativePath: '',
+    parentPath: '',
+    parentAbsolutePath: '',
+    parentRelativePath: '',
+    error: undefined,
+  }
+
+  try {
+    const stat = await fs.stat(path);
+    const pathParsed = pathModule.parse(path);
+
+    pathInfo.name = pathParsed.base;
+    pathInfo.extension = pathParsed.ext;
+    pathInfo.size = stat.size;
+    pathInfo.created = stat.birthtime;
+    pathInfo.modified = stat.mtime;
+    pathInfo.accessed = stat.atime;
+    pathInfo.isDirectory = stat.isDirectory();
+    pathInfo.isFile = stat.isFile();
+    pathInfo.isSymbolicLink = stat.isSymbolicLink();
+    pathInfo.isBlockDevice = stat.isBlockDevice();
+    pathInfo.isCharacterDevice = stat.isCharacterDevice();
+    pathInfo.isFIFO = stat.isFIFO();
+    pathInfo.isSocket = stat.isSocket();
+    pathInfo.isExecutable = (stat.mode & 0o111) !== 0;
+    pathInfo.owner = (await fs.lstat(path)).uid.toString();
+    pathInfo.group = (await fs.lstat(path)).gid.toString();
+    pathInfo.mode = (stat.mode & 0o777).toString(8);
+    pathInfo.path = path;
+    pathInfo.absolutePath = pathModule.resolve(path);
+    pathInfo.relativePath = pathModule.relative('.', path);
+    pathInfo.parentPath = pathModule.dirname(path);
+    pathInfo.parentAbsolutePath = pathModule.resolve(pathModule.dirname(path));
+    pathInfo.parentRelativePath = pathModule.relative('.', pathModule.dirname(path));
+
+    try {
+      await fs.access(path, R_OK);
+      pathInfo.isReadable = true;
+    } catch (err) {
+      pathInfo.isReadable = false;
+    }
+
+    try {
+      await fs.access(path, W_OK);
+      pathInfo.isWritable = true;
+    } catch (err) {
+      pathInfo.isWritable = false;
+    }
+  }
+  catch (err) {
+    console.error(`Error getting file info for ${path}:`, err);
+  } finally {
+    return pathInfo;
+  }
+}
+
+/**
+ * Default TEXT formatter for directory lists, will only return the following information:
+ * - name
+ * - extension - if a file
+ * - size (in bytes) - if a file
+ * @param pathInfos 
+ */
+const DEFAULT_DIRECTORY_LIST_FORMATTER: DirectoryListFormatter = (pathInfos: PathInfo[]) => {
+  return pathInfos.map(pathInfo => {
+    if (pathInfo.isFile) {
+      return `${pathInfo.name}${pathInfo.extension ? `.${pathInfo.extension}` : ''} (${pathInfo.size} bytes)`;
+    } else {
+      return `${pathInfo.name}`;
+    }
+  }).join('\n');
+}
+
+/**
+ * Default JSON formatter for directory lists, will only return the following information:
+ * - name
+ * - extension - if a file
+ * - size (in bytes) - if a file
+ * 
+ * @param pathInfos 
+ * @returns 
+ */
+const DEFAULT_DIRECTORY_JSON_FORMATTER: DirectoryListFormatter = (pathInfos: PathInfo[]) => {
+  return JSON.stringify(pathInfos.map(pathInfo => {
+    return {
+      name: pathInfo.name,
+      extension: pathInfo?.extension,
+      size: pathInfo?.size,
+    }
+  }));
+}
+
 /*
  * A macro that extracts the content of a directory and returns it as a list
  * when subfolders are set to true, it will also include subfolders
+ * 
+ * Usage: @ls(path, subfolders, filter, format)
+ * 
+ * path - required parameter, the path to the directory to list
+ * subfolders - optional parameter, whether to include subfolders in the list default is false
+ * filter - optional parameter, a filter to apply to the list of files - accepts wildcards default is *
+ * format - optional parameter, the format of the list - accepts text or json default is text, you 
+ *  can specify a component fqn to use as the formatter as well. i.e. @ls(path, subfolders, filter, macro.DirectoryListFormatter?@version)
+ * 
+ * returns a list of files in the directory either as plain text or a json.
  */
-
-// 
-// Usage: @ls(path, subfolders, format)
 export const ListDirectory: Macro<string> = async (
   args: string[],
   state: ChatState) => {
-  const [path, subfolders, pattern = "*", format = 'text'] = args;
+  const [path, subfolders = 'false', pattern = "*", format = 'text'] = args;
   const includeSubfolders = subfolders === 'true' || subfolders === '1';
   try {
     // Read the directory
-    const files = await fs.readdir(path.trim());
+    const files = await fs.readdir(path.trim(), { encoding: 'utf-8', withFileTypes: true });
+    //filter out files that match the pattern
+    const filteredFiles = pattern.trim() === '*' ? files : files.filter((entry) => { 
+      if(entry?.name && entry.name !== '.' && entry.name !== '..') { 
+        if(entry.name.match(pattern)) { 
+          return true;
+        } 
+      }
+      return false;
+    });
 
-    // Filter out the directories
-    const filteredFiles = includeSubfolders ? files : files.filter(file => !file.includes('.'));
+    let fileInfos: PathInfo[] = [];
+    for (const file of filteredFiles) {
+      const filePath = pathModule.join(path, file.name);
+      const fileInfo = await getFileInfo(filePath);
+      fileInfos.push(fileInfo);
+    }
 
-    // Convert to a list
-    const list = filteredFiles.map(file => `- ${file}`).join('\n');
+    let formatter: DirectoryListFormatter = DEFAULT_DIRECTORY_LIST_FORMATTER;
+    let formatterMime: string = 'text';
+    if(format === 'json') {
+      formatter = DEFAULT_DIRECTORY_JSON_FORMATTER;
+      formatterMime = 'text/json';
+    }
 
-    return list;
+    if(FQN_REGEX.test(format)) {
+      const [ name, nameSpace, version = '1.0.0' ] = format.match(FQN_REGEX);
+      const formatterService: DirectoryListFormatterService = state.context.getService<DirectoryListFormatterService>(`${nameSpace}.${name}@${version}`);
+      if (formatterService) {
+        formatter = formatterService.formatter
+        formatterMime = `text/vnd+${formatterService.nameSpace}.${formatterService.name}@${formatterService.version}`;
+      } else {
+        return `Formatter service ${nameSpace}.${name}@${version} not found`;
+      }
+    }
+
+    return `\`\`\`${formatterMime}\n${formatter(fileInfos)}\n\`\`\``;
   } catch (err) {
-    console.error(`Error reading directory at ${path}:`, err);
+    logger.error(`Error reading directory at ${path}:`, err);
     return '';
   }
 }
 
+/**
+ * Macro for extracting detailed information about a file or directory
+ * @param args 
+ * @param state 
+ * @returns 
+ */
+export const PathInfo: Macro<string> = async (
+  args: string[],
+  state: ChatState) => {
+  const [path] = args;
+  try {
+    const fileInfo = await getFileInfo(path.trim());
+    return `\`\`\`json\n${JSON.stringify(fileInfo)}\`\`\``;
+  } catch (err) {
+    logger.error(`Error reading file at ${path}:`, err);
+    return '';
+  }
+}
+
+/**
+ * Macro for extracting detailed information about a file or directory
+ */
+export const PathInfoComponentRegister: Reactory.IReactoryComponentDefinition<typeof PathInfo> = {
+  component: PathInfo,
+  name: 'PathInfo',
+  nameSpace: 'reactor',
+  version: '1.0.0',
+  description: readFileSync(require.resolve('./docs/PathInfo.md'), 'utf-8').toString(),
+  domain: 'file',
+  features: [],
+  stem: 'file',
+  tags: ['macro', 'file', 'info', 'path', 'pathInfo'],
+}
+
+/**
+ * Macro registry entry for the ListDirectory macro
+ */
 export const ListDirectoryComponentRegister: Reactory.IReactoryComponentDefinition<typeof ListDirectory> = {
   component: ListDirectory,
   name: 'ListDirectory',
@@ -127,8 +361,12 @@ export const ListDirectoryComponentRegister: Reactory.IReactoryComponentDefiniti
 }
 
 
-// A macro that extracts a portion of a file and returns it as a text block
-// Usage: @extract(path, start, end)
+/**
+ * 
+ * @param args 
+ * @param state 
+ * @returns 
+ */
 export const ExtractFile: Macro<string> = async (
   args: string[],
   state: ChatState
@@ -152,15 +390,16 @@ export const ExtractFile: Macro<string> = async (
     const portion = lines.slice(startLine - 1, endLine).join('\n');
 
     // Return it as a text block
-    return `\`\`\\${mime}
-    ${portion}
-    \`\`\``;
+    return `\`\`\\${mime}\n${portion}\n\`\`\``;
   } catch (err) {
     console.error(`Error reading file at ${path}:`, err);
     return `Error reading file at ${path}: ${err?.message}`;
   }
 };
 
+/**
+ * Macro registry entry for the ExtractFile macro
+ */
 export const ExtractFileComponentRegister: Reactory.IReactoryComponentDefinition<typeof ExtractFile> = {
   component: ExtractFile,
   name: 'ExtractFile',
@@ -204,7 +443,7 @@ export const InsertSnippet: Macro<string> = async (
     return `Snippet inserted into ${path} successfully.`;
   } catch (err) {
     console.error(`Error writing file at ${path}:`, err);
-    return `Error writing file at ${path}: ${err?.message}`;
+    return `Error writing file at ${path}`;
   }
 };
 
@@ -227,4 +466,5 @@ export const FileMacros: Reactory.IReactoryComponentDefinition<Macro<unknown>>[]
   ListDirectoryComponentRegister,
   ExtractFileComponentRegister,
   InsertSnippetComponentRegister,
+  PathInfoComponentRegister,
 ];
