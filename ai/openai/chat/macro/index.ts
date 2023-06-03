@@ -6,11 +6,13 @@ import  {
   ListDirectory,
   InsertSnippet,
   FileMacros,
-} from './file.ai.macro';
-import { FetchMacro } from './http.ai.macro';
-import { QueryGQL, MutationGQL } from './graphql.ai.macro';
-import { ServiceRegister } from './workflow.ai.macro';
-import { CreateUser, GetUser } from './user.ai.macro';
+} from './fs/file.ai.macro';
+import { FetchMacro } from './web/http.ai.macro';
+import { QueryGQL, MutationGQL } from './data/graphql.ai.macro';
+import { ServiceRegister } from './workflow/workflow.ai.macro';
+import { CreateUser, GetUser } from './workflow/user.ai.macro';
+import { CodeReview, CodeReviewFile } from './develop/develop.ai.macro';
+
 import { CreateChatCompletionRequest, CreateCompletionResponse } from 'openai';
 
 export const REACTOR_MACRO_MD = require.resolve('./macros.md');
@@ -50,7 +52,9 @@ const inputMacros: MacroFunctions = {
   svc: ServiceRegister,
   user: GetUser,
   getUser: GetUser,
-  GetUser
+  GetUser,
+  codeReview: CodeReview,
+  codeReviewFile: CodeReviewFile,
 };
 
 const outputMacros: MacroFunctions = {

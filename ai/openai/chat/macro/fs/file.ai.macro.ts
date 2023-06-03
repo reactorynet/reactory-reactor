@@ -1,6 +1,6 @@
 import pathModule from 'path';
 import os from 'os';
-import { promises as fs, readFileSync } from 'fs';
+import { promises as fs, readFileSync, existsSync } from 'fs';
 import { ChatState, Macro } from '@reactory/server-modules/reactor/types/chat.types';
 import logger from '@reactory/server-core/logging';
 import { R_OK, W_OK } from 'constants';
@@ -36,47 +36,89 @@ export const ReadFileComponentRegister: Reactory.IReactoryComponentDefinition<ty
   name: 'ReadFile',
   nameSpace: 'reactor',
   version: '1.0.0',
-  description: readFileSync(require.resolve('./docs/ReadFile.md'), 'utf-8').toString(),
+  description: readFileSync(require.resolve('./ReadFile.md'), 'utf-8').toString(),
   domain: 'file',
   features: [],
   stem: 'file',
   tags: ['macro', 'file', 'read'],
 }
 
-const CODE_BLOCK_REGEX = /```(.+?)\n([\s\S]+?)\n```/g;
+const CONTENT_BLOCK_REGEX = /(```?.+?)\n([\s\S]+?)\n```/g;
+const SUCCESS_MESSAGE = (path: string) => `File was written successfully to ${path.trim()}`;
+const FAILED_MESSAGE = (path: string, err: Error) => `Failed to write file to ${path.trim()}: ${err?.message}`;
 
 export const WriteFile: Macro<string> = async (
   args: string[],
   state: ChatState) => {
-  const [path, content] = args;
+  const [
+    path,
+    content,
+    mode = 'overwrite',
+    start = '0', 
+    end = '-1'
+  ] = args;
   try {
-    // Extract code blocks from content using regex    
-    let match;
-    let codeBlocks = '';    
-    let codeBlockCount = 0;
-    while ((match = CODE_BLOCK_REGEX.exec(content)) !== null) {      
-      switch(match.length) {
-        case 3: {
-          codeBlocks += match[2];
-          break;
-        }
-        case 2: { 
-          codeBlocks += match[1];
-          break;
-        }
-        case 1: {
-          codeBlocks += match[0];
-          break;
-        }
+    // Write the file
+    const write = async (data: string) => {
+      const exists = existsSync(path.trim());
+      if(exists === true && mode === 'create') return FAILED_MESSAGE(path.trim(), new Error('File already exists and overwrite is set to false'));
+      if(exists === true && mode === 'overwrite') await fs.unlink(path.trim());
+      if(exists === true && mode === 'append') {
+        data = `${(await fs.readFile(path.trim(), 'utf-8')).toString()}\n${data.trim()}`;
+        await fs.unlink(path.trim());
       }
-      codeBlockCount++;
-      if (codeBlockCount > 0) codeBlocks += '\n';
+      if(exists === true && mode === 'prepend') {
+        data = `${data.trim()}\n${(await fs.readFile(path.trim(), 'utf-8')).toString()}`;
+        await fs.unlink(path.trim()); 
+      }
+      if(exists === true && mode === 'insert') {
+        const lines = data.split('\n');
+        const existing = (await fs.readFile(path.trim(), 'utf-8')).toString().split('\n');
+        const startLine = parseInt(start);
+        const endLine = parseInt(end);
+
+        if(endLine < startLine) return FAILED_MESSAGE(path.trim(), new Error('Invalid start and end line parameters'));
+
+        const modifiedLines = [
+          ...existing.slice(0, startLine - 1), // Lines before the start line
+          ...lines, // Snippet to insert or replace with
+          ...existing.slice(endLine) // Lines after the end line (if any)
+        ];
+
+        data = modifiedLines.join('\n');
+      }
+      
+      await fs.writeFile(path.trim(), data.trim(), 'utf-8');
+      return SUCCESS_MESSAGE(path.trim());
     }
-    await fs.writeFile(path.trim(), codeBlocks.trim(), 'utf-8');
-    return `File was written successfully at ${path.trim()}`;
+
+    if(!content) return FAILED_MESSAGE(path.trim(), new Error('No content was provided'));
+
+    if(content.indexOf('```') === -1) {
+      //write the entire content to the file
+      return write(content);
+    }
+
+    let match;
+    let contentBlocks = '';
+    let contentBlockCount = 0;
+    //extract the code blocks from the content
+    //we do this because we want to write the content blocks as is
+    let matched: RegExpMatchArray = content.match(CONTENT_BLOCK_REGEX);
+    if(!matched || matched?.length === 0) {
+      //write the entire content to the file and return
+      return write(content);
+    }
+
+    while(match = CONTENT_BLOCK_REGEX.exec(content)) { 
+      contentBlocks += match[2];
+      contentBlockCount++;
+      if(contentBlockCount > 0) contentBlocks += '\n';
+    }
+
+    return write(contentBlocks);
   } catch (err) {
-    logger.error(`Error writing to file at ${path}:`, err);
-    return `Failed to write file at ${path}: ${err?.message}`;
+    return FAILED_MESSAGE(path.trim(), err);
   }
 }
 
@@ -85,7 +127,7 @@ export const WriteFileComponentRegister: Reactory.IReactoryComponentDefinition<t
   name: 'WriteFile',
   nameSpace: 'reactor',
   version: '1.0.0',
-  description: readFileSync(require.resolve('./docs/WriteFile.md'), 'utf-8').toString(),
+  description: readFileSync(require.resolve('./WriteFile.md'), 'utf-8').toString(),
   domain: 'file',
   features: [],
   stem: 'file',
@@ -338,7 +380,7 @@ export const PathInfoComponentRegister: Reactory.IReactoryComponentDefinition<ty
   name: 'PathInfo',
   nameSpace: 'reactor',
   version: '1.0.0',
-  description: readFileSync(require.resolve('./docs/PathInfo.md'), 'utf-8').toString(),
+  description: readFileSync(require.resolve('./PathInfo.md'), 'utf-8').toString(),
   domain: 'file',
   features: [],
   stem: 'file',
@@ -353,7 +395,7 @@ export const ListDirectoryComponentRegister: Reactory.IReactoryComponentDefiniti
   name: 'ListDirectory',
   nameSpace: 'reactor',
   version: '1.0.0',
-  description: readFileSync(require.resolve('./docs/ListDirectory.md'), 'utf-8').toString(),
+  description: readFileSync(require.resolve('./ListDirectory.md'), 'utf-8').toString(),
   domain: 'file',
   features: [],
   stem: 'file',
@@ -386,11 +428,13 @@ export const ExtractFile: Macro<string> = async (
     const startLine = parseInt(start);
     const endLine = parseInt(end);
 
+    if(endLine < startLine) return `Invalid parameters. Usage: @extract(path, start, end) end must be larger than the start`;
+
     // Extract the portion
     const portion = lines.slice(startLine - 1, endLine).join('\n');
-
+    const content = `${mime}\n${portion}`
     // Return it as a text block
-    return `\`\`\\${mime}\n${portion}\n\`\`\``;
+    return `\`\`\`${content}\n\`\`\``;
   } catch (err) {
     console.error(`Error reading file at ${path}:`, err);
     return `Error reading file at ${path}: ${err?.message}`;
@@ -405,7 +449,7 @@ export const ExtractFileComponentRegister: Reactory.IReactoryComponentDefinition
   name: 'ExtractFile',
   nameSpace: 'reactor',
   version: '1.0.0',
-  description: readFileSync(require.resolve('./docs/ExtractFile.md'), 'utf-8').toString(),
+  description: readFileSync(require.resolve('./ExtractFile.md'), 'utf-8').toString(),
   domain: 'file',
   features: [],
   stem: 'file',
@@ -442,7 +486,7 @@ export const InsertSnippet: Macro<string> = async (
 
     return `Snippet inserted into ${path} successfully.`;
   } catch (err) {
-    console.error(`Error writing file at ${path}:`, err);
+    logger.error(`Error writing file at ${path}:`, err);
     return `Error writing file at ${path}`;
   }
 };
@@ -452,7 +496,7 @@ export const InsertSnippetComponentRegister: Reactory.IReactoryComponentDefiniti
   name: 'InsertSnippet',
   nameSpace: 'reactor',
   version: '1.0.0',
-  description: readFileSync(require.resolve('./docs/InsertSnippet.md'), 'utf-8').toString(),
+  description: readFileSync(require.resolve('./InsertSnippet.md'), 'utf-8').toString(),
   domain: 'file',
   features: [],
   stem: 'file',

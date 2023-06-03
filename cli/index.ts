@@ -24,10 +24,8 @@ const ReactorCliApp: Reactory.IReactoryComponentDefinition<ReactoryCliApp> = {
     description: 'Chat with the Reactory AI assistant',
     stem: 'chat',
   }],
-  enabled: true,
   overwrite: false,
   roles: ['USER'],
-  dependencies: [],
   stem: 'reactor',
   tags: ['reactor', 'cli', 'assistant', 'ai'],
   toString(includeVersion) {

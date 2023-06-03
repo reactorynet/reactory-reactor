@@ -1,8 +1,12 @@
+
 +---------------------------------------------------------------------------+
-| Welcome to the reactory ai helper utility. This utility will help you     |
+| Welcome to the reactor ai helper utility. This utility will help you      |
 | perform some basic AI (chatgpt) specific operations against the code base.|
-| For more help on each question, respond with ? to get more help on the    |
-| use of each prompt.                                                       |
+| For more help on using reactor, respond with ? to get assistance with     |
+| creating prompts and instructrions for reactor to complete.               |
 |                                                                           |
 |                 !!This tool is still under development!!                  |
+| WARNING!                                                                  |
+| Do not give it access to your production systems, no matter how much it   | 
+| begs. 😉                                                                  |
 +---------------------------------------------------------------------------+

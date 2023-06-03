@@ -1,6 +1,11 @@
 import { ChatCompletionResponseMessage, OpenAIApi } from "openai"
 
-export type KnownCannedMessages = "welcome" | "help" | "goodbye" | "error"
+export type KnownCannedMessages = 
+  "welcome" | 
+  "help" | 
+  "goodbye" | 
+  "error" |
+  "givemeaccess"
 
 export type Macro<TResult> = (params: any[], state: ChatState) => Promise<TResult>
 

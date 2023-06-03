@@ -1,0 +1,46 @@
+const { CodeReview, CodeReviewComponentRegister } = require('./develop.ai.macro');
+
+const mockFileContents = 'console.log("Hello World!");';
+const mockReviewContents = 'Good job, keep it up!';
+
+const mockState = {
+  ai: jest.fn(),
+  macros: [
+    {name: 'ReadFile', component: async () => mockFileContents},
+    {name: 'ListDirectory', component: async () => JSON.stringify([{ name: 'file1', extension: 'js', size: 1234 }])},
+    {name: 'WriteFile', component: async () => {}}
+  ],
+  modelId: 'mockModelId',
+  history: []
+}
+
+const mockArgs = ['path/to/file', 'path/to/review.specs'];
+
+describe('CodeReview macro', () => {
+  // Test 1: successfully performs a code review
+  it('should successfully perform a code review', async () => {
+    const result = await CodeReview(mockArgs, mockState);
+    expect(result).toEqual(mockReviewContents);
+  });
+
+  // Test 2: throws an error if no path is provided
+  it('should throw an error if no path is provided', async () => {
+    mockArgs[0] = undefined; // set path to undefined
+    const result = await CodeReview(mockArgs, mockState);
+    expect(result).toEqual('A request for a a code review requires a valid path to a folder');
+  });
+
+  // Test 3: throws an error if the provided path does not exist
+  it('should throw an error if the provided path does not exist', async () => {
+    mockArgs[0] = 'invalid_path'; // set path to an invalid path
+    const result = await CodeReview(mockArgs, mockState);
+    expect(result).toEqual('The path invalid_path does not exist');
+  });
+
+  // Test 4: throws an error if the file input macro is not found
+  it('should throw an error if the file input macro is not found', async () => {
+    mockState.macros = [] // remove any macros from the state
+    const result = await CodeReview(mockArgs, mockState);
+    expect(result).toEqual('No file input macro found');
+  });
+});

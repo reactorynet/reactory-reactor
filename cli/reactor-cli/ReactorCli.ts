@@ -8,6 +8,9 @@ import { ChatState } from "@reactory/server-modules/reactor/types/chat.types";
 import readline from 'readline';
 import { template } from 'lodash';
 import { MacroRegistry } from "@reactory/server-modules/reactor/ai/openai/chat/macro";
+import CANNED_MESSAGES from "@reactory/server-modules/reactor/cli/reactor-cli/messages";
+import logger from "@reactory/server-core/logging";
+import { ObjectId } from "mongodb";
 
 const DEFAULT_MODEL_ID = 'gpt-3.5-turbo-0301';
 
@@ -27,6 +30,7 @@ const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryCo
 
 
   const modelState: ChatState = {
+    id: new ObjectId().toHexString(),
     botId: 'Reactor',
     modelId: modelId || DEFAULT_MODEL_ID,
     started: new Date(),
@@ -51,9 +55,52 @@ const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryCo
     terminal: true,
   });
 
+  let pastedContent: string = '';
+
+  // Function to sanitize the pasted content
+  function sanitizeContent(content: string) {
+    logger.info(`Sanitizing content\n: ${content}`);
+    return content.trim();
+  }
+
+  const { 
+    stdin,
+    stdout
+  } = process;
+
+  process.stdin.on('paste', () => {
+
+    pastedContent = stdin.read().toString();
+    pastedContent = sanitizeContent(pastedContent);
+
+    // Clear the original content from the prompt
+    readline.cursorTo(stdout, 0);
+    readline.clearLine(stdout, 1);
+
+    // Write the sanitized content back to the prompt
+    rl.write(pastedContent);
+
+    // Move the cursor to the end of the line
+    readline.moveCursor(stdout, pastedContent.length, 0);
+  });
+
   rl.on('close', () => {
     console.log('Goodbye.')
     process.exit(0);
+  });
+
+  rl.on('line', (input) => {
+    // If there's pasted content, ignore the line input
+    if (input.trim() === '') {
+      // Handle the case where only newline is entered
+      // For example, ignore it or perform a specific action
+      return;
+    }
+
+    if (pastedContent !== '') {
+      rl.prompt();
+      return;
+    }
   });
 
   if (kwargs.length > 0) {
@@ -75,29 +122,10 @@ const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryCo
 
   rl.prompt(true);
 
-  rl.write(colors.yellow(`
-+---------------------------------------------------------------------------+
-| Welcome to the reactory ai helper utility. This utility will help you     |\r
-| perform some basic AI (chatgpt) specific operations against the code base.|\r
-| For more help on each question, respond with ? to get more help on the    |\r
-| use of each prompt.                                                       |\r
-|                                                                           |\r
-|                 !!This tool is still under development!!                  |\r
-+---------------------------------------------------------------------------+
-`));
+  rl.write(colors.yellow(CANNED_MESSAGES.welcome));
 
   if (!apiKey || !apiOrg) {
-    rl.write(colors.yellow(`
-  +---------------------------------------------------------------------------+
-  | Error: You must provide an apikey and apivalue to use this tool.          |\r
-  | Add the following keys in your environment file                           |\r
-  |    * OPENAI_API_KEY                                                       |\r
-  |    * OPENAI_ORG                                                           |\r
-  | or specify the values in the command line using the params                |\r
-  |    * --apikey=<your api key>                                              |\r
-  |    * --apiorg=<your api value>                                            |\r
-  +---------------------------------------------------------------------------+
-  `));
+    rl.write(colors.yellow(CANNED_MESSAGES.error));
     rl.close();
     return;
   }

@@ -1,0 +1,8 @@
+Update macro @file(src/modules/reactor/ai/openai/chat/macro/develop/develop.ai.macro.ts). Make any changes needed wrt error handling and documentation ==> @out(src/modules/reactor/ai/openai/chat/macro/develop/develop.ai.macro-wip.ts)
+
+Provide an updated shell script @file(bin/cli.sh) and change the --inspect parameter to be added if a the command contains the --debug flag ==> @out(bin/cli.ai.sh)
+Provide an updated shell script @file(bin/cli.sh) and only enable nodemon when --watch flag is enabled on command ==> @out(bin/cli.ai.sh)
+
+Provide feedback on code review macro @file(src/modules/reactor/ai/openai/chat/macro/develop/develop.ai.macro.ts).\nMake any changes needed wrt error handling and documentation and provide an updated macro. ==> @out(src/modules/reactor/ai/openai/chat/macro/develop/develop.ai.macro-wip.ts)
+
+See macro @file(src/modules/reactor/ai/openai/chat/macro/develop/develop.ai.macro.ts). Generate a comprehensive jest test suite ==> @out(src/modules/reactor/ai/openai/chat/macro/develop/develop.ai.macro.test.ai.ts)

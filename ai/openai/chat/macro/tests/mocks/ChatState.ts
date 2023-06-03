@@ -7,6 +7,7 @@ const MockAI: OpenAIApi = jest.genMockFromModule('openai');
 
 const getMockChatState = async ({ 
   macros = [], 
+  ai = MockAI,
 }): Promise<ChatState> => {
 
   const context = await ReactoryContextProvider();
@@ -37,7 +38,7 @@ const getMockChatState = async ({
     modelId: 'gpt-3.5-turbo-0301',
     started: new Date(),
     history: [],
-    ai: MockAI,
+    ai,
     macros,
     apiKey: 'mock-api-key',
     apiOrg: 'mock-api-org',
