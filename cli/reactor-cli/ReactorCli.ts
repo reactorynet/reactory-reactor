@@ -130,6 +130,8 @@ const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryCo
     return;
   }
 
+  modelState.rl = rl;
+
   try {
     const configuration = new Configuration({
       organization: apiOrg,

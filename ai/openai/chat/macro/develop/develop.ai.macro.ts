@@ -3,7 +3,7 @@ import os from 'os';
 import { promises as fs, readFileSync, existsSync } from 'fs';
 import { ChatState, Macro } from '@reactory/server-modules/reactor/types/chat.types';
 import { FileMacros } from '../fs/file.ai.macro';
-import { getAIResponse, createPrompt } from '../../questions/factory';
+import { getAIResponse, createPrompt } from '@reactory/server-modules/reactor/ai/openai/chat/questions/factory';
 
 /**
  * 
@@ -37,6 +37,7 @@ export const CodeReviewFile: Macro<string> = async (
   if(!existsSync(path)) return FAILURE_MESSAGE(`The path "${path}" does not exist`);
   
   let specificationContent: string = readFileSync(require.resolve('./CodeReviewSpecifications.md')).toString();
+
   if(specs && existsSync(specs)) specificationContent = readFileSync(specs).toString();
   
   const fileIn = FileMacros.find(macro => macro.name === 'ReadFile');
@@ -93,12 +94,18 @@ export const CodeReview: Macro<string> = async (
   args: string[],
   state: ChatState) => {
 
-  const [path, specs] = args;
+  const [
+    path, 
+    specs,
+    target = 'inline',
+    targetPath,
+    throttle = '500'
+  ] = args;
   const {
     ai,
     macros,
     modelId,
-    history
+    history,
   } = state;
 
   if(!path) return 'A request for a a code review requires a valid path to a folder';
@@ -127,7 +134,10 @@ export const CodeReview: Macro<string> = async (
   });
 
   // we get the directory contents using the dirIn macro
-  const dirContents: { name: string, extension?: string, size?: number}[] = JSON.parse(await dirIn([path, 'true', '*', 'json'], state));
+  const dirContents: { name: string, extension?: string, size?: number}[] = JSON.parse(
+    await dirIn([path, 'true', '*', 'json', 'false'], state)
+  );
+
   let question = `Write a review on file structure for the following directory: ${path}
   \`\`\`txt
   ${dirContents.map(f => `${f.name}${f.extension ? `.${f.extension}` : ''}`).join('\n')}\n\n
@@ -140,35 +150,48 @@ export const CodeReview: Macro<string> = async (
     history,
     'system'
   );
-
-
-  const directoryResult = await getAIResponse(state.ai, prompt, state);
+  
+  const fileReviewResult = await getAIResponse(state.ai, prompt, state);
 
   // Clone the response to avoid mutating the original object
-  const updatedResponse = JSON.parse(JSON.stringify(directoryResult));
+  const updatedResponse = JSON.parse(JSON.stringify(fileReviewResult));
 
   // Access message object
   const message = updatedResponse.choices[0].message;
 
-  const reviewFile = pathModule.join(os.tmpdir(), 'review.md');
+  const reviewFile = pathModule.join(__dirname, 'samples/review.md');
   //start the review
   await fileOut([reviewFile, message.content, 'overwrite'], state);
 
   // we iterate over the directory contents and perform a code review on each file
-  for(let i = 0; i < dirContents.length; i++) {
-    const file = dirContents[i];
-    if(file.size > 0) {
-      if(file.size < 100000) { 
-        const filePath = pathModule.join(path, file.name + (file.extension ? `.${file.extension}` : ''));    
-        const fileResult = await CodeReviewFile([filePath, specs], state);
-        await fileOut([reviewFile, fileResult, 'append'], state);
-      } else {
-        await fileOut([reviewFile, `File ${file.name} is too large to review - Skipping reivew\n`, 'false'], state);
-      }
+  let lastReviewTS = Date.now();
 
-    } else {
-      await fileOut([reviewFile, `No content found for file ${file.name} - Skipping reivew\n`, 'false'], state);
+  const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  for (const file of dirContents) {
+    const doReview = async () => {
+      if (file.size > 0) {
+        if (file.size < 100000) {
+          const filePath = pathModule.join(path, file.name);
+          const fileResult = await CodeReviewFile([filePath, specs], state);
+
+          await fileOut([reviewFile, fileResult, 'append'], state);
+        } else {
+          await fileOut([reviewFile, `File ${file.name} is too large to review - Skipping review\n`, 'false'], state);
+        }
+      } else {
+        await fileOut([reviewFile, `No content found for file ${file.name} - Skipping review\n`, 'false'], state);
+      }
     }
+
+    const now = Date.now();
+    const THROTTLE = parseInt(throttle);
+    if (now - lastReviewTS < THROTTLE) {
+      await delay(THROTTLE - (now - lastReviewTS));
+    }
+
+    await doReview();
+    lastReviewTS = Date.now();
   }
 
   const review = await fileIn([reviewFile], state);

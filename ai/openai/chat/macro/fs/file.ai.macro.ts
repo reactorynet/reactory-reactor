@@ -2,6 +2,7 @@ import pathModule from 'path';
 import os from 'os';
 import { promises as fs, readFileSync, existsSync } from 'fs';
 import { ChatState, Macro } from '@reactory/server-modules/reactor/types/chat.types';
+import { PathInfo, DirectoryListFormatter, DirectoryListFormatterService} from '@reactory/server-modules/reactor/types/macro.types'
 import logger from '@reactory/server-core/logging';
 import { R_OK, W_OK } from 'constants';
 
@@ -132,46 +133,6 @@ export const WriteFileComponentRegister: Reactory.IReactoryComponentDefinition<t
   features: [],
   stem: 'file',
   tags: ['macro', 'file', 'write', 'save', 'output'],
-}
-
-/**
- * Defines a function that formats and array of pathInfos into a string
- */
-type DirectoryListFormatter = (pathInfos: PathInfo[]) => string;
-
-type DirectoryListFormatterService = Reactory.Service.IReactoryService & {
-  formatter: DirectoryListFormatter;
-}
-/**
- * Defines a Path Informaiton object that contains information about a file or directory
- */
-type PathInfo = {
-  name: string;
-  extension: string;
-  size: number;
-  created?: Date;
-  modified?: Date;
-  accessed?: Date;
-  isDirectory: boolean;
-  isFile: boolean;
-  isSymbolicLink: boolean;
-  isBlockDevice?: boolean;
-  isCharacterDevice?: boolean;
-  isFIFO?: boolean;
-  isSocket?: boolean;
-  isWritable: boolean;
-  isReadable: boolean;
-  isExecutable: boolean;
-  owner: string;
-  group: string;
-  mode?: string;
-  path?: string;
-  absolutePath?: string;
-  relativePath?: string;
-  parentPath?: string;
-  parentAbsolutePath?: string;
-  parentRelativePath?: string;
-  error?: Error;
 }
 
 /**
@@ -306,7 +267,13 @@ const DEFAULT_DIRECTORY_JSON_FORMATTER: DirectoryListFormatter = (pathInfos: Pat
 export const ListDirectory: Macro<string> = async (
   args: string[],
   state: ChatState) => {
-  const [path, subfolders = 'false', pattern = "*", format = 'text'] = args;
+  const [
+    path, 
+    subfolders = 'false', 
+    pattern = "*", 
+    format = 'text',
+    escape = 'true'
+  ] = args;
   const includeSubfolders = subfolders === 'true' || subfolders === '1';
   try {
     // Read the directory
@@ -346,7 +313,11 @@ export const ListDirectory: Macro<string> = async (
       }
     }
 
-    return `\`\`\`${formatterMime}\n${formatter(fileInfos)}\n\`\`\``;
+    if(escape === 'true') {
+      return `\`\`\`${formatterMime}\n${formatter(fileInfos)}\n\`\`\``;
+    } else {
+      return formatter(fileInfos);
+    }
   } catch (err) {
     logger.error(`Error reading directory at ${path}:`, err);
     return '';
@@ -359,7 +330,7 @@ export const ListDirectory: Macro<string> = async (
  * @param state 
  * @returns 
  */
-export const PathInfo: Macro<string> = async (
+export const PathInfoMacro: Macro<string> = async (
   args: string[],
   state: ChatState) => {
   const [path] = args;
@@ -376,7 +347,7 @@ export const PathInfo: Macro<string> = async (
  * Macro for extracting detailed information about a file or directory
  */
 export const PathInfoComponentRegister: Reactory.IReactoryComponentDefinition<typeof PathInfo> = {
-  component: PathInfo,
+  component: PathInfoMacro,
   name: 'PathInfo',
   nameSpace: 'reactor',
   version: '1.0.0',

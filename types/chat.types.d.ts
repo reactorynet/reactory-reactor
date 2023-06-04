@@ -1,5 +1,5 @@
 import { ChatCompletionResponseMessage, OpenAIApi } from "openai"
-
+import { Interface as ReadLineInterface } from "readline";
 export type KnownCannedMessages = 
   "welcome" | 
   "help" | 
@@ -81,6 +81,10 @@ export type ChatState = {
    * The macros that are available for the chat session.
    * */
   macros: Reactory.IReactoryComponentDefinition<Macro<unknown>>[]
+  /**
+   * The readline interface for the chat session.
+   */
+  rl?: ReadLineInterface
 }
 
 export interface QuestionHandlerResponse {

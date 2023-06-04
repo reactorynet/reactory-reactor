@@ -11,7 +11,8 @@ import { FetchMacro } from './web/http.ai.macro';
 import { QueryGQL, MutationGQL } from './data/graphql.ai.macro';
 import { ServiceRegister } from './workflow/workflow.ai.macro';
 import { CreateUser, GetUser } from './workflow/user.ai.macro';
-import { CodeReview, CodeReviewFile } from './develop/develop.ai.macro';
+import { CodeReview, CodeReviewFile, DevelopmentMacros } from './develop/develop.ai.macro';
+
 
 import { CreateChatCompletionRequest, CreateCompletionResponse } from 'openai';
 
@@ -19,6 +20,8 @@ export const REACTOR_MACRO_MD = require.resolve('./macros.md');
 
 export const MacroRegistry: Reactory.IReactoryComponentDefinition<Macro<unknown>>[] = [
   ...FileMacros,
+  ...DevelopmentMacros,
+  
 ];
 
 

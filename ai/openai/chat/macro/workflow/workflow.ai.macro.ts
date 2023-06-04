@@ -1,5 +1,44 @@
 import { ChatState, Macro } from "modules/reactor/types/chat.types"
 
+import { exec } from "child_process";
+
+/**
+ * A macro that executes a shell command.
+ * @param args - a list of arguments for the shell command
+ * @param state - the current chat state
+ * @param context - the current reactory context
+ * @returns the result of the shell command
+ */
+export const ShellCommand: Macro<string> = async (args: any[], state: ChatState, context?: Reactory.Server.IReactoryContext) => {
+
+  // define a helper function to execute a shell command
+  const execCommand = (command: string): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      exec(command, (error, stdout, stderr) => {
+        if (error) {
+          reject(`Error: ${error.message}`);
+        } else if (stderr) {
+          reject(`Stderr: ${stderr}`);
+        } else {
+          resolve(stdout);
+        }
+      });
+    });
+  };
+
+  // check if a command is provided
+  if (args && args.length > 0) {
+    try {
+      const result = await execCommand(args.join(' '));
+      return result;
+    } catch (error) {
+      return `Command execution failed: ${error}`;
+    }
+  } else {
+    return 'No command provided';
+  }
+};
+
 /**
  * A macro that lists all services registered in the system or
  * returns the service with the given name / fqn.
@@ -51,4 +90,6 @@ export const ServiceRegister: Macro<string | object | object[]> = async (args: a
   //assume we are listing all services
   return list() as string;
 }
+
+
 
