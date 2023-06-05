@@ -1,6 +1,6 @@
 import fs, { readFile, readFileSync } from 'fs';
-import { 
-  CodeReview, 
+import {
+  CodeReview,
   CodeReviewFile,
   GitMacro,
 } from './develop.ai.macro';
@@ -34,17 +34,17 @@ jest.mock('@reactory/server-modules/reactor/ai/openai/chat/questions/factory', (
   return {
     getAIResponse: async (ai: OpenAIApi, prompt: CreateChatCompletionRequest, state: ChatState) => {
       let response = mockReviewFileObject('');
-      if(prompt.messages[0].content.includes('Write code review for:')) {
+      if (prompt.messages[0].content.includes('Write code review for:')) {
         response = mockReviewFileObject(mockReviewFileContent);
       }
 
-      if (prompt.messages[0].content.includes('Write a review on file structure for the following directory')) { 
+      if (prompt.messages[0].content.includes('Write a review on file structure for the following directory')) {
         response = mockReviewFileObject(mockReviewDirectory);
       }
-      
+
       return response;
     },
-    createPrompt: (modelId: string, message: string, history: any[], role?: string) =>  {
+    createPrompt: (modelId: string, message: string, history: any[], role?: string) => {
       let messages = [
         ...history,
         {
@@ -66,11 +66,13 @@ describe('CodeReview macros', () => {
 
   beforeEach(async () => {
     jest.resetAllMocks();
-    chatState = await TestChatState({ macros: [
-      ...FileMacros,
-      CodeReview,
-      CodeReviewFile
-    ] });
+    chatState = await TestChatState({
+      macros: [
+        ...FileMacros,
+        CodeReview,
+        CodeReviewFile
+      ]
+    });
   });
 
   // Test 1: successfully performs a code review
@@ -111,5 +113,15 @@ describe('CodeReview macros', () => {
     ];
     const result = await GitMacro(args, chatState);
     expect(result).toEqual(`Successfully cloned the repository ${repo} to ${target} and checked out branch ${branch}`);
-  })
+
+    const reviewArgs = [
+      `${process.env.APP_DATA_ROOT}/projects/eng-test`,
+      `${__dirname}/samples/hello-world.spec.md`,
+      'inline'
+    ];
+    const codeReview = await CodeReview(reviewArgs, chatState);
+    expect(result).toBeTruthy();
+    //@ts-ignore
+
+  }, 30000)
 });

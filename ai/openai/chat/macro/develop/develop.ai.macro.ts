@@ -36,11 +36,15 @@ export const CodeReviewFile: Macro<string> = async (
     history
   } = state;
 
-  const SUCCESS_MESSAGE = (review: string) => `Code review completed for ${path}:\n${review}`;
-  const FAILURE_MESSAGE = (error: string) => `Code review failed for ${path}:\n${error}`;
+  let $path = path;
+
+  if ($path.indexOf('${') > -1) $path = template($path)({ os, pathModule, process, state });
+
+  const SUCCESS_MESSAGE = (review: string) => `Code review completed for ${$path}:\n${review}`;
+  const FAILURE_MESSAGE = (error: string) => `Code review failed for ${$path}:\n${error}`;
   
-  if(!path) return FAILURE_MESSAGE('A request for a a code review requires a valid path to a folder');
-  if(!existsSync(path)) return FAILURE_MESSAGE(`The path "${path}" does not exist`);
+  if(!$path) return FAILURE_MESSAGE('A request for a a code review requires a valid path to a folder');
+  if(!existsSync($path)) return FAILURE_MESSAGE(`The path "${$path}" does not exist`);
   
   let specificationContent: string = readFileSync(require.resolve('./CodeReviewSpecifications.md')).toString();
 
@@ -114,8 +118,12 @@ export const CodeReview: Macro<string> = async (
     history,
   } = state;
 
-  if(!path) return 'A request for a a code review requires a valid path to a folder';
-  if(!existsSync(path)) return `The path ${path} does not exist`;
+  let $path = path;
+
+  if($path.indexOf('${') > -1) $path = template($path)({ os, pathModule, process, state });
+
+  if(!$path) return 'A request for a a code review requires a valid path to a folder';
+  if(!existsSync($path)) return `The path ${$path} does not exist`;
 
   let specificationContent = readFileSync(require.resolve('./CodeReviewSpecifications.md'));
   if (specs && existsSync(specs)) specificationContent = readFileSync(specs);
@@ -141,10 +149,10 @@ export const CodeReview: Macro<string> = async (
 
   // we get the directory contents using the dirIn macro
   const dirContents: { name: string, extension?: string, size?: number}[] = JSON.parse(
-    await dirIn([path, 'true', '*', 'json', 'false'], state)
+    await dirIn([$path, 'true', '*', 'json', 'false'], state)
   );
 
-  let question = `Write a review on file structure for the following directory: ${path}
+  let question = `Write a review on file structure for the following directory: ${$path}
   \`\`\`txt
   ${dirContents.map(f => `${f.name}${f.extension ? `.${f.extension}` : ''}`).join('\n')}\n\n
   \`\`\`
@@ -178,7 +186,7 @@ export const CodeReview: Macro<string> = async (
     const doReview = async () => {
       if (file.size > 0) {
         if (file.size < 100000) {
-          const filePath = pathModule.join(path, file.name);
+          const filePath = pathModule.join($path, file.name);
           const fileResult = await CodeReviewFile([filePath, specs], state);
 
           await fileOut([reviewFile, fileResult, 'append'], state);
@@ -204,7 +212,7 @@ export const CodeReview: Macro<string> = async (
 
   let finalPrompt = createPrompt(
     modelId,
-    `Summarize and format the review generated ${path}:\n${review}`,
+    `Summarize and format the review generated ${$path}:\n${review}`,
     history,
     'system'
   );
@@ -310,7 +318,7 @@ const cloneRepo = async (repo: string, target: string, branch: string): Promise<
 
 const pullRepo = async (repo: string, target: string, branch: string) => {
   // Pull the repo
-  await exec(`git pull ${repo} ${branch}`, { cwd: target });
+  await exec(`git pull ${repo} ${branch}`, { cwd: target, env: process.env });
   // Post pulling check
   // Check if target folder exists
   if (!existsSync(target)) {
