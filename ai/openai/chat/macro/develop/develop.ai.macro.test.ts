@@ -1,7 +1,8 @@
 import fs, { readFile, readFileSync } from 'fs';
 import { 
   CodeReview, 
-  CodeReviewFile 
+  CodeReviewFile,
+  GitMacro,
 } from './develop.ai.macro';
 import { FileMacros } from '../fs/file.ai.macro';
 import TestChatState from '../tests/mocks/ChatState';
@@ -94,5 +95,21 @@ describe('CodeReview macros', () => {
     ];
     const result = await CodeReview(args, chatState);
     expect(result).toBeTruthy();
+    //@ts-ignore
   }, 30000);
+
+  // Test 3: successfully checks out a branch from a git repository
+  it('should successfully check out a branch from a git repository', async () => {
+    const repo = 'git@github.com:keegz1998/eng-test.git';
+    const target = '${process.env.APP_DATA_ROOT}/projects/eng-test';
+    const branch = 'master';
+    const args = [
+      'clone',
+      repo,
+      target,
+      branch
+    ];
+    const result = await GitMacro(args, chatState);
+    expect(result).toEqual(`Successfully cloned the repository ${repo} to ${target} and checked out branch ${branch}`);
+  })
 });

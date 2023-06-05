@@ -1,9 +1,15 @@
 import pathModule from 'path';
 import os from 'os';
-import { promises as fs, readFileSync, existsSync } from 'fs';
+import { promises as fs, readFileSync, existsSync, mkdirSync } from 'fs';
 import { ChatState, Macro } from '@reactory/server-modules/reactor/types/chat.types';
 import { FileMacros } from '../fs/file.ai.macro';
 import { getAIResponse, createPrompt } from '@reactory/server-modules/reactor/ai/openai/chat/questions/factory';
+import { template } from 'lodash';
+import { promisify } from 'util';
+import { exec as execCallback } from 'child_process';
+
+// Convert exec to a function that returns a Promise
+const exec = promisify(execCallback);
 
 /**
  * 
@@ -231,34 +237,174 @@ export const CodeReviewComponentRegister: Reactory.IReactoryComponentDefinition<
   tags: ['code', 'review', 'development', 'file', 'directory'],
 }
 
+
 /**
- * A macro that performs git operations
+ * Checks a git branch
+ * @param branch 
+ * @param target 
+ */
+const checkBranch = async (branch: string, target: string) => {
+  // Check git status
+  const { stdout: statusOut } = await exec(`git status`, { cwd: target });
+  // Ensure branch specification and output match
+  const isOnCorrectBranch = statusOut.includes(`On branch ${branch}`);
+  if (!isOnCorrectBranch) {
+    throw new Error(`Current branch does not match the specified branch ${branch}.`);
+  }
+
+  return `${branch} is the current branch`;
+};
+
+/**
+ * Clones a repo
+ * @param repo 
+ * @param target 
+ * @param branch 
+ */
+const cloneRepo = async (repo: string, target: string, branch: string): Promise<string> => {
+  //check if the target folder contains the repo name already
+  const repoName = repo.split('/').pop().replace('.git', '');
+  let $target = target;
+  if($target.endsWith(repoName)) {
+    $target = $target.replace(repoName, '');
+  }
+
+  const targetPath = pathModule.join($target, repoName);
+  //check if the target folder exists and create it if it does not
+  if (!existsSync(targetPath)) {
+    mkdirSync(targetPath, { recursive: true });
+  }
+  // Clone the repo
+  const { stderr: cloneErr, stdout: cloneOut } =  await exec(`git clone ${repo} ${targetPath} --branch ${branch}`);
+  if(cloneErr) throw new Error(cloneErr); 
+  if(!cloneOut.includes('Cloning into')) throw new Error(`Could not clone the repository ${repo} to ${targetPath}`);
+  // Check if target folder exists
+  if (!existsSync(targetPath)) {
+    throw new Error(`Target folder ${targetPath} does not exist after cloning.`);
+  }
+
+  //check if .git folder exists
+  const gitPath = pathModule.join(targetPath, '.git');
+  if (!existsSync(gitPath)) {
+    throw new Error(`.git folder does not exist after cloning.`);
+  }
+
+  try {
+    // Check branch
+    await checkBranch(branch, target);
+  } catch (err) {
+    // If the branch does not exist, checkout the branch
+    await exec(`git checkout ${branch}`, { cwd: target });
+    await checkBranch(branch, target);
+  }
+
+  // Create a .gitignore file if it does not exist
+  const gitIgnorePath = pathModule.join(target, '.gitignore');
+  if (!existsSync(gitIgnorePath)) {
+    await fs.writeFile(gitIgnorePath, '');
+  }
+
+  return `Successfully cloned the repository ${repo} to ${target} and checked out branch ${branch}`
+};
+
+
+const pullRepo = async (repo: string, target: string, branch: string) => {
+  // Pull the repo
+  await exec(`git pull ${repo} ${branch}`, { cwd: target });
+  // Post pulling check
+  // Check if target folder exists
+  if (!existsSync(target)) {
+    throw new Error(`Target folder ${target} does not exist after pulling.`);
+  }
+  // Check branch
+  await checkBranch(branch, target);
+};
+
+/**
+ * Performs a git status
+ * @param target 
+ * @returns 
+ */
+const gitStatus = async (target: string) => {
+  // Get the status of the current git repository
+  const { stdout: statusOut } = await exec(`git status`, { cwd: target });
+  return statusOut;
+};
+
+const commitRepo = async (target: string, commitMessage: string) => {
+  // Add all changes to staging area
+  await exec(`git add .`, { cwd: target });
+  // Commit the changes
+  await exec(`git commit -m "${commitMessage}"`, { cwd: target });
+};
+
+const pushRepo = async (repo: string, target: string, branch: string) => {
+  // Push the commit to the repo
+  await exec(`git push ${repo} ${branch}`, { cwd: target });
+};
+
+/**
+ * 
  * @param args 
  * @param state 
+ * @returns 
  */
 export const GitMacro: Macro<string> = async (
   args: string[],
   state: ChatState) => {
 
-    const [operation, ...options] = args;
+  const [operation, ...options] = args;
 
-    if(operation === 'clone') {
-      const [repo, target] = options;
+  let [repo, target, branch = 'master'] = options;
 
-      if(!repo) return 'A request to clone a repository requires a valid repository url';
-      if(!target) return 'A request to clone a repository requires a valid target path';
+  if (!repo) return 'A request to clone a repository requires a valid repository url';
+  if (!target) return 'A request to clone a repository requires a valid target path';
 
-      const { exec } = require('child_process');
+  if (repo.indexOf('${') > -1) repo = template(repo)({ os, pathModule, process, state });
+  if (target.indexOf('${') > -1) target = template(target)({ os, pathModule, process, state });
+  if (branch.indexOf('${') > -1) branch = template(branch)({ os, pathModule, process, state });
 
-      exec(`git clone ${repo} ${target}`, (err: Error, stdout: string, stderr: string) => {
-        if(err) return err.message;
-        if(stderr) return stderr;
-        return stdout;
-      });
-    }
+  switch (operation) {
+    case 'clone':
+      try {
+        return await cloneRepo(repo, target, branch);        
+      } catch (err) {
+        return `Could not clone the repository due to an error ${err.message}`;
+      }
+    case 'pull':
+      try {
+        await pullRepo(repo, target, branch);
+        return `Successfully pulled the repository ${repo} from branch ${branch} to ${target}`;
+      } catch (err) {
+        return `Could not pull the repository due to an error ${err.message}`;
+      }
+    case 'commit':
+      const commitMessage = 'your commit message'; // replace with actual commit message
+      try {
+        await commitRepo(target, commitMessage);
+        return `Successfully committed changes to the repository at ${target} with message "${commitMessage}"`;
+      } catch (err) {
+        return `Could not commit changes due to an error ${err.message}`;
+      }
 
-  return '';
-  };
+    case 'push':
+      try {
+        await pushRepo(repo, target, branch);
+        return `Successfully pushed changes to the repository ${repo} on branch ${branch} from ${target}`;
+      } catch (err) {
+        return `Could not push changes due to an error ${err.message}`;
+      }
+    case 'status':
+      try {
+        const status = await gitStatus(target);
+        return status;
+      } catch (err) {
+        return `Could not retrieve git status due to an error ${err.message}`;
+      }
+    default:
+      return `Invalid operation: ${operation}. Available operations are: clone, pull, push, commit, status`;
+  }
+};
 
 
 /**
