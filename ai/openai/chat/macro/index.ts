@@ -21,9 +21,8 @@ export const REACTOR_MACRO_MD = require.resolve('./macros.md');
 export const MacroRegistry: Reactory.IReactoryComponentDefinition<Macro<unknown>>[] = [
   ...FileMacros,
   ...DevelopmentMacros,
-  
-];
 
+];
 
 export const getMacrosMD = (): string => {
   const macrosText = MacroRegistry.map((macro) => {
@@ -33,8 +32,8 @@ export const getMacrosMD = (): string => {
   return REACTOR_MACRO_MD.replace('{{macros}}', macrosText);
 }
 
-export const getMacro = (name: string): Macro<unknown> | undefined => { 
-  return MacroRegistry.find((macro) => macro.name === name)?.component;
+export const getMacro = <T>(name: string): Macro<T> | undefined => { 
+  return MacroRegistry.find((macro) => macro.name === name)?.component as unknown as Macro<T>;
 }
 
 // Usage

@@ -2,7 +2,7 @@ import pathModule from 'path';
 import os from 'os';
 import { promises as fs, readFileSync, existsSync, mkdirSync } from 'fs';
 import { ChatState, Macro } from '@reactory/server-modules/reactor/types/chat.types';
-import { FileMacros } from '../fs/file.ai.macro';
+import { FileMacros, RemoveDirectory } from '../fs/file.ai.macro';
 import { getAIResponse, createPrompt } from '@reactory/server-modules/reactor/ai/openai/chat/questions/factory';
 import { template } from 'lodash';
 import { promisify } from 'util';
@@ -269,7 +269,7 @@ const checkBranch = async (branch: string, target: string) => {
  * @param target 
  * @param branch 
  */
-const cloneRepo = async (repo: string, target: string, branch: string): Promise<string> => {
+const cloneRepo = async (repo: string, target: string, branch: string, overwrite: boolean = false, state: ChatState): Promise<string> => {
   //check if the target folder contains the repo name already
   const repoName = repo.split('/').pop().replace('.git', '');
   let $target = target;
@@ -281,6 +281,10 @@ const cloneRepo = async (repo: string, target: string, branch: string): Promise<
   //check if the target folder exists and create it if it does not
   if (!existsSync(targetPath)) {
     mkdirSync(targetPath, { recursive: true });
+  } else {
+    //check if the target folder exists and whether to overwrite it
+    if(existsSync($target) ===  true && overwrite === false) throw new Error(`Target folder ${targetPath} already exists. Use overwrite flag to overwrite the folder.`);
+    if(existsSync($target) ===  true && overwrite === true) await RemoveDirectory([$target], state);
   }
   // Clone the repo
   const { stderr: cloneErr, stdout: cloneOut } =  await exec(`git clone ${repo} ${targetPath} --branch ${branch}`);
@@ -363,7 +367,7 @@ export const GitMacro: Macro<string> = async (
 
   const [operation, ...options] = args;
 
-  let [repo, target, branch = 'master'] = options;
+  let [repo, target, branch = 'master', overwrite = 'false'] = options;
 
   if (!repo) return 'A request to clone a repository requires a valid repository url';
   if (!target) return 'A request to clone a repository requires a valid target path';
@@ -375,7 +379,7 @@ export const GitMacro: Macro<string> = async (
   switch (operation) {
     case 'clone':
       try {
-        return await cloneRepo(repo, target, branch);        
+        return await cloneRepo(repo, target, branch, overwrite === 'true', state);  
       } catch (err) {
         return `Could not clone the repository due to an error ${err.message}`;
       }

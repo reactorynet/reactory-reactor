@@ -1,20 +1,98 @@
-import { ChatState, Macro } from "modules/reactor/types/chat.types"
-
+import { ChatState, Macro } from "modules/reactor/types/chat.types";
 import { exec } from "child_process";
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+
+const DEFAULT_SHELL_TEMPLATE = `
+#!/bin/bash
+# This is a default shell template
+# You can change this template by setting the environment variable DEFAULT_SHELL_TEMPLATE
+\${cmd}
+`
 
 /**
- * A macro that executes a shell command.
+ * A security check to prevent potentially dangerous shell commands from being executed.
+ * @param command 
+ * @param state 
+ */
+export const secureShell = (command: string, state: ChatState): void => {
+  const dangerousCommandPatterns = [
+    /^rm\s/,
+    /^mv\s/,
+  ];
+
+  //check if environment variable DENY_SHELL_EXECUTION is set to true
+  if(process.env.DENY_SHELL_EXECUTION === 'true') {
+    throw new Error('Unauthorized: Shell execution is disabled.');
+  }
+
+  const { context } = state;
+
+  // Check if user is authenticated and has the necessary role
+  if (!context || !context.hasRole('SHELL-EXEC') && !context.hasRole('ADMIN')) {
+    throw new Error('Unauthorized: User does not have the necessary role to execute shell commands.');
+  }
+
+  // Check if environment varable DENIED_SHELL_COMMANDS is set
+  if(process.env.DENIED_SHELL_COMMANDS) {
+    const deniedCommands = process.env.DENIED_SHELL_COMMANDS.split(',');
+    //add to the dangerous command patterns
+    dangerousCommandPatterns.push(...deniedCommands.map(cmd => new RegExp(`^${cmd}\\s`))); 
+  }
+
+  // Check if command matches any dangerous patterns
+  dangerousCommandPatterns.forEach((pattern) => {
+    if (pattern.test(command)) {
+      throw new Error(`Security Alert: Attempted to execute a potentially dangerous command: ${command}`);
+    }
+  });
+}
+
+/**
+ * A macro that writes a shell command to a temporary .sh file and executes it.
  * @param args - a list of arguments for the shell command
  * @param state - the current chat state
  * @param context - the current reactory context
  * @returns the result of the shell command
  */
 export const ShellCommand: Macro<string> = async (args: any[], state: ChatState, context?: Reactory.Server.IReactoryContext) => {
+  const [shellCommand, workingDir = process.cwd(), templateId = 'default', timeoutInSeconds = '60'] = args;
 
-  // define a helper function to execute a shell command
+  try {
+    // Check if command is potentially dangerous
+    secureShell(shellCommand, state);
+  } catch (securityError) {
+    return `Security Check Failed: ${securityError.message}`
+  }
+  
+  // Validate working directory
+  if (!fs.existsSync(workingDir)) {
+    throw new Error(`Working directory "${workingDir}" does not exist.`);
+  }
+
+  if(!fs.existsSync(path.join(process.env.APP_DATA_ROOT, 'shell-templates'))) {
+    fs.mkdirSync(path.join(process.env.APP_DATA_ROOT, 'shell-templates'));
+    fs.writeFileSync(path.join(process.env.APP_DATA_ROOT, DEFAULT_SHELL_TEMPLATE, 'default.sh'), '');
+  }
+
+  // Check if template exists
+  const templatePath = path.join(process.env.APP_DATA_ROOT, 'shell-templates', `${templateId}.sh`);
+  if (!fs.existsSync(templatePath)) {
+    throw new Error(`Shell template "${templateId}" does not exist. You can create a new template using /@out(${templatePath}, <template>))`);
+  }
+
+  // Create .sh file
+  const shFilePath = path.join(os.tmpdir(), `${templateId}.sh`);
+  const commandWithEnvVars = `${Object.entries(process.env).map(([key, val]) => `export ${key}='${val}'`).join('\n')}\n${shellCommand}`;
+  fs.writeFileSync(shFilePath, commandWithEnvVars);
+  //make the file executable
+  fs.chmodSync(shFilePath, 0o777);
+
+  // Execute .sh file
   const execCommand = (command: string): Promise<string> => {
     return new Promise((resolve, reject) => {
-      exec(command, (error, stdout, stderr) => {
+      const child = exec(command, { cwd: workingDir }, (error, stdout, stderr) => {
         if (error) {
           reject(`Error: ${error.message}`);
         } else if (stderr) {
@@ -23,13 +101,22 @@ export const ShellCommand: Macro<string> = async (args: any[], state: ChatState,
           resolve(stdout);
         }
       });
+
+      if (timeoutInSeconds) {
+        const timeoutInMilliseconds = timeoutInSeconds * 1000;
+        setTimeout(() => {
+          child.kill(); // kills the process if it's still running after the timeout
+          reject(`Command execution timed out after ${timeoutInSeconds} seconds.`);
+        }, timeoutInMilliseconds);
+      }
     });
   };
 
+
   // check if a command is provided
-  if (args && args.length > 0) {
+  if (shellCommand && shellCommand.length > 0) {
     try {
-      const result = await execCommand(args.join(' '));
+      const result = await execCommand(`sh ${shFilePath}`);
       return result;
     } catch (error) {
       return `Command execution failed: ${error}`;
@@ -38,6 +125,7 @@ export const ShellCommand: Macro<string> = async (args: any[], state: ChatState,
     return 'No command provided';
   }
 };
+
 
 /**
  * A macro that lists all services registered in the system or

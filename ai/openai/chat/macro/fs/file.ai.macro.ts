@@ -1,6 +1,7 @@
 import pathModule from 'path';
 import os from 'os';
 import { promises as fs, readFileSync, existsSync } from 'fs';
+import fsExtra from 'fs-extra';
 import { ChatState, Macro } from '@reactory/server-modules/reactor/types/chat.types';
 import { PathInfo, DirectoryListFormatter, DirectoryListFormatterService} from '@reactory/server-modules/reactor/types/macro.types'
 import logger from '@reactory/server-core/logging';
@@ -346,7 +347,7 @@ export const PathInfoMacro: Macro<string> = async (
 /**
  * Macro for extracting detailed information about a file or directory
  */
-export const PathInfoComponentRegister: Reactory.IReactoryComponentDefinition<typeof PathInfo> = {
+export const PathInfoComponentRegister: Reactory.IReactoryComponentDefinition<typeof PathInfoMacro> = {
   component: PathInfoMacro,
   name: 'PathInfo',
   nameSpace: 'reactor',
@@ -372,6 +373,36 @@ export const ListDirectoryComponentRegister: Reactory.IReactoryComponentDefiniti
   stem: 'file',
   tags: ['macro', 'file', 'list', 'ls', 'dir'],
 }
+
+/**
+ * A macro that deletes a folder and all subfolders and files
+ */
+export const RemoveDirectory: Macro<string> = async (
+  args: string[],
+  state: ChatState
+) => {
+  const [path] = args;
+  try {
+    await fsExtra.rmdir(path.trim(), { recursive: true });
+    return `Folder ${path} deleted successfully`;
+  } catch(err) {
+    return `Error deleting folder ${path}: ${err?.message}`;
+  }
+}
+
+export const RemoveDirectoryComponentRegister: Reactory.IReactoryComponentDefinition<typeof RemoveDirectory> = {
+  component: RemoveDirectory,
+  name: 'ListDirectory',
+  nameSpace: 'reactor',
+  version: '1.0.0',
+  description: `A simple macro that deletes a folder and all subfolders and files`,
+  domain: 'file',
+  features: [],
+  stem: 'file',
+  tags: ['macro', 'file', 'list', 'ls', 'dir'],
+}
+
+
 
 
 /**

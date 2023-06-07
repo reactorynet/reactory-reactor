@@ -1,4 +1,4 @@
-import fs, { readFile, readFileSync } from 'fs';
+import fs, { existsSync, readFile, readFileSync } from 'fs';
 import {
   CodeReview,
   CodeReviewFile,
@@ -109,11 +109,11 @@ describe('CodeReview macros', () => {
       'clone',
       repo,
       target,
-      branch
+      branch,
+      'true'
     ];
     const result = await GitMacro(args, chatState);
     expect(result).toEqual(`Successfully cloned the repository ${repo} to ${target} and checked out branch ${branch}`);
-
     const reviewArgs = [
       `${process.env.APP_DATA_ROOT}/projects/eng-test`,
       `${__dirname}/samples/hello-world.spec.md`,

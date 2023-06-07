@@ -1,9 +1,9 @@
 import * as fs from 'fs';
 import { ReadLine } from "readline";
-import { ChatCompletionResponseMessage, Configuration, CreateChatCompletionRequest, OpenAIApi } from "openai";
+import { ChatCompletionRequestMessage, ChatCompletionResponseMessage, Configuration, CreateChatCompletionRequest, OpenAIApi } from "openai";
 import { ChatState, IQuestion, IQuestionCollection, QuestionHandlerResponse } from "../../../../types/chat.types";
-import { 
-  handleUserResponse, 
+import {
+  handleUserResponse,
   handleChatCompletionResponse,
   MacroRegistry,
   getMacro,
@@ -14,20 +14,20 @@ import { ObjectId } from 'mongodb';
 
 export const SYSTEM_INITIALIZER_MESSAGE: ChatCompletionResponseMessage = {
   role: 'user',
-  content: fs.readFileSync(require.resolve('../macro/macros.md'), 'utf-8').toString(), 
+  content: fs.readFileSync(require.resolve('../macro/macros.md'), 'utf-8').toString(),
 };
 
 
-const persistChatState = async (state: ChatState): Promise<void> => { 
+const persistChatState = async (state: ChatState): Promise<void> => {
   const { history, botId, modelId, started, context, id } = state;
   const { user } = context;
   const meta = {
     summary: 'Chat session with Reactor',
     title: `Chat session with Reactor`,
-    };
-  
+  };
+
   let chat = await ReactorConversationModel.findById(id);
-  if(!chat) {
+  if (!chat) {
     chat = new ReactorConversationModel({
       _id: id,
       id,
@@ -87,9 +87,9 @@ export async function getAIResponse(ai: OpenAIApi, prompt: CreateChatCompletionR
     return choices[0].message;
   } catch (error) {
     console.error(`Error getting AI response: ${error}`);
-    return  { 
+    return {
       role: 'assistant',
-      content:  "I'm sorry, I couldn't process that. Could you please rephrase or try again later?"
+      content: "I'm sorry, I couldn't process that. Could you please rephrase or try again later?"
     };
   }
 }
@@ -111,17 +111,23 @@ function pruneHistory(history: any[]): any[] {
   return prunedHistory.reverse();
 }
 
-const handleCommandAction = async (response: string, state: ChatState): Promise<any> => { 
-  const [command, ...params] = response.split(' ');
-  const macro = getMacro(command);
-  if(macro) {
-    return await macro(params, state);
+const handleCommandAction = async (response: string, state: ChatState): Promise<ChatCompletionResponseMessage> => {
+  
+  let [command, ...params] = response.split(' ');
+  let content: string = 'Command not found';
+  if (command.startsWith("@")) command = command.slice(1);
+  const macro = getMacro<string>(command);
+  if (macro) {
+    content = await macro(params, state);
   }
-  return 'Command not found';
+
+  return {
+    role: 'system',
+    content,
+  }
 }
 
 export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE): IQuestion => {
-
   const {
     modelId,
     started,
@@ -132,7 +138,7 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
   const { user } = context;
 
   let question = state.history.length === 1 ?
-    `Hi ${user?.firstName ? user.firstName : 'Anon'}, how can we build better applications today with reactory?` : 'What else can I help you with?'; 
+    `Hi ${user?.firstName ? user.firstName : 'Anon'}, how can we build better applications today with reactory?` : 'What else can I help you with?';
 
   // Prune history before passing to createPrompt
   // let history = pruneHistory(state.history);
@@ -142,30 +148,41 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
   return {
     question,
     handler: async (response, state) => {
-      if(response.indexOf('/') === 0) {
-        // handle command message
-        await handleCommandAction(response, state);
-      }
-      const processedResponse = await handleUserResponse(response, state);
-      const userResponse: ChatCompletionResponseMessage = {
+      // Add the command's response to the messages
+      const userInput: ChatCompletionRequestMessage = {
         role: 'user',
-        content: processedResponse,
+        content: response,
       };
-      // Add the user's response to the messages
-      prompt.messages.push(userResponse);
-      
-      // Add the old chat's history to the new chat's state
-      const prunedHistory = pruneHistory(state.history);
-      let nextState = { ...state }
-      nextState.history = prunedHistory;
-      state.history.push(userResponse);
 
-      // Get AI's response
-      const message = await getAIResponse(ai, prompt, state);
+      const getNextState = () => {
+        // Add the old chat's history to the new chat's state
+        const prunedHistory = pruneHistory(state.history);
+        let nextState = { ...state }
+        nextState.history = prunedHistory;
+        state.history.push(userInput);
+        return nextState;
+      }
 
-      // Add the AI's response to the chat history
+      let nextState;
+      let message: ChatCompletionResponseMessage; // The AI's response or the system comamnd response
+      if (response.indexOf('/') === 0) {
+        // handle command message
+        const commandResult = await handleCommandAction(response, state);
+        prompt.messages.push(userInput);
+        nextState = getNextState();
+        message = commandResult
+      } else {
+        userInput.content = await handleUserResponse(response, state);
+        // Add the user's response to the messages
+        prompt.messages.push(userInput);
+        // Get AI's response
+        nextState = getNextState();
+        message = await getAIResponse(ai, prompt, state);
+        // Add the AI's response to the chat history
+      }
+
       nextState.history.push(message);
-
+      // Display the AI's response
       rl.write(`Reactor: ${message.content}`);
 
       //persist the chat state to the database
