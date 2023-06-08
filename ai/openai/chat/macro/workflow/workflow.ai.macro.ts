@@ -8,7 +8,13 @@ const DEFAULT_SHELL_TEMPLATE = `
 #!/bin/bash
 # This is a default shell template
 # You can change this template by setting the environment variable DEFAULT_SHELL_TEMPLATE
-\${cmd}
+<%=command%>
+`
+
+const ERROR_SHELL_TEMPLATE = `
+#!/bin/bash
+
+echo "Unabled to process tempalte Error: <%=error%>"
 `
 
 /**
@@ -50,15 +56,78 @@ export const secureShell = (command: string, state: ChatState): void => {
 }
 
 /**
+ * Gets the shell command text using the given template id.
+ * @param templateId 
+ * @param command 
+ * @param state 
+ * @returns 
+ */
+const getShellCommandText = async (templateId: string, command: string, state: ChatState): Promise<string> => {
+
+  const { context } = state;
+  const templateSvc = context.getService<Reactory.Service.IReactoryTemplateService>('core.TemplateService@1.0.0');
+  let shellCommandText = null;
+  const commandWithEnvVars = `${Object.entries(process.env).map(([key, val]) => `export ${key}='${val}'`).join('\n')}`;
+
+  const templateFromFile = (): string => {
+    if (!fs.existsSync(path.join(process.env.APP_DATA_ROOT, 'templates/shell'))) {
+      fs.mkdirSync(path.join(process.env.APP_DATA_ROOT, 'templates/shell'), { recursive: true });
+      fs.writeFileSync(path.join(process.env.APP_DATA_ROOT, DEFAULT_SHELL_TEMPLATE, 'default.sh.ejs'), '');
+      return DEFAULT_SHELL_TEMPLATE;
+    }
+
+    const templatePath = path.join(process.env.APP_DATA_ROOT, 'templates/shell', `${templateId}.sh.ejs`);
+    if (!fs.existsSync(templatePath)) {
+      return DEFAULT_SHELL_TEMPLATE;
+    }
+    return fs.readFileSync(templatePath, 'utf8');
+  }
+
+  if (templateSvc) {
+    const templateDoc = await templateSvc.getTemplate(`shell/${templateId}.sh`, context.partner.id);
+    if (templateDoc) {
+      shellCommandText = await templateSvc.renderTemplate(templateDoc, {
+        command,
+        environmentVars: commandWithEnvVars,
+        context: context,
+        state: state,
+      });
+    }
+  }
+
+  if (shellCommandText === null) {
+    shellCommandText = await templateSvc.renderTemplate(templateFromFile(), {
+      command,
+      environmentVars: commandWithEnvVars,
+      context: context,
+      state: state,
+    });
+  }
+
+  if (!shellCommandText) {
+    shellCommandText = await templateSvc.renderTemplate(ERROR_SHELL_TEMPLATE, { error: `Could not render template ${templateId}` });
+  }
+
+  return shellCommandText;
+}
+
+/**
  * A macro that writes a shell command to a temporary .sh file and executes it.
  * @param args - a list of arguments for the shell command
  * @param state - the current chat state
  * @param context - the current reactory context
  * @returns the result of the shell command
  */
-export const ShellCommand: Macro<string> = async (args: any[], state: ChatState, context?: Reactory.Server.IReactoryContext) => {
-  const [shellCommand, workingDir = process.cwd(), templateId = 'default', timeoutInSeconds = '60'] = args;
+export const ShellCommand: Macro<string> = async (args: any[], state: ChatState) => {
 
+  const [
+    shellCommand, 
+    workingDir = process.cwd(), 
+    templateId = 'default', 
+    timeoutInSeconds = '60',
+    sudo = 'false'
+  ] = args;
+  
   try {
     // Check if command is potentially dangerous
     secureShell(shellCommand, state);
@@ -70,22 +139,10 @@ export const ShellCommand: Macro<string> = async (args: any[], state: ChatState,
   if (!fs.existsSync(workingDir)) {
     throw new Error(`Working directory "${workingDir}" does not exist.`);
   }
-
-  if(!fs.existsSync(path.join(process.env.APP_DATA_ROOT, 'shell-templates'))) {
-    fs.mkdirSync(path.join(process.env.APP_DATA_ROOT, 'shell-templates'));
-    fs.writeFileSync(path.join(process.env.APP_DATA_ROOT, DEFAULT_SHELL_TEMPLATE, 'default.sh'), '');
-  }
-
-  // Check if template exists
-  const templatePath = path.join(process.env.APP_DATA_ROOT, 'shell-templates', `${templateId}.sh`);
-  if (!fs.existsSync(templatePath)) {
-    throw new Error(`Shell template "${templateId}" does not exist. You can create a new template using /@out(${templatePath}, <template>))`);
-  }
-
+  
   // Create .sh file
-  const shFilePath = path.join(os.tmpdir(), `${templateId}.sh`);
-  const commandWithEnvVars = `${Object.entries(process.env).map(([key, val]) => `export ${key}='${val}'`).join('\n')}\n${shellCommand}`;
-  fs.writeFileSync(shFilePath, commandWithEnvVars);
+  const shFilePath = path.join(os.tmpdir(), `${templateId}.sh`);  
+  fs.writeFileSync(shFilePath, getShellCommandText(templateId, shellCommand, state));
   //make the file executable
   fs.chmodSync(shFilePath, 0o777);
 
@@ -116,7 +173,7 @@ export const ShellCommand: Macro<string> = async (args: any[], state: ChatState,
   // check if a command is provided
   if (shellCommand && shellCommand.length > 0) {
     try {
-      const result = await execCommand(`sh ${shFilePath}`);
+      const result = await execCommand(`${sudo !== 'false' ? 'sudo ' : ''}sh ${shFilePath}`);
       return result;
     } catch (error) {
       return `Command execution failed: ${error}`;
