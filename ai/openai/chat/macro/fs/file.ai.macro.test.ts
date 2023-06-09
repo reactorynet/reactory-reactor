@@ -3,7 +3,7 @@ import {
   ReadFile, 
   WriteFile,
   ListDirectory,
-  PathInfo,
+  PathInfoMacro,
   ExtractFile,
   InsertSnippet
 } from './file.ai.macro';
@@ -50,7 +50,7 @@ describe('file utilities', () => {
 
     test('returns the path info of a file', async () => { 
       const filePath = require.resolve('./samples/01.txt');
-      const result = await PathInfo([filePath], chatState);
+      const result = await PathInfoMacro([filePath], chatState);
       expect(result).toBeTruthy();
     });
 

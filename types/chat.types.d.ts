@@ -1,17 +1,19 @@
 import { ChatCompletionResponseMessage, OpenAIApi } from "openai"
 import { Interface as ReadLineInterface } from "readline";
-export type KnownCannedMessages = 
-  "welcome" | 
-  "help" | 
-  "goodbye" | 
-  "error" |
-  "givemeaccess"
 
 export type Macro<TResult> = (params: any[], state: ChatState) => Promise<TResult>
 
 export type MacroFunctions = {
   [macro: string]: Macro<unknown>
 };
+
+
+export type KnownCannedMessages = 
+  "welcome" | 
+  "help" | 
+  "goodbye" | 
+  "error" |
+  "givemeaccess"
 
 export type CanedMessages = {
   [key in KnownCannedMessages]: string;
@@ -28,6 +30,8 @@ export type ChatState = {
   id?: string
   /**
    * The unique identifier for the bot that is being used for the chat session.
+   * 
+   * The id of the bot defines what configuration is used for the bot.
    * */
   botId: string
   /**

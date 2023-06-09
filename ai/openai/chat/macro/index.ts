@@ -8,7 +8,7 @@ import  {
   FileMacros,
 } from './fs/file.ai.macro';
 import { FetchMacro } from './web/http.ai.macro';
-import { QueryGQL, MutationGQL } from './data/graphql.ai.macro';
+import { QueryGQL, MutationGQL } from './graphql/graphql.macro';
 import { ServiceRegister } from './workflow/workflow.ai.macro';
 import { CreateUser, GetUser } from './workflow/user.ai.macro';
 import { CodeReview, CodeReviewFile, DevelopmentMacros } from './develop/develop.ai.macro';

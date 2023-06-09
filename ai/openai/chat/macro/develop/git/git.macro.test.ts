@@ -1,10 +1,11 @@
-import fs, { existsSync, readFile, readFileSync } from 'fs';
+
+import { GitMacro } from './git.macro';
 import {
   CodeReview,
   CodeReviewFile,
-} from './develop.ai.macro';
-import { FileMacros } from '../fs/file.ai.macro';
-import TestChatState from '../tests/mocks/ChatState';
+} from '../develop.ai.macro';
+import { FileMacros } from '../../fs/file.ai.macro';
+import TestChatState from '../../tests/mocks/ChatState';
 import { ChatState } from '@reactory/server-modules/reactor/types/chat.types';
 import { CreateChatCompletionRequest, OpenAIApi } from 'openai';
 
@@ -60,7 +61,7 @@ jest.mock('@reactory/server-modules/reactor/ai/openai/chat/questions/factory', (
   }
 });
 
-describe('CodeReview macros', () => {
+describe('Git Macro Test', () => {
   let chatState: ChatState = null;
 
   beforeEach(async () => {
@@ -74,32 +75,7 @@ describe('CodeReview macros', () => {
     });
   });
 
-  // Test 1: successfully performs a code review
-  it('should successfully perform a code review on the unit test file', async () => {
-    const filePath = __dirname;
-    const args = [
-      `${filePath}/samples/hello-world.ts`,
-      `${filePath}/samples/hello-world.spec.md`,
-      'inline'
-    ];
-    const result = await CodeReviewFile(args, chatState);
-    expect(result).toBeTruthy();
-  });
-
-  // Test 2: successfully performs a code review on a path
-  it('should successfully perform a code review on a path', async () => {
-    const filePath = __dirname;
-    const args = [
-      `${filePath}/samples`,
-      `${filePath}/samples/hello-world.spec.md`,
-      'inline'
-    ];
-    const result = await CodeReview(args, chatState);
-    expect(result).toBeTruthy();
-    //@ts-ignore
-  }, 30000);
-
-  // Test 3: successfully checks out a branch from a git repository
+  // Test 1: successfully checks out a branch from a git repository
   it('should successfully check out a branch from a git repository', async () => {
     const repo = 'git@github.com:keegz1998/eng-test.git';
     const target = '${process.env.APP_DATA_ROOT}/projects/eng-test';
@@ -118,7 +94,6 @@ describe('CodeReview macros', () => {
       `${__dirname}/samples/hello-world.spec.md`,
       'inline'
     ];
-    const codeReview = await CodeReview(reviewArgs, chatState);
     expect(result).toBeTruthy();
     //@ts-ignore
 
