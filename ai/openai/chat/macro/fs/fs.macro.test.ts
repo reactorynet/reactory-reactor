@@ -6,8 +6,8 @@ import {
   PathInfoMacro,
   ExtractFile,
   InsertSnippet
-} from './file.ai.macro';
-import TestChatState from '../tests/mocks/ChatState';
+} from './fs.macro';
+import TestChatState from '../data/tests/mocks/ChatState';
 import { ChatState } from '@reactory/server-modules/reactor/types/chat.types';
 
 describe('file utilities', () => {

@@ -2,12 +2,13 @@ import pathModule from 'path';
 import os from 'os';
 import { promises as fs, readFileSync, existsSync, mkdirSync } from 'fs';
 import { ChatState, Macro } from '@reactory/server-modules/reactor/types/chat.types';
-import { RemoveDirectory } from '../../fs/file.ai.macro';
+import { RemoveDirectory } from '../../fs/fs.macro';
 import { ShellCommand as exec } from '../../shell/shell.macro'
 
 import { template } from 'lodash';
 import { ShellCommandArgs } from 'modules/reactor/types/macro.types';
 import Reactory from '@reactory/reactory-core';
+import { GitMacroArgs } from './git.macro.types';
 
 
 /**
@@ -181,13 +182,13 @@ const pushRepo = async (repo: string, target: string, branch: string, state: Cha
 };
 
 /**
- * 
+ * A macro that will perform git operations
  * @param args 
  * @param state 
  * @returns 
  */
 export const GitMacro: Macro<string> = async (
-  args: string[],
+  args: GitMacroArgs,
   state: ChatState) => {
 
   const [operation, ...options] = args;
@@ -239,7 +240,7 @@ export const GitMacro: Macro<string> = async (
         return `Could not retrieve git status due to an error ${err.message}`;
       }
     default:
-      return `Invalid operation: ${operation}. Available operations are: clone, pull, push, commit, status`;
+      return `Operation: ${operation} not supported. Available operations are: clone, pull, push, commit, status`;
   }
 };
 

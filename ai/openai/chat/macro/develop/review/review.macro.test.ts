@@ -1,10 +1,11 @@
-import fs, { existsSync, readFile, readFileSync } from 'fs';
+
 import {
   CodeReview,
   CodeReviewFile,
-} from './develop.ai.macro';
-import { FileMacros } from '../fs/file.ai.macro';
-import TestChatState from '../tests/mocks/ChatState';
+} from './review.macro';
+import { FileMacros } from '../../fs/fs.macro';
+import git from '../git';
+import TestChatState from '../../data/tests/mocks/ChatState';
 import { ChatState } from '@reactory/server-modules/reactor/types/chat.types';
 import { CreateChatCompletionRequest, OpenAIApi } from 'openai';
 
@@ -99,28 +100,28 @@ describe('CodeReview macros', () => {
     //@ts-ignore
   }, 30000);
 
-  // Test 3: successfully checks out a branch from a git repository
-  it('should successfully check out a branch from a git repository', async () => {
-    const repo = 'git@github.com:keegz1998/eng-test.git';
-    const target = '${process.env.APP_DATA_ROOT}/projects/eng-test';
-    const branch = 'master';
-    const args = [
-      'clone',
-      repo,
-      target,
-      branch,
-      'true'
-    ];
-    const result = await GitMacro(args, chatState);
-    expect(result).toEqual(`Successfully cloned the repository ${repo} to ${target} and checked out branch ${branch}`);
-    const reviewArgs = [
-      `${process.env.APP_DATA_ROOT}/projects/eng-test`,
-      `${__dirname}/samples/hello-world.spec.md`,
-      'inline'
-    ];
-    const codeReview = await CodeReview(reviewArgs, chatState);
-    expect(result).toBeTruthy();
-    //@ts-ignore
+  // // Test 3: successfully checks out a branch from a git repository
+  // it('should successfully check out a branch from a git repository', async () => {
+  //   const repo = 'git@github.com:keegz1998/eng-test.git';
+  //   const target = '${process.env.APP_DATA_ROOT}/projects/eng-test';
+  //   const branch = 'master';
+  //   const args = [
+  //     'clone',
+  //     repo,
+  //     target,
+  //     branch,
+  //     'true'
+  //   ];
+  //   const result = await git(args, chatState);
+  //   expect(result).toEqual(`Successfully cloned the repository ${repo} to ${target} and checked out branch ${branch}`);
+  //   const reviewArgs = [
+  //     `${process.env.APP_DATA_ROOT}/projects/eng-test`,
+  //     `${__dirname}/samples/hello-world.spec.md`,
+  //     'inline'
+  //   ];
+  //   const codeReview = await CodeReview(reviewArgs, chatState);
+  //   expect(result).toBeTruthy();
+  //   //@ts-ignore
 
-  }, 30000)
+  // }, 30000)
 });

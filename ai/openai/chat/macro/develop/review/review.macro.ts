@@ -1,18 +1,14 @@
 import pathModule from 'path';
 import os from 'os';
 import { promises as fs, readFileSync, existsSync, mkdirSync } from 'fs';
+import git from '../git';
 import { ChatState, Macro } from '@reactory/server-modules/reactor/types/chat.types';
-import { FileMacros, RemoveDirectory } from '../fs/file.ai.macro';
+import { FileMacros, RemoveDirectory } from '../../fs/fs.macro';
 import { getAIResponse, createPrompt } from '@reactory/server-modules/reactor/ai/openai/chat/questions/factory';
 import { template } from 'lodash';
-import { promisify } from 'util';
-import { exec as execCallback } from 'child_process';
-
-// Convert exec to a function that returns a Promise
-const exec = promisify(execCallback);
 
 /**
- * 
+ * Macro that performs a review on a file using a set of specifications
  * @param args 
  * @param state 
  * @returns 
@@ -46,7 +42,7 @@ export const CodeReviewFile: Macro<string> = async (
   if(!$path) return FAILURE_MESSAGE('A request for a a code review requires a valid path to a folder');
   if(!existsSync($path)) return FAILURE_MESSAGE(`The path "${$path}" does not exist`);
   
-  let specificationContent: string = readFileSync(require.resolve('./CodeReviewSpecifications.md')).toString();
+  let specificationContent: string = readFileSync(require.resolve('./review.specifications.default.md')).toString();
 
   if(specs && existsSync(specs)) specificationContent = readFileSync(specs).toString();
   
@@ -88,7 +84,7 @@ export const CodeReviewFileComponentRegister: Reactory.IReactoryComponentDefinit
   name: 'CodeReview',
   version: '1.0.0',
   component: CodeReviewFile,
-  description: readFileSync(require.resolve('./CodeReviewFile.md'), 'utf-8').toString(),
+  description: readFileSync(require.resolve('./review.file.macro.md'), 'utf-8').toString(),
   features: [],
   stem: 'review',
   tags: ['code', 'review', 'development', 'file', 'directory'],
@@ -124,7 +120,7 @@ export const CodeReview: Macro<string> = async (
   if(!$path) return 'A request for a a code review requires a valid path to a folder';
   if(!existsSync($path)) return `The path ${$path} does not exist`;
 
-  let specificationContent = readFileSync(require.resolve('./CodeReviewSpecifications.md'));
+  let specificationContent = readFileSync(require.resolve('./review.specifications.default.md'));
   if (specs && existsSync(specs)) specificationContent = readFileSync(specs);
 
   let fileIn: Macro<string> = null;
@@ -237,7 +233,7 @@ export const CodeReviewComponentRegister: Reactory.IReactoryComponentDefinition<
   name: 'CodeReview',
   version: '1.0.0',
   component: CodeReview,
-  description: readFileSync(require.resolve('./CodeReview.md'), 'utf-8').toString(),
+  description: readFileSync(require.resolve('./review.macro.md'), 'utf-8').toString(),
   features: [],
   stem: 'review',
   tags: ['code', 'review', 'development', 'file', 'directory'],

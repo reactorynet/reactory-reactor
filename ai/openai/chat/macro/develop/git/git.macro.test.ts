@@ -3,9 +3,9 @@ import { GitMacro } from './git.macro';
 import {
   CodeReview,
   CodeReviewFile,
-} from '../develop.ai.macro';
-import { FileMacros } from '../../fs/file.ai.macro';
-import TestChatState from '../../tests/mocks/ChatState';
+} from '../review';
+import { FileMacros } from '../../fs/fs.macro';
+import TestChatState from '../../data/tests/mocks/ChatState';
 import { ChatState } from '@reactory/server-modules/reactor/types/chat.types';
 import { CreateChatCompletionRequest, OpenAIApi } from 'openai';
 

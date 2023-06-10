@@ -4,7 +4,9 @@ import fs, { readFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import Reactory from "@reactory/reactory-core";
+import { ComponentDomain, FeatureType } from "@reactory/reactory-core";
 import { ShellCommandArgs, ShellCommandMacroOutput } from "modules/reactor/types/macro.types";
+import ReactoryFormEditor from "modules/core/forms/ReactoryFormEditor";
 
 const DEFAULT_SHELL_TEMPLATE = `
 #!/bin/bash
@@ -210,12 +212,12 @@ const ShellCommandComponentRegister: Reactory.IReactoryComponentDefinition<typeo
   features: [{
     feature: 'shell',
     description: 'Executes a shell command',
-    featureType: Reactory.FeatureType.function,
+    featureType: FeatureType.function,
     action: ["execute", "run", "shell", "command"],
     stem: "shell",
   }],
   tags: ['shell', 'command', 'execute', 'run', 'script', 'sh'],
-  domain: Reactory.ComponentDomain.function,
+  domain: ComponentDomain.function,
   roles: ['SHELL-EXEC'],
   stem: 'shell',
 };

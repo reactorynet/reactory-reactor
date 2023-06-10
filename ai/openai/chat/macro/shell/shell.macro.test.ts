@@ -1,7 +1,7 @@
 import { ShellCommand } from './shell.macro';
 import { exec } from "child_process";
 import { ChatState } from "modules/reactor/types/chat.types";
-import TestChatState from '../tests/mocks/ChatState';
+import TestChatState from '../data/tests/mocks/ChatState';
 
 jest.mock("child_process");
 
