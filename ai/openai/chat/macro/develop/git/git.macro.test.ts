@@ -8,6 +8,7 @@ import { FileMacros } from '../../fs/fs.macro';
 import TestChatState from '../../data/tests/mocks/ChatState';
 import { ChatState } from '@reactory/server-modules/reactor/types/chat.types';
 import { CreateChatCompletionRequest, OpenAIApi } from 'openai';
+import { GitMacroArgs } from './git.macro.types';
 
 const mockReviewFileContent = `# Review for hello-world file
 Nice work!

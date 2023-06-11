@@ -149,9 +149,8 @@ export const CodeReview: Macro<string> = async (
 
   let question = `Write a review on file structure for the following directory: ${$path}
   \`\`\`txt
-  ${dirContents.map(f => `${f.name}${f.extension ? `.${f.extension}` : ''}`).join('\n')}\n\n
+  ${dirContents.map(f => `${f.name}`).join('\n')}\n\n
   \`\`\`
-
   `;
   const prompt = createPrompt(
     modelId,

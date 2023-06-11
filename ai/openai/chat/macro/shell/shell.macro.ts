@@ -1,12 +1,13 @@
 import { ChatState, Macro } from "modules/reactor/types/chat.types";
-import { exec } from "child_process";
+import { ChildProcess, SpawnOptions, spawn } from "child_process";
 import fs, { readFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import Reactory from "@reactory/reactory-core";
 import { ComponentDomain, FeatureType } from "@reactory/reactory-core";
 import { ShellCommandArgs, ShellCommandMacroOutput } from "modules/reactor/types/macro.types";
-import ReactoryFormEditor from "modules/core/forms/ReactoryFormEditor";
+import logger from "@reactory/server-core/logging";
+import { User } from "models";
 
 const DEFAULT_SHELL_TEMPLATE = `
 #!/bin/bash
@@ -15,20 +16,18 @@ const DEFAULT_SHELL_TEMPLATE = `
 # The file name should be the template id with a .sh.ejs extension
 # Templates can be loaded into the database using the template service
 echo "Reactory Shell running using default template"
-<%=environmentVars%>
-<%=command%>
+<%- environmentVars%>
+<%- command%>
 `
 
 const ERROR_SHELL_TEMPLATE = `
 #!/bin/bash
-
-<%=environmentVars%>
-echo "Warning! Unable to process template error: <%=error%>"
+echo "Warning! Unable to process template error: <%-error%>"
 echo "Please check the template configuration and try again."
 echo "Attempting to start a shell with the default template"
-<%=command%>
+<%- environmentVars%>
+<%- command%>
 `
-
 /**
  * A security check to prevent potentially dangerous shell commands from being executed.
  * @param command 
@@ -160,42 +159,121 @@ export const ShellCommand: Macro<ShellCommandMacroOutput> = async (args: ShellCo
     throw new Error(`Working directory "${workingDir}" does not exist.`);
   }
 
+  
   // Create .sh file
-  const shFilePath = path.join(os.tmpdir(), `${templateId}.sh`);
-  fs.writeFileSync(shFilePath, getShellCommandText(templateId, shellCommand, state));
-  //make the file executable
-  fs.chmodSync(shFilePath, 0o777);
+  const shFilePath = path.join(os.tmpdir(), `${templateId}.sh`);  
+  let shellCommandText = null;
+
+  //handle each process with each own try catch block in order 
+  //to provide more detailed error messages
+
+  // Get shell command text
+  try {
+    shellCommandText = await getShellCommandText(templateId, shellCommand, state);
+  } catch (error) {
+    logger.error(`Error getting shell command text: ${error.message}`);
+    return format === 'string' ? `Error getting shell command text: ${error.message}` : { stderr: `Error getting shell command text: ${error.message}`, stdout: null };
+  }
+
+  // Write shell command to file
+  try {
+    fs.writeFileSync(shFilePath, shellCommandText, { encoding: 'utf8' });
+  } catch (fsError) {
+    logger.error(`Error writing shell command to file: ${fsError.message}`);
+    return format === 'string' ? `Error writing shell command to file: ${fsError.message}` : { stderr: `Error writing shell command to file: ${fsError.message}`, stdout: null };
+  }
+
+
+  //Make the file executable
+  try {
+    fs.chmodSync(shFilePath, 0o777);
+  } catch (fsError) {
+    logger.error(`Error setting file permissions: ${fsError.message}`);
+    return format === 'string' ? `Error setting file permissions: ${fsError.message}` : { stderr: `Error setting file permissions: ${fsError.message}`, stdout: null };
+  }
+
+  const removeTmpFile = () => { 
+    if (fs.existsSync(shFilePath)) fs.unlinkSync(shFilePath);
+  };
 
   // Execute .sh file
   const execCommand = (command: string): Promise<ShellCommandMacroOutput> => {
     return new Promise((resolve, reject) => {
-      const child = exec(command, { cwd: workingDir }, (error, stdout, stderr) => {
-        if (error) {
-          reject(format === 'string' ? `Error: ${error.message}` : { stdout, stderr });
-        } else if (stderr) {
-          reject(format === 'string' ? `Stderr: ${stderr}` : { stdout, stderr });
-        } else {
-          resolve(format === 'string' ? stdout : { stderr: stderr, stdout });
-        }
-      });
+      const spawnOptions: SpawnOptions = { 
+        cwd: workingDir,
+      };
+      
+      let childProcess: ChildProcess = null;
+      let cleanExit = false;
+      let timer: NodeJS.Timeout = null;
+      const shellOut: string[] = [];
+      const shellErr: string[] = [];
 
-      if (timeoutInSeconds) {
-        const timeoutInMilliseconds = parseInt(timeoutInSeconds, 10) * 1000;
-        setTimeout(() => {
-          child.kill(); // kills the process if it's still running after the timeout
-          reject(`Command execution timed out after ${timeoutInSeconds} seconds.`);
-        }, timeoutInMilliseconds);
+      try  {
+        const childProcess: ChildProcess = spawn(command, spawnOptions);
+        
+        // child.stdout.on('data', (data) => {
+        //   shellOut.push(data);
+        // })
+
+        // child.stderr.on('data', (data) => { 
+        //   shellErr.push(data);
+        // })
+
+        childProcess.on('data', (data) => { 
+          shellOut.push(data);
+        });
+
+        childProcess.on('error', (error) => {
+          throw new Error(`Error executing shell command: ${error.message}`)
+        });
+
+        childProcess.on('close', (code) => {
+          cleanExit = code === 0;
+          if(timer !== null) { 
+            clearTimeout(timer);
+          }
+
+          if (childProcess) childProcess.removeAllListeners(); // removes all listeners from the child process
+          removeTmpFile();
+          resolve( format === 'string' ? shellOut.join('') : { stderr: shellErr.join(''), stdout: shellOut.join('') });
+        });
+
+
+        if (timeoutInSeconds) {
+          const timeoutInMilliseconds = parseInt(timeoutInSeconds, 10) * 1000;
+          timer = setTimeout(() => {
+            if (childProcess !== null) {
+              childProcess.removeAllListeners(); // removes all listeners from the child process
+              childProcess.kill(); // kills the process if it's still running after the timeout       
+            }
+            removeTmpFile();        
+            reject( format === 'string' ? 
+              `Command execution timed out after ${timeoutInSeconds} seconds.` : 
+              { stderr: `Command execution timed out after ${timeoutInSeconds} seconds.`, stdout: null });
+          }, timeoutInMilliseconds);
+        }
+      } catch (err) {
+        logger.error(`Error executing shell command: ${err.message}`);
+        if (timer !== null) {
+          clearTimeout(timer);
+        }
+        if (childProcess !== null) childProcess.removeAllListeners(); // removes all listeners from the child process
+        removeTmpFile();
       }
     });
-  };
+  }; 
 
 
   // check if a command is provided
   if (shellCommand && shellCommand.length > 0) {
     try {
-      const result = await execCommand(`${sudo !== 'false' ? 'sudo ' : ''}sh ${shFilePath}`);
+      const result = await execCommand(`${sudo !== 'false' ? 'sudo ' : ''}${shFilePath}`);
+      removeTmpFile();
       return result;
     } catch (error) {
+      logger.error(`Command execution failed: ${error.message}`);
+      removeTmpFile();
       return format === 'string' ? `Command execution failed: ${error}` : { stderr: error?.message || error, stdout: null };
     }
   } else {

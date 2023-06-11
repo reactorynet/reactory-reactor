@@ -4,13 +4,17 @@ import ReactoryContextProvider from './TestContext'
 import { ObjectId } from "mongodb";
 
 const MockAI: OpenAIApi = jest.genMockFromModule('openai');
-
+const DEFAULT_ROLES = ['USER', 'TESTER'];
 const getMockChatState = async ({ 
   macros = [], 
   ai = MockAI,
+  roles = DEFAULT_ROLES,
 }): Promise<ChatState> => {
 
   const context = await ReactoryContextProvider();
+  context.hasRole = jest.fn().mockImplementation((role: string) => {  
+    return roles.includes(role) === true;
+  });
   const userId = new ObjectId(1).toString();
   const apiUser: Reactory.Models.IApiStatus = {
     id: 'mock-api-user-id',

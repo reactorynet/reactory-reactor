@@ -17,6 +17,10 @@ const mockReviewDirectory = `# Review for hello-world folder structure
 Nice work!
 `;
 
+const mockReviewSummary = `# Review for hello-world file
+Nice work!
+`
+
 
 const mockReviewFileObject = (content: string) => ({
   choices: [
@@ -34,12 +38,17 @@ jest.mock('@reactory/server-modules/reactor/ai/openai/chat/questions/factory', (
   return {
     getAIResponse: async (ai: OpenAIApi, prompt: CreateChatCompletionRequest, state: ChatState) => {
       let response = mockReviewFileObject('');
-      if (prompt.messages[0].content.includes('Write code review for:')) {
+      const  { content } = prompt.messages[0]
+      if (content.startsWith('Write code review for:')) {
         response = mockReviewFileObject(mockReviewFileContent);
       }
 
-      if (prompt.messages[0].content.includes('Write a review on file structure for the following directory')) {
+      if (content.startsWith('Write a review on file structure for the following directory:')) {
         response = mockReviewFileObject(mockReviewDirectory);
+      }
+
+      if (content.startsWith('Summarize and format the review generated')) {
+        response = mockReviewFileObject(mockReviewSummary);
       }
 
       return response;
