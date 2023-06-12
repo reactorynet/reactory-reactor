@@ -82,5 +82,9 @@ export type ShellCommandArgs = [
   /**
    * The format of the output
    */
-  format: "string" | "object"
+  format: "string" | "object",
+  /**
+   * the shell to use
+   */
+  shell: "/bin/bash" | "/bin/zsh"
 ]

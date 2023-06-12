@@ -1,5 +1,5 @@
 import { ChatState, Macro } from "modules/reactor/types/chat.types";
-import { ChildProcess, SpawnOptions, spawn } from "child_process";
+import { ChildProcess, SpawnOptions, exec, ExecOptions, spawn } from "child_process";
 import fs, { readFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
@@ -8,6 +8,7 @@ import { ComponentDomain, FeatureType } from "@reactory/reactory-core";
 import { ShellCommandArgs, ShellCommandMacroOutput } from "modules/reactor/types/macro.types";
 import logger from "@reactory/server-core/logging";
 import { User } from "models";
+import { stderr } from "process";
 
 const DEFAULT_SHELL_TEMPLATE = `
 #!/bin/bash
@@ -144,7 +145,9 @@ export const ShellCommand: Macro<ShellCommandMacroOutput> = async (args: ShellCo
     templateId = 'default',
     timeoutInSeconds = '60',
     sudo = 'false',
-    format ='string'
+    format = 'string',
+    shell = '/bin/bash'
+
   ] = args;
 
   try {
@@ -159,9 +162,9 @@ export const ShellCommand: Macro<ShellCommandMacroOutput> = async (args: ShellCo
     throw new Error(`Working directory "${workingDir}" does not exist.`);
   }
 
-  
+
   // Create .sh file
-  const shFilePath = path.join(os.tmpdir(), `${templateId}.sh`);  
+  const shFilePath = path.join(os.tmpdir(), `${templateId}.sh`);
   let shellCommandText = null;
 
   //handle each process with each own try catch block in order 
@@ -192,96 +195,87 @@ export const ShellCommand: Macro<ShellCommandMacroOutput> = async (args: ShellCo
     return format === 'string' ? `Error setting file permissions: ${fsError.message}` : { stderr: `Error setting file permissions: ${fsError.message}`, stdout: null };
   }
 
-  const removeTmpFile = () => { 
+  const removeTmpFile = () => {
     if (fs.existsSync(shFilePath)) fs.unlinkSync(shFilePath);
   };
 
   // Execute .sh file
-  const execCommand = (command: string): Promise<ShellCommandMacroOutput> => {
+  const execCommand = async (command: string): Promise<ShellCommandMacroOutput> => {
     return new Promise((resolve, reject) => {
-      const spawnOptions: SpawnOptions = { 
+      const execOptions: ExecOptions = {
         cwd: workingDir,
+        shell
       };
-      
+
       let childProcess: ChildProcess = null;
-      let cleanExit = false;
-      let timer: NodeJS.Timeout = null;
+      let timer: NodeJS.Timeout;
       const shellOut: string[] = [];
       const shellErr: string[] = [];
 
-      try  {
-        const childProcess: ChildProcess = spawn(command, spawnOptions);
-        
-        // child.stdout.on('data', (data) => {
-        //   shellOut.push(data);
-        // })
+      const cleanExit = () => {
+        clearTimeout(timer);
+        if (childProcess) childProcess.removeAllListeners(); // removes all listeners from the child process
+        removeTmpFile();
+        const errorString = shellErr.join('\n').trim();
+        const outString = shellOut.join('\n').trim();
+        if (shellErr.length > 0) {
+          reject(format === 'string' ? 
+            `${outString}${errorString}` : 
+            { stderr: errorString, stdout: outString });
+        } else {
+          resolve(format === 'string' ? 
+          `${outString}${errorString}` : 
+          { stderr: errorString, stdout: outString });
+        }
+      }
 
-        // child.stderr.on('data', (data) => { 
-        //   shellErr.push(data);
-        // })
+      try {
+        childProcess = spawn(command, [], execOptions);
+        timer = setTimeout(() => {
+          shellErr.push(`Process timed out after ${timeoutInSeconds} seconds`)
+          if (childProcess) {
+            childProcess.kill('SIGTERM'); //exit will be handled by event.s
+          } else {
+            cleanExit();
+          }
 
-        childProcess.on('data', (data) => { 
+        }, parseInt(timeoutInSeconds, 10) * 1000);
+
+        const exitHandler = (code: number, signal: string) => {
+          if (code !== 0) shellErr.push(`error: ${code} - ${signal}`)
+          cleanExit();
+        }
+
+        childProcess.stdout.on('data', (data) => {
           shellOut.push(data);
         });
 
-        childProcess.on('error', (error) => {
-          throw new Error(`Error executing shell command: ${error.message}`)
+        childProcess.stderr.on('data', (data) => {
+          shellErr.push(data);
         });
 
-        childProcess.on('close', (code) => {
-          cleanExit = code === 0;
-          if(timer !== null) { 
-            clearTimeout(timer);
-          }
-
-          if (childProcess) childProcess.removeAllListeners(); // removes all listeners from the child process
-          removeTmpFile();
-          resolve( format === 'string' ? shellOut.join('') : { stderr: shellErr.join(''), stdout: shellOut.join('') });
-        });
-
-
-        if (timeoutInSeconds) {
-          const timeoutInMilliseconds = parseInt(timeoutInSeconds, 10) * 1000;
-          timer = setTimeout(() => {
-            if (childProcess !== null) {
-              childProcess.removeAllListeners(); // removes all listeners from the child process
-              childProcess.kill(); // kills the process if it's still running after the timeout       
-            }
-            removeTmpFile();        
-            reject( format === 'string' ? 
-              `Command execution timed out after ${timeoutInSeconds} seconds.` : 
-              { stderr: `Command execution timed out after ${timeoutInSeconds} seconds.`, stdout: null });
-          }, timeoutInMilliseconds);
-        }
+        ["close", "exit", "error", "disconnect"].forEach((evt) => childProcess.on(evt, exitHandler));
       } catch (err) {
-        logger.error(`Error executing shell command: ${err.message}`);
-        if (timer !== null) {
-          clearTimeout(timer);
-        }
-        if (childProcess !== null) childProcess.removeAllListeners(); // removes all listeners from the child process
-        removeTmpFile();
+        shellErr.push(err.message)
+        cleanExit();
       }
-    });
-  }; 
+    })
+  };
 
-
-  // check if a command is provided
   if (shellCommand && shellCommand.length > 0) {
     try {
       const result = await execCommand(`${sudo !== 'false' ? 'sudo ' : ''}${shFilePath}`);
-      removeTmpFile();
       return result;
     } catch (error) {
       logger.error(`Command execution failed: ${error.message}`);
-      removeTmpFile();
       return format === 'string' ? `Command execution failed: ${error}` : { stderr: error?.message || error, stdout: null };
     }
   } else {
-    return  format === 'string' ? 'No command provided': { stderr: 'No command provided', stdout: null };
+    return format === 'string' ? 'No command provided' : { stderr: 'No command provided', stdout: null };
   }
 };
 
-const ShellCommandComponentRegister: Reactory.IReactoryComponentDefinition<typeof ShellCommand> = { 
+const ShellCommandComponentRegister: Reactory.IReactoryComponentDefinition<typeof ShellCommand> = {
   nameSpace: 'reactor',
   name: 'ShellCommand',
   version: '1.0.0',
