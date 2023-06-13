@@ -3,8 +3,7 @@ import os from 'os';
 import { promises as fs, readFileSync, existsSync, mkdirSync } from 'fs';
 import { ChatState, Macro } from '@reactory/server-modules/reactor/types/chat.types';
 import { RemoveDirectory } from '../../fs/fs.macro';
-import { ShellCommand as exec } from '../../shell/shell.macro'
-
+import { ShellCommand } from '../../shell/shell.macro'
 import { template } from 'lodash';
 import { ShellCommandArgs } from 'modules/reactor/types/macro.types';
 import Reactory from '@reactory/reactory-core';
@@ -31,10 +30,10 @@ const checkGitIgnore = async (target: string, state: ChatState) => {
     await fs.writeFile(gitIgnorePath, '');
     // Add .gitignore to staging area
     
-    await exec(shArgs, state);
+    await ShellCommand(shArgs, state);
     // Commit the changes
     shArgs[0] = `git commit -m "Add .gitignore"`;
-    await exec(shArgs, state);
+    await ShellCommand(shArgs, state);
   }
 }
 
@@ -45,7 +44,7 @@ const checkGitIgnore = async (target: string, state: ChatState) => {
  */
 const checkBranch = async (branch: string, target: string, state: ChatState) => {
   // Check git status
-  const out = await exec([`git status`, target, 'git', '5', 'object'], state) as unknown as {stdout: string, stderr: string};
+  const out = await ShellCommand([`git status`, target, 'git', '5', 'object'], state) as unknown as {stdout: string, stderr: string};
   // Ensure branch specification and output match
   const isOnCorrectBranch =  out.stdout.includes(`On branch ${branch}`);
   if (!isOnCorrectBranch) {
@@ -86,9 +85,9 @@ const cloneRepo = async (repo: string, target: string, branch: string, overwrite
     '120',
     'false',
     'object'
-  ]
+  ];
 
-  const { stderr: cloneErr, stdout: cloneOut } = await exec(shArgs, state) as unknown as {stdout: string, stderr: string};
+  const { stderr: cloneErr, stdout: cloneOut } = await ShellCommand(shArgs, state) as unknown as {stdout: string, stderr: string};
   if (cloneErr) throw new Error(cloneErr);
   if (!cloneOut.includes('Cloning into')) throw new Error(`Could not clone the repository ${repo} to ${targetPath}`);
   // Check if target folder exists
@@ -116,10 +115,9 @@ const cloneRepo = async (repo: string, target: string, branch: string, overwrite
       'object'
     ]
 
-    await exec(shArgs, state);
+    await ShellCommand(shArgs, state);
     await checkBranch(branch, target, state);
   }
-
   // Create a .gitignore file if it does not exist
   await checkGitIgnore(targetPath, state);
 
@@ -129,7 +127,7 @@ const cloneRepo = async (repo: string, target: string, branch: string, overwrite
 
 const pullRepo = async (repo: string, target: string, branch: string, state: ChatState) => {
   // Pull the repo
-  await exec([`git pull ${repo} ${branch}`], state);
+  await ShellCommand([`git pull ${repo} ${branch}`], state);
   // Post pulling check
   // Check if target folder exists
   if (!existsSync(target)) {
@@ -146,26 +144,28 @@ const pullRepo = async (repo: string, target: string, branch: string, state: Cha
  */
 const gitStatus = async (target: string, state: ChatState) => {
   // Get the status of the current git repository
-  const { stdout: statusOut } = await exec([
+  const { stdout: statusOut, stderr: statusError } = await ShellCommand([
     `git status`, 
     target, 
     'git', 
     '60', 
     'false', 
-    'object'], state) as unknown as {stdout: string, stderr: string};
-  return statusOut;
+    'object'], state) as { stdout: string, stderr: string }
+  
+    if(statusError) throw new Error(statusError);
+    return statusOut;
 };
 
 const commitRepo = async (target: string, commitMessage: string, state: ChatState) => {
   // Add all changes to staging area
-  await exec([`git add .`,
+  await ShellCommand([`git add .`,
     target,
     'git',
     '60',
     'false',
     'object'], state);
   // Commit the changes
-  const { stdout, stderr } = await exec([`git commit -m "${commitMessage}"`,
+  const { stdout, stderr } = await ShellCommand([`git commit -m "${commitMessage}"`,
     target,
     'git',
     '60',
@@ -178,7 +178,7 @@ const commitRepo = async (target: string, commitMessage: string, state: ChatStat
 
 const pushRepo = async (repo: string, target: string, branch: string, state: ChatState) => {
   // Push the commit to the repo
-  await exec([`git push ${repo} ${branch}`, target, 'git', '60', 'false', 'object'], state);
+  await ShellCommand([`git push ${repo} ${branch}`, target, 'git', '60', 'false', 'object'], state);
 };
 
 /**
@@ -195,8 +195,8 @@ export const GitMacro: Macro<string> = async (
 
   let [repo, target, branch = 'master', overwrite = 'false'] = options;
 
-  if (!repo) return 'A request to clone a repository requires a valid repository url';
-  if (!target) return 'A request to clone a repository requires a valid target path';
+  if (!repo && operation === 'clone') return 'A request to clone a repository requires a valid repository url';
+  if (!target) return 'A git request requires a target folder';
 
   if (repo.indexOf('${') > -1) repo = template(repo)({ os, pathModule, process, state });
   if (target.indexOf('${') > -1) target = template(target)({ os, pathModule, process, state });

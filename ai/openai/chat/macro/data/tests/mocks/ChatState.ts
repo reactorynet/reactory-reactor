@@ -49,6 +49,7 @@ const getMockChatState = async ({
     context: context,
     authToken: 'mock-auth-token',
     user: apiUser,
+    vars: {},
   };
 
   return MockChatState;

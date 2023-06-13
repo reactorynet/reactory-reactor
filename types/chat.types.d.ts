@@ -89,6 +89,12 @@ export type ChatState = {
    * The readline interface for the chat session.
    */
   rl?: ReadLineInterface
+  /**
+   * Variables that are available for the chat session.
+   * */
+  vars: {
+    [key: string]: unknown
+  }
 }
 
 export interface QuestionHandlerResponse {

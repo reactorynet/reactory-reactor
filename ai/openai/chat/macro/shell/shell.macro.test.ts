@@ -6,12 +6,10 @@ import TestChatState from '../data/tests/mocks/ChatState';
 describe('ShellCommand Macro', () => {
 
   // Setup
-  let mockExec: jest.Mock;
   let chatState: ChatState = null;
   
 
   beforeEach(async () => {
-    mockExec = jest.fn();
     // (exec as unknown as jest.Mock) = mockExec;
     chatState = await TestChatState({
       macros: [],

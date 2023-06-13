@@ -44,6 +44,9 @@ const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryCo
       organization: apiOrg,
       apiKey: apiKey,
     })),
+    vars: {
+      __created: new Date().valueOf(),
+    }
   }
 
   modelState.history.push(getInitializerMessage(modelState));

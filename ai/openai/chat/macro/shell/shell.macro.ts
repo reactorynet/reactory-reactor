@@ -105,6 +105,8 @@ const getShellCommandText = async (templateId: string, command: string, state: C
         environmentVars: commandWithEnvVars,
         context: context,
         state: state,
+        vars: state.vars,
+        process: process,
       });
     }
   }
@@ -116,6 +118,8 @@ const getShellCommandText = async (templateId: string, command: string, state: C
       environmentVars: commandWithEnvVars,
       context: context,
       state: state,
+      vars: state.vars,
+      process: process,
     });
   }
 
@@ -124,6 +128,10 @@ const getShellCommandText = async (templateId: string, command: string, state: C
       error: `No template found on file or in database: ${templateId}`,
       command,
       environmentVars: commandWithEnvVars,
+      context: context,
+      state: state,
+      vars: state.vars,
+      process: process,
     });
   }
 
@@ -154,7 +162,9 @@ export const ShellCommand: Macro<ShellCommandMacroOutput> = async (args: ShellCo
     // Check if command is potentially dangerous
     secureShell(shellCommand, state);
   } catch (securityError) {
-    return `Security Check Failed: ${securityError.message}`
+    return format === 'string' ?  
+      `Security Check Failed: ${securityError.message}` :
+      { stderr: `Security Check Failed: ${securityError.message}`, stdout: null };
   }
 
   // Validate working directory
@@ -162,8 +172,6 @@ export const ShellCommand: Macro<ShellCommandMacroOutput> = async (args: ShellCo
     throw new Error(`Working directory "${workingDir}" does not exist.`);
   }
 
-
-  // Create .sh file
   const shFilePath = path.join(os.tmpdir(), `${templateId}.sh`);
   let shellCommandText = null;
 
@@ -247,11 +255,21 @@ export const ShellCommand: Macro<ShellCommandMacroOutput> = async (args: ShellCo
         }
 
         childProcess.stdout.on('data', (data) => {
-          shellOut.push(data);
+          shellOut.push(typeof data?.toString === 'function' ? data.toString() : data );
         });
 
         childProcess.stderr.on('data', (data) => {
-          shellErr.push(data);
+          //we use a basic regex to check if the data is a error message
+          //message. If it is we will push it to the shellErr array 
+          //otherwise we will push it to the shellOut array
+          //unix systems use stderr to output messages that are not strictly errors
+          const regex = /failed|failure|error|crash/i;
+          const stringData = typeof data?.toString === 'function' ? data.toString() : data;
+          if (regex.test(stringData)) { 
+            shellErr.push(stringData);
+            return;
+          } 
+          shellOut.push(stringData);
         });
 
         ["close", "exit", "error", "disconnect"].forEach((evt) => childProcess.on(evt, exitHandler));
