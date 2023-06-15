@@ -1,5 +1,5 @@
 //current set of supported operations
-export type GitMacroOperation = string & ('status' | 'commit' | 'push' | 'pull' | 'clone');
+export type GitMacroOperation = string & ('status' | 'commit' | 'push' | 'pull' | 'clone' | 'checkout');
 /**
  * The target folder where the git repository will be cloned to, or where the git operation will be performed
  */

@@ -38,6 +38,28 @@ const checkGitIgnore = async (target: string, state: ChatState) => {
 }
 
 /**
+ * Checks out a git branch if it exists
+ * @param branch - the branch to checkout
+ * @param target - the target folder
+ * @param state - the current chat state
+ * @returns 
+ */
+const checkoutBranch = async (branch: string, target: string, state: ChatState) => { 
+  // Checkout the branch
+  const shArgs: ShellCommandArgs = [ 
+    `git checkout ${branch}`,
+    target,
+    'git',
+    '5',
+    'false',
+    'string'
+  ];
+
+  await ShellCommand(shArgs, state);
+  return checkBranch(branch, target, state);
+}
+
+/**
  * Checks a git branch
  * @param branch 
  * @param target 
@@ -88,8 +110,11 @@ const cloneRepo = async (repo: string, target: string, branch: string, overwrite
   ];
 
   const { stderr: cloneErr, stdout: cloneOut } = await ShellCommand(shArgs, state) as unknown as {stdout: string, stderr: string};
-  if (cloneErr) throw new Error(cloneErr);
-  if (!cloneOut.includes('Cloning into')) throw new Error(`Could not clone the repository ${repo} to ${targetPath}`);
+  if (cloneErr) { 
+    throw new Error(cloneErr);
+  }
+
+  if (cloneOut && !cloneOut?.includes('Cloning into')) throw new Error(`Could not clone the repository ${repo} to ${targetPath}`);
   // Check if target folder exists
   if (!existsSync(targetPath)) {
     throw new Error(`Target folder ${targetPath} does not exist after cloning.`);
@@ -239,6 +264,13 @@ export const GitMacro: Macro<string> = async (
       } catch (err) {
         return `Could not retrieve git status due to an error ${err.message}`;
       }
+    case 'checkout': {
+      try {
+        return await checkoutBranch(branch, target, state);
+      } catch (err) {
+        return `Could not check out branch ${branch} due to an error ${err.message}`;
+      }
+    }
     default:
       return `Operation: ${operation} not supported. Available operations are: clone, pull, push, commit, status`;
   }
@@ -258,7 +290,7 @@ const GitMacroComponentDefinition: Reactory.IReactoryComponentDefinition<typeof 
     stem: 'clone'
   }],
   roles: ['DEVELOPER', 'ADMIN'],
-  tags: ['git', 'repository', 'clone', 'pull', 'push', 'commit', 'status'],
+  tags: ['git', 'repository', 'clone', 'pull', 'push', 'commit', 'status', 'checkout'],
 };
 
 export default GitMacroComponentDefinition;

@@ -90,6 +90,22 @@ describe('Git Macro Test', () => {
     chatState.vars.sshKey = `${process.env.HOME}/.ssh/id_reactor_ed25519`;
     const result = await GitMacro(args, chatState);
     expect(result).toContain('On branch');
-
+    //@ts-ignore
   }, 5000);
+
+  it('should clones the reactory core repo to a project folder using ssh', async () => {
+    const target = `${process.env.APP_DATA_ROOT}/projects/reactory-core`;
+    const args: GitMacroArgs = [
+      'clone',
+      'git@github.com:reactorynet/reactory-core.git',
+      target,
+      'master',
+      'true',
+    ];
+    //add the ssh key to the chat state
+    chatState.vars.sshKey = `${process.env.HOME}/.ssh/id_reactor_ed25519`;
+    const result = await GitMacro(args, chatState);
+    expect(result).toContain('On branch');
+    //@ts-ignore
+  },1200000)
 });
