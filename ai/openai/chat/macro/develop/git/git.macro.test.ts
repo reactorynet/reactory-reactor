@@ -4,7 +4,7 @@ import {
   CodeReview,
   CodeReviewFile,
 } from '../review';
-import { FileMacros } from '../../fs/fs.macro';
+import { FileMacros, RemoveDirectory } from '../../fs/fs.macro';
 import TestChatState from '../../data/tests/mocks/ChatState';
 import { ChatState } from '@reactory/server-modules/reactor/types/chat.types';
 import { CreateChatCompletionRequest, OpenAIApi } from 'openai';
@@ -87,13 +87,12 @@ describe('Git Macro Test', () => {
       target,
     ];
     //add the ssh key to the chat state
-    chatState.vars.sshKey = `${process.env.HOME}/.ssh/id_reactor_ed25519`;
     const result = await GitMacro(args, chatState);
     expect(result).toContain('On branch');
     //@ts-ignore
   }, 5000);
 
-  it('should clones the reactory core repo to a project folder using ssh', async () => {
+  it('should clone the reactory core repo to a project folder using ssh', async () => {
     const target = `${process.env.APP_DATA_ROOT}/projects/reactory-core`;
     const args: GitMacroArgs = [
       'clone',
@@ -102,10 +101,9 @@ describe('Git Macro Test', () => {
       'master',
       'true',
     ];
-    //add the ssh key to the chat state
-    chatState.vars.sshKey = `${process.env.HOME}/.ssh/id_reactor_ed25519`;
     const result = await GitMacro(args, chatState);
-    expect(result).toContain('On branch');
+    expect(result).toContain('Successfully cloned the repository');
     //@ts-ignore
+    await RemoveDirectory([target], chatState);
   },1200000)
 });

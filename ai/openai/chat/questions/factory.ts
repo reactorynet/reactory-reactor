@@ -17,6 +17,18 @@ export const SYSTEM_INITIALIZER_MESSAGE: ChatCompletionResponseMessage = {
   content: fs.readFileSync(require.resolve('../macro/macros.md'), 'utf-8').toString(),
 };
 
+export const extractResponse = (response: any, question: string) => {
+  if (response && response?.choices) {
+    return response.choices[0].message;
+  } else {
+    if (response && response.content) {
+      return response.content;
+    } else {
+      return `AI system failed to respond to the following prompt: ${question}`;
+    }
+  }
+}
+
 
 const persistChatState = async (state: ChatState): Promise<void> => {
   const { history, botId, modelId, started, context, id } = state;

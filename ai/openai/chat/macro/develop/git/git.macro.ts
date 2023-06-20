@@ -66,13 +66,16 @@ const checkoutBranch = async (branch: string, target: string, state: ChatState) 
  */
 const checkBranch = async (branch: string, target: string, state: ChatState) => {
   // Check git status
-  const out = await ShellCommand([`git status`, target, 'git', '5', 'object'], state) as unknown as {stdout: string, stderr: string};
+  const { stderr, stdout } = await ShellCommand([`git status`, target, 'git', '5', 'false', 'object'], state) as unknown as {stdout: string, stderr: string};
   // Ensure branch specification and output match
-  const isOnCorrectBranch =  out.stdout.includes(`On branch ${branch}`);
+  if(stderr) {
+    throw new Error(stderr);
+  }
+
+  const isOnCorrectBranch = stdout?.includes(`On branch ${branch}`) || false;
   if (!isOnCorrectBranch) {
     throw new Error(`Current branch does not match the specified branch ${branch}.`);
   }
-
   return `${branch} is the current branch`;
 };
 
@@ -85,7 +88,7 @@ const checkBranch = async (branch: string, target: string, state: ChatState) => 
 const cloneRepo = async (repo: string, target: string, branch: string, overwrite: boolean = false, state: ChatState): Promise<string> => {
   //check if the target folder contains the repo name already
   const repoName = repo.split('/').pop().replace('.git', '');
-  let $target = target;
+  let $target = target; //$target is the target folder
   if ($target.endsWith(repoName)) {
     $target = $target.replace(repoName, '');
   }
@@ -102,7 +105,7 @@ const cloneRepo = async (repo: string, target: string, branch: string, overwrite
   // Clone the repo
   let shArgs: ShellCommandArgs = [
     `git clone ${repo} ${targetPath} --branch ${branch}`,
-    process.cwd(),
+    targetPath,
     'git',
     '120',
     'false',
@@ -125,28 +128,8 @@ const cloneRepo = async (repo: string, target: string, branch: string, overwrite
   if (!existsSync(gitPath)) {
     throw new Error(`.git folder does not exist after cloning.`);
   }
-
-  try {
-    // Check branch
-    await checkBranch(branch, target, state);
-  } catch (err) {
-    // If the branch does not exist, checkout the branch
-    const shArgs: ShellCommandArgs = [
-      `git checkout ${branch}`,
-      process.cwd(),
-      'git',
-      '120',
-      'false',
-      'object'
-    ]
-
-    await ShellCommand(shArgs, state);
-    await checkBranch(branch, target, state);
-  }
-  // Create a .gitignore file if it does not exist
-  await checkGitIgnore(targetPath, state);
-
-  return `Successfully cloned the repository ${repo} to ${target} and checked out branch ${branch}`
+  
+  return `Successfully cloned the repository ${repo} to ${targetPath} and checked out branch ${branch}`
 };
 
 

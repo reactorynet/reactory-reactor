@@ -245,6 +245,7 @@ const DEFAULT_DIRECTORY_JSON_FORMATTER: DirectoryListFormatter = (pathInfos: Pat
       name: pathInfo.name,
       extension: pathInfo?.extension,
       size: pathInfo?.size,
+      path: pathInfo?.absolutePath
     }
   }));
 }

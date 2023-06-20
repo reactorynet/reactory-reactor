@@ -1,11 +1,28 @@
 import pathModule from 'path';
 import os from 'os';
-import { promises as fs, readFileSync, existsSync, mkdirSync } from 'fs';
+import { promises as fs, readFileSync, existsSync, statSync } from 'fs';
 import git from '../git';
 import { ChatState, Macro } from '@reactory/server-modules/reactor/types/chat.types';
 import { FileMacros, RemoveDirectory } from '../../fs/fs.macro';
-import { getAIResponse, createPrompt } from '@reactory/server-modules/reactor/ai/openai/chat/questions/factory';
+import { getAIResponse, createPrompt, extractResponse } from '@reactory/server-modules/reactor/ai/openai/chat/questions/factory';
 import { template } from 'lodash';
+import { CodeReviewArgs } from './review.macro.d';
+
+/**
+ * Checks if a path is directory
+ * @param path 
+ * @returns 
+ */
+export const isDirectory = (path) => {
+  try {
+    const stat = statSync(path);
+    return stat.isDirectory();
+  } catch (error) {
+    // Handle error if the path does not exist or there was an issue accessing it
+    console.error(`Error checking if ${path} is a directory: ${error}`);
+    return false;
+  }
+};
 
 /**
  * Macro that performs a review on a file using a set of specifications
@@ -29,10 +46,13 @@ export const CodeReviewFile: Macro<string> = async (
     ai,
     macros,
     modelId,
-    history
+    history,
+    rl
   } = state;
 
   let $path = path;
+
+  rl.write(`Reviewing ${$path} - please wait...\n`);
 
   if ($path.indexOf('${') > -1) $path = template($path)({ os, pathModule, process, state });
 
@@ -61,8 +81,7 @@ export const CodeReviewFile: Macro<string> = async (
   const result = await getAIResponse(ai, prompt, state);  
   const updatedResponse = JSON.parse(JSON.stringify(result));
   // Access message object
-  const message = updatedResponse.choices[0].message;
-  const review = message.content;
+  let review = extractResponse(updatedResponse, prompt.messages[0].content);
 
   if(target === 'inline') {
     return SUCCESS_MESSAGE(review);
@@ -96,7 +115,7 @@ export const CodeReviewFileComponentRegister: Reactory.IReactoryComponentDefinit
  * @param state 
  */
 export const CodeReview: Macro<string> = async (
-  args: string[],
+  args: CodeReviewArgs,
   state: ChatState) => {
 
   const [
@@ -104,7 +123,8 @@ export const CodeReview: Macro<string> = async (
     specs,
     target = 'inline',
     targetPath,
-    throttle = '500'
+    throttle = '500',
+    verbose = 'false'
   ] = args;
   const {
     ai,
@@ -120,8 +140,8 @@ export const CodeReview: Macro<string> = async (
   if(!$path) return 'A request for a a code review requires a valid path to a folder';
   if(!existsSync($path)) return `The path ${$path} does not exist`;
 
-  let specificationContent = readFileSync(require.resolve('./review.specifications.default.md'));
-  if (specs && existsSync(specs)) specificationContent = readFileSync(specs);
+  let specificationContent: string = readFileSync(require.resolve('./review.specifications.default.md')).toString();
+  if (specs && existsSync(specs)) specificationContent = readFileSync(specs).toString();
 
   let fileIn: Macro<string> = null;
   let dirIn: Macro<string> = null;
@@ -143,7 +163,7 @@ export const CodeReview: Macro<string> = async (
   });
 
   // we get the directory contents using the dirIn macro
-  const dirContents: { name: string, extension?: string, size?: number}[] = JSON.parse(
+  const dirContents: { name: string, extension?: string, size?: number, path: string}[] = JSON.parse(
     await dirIn([$path, 'true', '*', 'json', 'false'], state)
   );
 
@@ -165,11 +185,11 @@ export const CodeReview: Macro<string> = async (
   const updatedResponse = JSON.parse(JSON.stringify(fileReviewResult));
 
   // Access message object
-  const message = updatedResponse.choices[0].message;
+  let message = extractResponse(updatedResponse, question);
 
   const reviewFile = pathModule.join(__dirname, 'samples/review.md');
   //start the review
-  await fileOut([reviewFile, message.content, 'overwrite'], state);
+  await fileOut([reviewFile, message, 'overwrite'], state);
 
   // we iterate over the directory contents and perform a code review on each file
   let lastReviewTS = Date.now();
@@ -177,12 +197,11 @@ export const CodeReview: Macro<string> = async (
   const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
   for (const file of dirContents) {
-    const doReview = async () => {
-      if (file.size > 0) {
+    const doReview = async () => {      
+      if (file.size > 0 && isDirectory(file.path) === false) {
         if (file.size < 100000) {
           const filePath = pathModule.join($path, file.name);
           const fileResult = await CodeReviewFile([filePath, specs], state);
-
           await fileOut([reviewFile, fileResult, 'append'], state);
         } else {
           await fileOut([reviewFile, `File ${file.name} is too large to review - Skipping review\n`, 'false'], state);
@@ -217,7 +236,7 @@ export const CodeReview: Macro<string> = async (
   const finalResponse = JSON.parse(JSON.stringify(result));
 
   // Access message object
-  const finalMessage = finalResponse.choices[0].message;
+  const finalMessage = extractResponse(finalResponse, finalPrompt.messages[0].content);
   // we return the final message & overwite the review file with the updated review
   await fileOut([reviewFile, finalMessage.content], state);
 

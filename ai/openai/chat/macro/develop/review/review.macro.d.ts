@@ -1,4 +1,10 @@
-
+export type DirectoryElement = { 
+  name: string, 
+  extension?: string, 
+  size?: number, 
+  path?: string 
+};
+  
 /**
  * Path to the file or directory to review
  */

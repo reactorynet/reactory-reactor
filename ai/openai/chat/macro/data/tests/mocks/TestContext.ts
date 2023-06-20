@@ -2,10 +2,13 @@ import Reactory from "@reactory/reactory-core";
 import ReactoryContextProvider from "@reactory/server-core/context/ReactoryContextProvider";
 import { ObjectId } from "mongodb";
 
+export const DEFAULT_ROLES = ['USER', 'TESTER'];
+export const EXEC_ROLES = ['USER', 'SHELL-EXEC'];
+
 /**
  * Creates a mock Reactory context for testing. 
  */
-export default async (): Promise<Reactory.Server.IReactoryContext> => {
+export default async (roles: string[] = DEFAULT_ROLES): Promise<Reactory.Server.IReactoryContext> => {
 
   const userId: ObjectId = new ObjectId(1);
   const partnerId: ObjectId = new ObjectId(2);

@@ -3,11 +3,14 @@ import {
   CodeReview,
   CodeReviewFile,
 } from './review.macro';
-import { FileMacros } from '../../fs/fs.macro';
+import { FileMacros, RemoveDirectory } from '../../fs/fs.macro';
 import git from '../git';
 import TestChatState from '../../data/tests/mocks/ChatState';
 import { ChatState } from '@reactory/server-modules/reactor/types/chat.types';
 import { CreateChatCompletionRequest, OpenAIApi } from 'openai';
+import logger from '@reactory/server-core/logging';
+import { GitMacroArgs } from '../git/git.macro.types';
+import { existsSync } from 'fs-extra';
 
 const mockReviewFileContent = `# Review for hello-world file
 Nice work!
@@ -76,6 +79,7 @@ describe('CodeReview macros', () => {
   beforeEach(async () => {
     jest.resetAllMocks();
     chatState = await TestChatState({
+      roles: ['USER', 'TESTER', 'ADMIN', 'SHELL-EXEC'],
       macros: [
         ...FileMacros,
         CodeReview,
@@ -93,6 +97,7 @@ describe('CodeReview macros', () => {
       'inline'
     ];
     const result = await CodeReviewFile(args, chatState);
+    logger.info(result);
     expect(result).toBeTruthy();
   });
 
@@ -109,28 +114,35 @@ describe('CodeReview macros', () => {
     //@ts-ignore
   }, 30000);
 
-  // // Test 3: successfully checks out a branch from a git repository
-  // it('should successfully check out a branch from a git repository', async () => {
-  //   const repo = 'git@github.com:keegz1998/eng-test.git';
-  //   const target = '${process.env.APP_DATA_ROOT}/projects/eng-test';
-  //   const branch = 'master';
-  //   const args = [
-  //     'clone',
-  //     repo,
-  //     target,
-  //     branch,
-  //     'true'
-  //   ];
-  //   const result = await git(args, chatState);
-  //   expect(result).toEqual(`Successfully cloned the repository ${repo} to ${target} and checked out branch ${branch}`);
-  //   const reviewArgs = [
-  //     `${process.env.APP_DATA_ROOT}/projects/eng-test`,
-  //     `${__dirname}/samples/hello-world.spec.md`,
-  //     'inline'
-  //   ];
-  //   const codeReview = await CodeReview(reviewArgs, chatState);
-  //   expect(result).toBeTruthy();
-  //   //@ts-ignore
+  // Test 3: successfully checks out a branch from a git repository
+  it('should successfully check out a branch from a git repository and perform a review', async () => {    
 
-  // }, 30000)
+    const target = `${process.env.APP_DATA_ROOT}/projects/reactory-core`;
+    if (existsSync(target)) { 
+      await RemoveDirectory([target], chatState);
+    }
+
+    const args: GitMacroArgs = [
+      'clone',
+      'git@github.com:reactorynet/reactory-core.git',
+      target,
+      'master',
+      'true',
+    ];
+    const result = await git(args, chatState);
+    expect(result).toContain(`Successfully cloned the repository`);    
+    //@ts-ignore
+  }, 180000);
+
+  it('successfull performs a code review on a git repository', async () => { 
+    const target = `${process.env.APP_DATA_ROOT}/projects/reactory-core`;
+    const reviewArgs = [
+      target,
+      `${__dirname}/samples/hello-world.spec.md`,
+      'inline'
+    ];
+    const codeReview = await CodeReview(reviewArgs, chatState);
+    expect(codeReview).toBeTruthy();
+    //@ts-ignore
+  }, 180000);
 });

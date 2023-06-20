@@ -2,6 +2,7 @@ import { ShellCommand } from './shell.macro';
 
 import { ChatState } from "modules/reactor/types/chat.types";
 import TestChatState from '../data/tests/mocks/ChatState';
+import { ShellCommandArgs } from 'modules/reactor/types/macro.types';
 
 describe('ShellCommand Macro', () => {
 
@@ -19,10 +20,8 @@ describe('ShellCommand Macro', () => {
 
   it('should execute the provided shell command', async () => {
     const shellCommand = 'echo \"Hello, World!\"';
-    const expectedOutput = 'Hello, World!';
-    
+    const expectedOutput = 'Hello, World!';    
     const output = await ShellCommand([shellCommand], chatState);
-
     expect(output).toBe(expectedOutput);
   });
 
@@ -37,4 +36,12 @@ describe('ShellCommand Macro', () => {
     const output = await ShellCommand([], chatState);
     expect(output).toBe('No command provided');
   });
+
+  it('should execute the command in the target directory', async () => {
+    const shellCommand = 'pwd';
+    const args: ShellCommandArgs = [shellCommand, process.env.REACTORY_HOME], ;
+    const expectedOutput = process.env.REACTORY_HOME;
+    const output = await ShellCommand(args, chatState);
+    expect(output).toBe(expectedOutput);
+  });  
 });

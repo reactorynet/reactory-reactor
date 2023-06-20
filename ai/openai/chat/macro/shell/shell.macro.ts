@@ -48,7 +48,7 @@ export const secureShell = (command: string, state: ChatState): void => {
   const { context } = state;
 
   // Check if user is authenticated and has the necessary role
-  if (!context || !context.hasRole('SHELL-EXEC') && !context.hasRole('ADMIN')) {
+  if (!context || !context.hasRole('SHELL-EXEC')) {
     throw new Error('Unauthorized: User does not have the necessary role to execute shell commands.');
   }
 
