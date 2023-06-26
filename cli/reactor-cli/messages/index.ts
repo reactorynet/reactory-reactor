@@ -1,4 +1,4 @@
-import { CanedMessages } from "@reactory/server-modules/reactor/types/chat.types";
+import { CanedMessages } from "modules/reactor/ai/openai/types/chat";
 import { readFileSync } from "fs";
 
 const ReactorCliAppCannedResponses: CanedMessages  = {

@@ -1,8 +1,8 @@
-import { GitMacro } from './git.macro';
+import { GitMacro } from './macro';
 
 export { 
   default as GitMacroRegistry,
   GitMacro as GitMacro,
-} from './git.macro';
+} from './macro';
 
 export default GitMacro;

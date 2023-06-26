@@ -1,10 +1,10 @@
-import { CodeReview } from './review.macro';
+import { CodeReview } from './macro';
 export {
   CodeReview,
   CodeReviewFileComponentRegister,
   CodeReviewFile,
   CodeReviewComponentRegister,
   DevelopmentMacros,
-} from './review.macro';
+} from './macro';
 
 export default CodeReview;

@@ -1,4 +1,4 @@
-import { ChatState, Macro, MacroFunctions } from '@reactory/server-core/modules/reactor/types/chat.types';
+import { ChatState, Macro, MacroFunctions } from 'modules/reactor/ai/openai/types/chat';
 import  { 
   ReadFile, 
   WriteFile,
@@ -6,11 +6,11 @@ import  {
   ListDirectory,
   InsertSnippet,
   FileMacros,
-} from './fs/fs.macro';
-import { FetchMacro } from './web/http.macro';
-import { QueryGQL, MutationGQL } from './graphql/graphql.macro';
-import { ServiceRegister } from './workflow/workflow.macro';
-import { CreateUser, GetUser } from './user/user.macro';
+} from './fs/macro';
+import { FetchMacro } from './web/macro';
+import { QueryGQL, MutationGQL } from './graphql/macro';
+import { ServiceRegister } from './workflow/macro';
+import { CreateUser, GetUser } from './user/macro';
 import DevelopmentMacros from './develop';
 import { 
   review,
@@ -110,8 +110,6 @@ export async function handleChatCompletionResponse(
 
   // Clone the response to avoid mutating the original object
   const updatedResponse = JSON.parse(JSON.stringify(response));
-
-  // Access message object
   const message = updatedResponse.choices[0].message;
 
   let match;

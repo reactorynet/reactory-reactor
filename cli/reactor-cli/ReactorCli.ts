@@ -4,7 +4,7 @@ import {
   SYSTEM_INITIALIZER_MESSAGE 
 } from '@reactory/server-modules/reactor/ai/openai/chat/questions/factory';
 import { ask, colors } from '@reactory/server-modules/reactor/helpers';
-import { ChatState } from "@reactory/server-modules/reactor/types/chat.types";
+import { ChatState } from "modules/reactor/ai/openai/types/chat";
 import readline from 'readline';
 import { template } from 'lodash';
 import { MacroRegistry } from "@reactory/server-modules/reactor/ai/openai/chat/macro";

@@ -1,7 +1,13 @@
 import * as fs from 'fs';
 import { ReadLine } from "readline";
-import { ChatCompletionRequestMessage, ChatCompletionResponseMessage, Configuration, CreateChatCompletionRequest, OpenAIApi } from "openai";
-import { ChatState, IQuestion, IQuestionCollection, QuestionHandlerResponse } from "../../../../types/chat.types";
+import { 
+  ChatCompletionRequestMessage,
+  ChatCompletionResponseMessage, 
+  Configuration, 
+  CreateChatCompletionRequest, 
+  OpenAIApi 
+} from "openai";
+import { ChatState, IQuestion } from "../../types/chat";
 import {
   handleUserResponse,
   handleChatCompletionResponse,
@@ -9,13 +15,29 @@ import {
   getMacro,
 } from '../macro';
 import ReactorConversationModel from '@reactory/server-modules/reactor/models/ReactorChatState';
-import { template } from 'lodash';
-import { ObjectId } from 'mongodb';
 
 export const SYSTEM_INITIALIZER_MESSAGE: ChatCompletionResponseMessage = {
   role: 'user',
   content: fs.readFileSync(require.resolve('../macro/macros.md'), 'utf-8').toString(),
 };
+
+
+export const INITIAL_CHAT_STATE: ChatState = {
+  modelId: process.env.OPENAI_MODEL_ID || '',
+  started: new Date(),
+  history: [
+    SYSTEM_INITIALIZER_MESSAGE
+  ],
+  apiKey: process.env.OPENAI_API_KEY || '',
+  apiOrg: process.env.OPENAI_ORG || '',
+  ai: new OpenAIApi(new Configuration({
+    apiKey: process.env.OPENAI_API_KEY,
+    organization: process.env.OPENAI_ORG,
+  })),
+  botId: 'Reactor',
+  macros: MacroRegistry,
+  vars: {},
+}
 
 export const extractResponse = (response: any, question: string) => {
   if (response && response?.choices) {
@@ -30,7 +52,7 @@ export const extractResponse = (response: any, question: string) => {
 }
 
 
-const persistChatState = async (state: ChatState): Promise<void> => {
+export const persistChatState = async (state: ChatState): Promise<void> => {
   const { history, botId, modelId, started, context, id } = state;
   const { user } = context;
   const meta = {
@@ -58,21 +80,6 @@ const persistChatState = async (state: ChatState): Promise<void> => {
   }
 }
 
-const INITIAL_CHAT_STATE: ChatState = {
-  modelId: process.env.OPENAI_MODEL_ID || '',
-  started: new Date(),
-  history: [
-    SYSTEM_INITIALIZER_MESSAGE
-  ],
-  apiKey: process.env.OPENAI_API_KEY || '',
-  apiOrg: process.env.OPENAI_ORG || '',
-  ai: new OpenAIApi(new Configuration({
-    apiKey: process.env.OPENAI_API_KEY,
-    organization: process.env.OPENAI_ORG,
-  })),
-  botId: 'Reactor',
-  macros: MacroRegistry,
-}
 
 export function createPrompt(modelId: string, message: string, history: any[], role?: string): CreateChatCompletionRequest {
   let messages = [
@@ -89,7 +96,6 @@ export function createPrompt(modelId: string, message: string, history: any[], r
   };
 }
 
-// Move this to a separate function
 export async function getAIResponse(ai: OpenAIApi, prompt: CreateChatCompletionRequest, state: ChatState): Promise<ChatCompletionResponseMessage> {
   try {
     const aiResponse = await ai.createChatCompletion(prompt);
@@ -107,8 +113,8 @@ export async function getAIResponse(ai: OpenAIApi, prompt: CreateChatCompletionR
 }
 
 // Prune the history to respect OpenAI API limits
-function pruneHistory(history: any[]): any[] {
-  const MAX_TOKENS = 4096;  // You may need to adjust this according to OpenAI's limits
+const pruneHistory = (history: ChatCompletionResponseMessage[]): ChatCompletionResponseMessage[] => {
+  const MAX_TOKENS = 4096;
   let totalTokens = 0;
 
   // Reverse history so that we start counting from the most recent messages
@@ -139,6 +145,7 @@ const handleCommandAction = async (response: string, state: ChatState): Promise<
   }
 }
 
+
 export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE): IQuestion => {
   const {
     modelId,
@@ -151,9 +158,6 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
 
   let question = state.history.length === 1 ?
     `Hi ${user?.firstName ? user.firstName : 'Anon'}, how can we build better applications today with reactory?` : 'What else can I help you with?';
-
-  // Prune history before passing to createPrompt
-  // let history = pruneHistory(state.history);
 
   let prompt = createPrompt(modelId, question, state.history);
 

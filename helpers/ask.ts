@@ -1,5 +1,5 @@
 import { colors, stripColorCodes } from './index';
-import { IQuestion, ChatState } from '@reactory/server-modules/reactor/types/chat.types';
+import { IQuestion, ChatState } from 'modules/reactor/ai/openai/types/chat';
 import { ReadLine } from 'readline';
 
 

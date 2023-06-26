@@ -1,0 +1,253 @@
+import pathModule from 'path';
+import os from 'os';
+import { promises as fs, readFileSync, existsSync, statSync } from 'fs';
+import git from '../git';
+import { ChatState, Macro } from 'modules/reactor/ai/openai/types/chat';
+import { 
+  FileMacros, 
+  RemoveDirectory, 
+  ReadFile as fileIn,
+  ListDirectory as dirIn, 
+  WriteFile as fileOut } from '../../fs/macro';
+import { getAIResponse, createPrompt, extractResponse } from '@reactory/server-modules/reactor/ai/openai/chat/questions/factory';
+import { template } from 'lodash';
+import { CodeReviewArgs } from './types';
+import { strongRandom } from 'utils';
+
+/**
+ * Checks if a path is directory
+ * @param path 
+ * @returns 
+ */
+export const isDirectory = (path) => {
+  try {
+    const stat = statSync(path);
+    return stat.isDirectory();
+  } catch (error) {
+    // Handle error if the path does not exist or there was an issue accessing it
+    console.error(`Error checking if ${path} is a directory: ${error}`);
+    return false;
+  }
+};
+
+/**
+ * Macro that performs a review on a file using a set of specifications
+ * @param args 
+ * @param state 
+ * @returns 
+ */
+export const CodeReviewFile: Macro<string> = async (
+  args: string[],
+  state: ChatState) => {
+  
+  const [
+    path, 
+    specs, 
+    //options are inline or file
+    target = 'inline',
+    targetPath
+  ] = args;
+
+  const {
+    ai,
+    macros,
+    modelId,
+    history,
+    rl
+  } = state;
+
+  let $path = path;
+
+  rl.write(`Reviewing ${$path} - please wait...\n`);
+
+  if ($path.indexOf('${') > -1) $path = template($path)({ os, pathModule, process, state });
+
+  const SUCCESS_MESSAGE = (review: string) => `Code review completed for ${$path}:\n${review}`;
+  const FAILURE_MESSAGE = (error: string) => `Code review failed for ${$path}:\n${error}`;
+  
+  if(!$path) return FAILURE_MESSAGE('A request for a a code review requires a valid path to a folder');
+  if(!existsSync($path)) return FAILURE_MESSAGE(`The path "${$path}" does not exist`);
+  
+  let specificationContent: string = ""
+
+  if(specs && existsSync(specs)) specificationContent = readFileSync(specs).toString();
+  
+  const fileIn = FileMacros.find(macro => macro.name === 'ReadFile');
+
+  if(!fileIn) return FAILURE_MESSAGE('No file input macro found');
+
+  const fileContents = await fileIn.component([path], state);
+  const prompt = createPrompt(
+    modelId,
+    `Write code review for: \n${fileContents}\n using the specifications :\n ${specificationContent}`,
+    history,
+    'system'
+  );
+
+  const result = await getAIResponse(ai, prompt, state);  
+  const updatedResponse = JSON.parse(JSON.stringify(result));
+  // Access message object
+  let review = extractResponse(updatedResponse, prompt.messages[0].content);
+  
+  if(target === 'inline') {
+    return SUCCESS_MESSAGE(review);
+  }
+
+  if(target === 'file') {
+    const fileOut = macros.find(macro => macro.name === 'WriteFile');
+    if(!fileOut) return FAILURE_MESSAGE('No file output macro found');
+    await fileOut.component([targetPath, review, 'overwrite'], state);
+    return SUCCESS_MESSAGE(review);
+  }
+}
+
+/**
+ * Registry entry for the CodeReview macro
+ */
+export const CodeReviewFileComponentRegister: Reactory.IReactoryComponentDefinition<typeof CodeReviewFile> = {
+  nameSpace: 'reactor',
+  name: 'CodeReview',
+  version: '1.0.0',
+  component: CodeReviewFile,
+  description: readFileSync(require.resolve('./review.file.macro.md'), 'utf-8').toString(),
+  features: [],
+  stem: 'review',
+  tags: ['code', 'review', 'development', 'file', 'directory'],
+}
+
+/**
+ * Performs a code review of the give folder and returns the results.
+ * @param args 
+ * @param state 
+ */
+export const CodeReview: Macro<string> = async (
+  args: CodeReviewArgs,
+  state: ChatState) => {
+
+  const [
+    path, 
+    specs,
+    target = 'inline',
+    targetPath,
+    throttle = '500',
+    verbose = 'false'
+  ] = args;
+  const {
+    ai,
+    macros,
+    modelId,
+    history,
+  } = state;
+
+  let $path = path;
+
+  if($path.includes('${')) $path = template($path)({ os, pathModule, process, state });
+
+  if(!$path) return 'A request for a review requires a valid path to a folder';
+  if(!existsSync($path)) return `The path ${$path} does not exist`;
+
+  let specificationContent: string = readFileSync(require.resolve('./review.specifications.default.md')).toString();
+  if (specs && existsSync(specs)) specificationContent = readFileSync(specs).toString();
+
+  
+  // we get the directory contents using the dirIn macro
+  const dirContents: { name: string, extension?: string, size?: number, path: string}[] = JSON.parse(
+    await dirIn([$path, 'true', '*', 'json', 'false'], state)
+  );
+
+  let question = `Write a review on file structure for the following directory: ${$path}
+  \`\`\`txt
+  ${dirContents.map(f => `${f.name}`).join('\n')}\n\n
+  \`\`\`
+  `;
+  const prompt = createPrompt(
+    modelId,
+    question,
+    history,
+    'system'
+  );
+  
+  const fileReviewResult = await getAIResponse(state.ai, prompt, state);
+
+  // Clone the response to avoid mutating the original object
+  const updatedResponse = JSON.parse(JSON.stringify(fileReviewResult));
+
+  // Access message object
+  let message = extractResponse(updatedResponse, question);
+
+  state.vars.review = message.content;
+
+  // we iterate over the directory contents and perform a code review on each file
+  let lastReviewTS = Date.now();
+
+  const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+  for (const file of dirContents) {
+    const doReview = async () => {      
+      if (file.size > 0 && isDirectory(file.path) === false) {
+        if (file.size < 100000) {
+          const filePath = pathModule.join($path, file.name);
+          const fileResult = await CodeReviewFile([filePath, specs], state);
+          state.vars.review = `${state.vars.review}\n\n${fileResult}`;
+        } else {
+          state.vars.review = `${state.vars.review}\n\n${file.name} is too large to review - Skipping review`;
+        }
+      } else {
+        state.vars.review =  `${state.vars.review}\n\n No content found for file ${file.name} - Skipping review`;
+      }
+    }
+
+    const now = Date.now();
+    const THROTTLE = parseInt(throttle);
+    if (now - lastReviewTS < THROTTLE) {
+      await delay(THROTTLE - (now - lastReviewTS));
+    }
+
+    await doReview();
+    lastReviewTS = Date.now();
+  }
+
+  let finalPrompt = createPrompt(
+    modelId,
+    `Summarize and format the review generated below:\n\n${state.vars.review}`,
+    history,
+    'system'
+  );
+
+  const result = await getAIResponse(ai, finalPrompt, state);
+
+  // Clone the response to avoid mutating the original object
+  const finalResponse = JSON.parse(JSON.stringify(result));
+
+  // Access message object
+  const finalMessage = extractResponse(finalResponse, finalPrompt.messages[0].content);
+  // we return the final message & overwite the review file with the updated review
+  if(target === 'inline') return finalMessage.content;
+  if(target === 'file') { 
+    await fileOut([pathModule.join($path, 'reactor_code_review.md'), finalMessage.content], state);
+  }
+  return finalMessage.content;
+}
+
+/**
+ * Registry entry for the CodeReview macro
+ */
+export const CodeReviewComponentRegister: Reactory.IReactoryComponentDefinition<typeof CodeReview> = { 
+  nameSpace: 'reactor',
+  name: 'CodeReview',
+  version: '1.0.0',
+  component: CodeReview,
+  description: readFileSync(require.resolve('./review.macro.md'), 'utf-8').toString(),
+  features: [],
+  stem: 'review',
+  tags: ['code', 'review', 'development', 'file', 'directory'],
+}
+
+
+/**
+ * Registry of development macros
+ */
+export const DevelopmentMacros: Reactory.IReactoryComponentDefinition<Macro<unknown>>[] = [
+  CodeReviewComponentRegister,
+  CodeReviewFileComponentRegister,
+];
