@@ -298,7 +298,7 @@ const ShellCommandComponentRegister: Reactory.IReactoryComponentDefinition<typeo
   name: 'ShellCommand',
   version: '1.0.0',
   component: ShellCommand,
-  description: readFileSync(require.resolve('./shell.macro.md')).toString(),
+  description: readFileSync(require.resolve('./readme.md')).toString(),
   features: [{
     feature: 'shell',
     description: 'Executes a shell command',

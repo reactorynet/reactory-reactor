@@ -264,7 +264,7 @@ const GitMacroComponentDefinition: Reactory.IReactoryComponentDefinition<typeof 
   nameSpace: 'reactor',
   name: 'GitMacro',
   version: '1.0.0',
-  description: readFileSync(require.resolve('./git.macro.md')).toString(),
+  description: readFileSync(require.resolve('./readme.md')).toString(),
   features: [{ 
     feature: 'clone',
     featureType: Reactory.FeatureType.function,
