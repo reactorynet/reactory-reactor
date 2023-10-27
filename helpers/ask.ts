@@ -21,9 +21,11 @@ export const ask = async (question: IQuestion, state: ChatState, rl: ReadLine): 
 
     if (question !== null && question !== undefined) {
       const $response = await new Promise<string>((resolve) => {
-        rl.question(`
-          ${colors.yellow(`[${botId}]>`)}${colors.green(`${question.question}`)}
-        `, (response: string) => {
+        let nextPrompt = `${colors.yellow(`[${botId}]>`)}${colors.green(`${question.question}`)}\n[me]>`;
+        if (question.question === "") {
+          nextPrompt = '[me]>'
+        }
+        rl.question(nextPrompt, (response: string) => {
           resolve(response);
         });
       });

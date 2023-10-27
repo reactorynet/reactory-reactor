@@ -5,7 +5,7 @@ import {
 } from '@reactory/server-modules/reactor/ai/openai/chat/questions/factory';
 import { ask, colors } from '@reactory/server-modules/reactor/helpers';
 import { ChatState } from "modules/reactor/ai/openai/types/chat";
-import readline from 'readline';
+import readline, { ReadLine } from 'readline';
 import { template } from 'lodash';
 import { MacroRegistry } from "@reactory/server-modules/reactor/ai/openai/chat/macro";
 import CANNED_MESSAGES from "@reactory/server-modules/reactor/cli/reactor-cli/messages";
@@ -51,12 +51,15 @@ const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryCo
 
   modelState.history.push(getInitializerMessage(modelState));
 
-  const rl = readline.createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    prompt: `> `,
-    terminal: true,
-  });
+  // const rl = readline.createInterface({
+  //   input: process.stdin,
+  //   output: process.stdout,
+  //   prompt: `> `,
+  //   terminal: true,
+  //   removeHistoryDuplicates: true,
+  // });
+
+  const rl: ReadLine = context.readline as ReadLine;
 
   let pastedContent: string = '';
 

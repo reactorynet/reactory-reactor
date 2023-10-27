@@ -14,6 +14,7 @@ import {
   MacroRegistry,
   getMacro,
 } from '../macro';
+import { colors } from '../../../../helpers';
 import ReactorConversationModel from '@reactory/server-modules/reactor/models/ReactorChatState';
 
 export const SYSTEM_INITIALIZER_MESSAGE: ChatCompletionResponseMessage = {
@@ -159,6 +160,11 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
   let question = state.history.length === 1 ?
     `Hi ${user?.firstName ? user.firstName : 'Anon'}, how can we build better applications today with reactory?` : 'What else can I help you with?';
 
+  if (state.history.length > 1) {
+    if(state.history[state.history.length - 1].content.includes("?")) {
+      question = "";
+    }
+  }
   let prompt = createPrompt(modelId, question, state.history);
 
   return {
@@ -199,8 +205,8 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
 
       nextState.history.push(message);
       // Display the AI's response
-      rl.write(`Reactor: ${message.content}`);
-
+      const { botId = 'Reactor' } = state;
+      rl.write(`${colors.yellow(`[${botId}]>`)}${ colors.green(`${message.content}`)}\n`)
       //persist the chat state to the database
       await persistChatState(nextState);
 
