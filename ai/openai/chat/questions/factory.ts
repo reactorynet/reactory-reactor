@@ -181,25 +181,23 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
         const prunedHistory = pruneHistory(state.history);
         let nextState = { ...state }
         nextState.history = prunedHistory;
-        state.history.push(userInput);
+        nextState.history.push(userInput);
         return nextState;
       }
 
-      let nextState;
+      let nextState = getNextState();
       let message: ChatCompletionResponseMessage; // The AI's response or the system comamnd response
       if (response.indexOf('/') === 0) {
         // handle command message
-        const commandResult = await handleCommandAction(response, state);
+        const commandResult = await handleCommandAction(response, nextState);
         prompt.messages.push(userInput);
-        nextState = getNextState();
         message = commandResult
       } else {
         userInput.content = await handleUserResponse(response, state);
         // Add the user's response to the messages
         prompt.messages.push(userInput);
         // Get AI's response
-        nextState = getNextState();
-        message = await getAIResponse(ai, prompt, state);
+        message = await getAIResponse(ai, prompt, nextState);
         // Add the AI's response to the chat history
       }
 

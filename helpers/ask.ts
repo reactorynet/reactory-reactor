@@ -1,5 +1,6 @@
 import { colors, stripColorCodes } from './index';
-import { IQuestion, ChatState } from 'modules/reactor/ai/openai/types/chat';
+import { IQuestion, ChatState } from '@reactory/server-modules/reactor/ai/openai/types/chat';
+import { handleChatCompletionResponse } from '@reactory/server-modules/reactor/ai/openai/chat/macro';
 import { ReadLine } from 'readline';
 
 
@@ -21,13 +22,22 @@ export const ask = async (question: IQuestion, state: ChatState, rl: ReadLine): 
 
     if (question !== null && question !== undefined) {
       const $response = await new Promise<string>((resolve) => {
-        let nextPrompt = `${colors.yellow(`[${botId}]>`)}${colors.green(`${question.question}`)}\n[me]>`;
-        if (question.question === "") {
-          nextPrompt = '[me]>'
+
+        if(question.question.includes("@")) {
+          // the bot has responded with an @ which signals macro processing.
+          // we process the macro and send the information back as "me" the user.
+          rl.write(colors.green(`bot has is requesting permission to execute macros`));
+          rl.close();
+        } else {
+          // default flow
+          let nextPrompt = `${colors.yellow(`[${botId}]>`)}${colors.green(`${question.question}`)}\n[me]>`;
+          if (question.question === "") {
+            nextPrompt = '[me]>'
+          }
+          rl.question(nextPrompt, (response: string) => {
+            resolve(response);
+          });
         }
-        rl.question(nextPrompt, (response: string) => {
-          resolve(response);
-        });
       });
 
       if (question.handler) {

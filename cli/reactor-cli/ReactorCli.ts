@@ -51,14 +51,6 @@ const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryCo
 
   modelState.history.push(getInitializerMessage(modelState));
 
-  // const rl = readline.createInterface({
-  //   input: process.stdin,
-  //   output: process.stdout,
-  //   prompt: `> `,
-  //   terminal: true,
-  //   removeHistoryDuplicates: true,
-  // });
-
   const rl: ReadLine = context.readline as ReadLine;
 
   let pastedContent: string = '';

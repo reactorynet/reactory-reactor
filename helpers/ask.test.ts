@@ -42,6 +42,8 @@ describe('ask function', () => {
       apiOrg: 'test-api-org',
       history: [],
       started: new Date(),
+      vars: {},
+      macros: []
     };
     mockReadLine = createInterface(process.stdin, process.stdout, undefined, false);
   });

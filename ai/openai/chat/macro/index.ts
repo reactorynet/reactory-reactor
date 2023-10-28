@@ -99,7 +99,6 @@ export async function handleUserResponse(userResponse: string, state: ChatState)
   return result;
 }
 
-
 export async function handleChatCompletionResponse(
   response: CreateCompletionResponse, 
   prompt: CreateChatCompletionRequest,
@@ -113,9 +112,10 @@ export async function handleChatCompletionResponse(
   const message = updatedResponse.choices[0].message;
 
   let match;
-  const macros = message.role === 'system' || message.role === 'user' ? inputMacros : outputMacros;
-  const input = prompt.messages[prompt.messages.length - 1];
-  while ((match = regex.exec(input.content)) !== null) {
+  const macros = { ...inputMacros, ...outputMacros };
+  
+  const input = message.content;
+  while ((match = regex.exec(input)) !== null) {
     const [macro, ...params] = match.slice(1);
     const splitParams = params[0].split(',');
 
