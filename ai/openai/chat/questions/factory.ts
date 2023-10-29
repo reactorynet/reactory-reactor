@@ -12,7 +12,7 @@ import {
   handleUserResponse,
   handleChatCompletionResponse,
   MacroRegistry,
-  getMacro,
+  handleCommandAction
 } from '../macro';
 import { colors } from '../../../../helpers';
 import ReactorConversationModel from '@reactory/server-modules/reactor/models/ReactorChatState';
@@ -130,23 +130,6 @@ const pruneHistory = (history: ChatCompletionResponseMessage[]): ChatCompletionR
   return prunedHistory.reverse();
 }
 
-const handleCommandAction = async (response: string, state: ChatState): Promise<ChatCompletionResponseMessage> => {
-  
-  let [command, ...params] = response.split(' ');
-  let content: string = 'Command not found';
-  if (command.startsWith("@")) command = command.slice(1);
-  const macro = getMacro<string>(command);
-  if (macro) {
-    content = await macro(params, state);
-  }
-
-  return {
-    role: 'system',
-    content,
-  }
-}
-
-
 export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE): IQuestion => {
   const {
     modelId,
@@ -215,3 +198,5 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
     },
   };
 };
+
+

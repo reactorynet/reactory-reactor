@@ -8,13 +8,13 @@ import { ChatState, Macro } from "modules/reactor/ai/openai/types/chat";
  * @param context - the current reactory context
  * @returns 
  */
-export const ServiceRegister: Macro<string | object | object[]> = async (args: any[], state: ChatState, context?: Reactory.Server.IReactoryContext) => {
+export const ServiceRegister: Macro<string | object | object[]> = async (args: any[], state: ChatState) => {
   
   const list = (format: string = 'string'): string | object => {
-    const { services } = context;
+    const { services } = state.context;
     if(services && services.length > 0) {
       if(format === 'string') {
-        return services.map(s => `${s.name}@${s.version}`).join('\n');
+        return services.map(s => `${s.nameSpace}.${s.name}@${s.version}`).join('\n');
       } else {
         return services;
       }
@@ -31,7 +31,7 @@ export const ServiceRegister: Macro<string | object | object[]> = async (args: a
       }
       case 'get': { 
         const [ , name, nameSpace, version, props = null, func = null, funcParams ] = args;
-        const service = context?.getService<any>(`${nameSpace}.${name}@${version}`, props);
+        const service = state.context?.getService<any>(`${nameSpace}.${name}@${version}`, props);
         if(service) {
           if(func && funcParams) { 
             const result = await service[func](...funcParams);
