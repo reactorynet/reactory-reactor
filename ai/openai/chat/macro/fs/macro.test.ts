@@ -4,7 +4,7 @@ import {
   WriteFile,
   ListDirectory,
   PathInfoMacro,
-  ExtractFile,
+  ExtractTextFromFile,
   InsertSnippet
 } from './macro';
 import TestChatState from '../data/tests/mocks/ChatState';
@@ -91,7 +91,7 @@ describe('file utilities', () => {
 
     test('Reads a portion of a file using ExtractFile', async () => {
       const filePath = require.resolve('./samples/03.txt');      
-      const result = await ExtractFile([filePath, '2', '2'], chatState);
+      const result = await ExtractTextFromFile([filePath, '2', '2'], chatState);
       expect(result.trim()).toEqual(`\`\`\`txt\nLine 2\n\`\`\``);
     });
 

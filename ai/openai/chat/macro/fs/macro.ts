@@ -414,13 +414,13 @@ export const RemoveDirectoryComponentRegister: Reactory.IReactoryComponentDefini
  * @param state 
  * @returns 
  */
-export const ExtractFile: Macro<string> = async (
+export const ExtractTextFromFile: Macro<string> = async (
   args: string[],
   state: ChatState
 ) => {
   // Check for valid input parameters
   if (args.length !== 3 || isNaN(+args[1]) || isNaN(+args[2])) {
-    return `Invalid parameters. Usage: @extract(path, start, end)`;
+    return `Invalid parameters. Usage: @snipText(path, start, end)`;
   }
 
   const [path, start, end] = args;
@@ -433,7 +433,7 @@ export const ExtractFile: Macro<string> = async (
     const startLine = parseInt(start);
     const endLine = parseInt(end);
 
-    if(endLine < startLine) return `Invalid parameters. Usage: @extract(path, start, end) end must be larger than the start`;
+    if(endLine < startLine) return `Invalid parameters. Usage: @snipText(path, start, end) end must be larger than the start`;
 
     // Extract the portion
     const portion = lines.slice(startLine - 1, endLine).join('\n');
@@ -449,15 +449,15 @@ export const ExtractFile: Macro<string> = async (
 /**
  * Macro registry entry for the ExtractFile macro
  */
-export const ExtractFileComponentRegister: Reactory.IReactoryComponentDefinition<typeof ExtractFile> = {
-  component: ExtractFile,
-  name: 'ExtractFile',
-  nameSpace: 'reactor',
+export const ExtractFileComponentRegister: Reactory.IReactoryComponentDefinition<typeof ExtractTextFromFile> = {
+  component: ExtractTextFromFile,
+  name: 'snipText',
+  nameSpace: 'reactor-macros',
   version: '1.0.0',
-  description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
+  description: readFileSync(require.resolve('./snipText.md'), 'utf-8').toString(),
   features: [],
-  stem: 'file',
-  tags: ['macro', 'file', 'extract', 'portion', 'slice'],
+  stem: 'snip',
+  tags: ['macro', 'file', 'extract', 'portion', 'slice', 'snip'],
 }
 
 // A macro that inserts a snippet into a file starting from a specified line
@@ -497,13 +497,13 @@ export const InsertSnippet: Macro<string> = async (
 
 export const InsertSnippetComponentRegister: Reactory.IReactoryComponentDefinition<typeof InsertSnippet> = {
   component: InsertSnippet,
-  name: 'InsertSnippet',
-  nameSpace: 'reactor',
+  name: 'insertText',
+  nameSpace: 'reactor-macros',
   version: '1.0.0',
-  description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
+  description: readFileSync(require.resolve('./insertText.md'), 'utf-8').toString(),
   features: [],
-  stem: 'file',
-  tags: ['macro', 'file', 'insert', 'snippet', 'replace'],
+  stem: 'insertText',
+  tags: ['macro', 'file', 'insert', 'snippet', 'replace', 'insert'],
 }
 
 

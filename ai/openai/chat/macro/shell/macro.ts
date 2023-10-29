@@ -294,8 +294,8 @@ export const ShellCommand: Macro<ShellCommandMacroOutput> = async (args: ShellCo
 };
 
 const ShellCommandComponentRegister: Reactory.IReactoryComponentDefinition<typeof ShellCommand> = {
-  nameSpace: 'reactor',
-  name: 'ShellCommand',
+  nameSpace: 'reactor-macros',
+  name: 'shell',
   version: '1.0.0',
   component: ShellCommand,
   description: readFileSync(require.resolve('./readme.md')).toString(),

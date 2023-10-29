@@ -12,13 +12,13 @@ import CANNED_MESSAGES from "@reactory/server-modules/reactor/cli/reactor-cli/me
 import logger from "@reactory/server-core/logging";
 import { ObjectId } from "mongodb";
 
-const DEFAULT_MODEL_ID = 'gpt-3.5-turbo-0301';
+const DEFAULT_MODEL_ID = 'gpt-3.5-turbo';
 
 const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryContext): Promise<void> => {
 
   let apiKey = process.env.OPENAI_API_KEY;
   let apiOrg = process.env.OPENAI_ORG;
-  let modelId = process.env.OPENAI_MODEL_ID || DEFAULT_MODEL_ID;
+  let modelId = process.env.OPENAI_DEFAULT_MODEL_ID || DEFAULT_MODEL_ID;
 
   const getInitializerMessage = (state: ChatState) => {
     const macros = state.macros.map(macro => `## ${macro.name}\n ## Usage\n${macro.description}`).join('\n');

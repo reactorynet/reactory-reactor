@@ -22,8 +22,8 @@ export const FetchMacro: Macro<string> = async (
 };
 
 export const FetchMacroRegistry: Reactory.IReactoryComponentDefinition<typeof FetchMacro> = {
-  nameSpace: 'reactor',
-  name: 'FetchMacro',
+  nameSpace: 'reactor-macros',
+  name: 'fetch',
   version: '1.0.0',
   component: FetchMacro,
   description: `A macro that fetches data from the given URL and returns it as text`,

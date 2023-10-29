@@ -1,5 +1,6 @@
 import { ChatState, Macro } from "modules/reactor/ai/openai/types/chat";
 import { execql, execml } from "graph/client";
+import Reactory from "@reactory/reactory-core";
 const DEFAULT_GQL = `
   query ApiStatus { 
     apiStatus {
@@ -60,6 +61,20 @@ export const QueryGQL: Macro<string | string[] | object | object[]> = async (
   }
 }
 
+export const QueryMacroComponentRegister: Reactory.IReactoryComponentDefinition<Macro<string | string[] | object | object[]>> = {
+  component: QueryGQL,
+  name: 'queryMacro',
+  nameSpace: 'reactor-macros',
+  version: '1.0.0',
+  description: 'Executes a GraphQL query with the provided arguments',
+  features: [
+    { feature: 'queryMacro', featureType: Reactory.FeatureType.function, description: 'executes graphql query', action: [], stem: 'query'}
+  ],
+  stem: 'mutation',
+  tags: ['macro', 'graphql', 'mutation'],
+};
+
+
 export const MutationGQL: Macro<string | string[] | object | object[]> = async (
   args: any[], 
   state: ChatState
@@ -106,3 +121,14 @@ export const MutationGQL: Macro<string | string[] | object | object[]> = async (
     return `Error executing GraphQL mutation: ${err.message}`;
   }
 }
+
+export const MutationMacroComponentRegister: Reactory.IReactoryComponentDefinition<Macro<string | string[] | object | object[]>> = {
+  component: MutationGQL,
+  name: 'mutationMacro',
+  nameSpace: 'reactor-macros',
+  version: '1.0.0',
+  description: 'Executes a GraphQL mutation with the provided arguments',
+  features: [],
+  stem: 'mutation',
+  tags: ['macro', 'graphql', 'mutation'],
+};

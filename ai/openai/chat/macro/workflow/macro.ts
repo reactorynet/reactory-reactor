@@ -1,3 +1,5 @@
+import Reactory from "@reactory/reactory-core";
+import { readFileSync } from "fs";
 import { ChatState, Macro } from "modules/reactor/ai/openai/types/chat";
 
 /**
@@ -14,7 +16,7 @@ export const ServiceRegister: Macro<string | object | object[]> = async (args: a
     const { services } = state.context;
     if(services && services.length > 0) {
       if(format === 'string') {
-        return services.map(s => `${s.nameSpace}.${s.name}@${s.version}`).join('\n');
+        return services.map(s => `${s.id} -> ${s.description || 'No description available'}`).join('\n');
       } else {
         return services;
       }
@@ -52,5 +54,14 @@ export const ServiceRegister: Macro<string | object | object[]> = async (args: a
   return list() as string;
 }
 
-
+export const ServiceRegisterComponentDefinition: Reactory.IReactoryComponentDefinition<Macro<string | string[] | object | object[]>> = {
+  component: ServiceRegister,
+  name: 'svc',
+  nameSpace: 'reactor-macros',
+  version: '1.0.0',
+  description: readFileSync(require.resolve('./ServiceRegister.md')).toString(),
+  features: [],
+  stem: 'mutation',
+  tags: ['macro', 'graphql', 'mutation'],
+};
 

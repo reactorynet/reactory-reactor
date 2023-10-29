@@ -1,17 +1,28 @@
 import { ChatState, Macro, MacroFunctions } from 'modules/reactor/ai/openai/types/chat';
+import FileMacros from './fs';
+import DevelopmentMacros from './develop';
+import EmailMacros from './email';
+import FastAIMacros from './fastai';
+import GraphqlMacros from './graphql';
+import RuntimeMacros from './runtime';
+import ShellMacros from './shell';
+import UserMacros from './user';
+import WebMacros from './web';
+import WorkflowMacros from './workflow';
+
 import  { 
   ReadFile, 
   WriteFile,
-  ExtractFile,
+  ExtractTextFromFile,
   ListDirectory,
   InsertSnippet,
-  FileMacros,
 } from './fs/macro';
 import { FetchMacro } from './web/macro';
 import { QueryGQL, MutationGQL } from './graphql/macro';
 import { ServiceRegister } from './workflow/macro';
 import { CreateUser, GetUser } from './user/macro';
-import DevelopmentMacros from './develop';
+
+
 import { 
   review,
   reviewFile,
@@ -23,30 +34,12 @@ import Hash from 'utils/hash';
 
 export const REACTOR_MACRO_MD = require.resolve('./macros.md');
 
-export const MacroRegistry: Reactory.IReactoryComponentDefinition<Macro<unknown>>[] = [
-  ...FileMacros,
-  ...DevelopmentMacros,
-
-];
-
-export const getMacrosMD = (): string => {
-  const macrosText = MacroRegistry.map((macro) => {
-    return `### ${macro.name}\n${macro.description}\n\n`;
-  }).join('');
-
-  return REACTOR_MACRO_MD.replace('{{macros}}', macrosText);
-}
-
-export const getMacro = <T>(name: string): Macro<T> | undefined => { 
-  return MacroRegistry.find((macro) => macro.name === name)?.component as unknown as Macro<T>;
-}
-
 // Usage
 const inputMacros: MacroFunctions = {
   file: ReadFile,
   ReadFile,
-  ExtractFile,
-  snip: ExtractFile,
+  ExtractFile: ExtractTextFromFile,
+  snip: ExtractTextFromFile,
   ListDirectory,
   read: ReadFile,
   readFile: ReadFile,
@@ -75,6 +68,32 @@ const outputMacros: MacroFunctions = {
   insert: InsertSnippet,
 };
 
+
+export const MacroRegistry: Reactory.IReactoryComponentDefinition<Macro<unknown>>[] = [
+  ...FileMacros,
+  ...DevelopmentMacros,
+  ...EmailMacros,
+  ...FastAIMacros,
+  ...GraphqlMacros,
+  ...RuntimeMacros,
+  ...ShellMacros,
+  ...UserMacros,
+  ...WebMacros,
+  ...WorkflowMacros,
+];
+
+export const getMacrosMD = (): string => {
+  const macrosText = MacroRegistry.map((macro) => {
+    return `### ${macro.name}\n${macro.description}\n\n`;
+  }).join('');
+
+  return REACTOR_MACRO_MD.replace('{{macros}}', macrosText);
+}
+
+export const getMacro = <T>(name: string): Macro<T> | undefined => { 
+  return MacroRegistry.find((macro) => macro.name === name)?.component as unknown as Macro<T>;
+}
+
 export type MacroExecutionResult<T> = {
   id: number;
   macro: string,
@@ -93,21 +112,21 @@ export interface MacroInstructionSetResult {
 /**
  * Execuertes
  */
-async function executeMacro<T>(macro: string, state: ChatState): Promise<MacroExecutionResult<T>> {
+export async function executeMacro<T>(macro: string, state: ChatState): Promise<MacroExecutionResult<T>> {
   if(!macro) throw new Error(`Macro expression null or undefined`);
   if(!state) throw new Error(`Chatstate is null or undefind`);
   const id = Hash(macro);
   const regex = /@(\w+)\((.*?)\)/g;
   const match = regex.exec(macro);
-  const macros = { ...inputMacros, ...outputMacros };  
   let nextState: ChatState = { ...state };
   let value: T = null;
   let error: string = null;
   try {    
     const [_macro, ...params] = match.slice(1);
     const splitParams = params[0].split(',');
-    if (macros[_macro]) {
-      value = await macros[_macro]([...splitParams], nextState) as T;      
+    const macroToExecute = getMacro<T>(_macro);
+    if (macroToExecute && typeof macroToExecute === "function") {
+      value = await macroToExecute([...splitParams], nextState) as T;      
     } else {
       error = `Macro ${_macro} not found`;
     }
@@ -222,7 +241,7 @@ export async function handleChatCompletionResponse(
 function generateContentFromResult(result: MacroExecutionResult<unknown>): string {
   const resultType = typeof result.value;
   return `
-  macro: ${result.id}
+  macro: ${result.macro}
   value: ${result.value}
   type: ${resultType}
   `
