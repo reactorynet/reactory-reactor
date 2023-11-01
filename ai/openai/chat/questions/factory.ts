@@ -18,7 +18,7 @@ import { colors } from '../../../../helpers';
 import ReactorConversationModel from '@reactory/server-modules/reactor/models/ReactorChatState';
 
 export const SYSTEM_INITIALIZER_MESSAGE: ChatCompletionResponseMessage = {
-  role: 'user',
+  role: 'system',
   content: fs.readFileSync(require.resolve('../macro/macros.md'), 'utf-8').toString(),
 };
 
@@ -123,6 +123,7 @@ const pruneHistory = (history: ChatCompletionResponseMessage[]): ChatCompletionR
 
   const prunedHistory = reversedHistory.filter((message) => {
     totalTokens += message.content.split(' ').length; // Approximate token count
+    console.debug(`${totalTokens}`)
     return totalTokens <= MAX_TOKENS;
   });
 
@@ -173,7 +174,7 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
       if (response.indexOf('/') === 0) {
         // handle command message
         const commandResult = await handleCommandAction(response, nextState);
-        prompt.messages.push(userInput);
+        // prompt.messages.push(userInput);
         message = commandResult
       } else {
         userInput.content = await handleUserResponse(response, state);

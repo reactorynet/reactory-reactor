@@ -3,9 +3,9 @@ import { ChatState, Macro } from "../../../types/chat";
 import { executeMacro } from "..";
 
 
-export const VariableMacro: Macro<string> = async (
+export const VariableMacro: Macro<unknown> = async (
   args: any[],
-  state: ChatState) => {
+  state: ChatState): Promise<unknown> => {
   const [k, v] = args;
   try {
     if(k === 'get') {

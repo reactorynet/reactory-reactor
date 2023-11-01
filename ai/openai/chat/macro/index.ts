@@ -238,29 +238,50 @@ export async function handleChatCompletionResponse(
   return updatedResponse;
 }
 
-function generateContentFromResult(result: MacroExecutionResult<unknown>): string {
+function generateContentFromResult(result: MacroExecutionResult<unknown>, debug: boolean = false): string {
   const resultType = typeof result.value;
-  return `
+  if(debug === true) return `
   macro: ${result.macro}
   value: ${result.value}
   type: ${resultType}
   `
+  else {
+    let _type = typeof result.value;
+    switch(_type) {
+      case 'object': {
+        if (result?.value?.toString && 
+          typeof result.value.toString === 'function') return result.value.toString();
+        else return `
+        \`\`\`json
+        ${JSON.stringify(result.value, null, 2)}
+        \`\`\`
+        `
+      }
+      default: {
+        return `${result.macro}`;
+      }
+    }
+  }
 }
 
-function generateContentFromResults(instructionSetResult: MacroInstructionSetResult): string {
+function generateContentFromResults(instructionSetResult: MacroInstructionSetResult, debug: boolean = false): string {
   const {
     id,
     hasErrors,
     results,
   } = instructionSetResult;
 
-  return `
-  Results:
+  if(debug === true) {
+    return `
     id: ${id},
     generated errors: ${hasErrors ? 'yes' : 'no'},
     errors: ${results.map(result => `${result.error ? result.macro + ' -> ' + result.error + '\n' : ''}`)}    
-    ${results.map(generateContentFromResult)}
+    ${results.map( result => generateContentFromResult(result, debug))}
   `
+  } else {
+    return `${results.map(result => generateContentFromResult(result, debug))}`
+  }
+  
 }
 
 /**
