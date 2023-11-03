@@ -1,5 +1,6 @@
 import { ChatCompletionResponseMessage, OpenAIApi } from "openai"
 import { Interface as ReadLineInterface } from "readline";
+import { Chat } from ".";
 
 export type Macro<TResult> = (params: any[], state: ChatState) => Promise<TResult>
 
@@ -18,6 +19,10 @@ export type KnownCannedMessages =
 export type CanedMessages = {
   [key in KnownCannedMessages]: string;
 };
+
+export type RatedChatCompletionResponseMessage = ChatCompletionResponseMessage & { rating?: number };
+
+export type ChatMessage = ChatCompletionResponseMessage | RatedChatCompletionResponseMessage;
 
 /**
  * Represents the state of a chat session.
@@ -53,7 +58,7 @@ export type ChatState = {
   /**
    * The history of the chat session.
    */
-  history: ChatCompletionResponseMessage[]
+  history: ChatMessage[]
   /**
    * The OpenAI API instance used for the chat session.
    */

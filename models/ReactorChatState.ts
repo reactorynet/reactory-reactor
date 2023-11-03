@@ -52,6 +52,7 @@ const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<Reacto
   history: [{
     role: String,
     content: String,
+    rating: Number
   }],
   created: {
     type: Date,

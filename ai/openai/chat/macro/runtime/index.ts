@@ -1,5 +1,6 @@
-import { VariableMacroRegistry } from './macro'
+import { VariableMacroRegistry, ModuleMacroRegistry } from './macro'
 
 export default [
-  VariableMacroRegistry
+  VariableMacroRegistry,
+  ModuleMacroRegistry
 ];

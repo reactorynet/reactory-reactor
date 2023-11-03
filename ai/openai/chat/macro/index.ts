@@ -9,6 +9,7 @@ import ShellMacros from './shell';
 import UserMacros from './user';
 import WebMacros from './web';
 import WorkflowMacros from './workflow';
+import ChatsMacros from './chats';
 
 import  { 
   ReadFile, 
@@ -80,6 +81,7 @@ export const MacroRegistry: Reactory.IReactoryComponentDefinition<Macro<unknown>
   ...UserMacros,
   ...WebMacros,
   ...WorkflowMacros,
+  ...ChatsMacros
 ];
 
 export const getMacrosMD = (): string => {
@@ -258,7 +260,7 @@ function generateContentFromResult(result: MacroExecutionResult<unknown>, debug:
         `
       }
       default: {
-        return `${result.macro}`;
+        return `${result.value}`;
       }
     }
   }
@@ -279,7 +281,8 @@ function generateContentFromResults(instructionSetResult: MacroInstructionSetRes
     ${results.map( result => generateContentFromResult(result, debug))}
   `
   } else {
-    return `${results.map(result => generateContentFromResult(result, debug))}`
+    const content = `${results.map(result => generateContentFromResult(result, debug))}`
+    return content;
   }
   
 }

@@ -1,7 +1,7 @@
 import Reactory from "@reactory/reactory-core";
 import { ChatState, Macro } from "../../../types/chat";
 import { executeMacro } from "..";
-
+import modules from '@reactory/server-core/modules';
 
 export const VariableMacro: Macro<unknown> = async (
   args: any[],
@@ -62,4 +62,44 @@ export const VariableMacroRegistry: Reactory.IReactoryComponentDefinition<typeof
   ],
   stem: 'fetch',
   tags: ['fetch', 'http', 'url', 'data'],
+}
+
+// a macro that describes modules installed in reactory
+export const ModuleMacro: Macro<unknown> = async (
+  args: any[],
+  state: ChatState): Promise<unknown> => {    
+    const describeModule = (module: Reactory.Server.IReactoryModule) => { 
+      return `
+      Module Id: ${module.nameSpace}.${module.name}@${module.version}
+      Depencies: ${module.dependencies.map((dep) => `${dep}`).join('\n')}
+      Services:
+      ${module.services.map((service) => `\t${service.id}`).join('\n')} 
+      `
+    };
+    let moduleText =  `Enabled Modules: ${modules.enabled?.map((mod) => { return describeModule(mod) })}`;    
+    return moduleText;
+};
+
+export const ModuleMacroRegistry: Reactory.IReactoryComponentDefinition<typeof ModuleMacro> = { 
+  nameSpace: 'reactor-macros',
+  name: 'modules',
+  version: '1.0.0',
+  component: ModuleMacro,
+  description: `# modules macro
+  Use this macro to list the modules installed in reactory
+  
+  ## Usage
+  @modules - lists the modules installed in reactory
+  `,
+  features: [
+    {
+      feature: 'list',
+      featureType: Reactory.FeatureType.function,
+      action: ['list', 'show', 'display'],
+      description: 'Operation that lists the modules installed in reactory.',
+      stem: 'list'
+    }
+  ],
+  stem: 'list',
+  tags: ['list', 'modules', 'installed'],
 }

@@ -7,7 +7,7 @@ import {
   CreateChatCompletionRequest, 
   OpenAIApi 
 } from "openai";
-import { ChatState, IQuestion } from "../../types/chat";
+import { ChatState, IQuestion, RatedChatCompletionResponseMessage } from "../../types/chat";
 import {
   handleUserResponse,
   handleChatCompletionResponse,
@@ -122,8 +122,7 @@ const pruneHistory = (history: ChatCompletionResponseMessage[]): ChatCompletionR
   const reversedHistory = [...history].reverse();
 
   const prunedHistory = reversedHistory.filter((message) => {
-    totalTokens += message.content.split(' ').length; // Approximate token count
-    console.debug(`${totalTokens}`)
+    totalTokens += message.content.split(' ').length; // Approximate token count    
     return totalTokens <= MAX_TOKENS;
   });
 
@@ -159,7 +158,7 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
         role: 'user',
         content: response,
       };
-
+      
       const getNextState = () => {
         // Add the old chat's history to the new chat's state
         const prunedHistory = pruneHistory(state.history);
@@ -170,7 +169,8 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
       }
 
       let nextState = getNextState();
-      let message: ChatCompletionResponseMessage; // The AI's response or the system comamnd response
+      
+      let message: ChatCompletionResponseMessage & { rating?: number }; // The AI's response or the system comamnd response
       if (response.indexOf('/') === 0) {
         // handle command message
         const commandResult = await handleCommandAction(response, nextState);
@@ -188,7 +188,38 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
       nextState.history.push(message);
       // Display the AI's response
       const { botId = 'Reactor' } = state;
-      rl.write(`${colors.yellow(`[${botId}]>`)}${ colors.green(`${message.content}`)}\n`)
+      rl.write(`${colors.yellow(`[${botId}]>`)}${ colors.green(`${message.content}`)}\n`);
+      // we want to prompt the user to give a rating for the response
+
+      const rateResponse = async (aiResponseMessage: ChatCompletionRequestMessage, state: ChatState): Promise<RatedChatCompletionResponseMessage> => { 
+        
+        return new Promise((resolve, reject) => { 
+          const ratedMessage = { ...aiResponseMessage, rating: 0 };
+          if (ratedMessage.content.length > 0) {        
+            rl.question(`${colors.yellow(`[${botId}]>`)}${ colors.green(`How would you rate this response? (1-10)`)}\n`, (rating) => { 
+              if (rating && rating.length > 0) {           
+                try { 
+                  ratedMessage.rating = parseInt(rating, 10);
+                  resolve(ratedMessage);
+                } catch (error) { 
+                  reject(error);
+                }                                 
+              }
+            })
+          }
+        });        
+      }
+      
+      // if reactor is running in training mode, we want to prompt the user to give a rating for the response 
+      if (process.env.OPENAI_TRAINING_MODE === 'true') { 
+        try {
+          const ratedMessage = await rateResponse(message, state);
+          nextState.history[nextState.history.length - 1] = ratedMessage;
+        } catch (error) { 
+          let errorMessage = `Error rating response: ${error}\n`;
+          console.error(errorMessage);
+        }
+      } 
       //persist the chat state to the database
       await persistChatState(nextState);
 
