@@ -143,6 +143,8 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
   let question = state.history.length === 1 ?
     `Hi ${user?.firstName ? user.firstName : 'Anon'}, how can we build better applications today with reactory?` : 'What else can I help you with?';
 
+  // check if the last message was a question
+  // if it is, we clear the default question
   if (state.history.length > 1) {
     if(state.history[state.history.length - 1].content.includes("?")) {
       question = "";
@@ -163,11 +165,11 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
         // Add the old chat's history to the new chat's state
         const prunedHistory = pruneHistory(state.history);
         let nextState = { ...state }
-        nextState.history = prunedHistory;
-        nextState.history.push(userInput);
+        nextState.history = prunedHistory;        
         return nextState;
       }
 
+      state.history.push(userInput);
       let nextState = getNextState();
       
       let message: ChatCompletionResponseMessage & { rating?: number }; // The AI's response or the system comamnd response
@@ -181,8 +183,7 @@ export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE)
         // Add the user's response to the messages
         prompt.messages.push(userInput);
         // Get AI's response
-        message = await getAIResponse(ai, prompt, nextState);
-        // Add the AI's response to the chat history
+        message = await getAIResponse(ai, prompt, nextState);        
       }
 
       nextState.history.push(message);

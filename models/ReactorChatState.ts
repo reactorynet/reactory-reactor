@@ -42,7 +42,7 @@ const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<Reacto
   modelId: {
     type: String,
     required: true,
-    default: 'gpt-3.5-turbo-0301',
+    default: 'gpt-3.5',
   },
   user: {
     type: ObjectId,

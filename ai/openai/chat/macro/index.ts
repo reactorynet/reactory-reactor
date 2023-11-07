@@ -30,7 +30,7 @@ import {
 } from './develop';
 
 
-import { ChatCompletionResponseMessage, CreateChatCompletionRequest, CreateCompletionResponse } from 'openai';
+import { ChatCompletionResponseMessage, CreateChatCompletionRequest, CreateCompletionResponse, CreateCompletionResponseChoicesInner } from 'openai';
 import Hash from 'utils/hash';
 
 export const REACTOR_MACRO_MD = require.resolve('./macros.md');
@@ -183,6 +183,26 @@ export async function processMacroInstructionSet(macros: string[], state: ChatSt
   };
 }
 
+/**
+ * This function will parse a macro file / string create a set of instructions 
+ * and execute them
+ * @param macro 
+ * @param state 
+ * @returns 
+ */
+export function parse(input: string, state: ChatState): string[] {
+  const instructionSet: string[] = [];
+
+  const regex = /@(\w+)\((.*?)\)/g;  
+  let match;  
+  while ((match = regex.exec(input)) !== null) {
+    const [macro, ...params] = match.slice(1);
+    instructionSet.push(`@${macro}(${params[0]})`);
+  }
+
+  return instructionSet;
+}
+
 
 export async function handleUserResponse(userResponse: string, state: ChatState): Promise<string> {
   // Extract macros and their parameters from the user response
@@ -209,23 +229,120 @@ export async function handleUserResponse(userResponse: string, state: ChatState)
   return result;
 }
 
+
+/**
+ * 
+ */
+export async function makeSelectionFromChoices(choices: CreateCompletionResponseChoicesInner[], state: ChatState): Promise<number> {
+  const { rl } = state;
+  let choice_index = 0;
+  const summary = `I have ${choices.length} results :\n`;
+  choices.forEach((choice) => {
+    choice_index++;            
+    const text = choice.text;
+    const lines = text.split('\n');      
+    rl.write(`${choice_index}. ${lines[0]}\n`);      
+  });
+
+  rl.write(`Please select one of the results by typing the number of the result you want to see\n`);
+  return new Promise((resolve, reject) => { 
+    rl.question(``, (answer) => { 
+      try { 
+        choice_index = parseInt(answer);
+        resolve(choice_index);
+      } catch (e) {
+        reject(e);
+      }
+    })
+  })
+
+}
+
+/**
+ * This function will handle the completion response from the openai api
+ * @param response 
+ * @param prompt 
+ * @param state 
+ * @returns 
+ */
 export async function handleChatCompletionResponse(
   response: CreateCompletionResponse, 
   prompt: CreateChatCompletionRequest,
   state: ChatState
   ): Promise<CreateCompletionResponse> {
 
-  const regex = /@(\w+)\((.*?)\)/g;
-
   // Clone the response to avoid mutating the original object
-  const updatedResponse = JSON.parse(JSON.stringify(response));
-  const message = updatedResponse.choices[0].message;
+  const cloned: CreateCompletionResponse = JSON.parse(JSON.stringify(response));
+  // first we check if there is a macro block definition
+  // which is recognise by the characters ```rfm as the start of the block and ``` as the end of the block
+  const macroBlockRegex = /```rfm([\s\S]*?)```/g;
+  let choice_index = 0;  
+  // if there is more than one choice we need display a short summary of each choice
+  // and then ask the user to select one of the choices to display the full text  
+  if(cloned.choices.length > 1) { 
+    let validChoice = false;
+    while(!validChoice) { 
+      choice_index = await makeSelectionFromChoices(cloned.choices, state);
+      if(choice_index > 0 && choice_index <= cloned.choices.length) { 
+        validChoice = true;
+      } else {
+        state.rl.write(`Invalid choice, please select a number between 1 and ${cloned.choices.length}\n`);
+      }
+    }    
+  }
+
+
+  let macroBlockMatch = macroBlockRegex.exec(cloned.choices[choice_index].text);
+  //if we have matches in our regex, we need to execute the macros
+  //the AI is giving us a request to execute macros and we need to give the user
+  //the option to execute them or not as a safeguard against macros that
+  //may be harmful to the system
+  
+  // macro regex is used to identify a macro snippet
+  const macroRegex = /@(\w+)\((.*?)\)/g;
+  
+  if (macroBlockMatch.length > 0) { 
+    // check each matched block for macros
+
+    // we need to execute the the loop for each block in 
+    // an async manner so we can prompt the user for each block
+    // if they want to execute the macros in the block
+
+    for (let i = 0; i < macroBlockMatch.length; i++) {
+      const block = macroBlockMatch[i];
+      const blockIdRegex = /```rfm #(\w+)/g;
+      const blockIdMatch = blockIdRegex.exec(block);
+      let blockId = i.toString();
+      if(blockIdMatch.length > 0) { 
+        blockId = blockIdMatch[1];
+      }
+
+      // we need to generate a message to prompt the user if they want to execute the macros
+      // in the code block. We will use the block id as the message 
+      // and the user will have to type (y)es or (n)o to execute the macros
+      // or not
+      state.rl.write(`\n${blockId}\n`);
+      state.rl.write(`${block}\n`);
+      state.rl.write(`\nExecute macros in this block? (y)es or (n)o\n`);
+      const answer: string = await new Promise((resolve, reject) => { 
+        state.rl.question(``, (answer) => { 
+          resolve(answer);
+        })
+      })
+
+      if (answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes') { 
+
+      }
+    }
+  }
+
+  const message = cloned.choices[choice_index].text;
 
   let match;
   const macros = { ...inputMacros, ...outputMacros };
   
-  const input = message.content;
-  while ((match = regex.exec(input.content)) !== null) {
+  const input = message;
+  while ((match = macroRegex.exec(input)) !== null) {
     const [macro, ...params] = match.slice(1);
     const splitParams = params[0].split(',');
 
@@ -237,7 +354,7 @@ export async function handleChatCompletionResponse(
     }
   }
 
-  return updatedResponse;
+  return cloned;
 }
 
 function generateContentFromResult(result: MacroExecutionResult<unknown>, debug: boolean = false): string {

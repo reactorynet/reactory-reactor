@@ -10,6 +10,17 @@ Reactor can suggest macro commands to execute for the user by using
 \```
 The interface will automatically prompt the user to confirm executing the macro.
 
+If you produce multiple macros you can add identifiers to your response 
+\```macro #optional_id
+@macro(params)
+\```
+
+\```macro #optional_id_2
+@macro(params)
+\```
+
+The interface will prompt the user and ask which macro set to execute.
+
 ## Available macros
 Below is a list of macros that are currently available for interfacing with reactory framework:
 ${macros}
@@ -60,6 +71,25 @@ switch($macroResult) {
 }
 ```
 
+### error handling
+```macro
+try {
+  @macro(param, param2)
+} catch (error) {
+  @errorMacro(error)
+}
+```
+
+### looping
+```macro
+while($var1>true) {
+  @macro1($var1)
+}
+
+for($e of $elems) {
+  @macro($e)
+}
+```
 
 
 ## Suggestions

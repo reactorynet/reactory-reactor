@@ -1,6 +1,7 @@
 import Reactory from "@reactory/reactory-core";
 import { ChatState, Macro } from "../../../types/chat";
 import ReactorConversationModel from '@reactory/server-modules/reactor/models/ReactorChatState';
+import { ObjectId } from "mongodb";
 
 export const ChatsMacro: Macro<unknown> = async (
   args: any[],
@@ -13,6 +14,22 @@ export const ChatsMacro: Macro<unknown> = async (
 
   try {
     switch(k) {
+      case 'new': {
+        state.id = ObjectId.generate().toString();
+        state.history = [];
+        return 'New chat session created'
+      }
+      case 'size': {
+        //calculates the size of the chat in tokens from the history
+        let size = 0;
+        state.history.forEach((message) => {
+          if(message?.content) {
+            size += message.content.split(' ').length;
+          }
+        })
+
+        return `Chat size is ~${size} tokens`;
+      }
       case 'list': {
         // list all chats
         const chats = await ReactorConversationModel.find({
@@ -39,7 +56,7 @@ export const ChatsMacro: Macro<unknown> = async (
         // load chat state
         // if v is null or undefined, we find the last chat 
         // for the user
-        if(v === undefined || null) { 
+        if(v === undefined || null) {
           const chat = await ReactorConversationModel.findOne({
             user: state.context.user
           }).sort({ started: -1 }).then();
