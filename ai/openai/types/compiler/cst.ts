@@ -2,6 +2,11 @@
 export type CSTNodeType =
   | 'Program'
   | 'MacroInvocation'
+  | 'MacroName'
+  | 'MacroArguments'
+  | 'MacroArgument'
+  | 'StringInterpolation'
+  | 'StringLiteral'
   | 'Grouping'
   | 'Chaining'
   | 'Branching'
@@ -14,7 +19,11 @@ export type CSTNodeType =
   | 'Identifier'
   | 'Operator'
   | 'Punctuation'
-  | 'Whitespace';
+  | 'VariableIdentifier'
+  | 'Whitespace'
+  | 'Comment'
+  | 'Newline'
+  | 'EOF';
 
 // The base type for all CST nodes
 export interface CSTNode {

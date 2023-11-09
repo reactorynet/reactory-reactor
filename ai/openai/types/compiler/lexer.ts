@@ -11,9 +11,10 @@ export type MacroTokenType =
   | 'COMMA'               // Matches ','
   | 'SEMICOLON'           // Matches ';'
   | 'ARROW_CHAIN'         // Matches '-->'
-  | 'ARROW_SUCCESS'       // Matches '-=>'
+  | 'ARROW_BRANCH'        // Matches '-=>'
   | 'VARIABLE'            // Matches '$' followed by a variable name
   | 'STRING_LITERAL'      // Matches string literals, e.g., "hello"
+  | 'EXECUTABLE_STRING_LITERAL' // Matches executable string literals, e.g., `hello ${name} or @print("hello")`
   | 'NUMBER_LITERAL'      // Matches numeric literals, e.g., 123, 45.67
   | 'LOGICAL_OPERATOR'    // Matches logical operators like '&&', '||'
   | 'COMPARISON_OPERATOR' // Matches comparison operators like '==', '!=', '<', '>'
@@ -43,7 +44,10 @@ export type MacroTokenType =
   | 'LOOP_FOR'            // Matches 'for'
   | 'ERROR'               // Used to indicate lexical errors
   | 'KEYWORD'            
-  | 'WHITESPACE';         // Used to ignore whitespace
+  | 'WHITESPACE'          // Matches whitespace
+  | 'COMMENT'             // Matches comments
+  | 'NEWLINE'             // Matches newlines
+  | 'EOF';                // Matches end of file
 
 // Token type definition
 export interface Token {
@@ -55,4 +59,10 @@ export interface Token {
   };
 }
 
-export type Tokenizer = (input: string) => Token[];
+export interface TokenizerOptions {
+  ignoreWhitespace?: boolean;
+  ignoreComments?: boolean;
+  ignoreNewLines?: boolean;
+}
+
+export type Tokenizer = (input: string, options: TokenizerOptions) => Token[];

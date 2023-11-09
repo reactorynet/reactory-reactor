@@ -1,8 +1,8 @@
-# Reactory Framework Macro Specification
+# Reactor Macro Specification
 
 ### Purpose
 
-The purpose of this macro language is to provide a high-level scripting utility that simplifies the creation and management of automated tasks within the Reactory environment. It aims to offer a more accessible approach to automation by abstracting away the complexity of direct scripting, making it more approachable for non-programmers or those with limited coding experience. This macro language is designed to enhance productivity, allowing users to compose powerful operations from simple, predefined commands (macros) and to control the flow of execution with intuitive constructs.
+The purpose of this macro language is to provide a high-level scripting utility that simplifies the creation and management of automated tasks within the Reactor AI enabled environment. It aims to offer a more accessible approach to automation by abstracting away the complexity of direct scripting, making it more approachable for non-programmers or those with limited coding experience. This macro language is designed to enhance productivity, allowing users to compose powerful operations from simple, predefined commands (macros) and to control the flow of execution with intuitive constructs.
 
 ### Overview
 
@@ -219,8 +219,6 @@ The semantics define not just the outcome of executing macros but also their sid
 
 ## Runtime Behaviour
 
-### Runtime Behavior
-
 The runtime behavior section describes how the macro language scripts are expected to be executed within the host environment, which in this case is a TypeScript/JavaScript runtime. This involves the interaction between the macro language processor, which may be an interpreter or a compiler, and the underlying system.
 
 #### Execution Environment
@@ -302,7 +300,7 @@ By defining the runtime behavior, script writers and users can have a predictabl
 ```typescript
 // In this example, the `@computeDiscount` macro is nested within the `@applyDiscount` macro.
 
-@applyDiscount(@computeDiscount(cartTotal, customerType), customerId)
+@applyDiscount(@computeDiscount($cartTotal, $customerType), $customerId)
 ```
 
 ### Example 5: Conditional Logic and Variable Assignment
@@ -325,7 +323,7 @@ if ($greeting === "Good morning") {
 // This script uses a `while` loop to call a macro multiple times as long as a condition is true.
 
 while($userActive) {
-  @checkForUpdates(userId)
+  @checkForUpdates($userId)
   @wait(60000) // Wait for 1 minute
 }
 ```
@@ -336,9 +334,9 @@ while($userActive) {
 // process a transaction.
 
 try {
-  @processTransaction(transactionId)
+  @processTransaction($transactionId)
 } catch (error) {
-  @rollbackTransaction(transactionId)
+  @rollbackTransaction($transactionId)
   @notifySupportTeam(error)
 }
 ```
@@ -347,7 +345,7 @@ try {
 ```typescript
 // A switch statement is used to perform different actions based on the status of an order.
 
-@var(orderStatus, @getOrderStatus(orderId))
+@var($orderStatus, @getOrderStatus($orderId))
 switch($orderStatus) {
   case "pending": {
     @notifyCustomer("Your order is being processed.", customerId)

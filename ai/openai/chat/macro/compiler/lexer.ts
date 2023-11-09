@@ -1,9 +1,18 @@
-import { Token, Tokenizer, MacroTokenType } from '../../../types/compiler/lexer';
+import { Token, Tokenizer, MacroTokenType, TokenizerOptions } from '../../../types/compiler/lexer';
+
+// Default options for the tokenizer
+const DEFAULT_OPTIONS: TokenizerOptions = {
+  ignoreWhitespace: false,
+  ignoreComments: false,
+  ignoreNewLines: false,
+};
 
 // The tokenizer function takes a string of macro code and returns an array of tokens
-const tokenize: Tokenizer = (input: string): Token[] => {
+const tokenize: Tokenizer = (input: string, options: TokenizerOptions = DEFAULT_OPTIONS): Token[] => {
   const tokens: Token[] = [];
   let position = { line: 1, column: 1 };
+
+  const { ignoreWhitespace, ignoreComments, ignoreNewLines } = options;
 
   // Regular expressions for the different tokens, ensure to include all necessary patterns
   const tokenPatterns: [RegExp, MacroTokenType][] = [
@@ -18,7 +27,7 @@ const tokenize: Tokenizer = (input: string): Token[] => {
     [/^,/, 'COMMA'],
     [/^;/, 'SEMICOLON'],
     [/^-->/, 'ARROW_CHAIN'],
-    [/^-=>/, 'ARROW_SUCCESS'],
+    [/^-=>/, 'ARROW_BRANCH'],
     [/^\$[a-zA-Z_]\w*/, 'VARIABLE'],
     [/^"[^"\\]*(\\.[^"\\]*)*"/, 'STRING_LITERAL'], // String literals with escape characters
     [/^\d+(\.\d+)?/, 'NUMBER_LITERAL'],
@@ -46,7 +55,16 @@ const tokenize: Tokenizer = (input: string): Token[] => {
     [/^async\b/, 'ASYNC'],
     [/^await\b/, 'AWAIT'],
     [/^[a-zA-Z_]\w*/, 'IDENTIFIER'],
-    // Add other patterns if needed
+    // executable string literals
+    [/^`[^`\\]*(\\.[^`\\]*)*`/, 'EXECUTABLE_STRING_LITERAL'],
+    [/^\/\/.*/, 'COMMENT'], // Single line comments
+    [/^\n/, 'NEWLINE'],
+    // multi line comment support
+    [/^\/\*/, 'COMMENT'],
+    [/^\*\//, 'COMMENT'],
+    // EOF
+    [/^$/, 'EOF'],
+    
   ];
 
   // Function to update position
@@ -68,8 +86,29 @@ const tokenize: Tokenizer = (input: string): Token[] => {
       const match = pattern.exec(input);
       if (match) {
         const [text] = match;
-        if (type !== 'WHITESPACE') { // WHITESPACE is ignored
-          tokens.push({ type, value: text, position: { ...position } });
+
+        switch(type)  {
+          case 'NEWLINE': {
+            if (ignoreNewLines === false) {
+              tokens.push({ type, value: text, position: { ...position } });
+            }
+            break;
+          }
+          case 'WHITESPACE': {
+            if (ignoreWhitespace === false) {
+              tokens.push({ type, value: text, position: { ...position } });
+            }
+            break;
+          }
+          case 'COMMENT': {
+            if (ignoreComments === false) {
+              tokens.push({ type, value: text, position: { ...position } });
+            }
+            break;
+          }
+          default: {
+            tokens.push({ type, value: text, position: { ...position } });
+          }
         }
         updatePosition(text);
         input = input.slice(text.length);
@@ -82,6 +121,9 @@ const tokenize: Tokenizer = (input: string): Token[] => {
       throw new Error(`Unexpected token at line ${position.line}, column ${position.column}`);
     }
   }
+
+  // Add EOF token
+  tokens.push({ type: 'EOF', value: '', position: { ...position } });
 
   return tokens;
 };
