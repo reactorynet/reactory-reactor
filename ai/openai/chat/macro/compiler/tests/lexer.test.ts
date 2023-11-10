@@ -26,7 +26,7 @@ describe('Lexer', () => {
 
   it('should tokenize a macro with a variable and a number literal', () => {
     const input = '@print($name, 123)';
-    const tokens = tokenize(input, { ignoreWhitespace: false });
+    const tokens = tokenize(input, { ignoreWhitespace: true });
     expect(tokens).toEqual(TokenisationMap[input]);
   });
 

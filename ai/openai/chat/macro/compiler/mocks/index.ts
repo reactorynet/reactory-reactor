@@ -1,22 +1,22 @@
-
 import {
-  LiteralNode,
+  StringLiteralNode,
+  BlockNode,
+  ConditionalExpressionNode,
+  NumberLiteralNode,
   VariableNode,
-  MacroNode,
-  MacroGroupNode,
+  MacroInvocationNode,
   MacroChainNode,
   MacroBranchNode,
-  ControlFlowNode,
-  ASTRoot,
+  ProgramNode,
 } from '../../../../types/compiler/ast';
 // Mocks for Literal values
-export const mockNumberLiteral: LiteralNode = {
-  type: 'Literal',
+export const mockNumberLiteral: NumberLiteralNode = {
+  type: 'NumberLiteral',
   value: 42,
 };
 
-export const mockStringLiteral: LiteralNode = {
-  type: 'Literal',
+export const mockStringLiteral: StringLiteralNode = {
+  type: 'StringLiteral',
   value: 'Hello, World!',
 };
 
@@ -27,23 +27,23 @@ export const mockVariable: VariableNode = {
 };
 
 // Mock for a simple Macro
-export const mockSimpleMacro: MacroNode = {
-  type: 'Macro',
+export const mockSimpleMacro: MacroInvocationNode = {
+  type: 'MacroInvocation',
   name: 'print',
-  params: [mockStringLiteral],
+  arguments: [mockStringLiteral],
 };
 
 // Mock for a Macro with a variable and literal as parameters
-export const mockMacroWithVariable: MacroNode = {
-  type: 'Macro',
+export const mockMacroWithVariable: MacroInvocationNode = {
+  type: 'MacroInvocation',
   name: 'add',
-  params: [mockNumberLiteral, mockVariable],
+  arguments: [mockNumberLiteral, mockVariable],
 };
 
 // Mock for a Macro Group
-export const mockMacroGroup: MacroGroupNode = {
-  type: 'MacroGroup',
-  macros: [mockSimpleMacro, mockMacroWithVariable],
+export const mockMacroGroup: BlockNode = {
+  type: 'Block',
+  body: [mockSimpleMacro, mockMacroWithVariable],
 };
 
 // Mock for a Macro Chain
@@ -57,19 +57,21 @@ export const mockMacroChain: MacroChainNode = {
 export const mockMacroBranch: MacroBranchNode = {
   type: 'MacroBranch',
   condition: mockVariable, // This could be a more complex expression in a real case
-  successPath: mockSimpleMacro,
-  failurePath: mockMacroWithVariable,
+  failureBranch: mockSimpleMacro,
+  successBranch: mockMacroWithVariable,  
 };
 
 // Mock for a Control Flow
-export const mockControlFlow: ControlFlowNode = {
-  type: 'ControlFlow',
+export const mockControlFlow: ConditionalExpressionNode = {
+  type: 'ConditionalExpression',
   controlType: 'if',
-  condition: mockVariable, // A more complex condition would be used in reality
-  body: [mockSimpleMacro, mockMacroWithVariable],
+  test: mockVariable,
+  consequent: mockSimpleMacro,
+  alternate: mockMacroWithVariable,
 };
 
 // Mock for the AST Root
-export const mockASTRoot: ASTRoot = {
-  body: [mockMacroGroup, mockMacroChain, mockMacroBranch, mockControlFlow],
+export const mockProgramNode: ProgramNode = {
+  type: 'Program',
+  body: [mockSimpleMacro],
 };

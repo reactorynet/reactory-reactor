@@ -1,4 +1,5 @@
 import { CSTNode } from "../../../types/compiler/cst";
+import { ASTNode, ProgramNode } from '../../../types/compiler/ast';
 import { MacroTokenType, Token } from "../../../types/compiler/lexer";
 
 
@@ -303,6 +304,13 @@ export const createCST = (tokens: Token[]): CSTNode => {
   return cst;
 }
 
+export const createAST = (cst: CSTNode): ProgramNode => { 
+  const ast: ProgramNode = {
+    type: 'Program',
+    body: [],
+  }
 
+  return ast;
+}
 
 

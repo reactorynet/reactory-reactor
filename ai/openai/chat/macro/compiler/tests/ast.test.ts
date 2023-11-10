@@ -1,5 +1,5 @@
 import {
-  mockASTRoot,
+  mockProgramNode,
   mockSimpleMacro,
   mockMacroGroup,
   mockMacroChain,
@@ -7,69 +7,33 @@ import {
   mockControlFlow,  
 } from '../mocks';
 
+import { createCST, createAST } from "../parser";
+import { Token } from "@reactory/server-modules/reactor/ai/openai/types/compiler/lexer";
+import { TokenisationMap } from "../mocks/tokens";
+
+
 // Mock functions (these would be replaced with actual implementations)
 const parse = jest.fn((input: string) => {
-  return mockASTRoot;
+  return mockProgramNode;
 });
 const executeMacro = jest.fn();
 const evaluateCondition = jest.fn();
 const executeControlFlow = jest.fn();
 
-describe('Macro Execution Engine', () => {
+describe('AST', () => {
   
   beforeEach(() => {
     jest.clearAllMocks();
   });
 
-  it('should parse input into an AST', () => {
+  it('should return an AST', () => {
+    // given an input string
     const input = '@print("Hello, World!")';
-    parse(input);
-    expect(parse).toHaveBeenCalledWith(input);
-    expect(parse).toReturnWith(mockASTRoot);
+    // when we parse the input
+    const cst = createCST(TokenisationMap[input]);
+
+    const ast = createAST(cst);    
+    // and we expect the parse function to return the AST root
+    expect(ast.type).toEqual('Program');
   });
-
-  // it('should execute a simple macro', async () => {
-  //   await executeMacro(mockSimpleMacro);
-  //   expect(executeMacro).toHaveBeenCalledWith(mockSimpleMacro);
-  //   // Assuming executeMacro returns a promise
-  //   expect(executeMacro).resolves.toEqual('Execution of print completed');
-  // });
-
-  // it('should execute all macros in a macro group sequentially', async () => {
-  //   await executeMacro(mockMacroGroup);
-  //   expect(executeMacro).toHaveBeenCalledWith(mockMacroGroup.macros[0]);
-  //   expect(executeMacro).toHaveBeenCalledWith(mockMacroGroup.macros[1]);
-  //   // Verify that macros are executed in order
-  //   expect(executeMacro.mock.invocationCallOrder[0])
-  //     .toBeLessThan(executeMacro.mock.invocationCallOrder[1]);
-  // });
-
-  // it('should chain two macros and pass the output of the first as the input to the second', async () => {
-  //   await executeMacro(mockMacroChain);
-  //   expect(executeMacro).toHaveBeenCalledWith(mockMacroChain.source);
-  //   // Check that the output of the first macro is passed to the second
-  //   // Here you would simulate the output of the first macro
-  //   expect(executeMacro).toHaveBeenCalledWith(expect.objectContaining({
-  //     params: expect.arrayContaining(['output of first macro'])
-  //   }));
-  // });
-
-  // it('should execute the correct branch based on a condition', async () => {
-  //   evaluateCondition.mockReturnValueOnce(true); // Simulate the condition being true
-  //   await executeMacro(mockMacroBranch);
-  //   expect(evaluateCondition).toHaveBeenCalledWith(mockMacroBranch.condition);
-  //   expect(executeMacro).toHaveBeenCalledWith(mockMacroBranch.successPath);
-
-  //   evaluateCondition.mockReturnValueOnce(false); // Simulate the condition being false
-  //   await executeMacro(mockMacroBranch);
-  //   expect(executeMacro).toHaveBeenCalledWith(mockMacroBranch.failurePath);
-  // });
-
-  // it('should handle control flow correctly', async () => {
-  //   await executeControlFlow(mockControlFlow);
-  //   expect(evaluateCondition).toHaveBeenCalledWith(mockControlFlow.condition);
-  //   expect(executeControlFlow).toHaveBeenCalledWith(mockControlFlow);
-  // });
-
-  // ... additional tests
 });
