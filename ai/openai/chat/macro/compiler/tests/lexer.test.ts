@@ -1,5 +1,5 @@
 import tokenize from "../lexer";
-import { Token, MacroTokenType } from "../../../../types/compiler/lexer";
+import { Token, TokenType } from "../../../../types/compiler/lexer";
 import { TokenisationMap } from "../mocks/tokens";
 describe('Lexer', () => { 
   beforeEach(() => { 
@@ -41,6 +41,17 @@ describe('Lexer', () => {
   it('should tokenize an executable string', () => {
     const input = '@print(`Hello, @var($name)`)';
     const tokens = tokenize(input, { ignoreWhitespace: false, ignoreNewLines: false });    
+    expect(tokens).toEqual(TokenisationMap[input]);
+  });
+
+  // a test that check if the lexer can parse a multi line macro
+  it('should tokenize a multi line macro', () => {
+    const input = `
+    if ($name == "John") {
+      @print("Hello, John!")
+    }
+    `;
+    const tokens = tokenize(input, { ignoreWhitespace: false, ignoreNewLines: false });
     expect(tokens).toEqual(TokenisationMap[input]);
   });
 });

@@ -1,5 +1,4 @@
-@var(var1, "Hello World");
-$var2 = @var(var1);
-console.log(var2);
-// should print:
-// >Hello World
+const message = "Hello";
+@ask("What is your name?")-->@var("name", $out)-->@print(`$message $out`);
+const hobbies = @ask("What are your hobbies?");
+@llm(`Suggest some places $name could visit based on their $hobbies`)

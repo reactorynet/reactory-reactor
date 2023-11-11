@@ -5,7 +5,7 @@ import {
   mockMacroChain,
   mockMacroBranch,
   mockControlFlow,  
-} from '../mocks';
+} from '../mocks/ast';
 
 import { createCST, createAST } from "../parser";
 import { Token } from "@reactory/server-modules/reactor/ai/openai/types/compiler/lexer";
@@ -26,14 +26,12 @@ describe('AST', () => {
     jest.clearAllMocks();
   });
 
-  it('should return an AST', () => {
-    // given an input string
-    const input = '@print("Hello, World!")';
+  it('should return a valid AST', () => {        
     // when we parse the input
-    const cst = createCST(TokenisationMap[input]);
-
+    const cst = createCST(TokenisationMap['@print("Hello, World!")']);
     const ast = createAST(cst);    
     // and we expect the parse function to return the AST root
     expect(ast.type).toEqual('Program');
+    expect(ast.body).toEqual([mockSimpleMacro]);
   });
 });

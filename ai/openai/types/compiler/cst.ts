@@ -7,6 +7,9 @@ export type CSTNodeType =
   | 'MacroArgument'
   | 'StringInterpolation'
   | 'StringLiteral'
+  | 'HexadecimalLiteral'
+  | 'NumberLiteral'
+  | 'BooleanLiteral'
   | 'Grouping'
   | 'Chaining'
   | 'Branching'
@@ -18,6 +21,7 @@ export type CSTNodeType =
   | 'Literal'
   | 'Identifier'
   | 'Operator'
+  | 'ComparisonOperator'
   | 'Punctuation'
   | 'VariableIdentifier'
   | 'Whitespace'
@@ -89,6 +93,26 @@ export interface CSTLiteralNode extends CSTNode {
   // Value is a string representation of the literal (e.g., "5", "'hello world'", "true")
 }
 
+export interface CSTStringLiteralNode extends CSTNode {
+  type: 'StringLiteral';
+  // Value is the string literal (e.g., "hello world")
+}
+
+export interface CSTNumberLiteralNode extends CSTNode {
+  type: 'NumberLiteral';
+  // Value is the numeric literal (e.g., 5, 3.14)
+}
+
+export interface CSTBooleanLiteralNode extends CSTNode {
+  type: 'BooleanLiteral';
+  // Value is the boolean literal (e.g., true, false)
+}
+
+export interface CSTHexadecimalLiteralNode extends CSTNode {
+  type: 'HexadecimalLiteral';
+  // Value is the hexadecimal literal (e.g., 0x1234)
+}
+
 export interface CSTIdentifierNode extends CSTNode {
   type: 'Identifier';
   // Value is the name of the identifier
@@ -97,6 +121,12 @@ export interface CSTIdentifierNode extends CSTNode {
 export interface CSTOperatorNode extends CSTNode {
   type: 'Operator';
   // Value is the operator symbol (e.g., '+', '&&', '==')
+}
+
+export interface CSTComparisonOperationNode extends CSTNode {
+  type: 'ComparisonOperator';
+  // Values is the comparison symbol (e.g., '>', '<=', '>=', '<>', '===', '==')
+  
 }
 
 export interface CSTPunctuationNode extends CSTNode {
@@ -111,6 +141,5 @@ export interface CSTWhitespaceNode extends CSTNode {
 
 // The root type for the CST
 export interface CSTProgramNode extends CSTNode {
-  type: 'Program';
-  body: CSTNode[];
+  type: 'Program';  
 }

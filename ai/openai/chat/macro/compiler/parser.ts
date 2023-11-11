@@ -1,12 +1,14 @@
 import { CSTNode } from "../../../types/compiler/cst";
-import { ASTNode, ProgramNode } from '../../../types/compiler/ast';
-import { MacroTokenType, Token } from "../../../types/compiler/lexer";
+import { ASTNode, ExpressionNode, MacroInvocationNode, ProgramNode, StringLiteralNode } from '../../../types/compiler/ast';
+import { TokenType, Token } from "../../../types/compiler/lexer";
+import { StringLiteral } from "typescript";
 
 
 export const createCST = (tokens: Token[]): CSTNode => {
   let current = 0;
 
   const nextToken = (): Token => tokens[current++];
+  const currentToken = (): Token => tokens[current];
   const peekToken = (): Token => tokens[current + 1];
 
   const parseStringInterpolation = (currentArgumentToken: Token): CSTNode => {
@@ -88,12 +90,35 @@ export const createCST = (tokens: Token[]): CSTNode => {
     return macroTagNode;
   }
 
-  const parseGrouping = (): CSTNode => { 
+  const parseGrouping = (openingType: TokenType): CSTNode => { 
     const node: CSTNode = {
       type: 'Grouping',
       children: [],
     };
-    const token = nextToken();
+    let token = nextToken();
+    let closingType: TokenType;
+
+    switch(openingType) { 
+      case "PAREN_OPEN": {
+        closingType = "PAREN_CLOSE";
+        break;
+      }
+      case "BRACKET_OPEN": {
+        closingType = "BRACKET_CLOSE";
+        break;
+      }
+      case "CURLY_OPEN": {
+        closingType = "CURLY_CLOSE";
+        break;
+      }
+    }
+
+    while(token.type !== closingType) { 
+      const childNode = parseToken(token);
+      node.children.push(childNode);
+      token = nextToken();
+    }
+
     node.value = token.value;
     return node;
   }
@@ -134,6 +159,57 @@ export const createCST = (tokens: Token[]): CSTNode => {
       children: [],
     };
     const token = nextToken();
+
+    // if control has to have a condition
+    // brackets are optional
+    // so our next token should be either a bracket, identifier, literal, or variable
+    // if it's a bracket, we parse a grouping
+    // if it's an identifier, literal, or variable, we parse a comparison
+    // otherwise throw an error
+    switch(token.type) {
+      case "STRING_LITERAL": {
+        node.type = "StringLiteral";
+        node.value = token.value;
+        break;
+      }
+      case "NUMBER_LITERAL": {
+        node.type = "NumberLiteral";
+        node.value = token.value;
+        break;
+      }
+      case "BOOLEAN_LITERAL": { 
+        node.type = "BooleanLiteral";
+        node.value = token.value;
+        break;
+      }
+      case "VARIABLE": {
+        node.type = "VariableIdentifier";
+        node.value = token.value;
+        break;
+      }
+      case "MACRO_START": {
+        node.type = "MacroInvocation";
+        node.value = token.value;
+        node.children.push(parseMacroInvocation(token));
+        break;
+      }
+      case "PAREN_OPEN":  {
+        node.type = "Grouping";
+        node.value = token.value;
+        node.children.push(parseGrouping(token.type));
+        break;
+      }
+      case "BRACKET_OPEN":  {
+        node.type = "Grouping";
+        node.value = token.value;
+        node.children.push(parseGrouping(token.type));
+        break;
+      }
+      default: {
+        throw new Error(`Unexpected token type: ${token.type}, STRING_LITERAL, NUMBER_LITERAL, BOOLEAN_LITERAL, VARIABLE, MACRO_START, PAREN_OPEN, or BRACKET_OPEN expected`);
+      }
+    }
+
     node.value = token.value;
     return node;
   }
@@ -183,7 +259,48 @@ export const createCST = (tokens: Token[]): CSTNode => {
       type: 'Identifier',
       children: [],
     };
+
     const token = nextToken();
+    switch(token.type) {
+      case "STRING_LITERAL": {
+        node.type = "StringLiteral";
+        node.value = token.value;
+        break;
+      }
+      case "NUMBER_LITERAL": {
+        node.type = "NumberLiteral";
+        node.value = token.value;
+        break;
+      }
+      case "BOOLEAN_LITERAL": { 
+        node.type = "BooleanLiteral";
+        node.value = token.value;
+        break;
+      }
+      case "VARIABLE": {
+        node.type = "VariableIdentifier";
+        node.value = token.value;
+        break;
+      }
+      case "MACRO_START": {
+        node.type = "MacroInvocation";
+        node.value = token.value;
+        node.children.push(parseMacroInvocation(token));
+        break;
+      }
+      case "PAREN_OPEN":
+      case "CURLY_OPEN":
+      case "BRACKET_OPEN":  {
+        node.type = "Grouping";
+        node.value = token.value;
+        node.children.push(parseGrouping(token.type));
+        break;
+      }
+      default: {
+        throw new Error(`Unexpected token type: ${token.type}, STRING_LITERAL, NUMBER_LITERAL, BOOLEAN_LITERAL, VARIABLE, MACRO_START, PAREN_OPEN, or BRACKET_OPEN expected`);
+      }
+    }
+
     node.value = token.value;
     return node;
   }
@@ -228,6 +345,26 @@ export const createCST = (tokens: Token[]): CSTNode => {
     return node;
   }
 
+  const parseVariableIdentifier = (): CSTNode => {
+    const node: CSTNode = {
+      type: 'VariableIdentifier',
+      children: [],
+    };
+    const token = nextToken();
+    node.value = token.value;
+    return node;
+  }
+
+  const parseComparisonOperator = (): CSTNode => {
+    const node: CSTNode = {
+      type: 'ComparisonOperator',
+      children: [],
+    };
+    const token = nextToken();
+    node.value = token.value;
+    return node;
+  }
+
   const parseEOF = (): CSTNode => {     
     return null;
   }
@@ -240,23 +377,17 @@ export const createCST = (tokens: Token[]): CSTNode => {
         return parseMacroInvocation(token);
       case "PAREN_OPEN":
       case "BRACKET_OPEN":
-        return parseGrouping();
       case "PAREN_CLOSE":
       case "BRACKET_CLOSE":
-        return parseGrouping();
       case "CURLY_OPEN":
       case "CURLY_CLOSE":
-        return parseNesting();
+        return parseGrouping(token.type);
       case "ARROW_CHAIN":
         return parseChaining();      
-      case "GROUPING" :
-        return parseGrouping();
-      case "CHAINING":
-        return parseChaining();
-      case "BRANCHING":
+      case "COMPARISON_OPERATOR":
+        return parseComparisonOperator();
+      case "ARROW_BRANCH":
         return parseBranching();
-      case "NESTING":
-        return parseNesting();
       case "IF_CONTROL":
         return parseIfControl();
       case "SWITCH_CONTROL":
@@ -265,14 +396,17 @@ export const createCST = (tokens: Token[]): CSTNode => {
         return parseTryCatch();
       case "WHILE_LOOP":
         return parseWhileLoop();
+      case "STRING_LITERAL":
+      case "BOOLEAN_LITERAL":
+      case "HEXADECIMAL_LITERAL":
       case "LITERAL":
         return parseLiteral();
-      case "IDENTIFIER":
-        return parseIdentifier();
       case "OPERATOR":
         return parseOperator();
       case "PUNCTUATION":
         return parsePunctuation();
+      case "VARIABLE":
+        return parseVariableIdentifier();
       case "WHITESPACE":
         return parseWhitespace();
       case "COMMENT":
@@ -305,12 +439,127 @@ export const createCST = (tokens: Token[]): CSTNode => {
 }
 
 export const createAST = (cst: CSTNode): ProgramNode => { 
-  const ast: ProgramNode = {
-    type: 'Program',
-    body: [],
+
+  const parseProgram = (node: CSTNode): ProgramNode => { 
+    const programNode: ProgramNode = {
+      type: 'Program',
+      body: [],
+    };
+    node.children.forEach(child => {
+      const astNode = parseNode(child);
+      programNode.body.push(astNode);
+    });
+
+    return programNode;
   }
 
-  return ast;
-}
+  const parseMacroInvocation = (node: CSTNode): ASTNode => { 
+    const macroInvocationNode: MacroInvocationNode = {
+      type: 'MacroInvocation',
+      name: null,
+      arguments: [],
+    };
+    
+    if(node.children.length < 1) throw new Error(`Macro name expected, none found in ${node.value}`);
 
+    //first child is the macro name
+    const macroNameNode = node.children[0];
+    if(macroNameNode.type !== "MacroName") throw new Error(`Macro name expected, none found in ${macroNameNode.value}`);
 
+    macroInvocationNode.name = macroNameNode.value;
+    if(node.children.length > 1) {
+      // add arguments if any
+      for(let i = 1; i < node.children.length; i++) {
+        const argumentNode = node.children[i];
+        if(argumentNode.type !== "MacroArguments") throw new Error(`Macro arguments expected, none found in ${argumentNode.value}`);
+        argumentNode.children.forEach(argument => {
+          const astNode = parseNode(argument) as ExpressionNode;
+          const validArgumentNodeTypes = [
+            'StringLiteral',
+            'StringInterpolation',
+            'NumberLiteral',
+            'BooleanLiteral',
+            'Variable',
+            'BinaryExpression',
+            'UnaryExpression',
+            'ConditionalExpression',
+            'MacroInvocation',
+            'MacroChain',
+            'MacroBranch',
+          ];
+          if(!validArgumentNodeTypes.includes(astNode.type)) throw new Error(`Unexpected argument type: ${astNode.type}`);
+          macroInvocationNode.arguments.push(astNode);
+        });
+      }
+    }
+
+    return macroInvocationNode;
+  };
+
+  const parseStringLiteral = (node: CSTNode): StringLiteralNode => {
+    const stringLiteralNode: StringLiteralNode = {
+      type: 'StringLiteral',
+      value: node.value,
+    };
+
+    return stringLiteralNode;
+  }
+ 
+
+  const parseNode = (node: CSTNode): ASTNode => { 
+    switch (node.type.toString()) {
+      case "Program":
+        return parseProgram(node);
+      case "MacroInvocation":
+        return parseMacroInvocation(node);
+      // case "MacroArguments":
+      //   return parseMacroArguments(node);
+      // case "MacroArgument":
+      //   return parseMacroArgument(node);
+      // case "StringInterpolation":
+      //   return parseStringInterpolation(node);
+      case "StringLiteral":
+        return parseStringLiteral(node);
+      // case "Grouping":
+      //   return parseGrouping(node);
+      // case "Chaining":
+      //   return parseChaining(node);
+      // case "Branching":
+      //   return parseBranching(node);
+      // case "Nesting":
+      //   return parseNesting(node);
+      // case "IfControl":
+      //   return parseIfControl(node);
+      // case "SwitchControl":
+      //   return parseSwitchControl(node);
+      // case "TryCatch":
+      //   return parseTryCatch(node);
+      // case "WhileLoop":
+      //   return parseWhileLoop(node);
+      // case "Literal":
+      //   return parseLiteral(node);
+      // case "Identifier":
+      //   return parseIdentifier(node);
+      // case "Operator":
+      //   return parseOperator(node);
+      // case "Punctuation":
+      //   return parsePunctuation(node);
+      // case "VariableIdentifier":
+      //   return parseVariableIdentifier(node);
+      // case "Whitespace":
+      //   return parseWhitespace(node);
+      // case "Comment":
+      //   return parseComment(node);
+      // case "Newline":
+      //   return parseNewline(node);
+      // case "EOF":
+      //   return parseEOF(node);
+      default:
+        throw new Error(`Unexpected token type: ${node.type}`);
+    }
+  }
+  
+  const node = parseNode(cst);
+  if(node.type !== "Program") throw new Error(`Unexpected node type: ${node.type}`);
+  return node as ProgramNode;
+};

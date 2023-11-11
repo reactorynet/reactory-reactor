@@ -17,7 +17,7 @@ export const mockNumberLiteral: NumberLiteralNode = {
 
 export const mockStringLiteral: StringLiteralNode = {
   type: 'StringLiteral',
-  value: 'Hello, World!',
+  value: "\"Hello, World!\"",
 };
 
 // Mock for Variable

@@ -1,5 +1,5 @@
 // Token types specific to the macro language
-export type MacroTokenType =
+export type TokenType =
   | 'IDENTIFIER'          // Matches macro names and variable names
   | 'MACRO_START'         // Matches '@' which denotes the start of a macro
   | 'PAREN_OPEN'          // Matches '('
@@ -14,11 +14,14 @@ export type MacroTokenType =
   | 'ARROW_BRANCH'        // Matches '-=>'
   | 'VARIABLE'            // Matches '$' followed by a variable name
   | 'STRING_LITERAL'      // Matches string literals, e.g., "hello"
+  | 'HEXADECIMAL_LITERAL' // Matches hexadecimal literals, e.g., '0x1234
+  | 'BOOLEAN_LITERAL'     // Matches boolean literals, e.g., 'true', 'false'
   | 'EXECUTABLE_STRING_LITERAL' // Matches executable string literals, e.g., `hello ${name} or @print("hello")`
   | 'NUMBER_LITERAL'      // Matches numeric literals, e.g., 123, 45.67
   | 'LOGICAL_OPERATOR'    // Matches logical operators like '&&', '||'
   | 'COMPARISON_OPERATOR' // Matches comparison operators like '==', '!=', '<', '>'
   | 'ASSIGNMENT'          // Matches '='
+  | 'EQUALS'              // Matches '==' or '==='
   | 'IF'                  // Matches 'if'
   | 'ELSE'                // Matches 'else'
   | 'ELIF'                // Matches 'elif'
@@ -42,6 +45,9 @@ export type MacroTokenType =
   | 'THROW'               // Matches 'throw'
   | 'LOOP_WHILE'          // Matches 'while'
   | 'LOOP_FOR'            // Matches 'for'
+  | 'CONST'               // Matches 'const'
+  | 'LET'                 // Matches 'let'
+  | 'VAR'                 // Matches 'var'
   | 'ERROR'               // Used to indicate lexical errors
   | 'KEYWORD'            
   | 'WHITESPACE'          // Matches whitespace
@@ -51,7 +57,7 @@ export type MacroTokenType =
 
 // Token type definition
 export interface Token {
-  type: MacroTokenType;
+  type: TokenType;
   value: string;
   position: {
     line: number;

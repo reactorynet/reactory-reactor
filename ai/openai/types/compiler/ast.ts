@@ -6,6 +6,7 @@ export type ASTNodeType =
   | 'MacroGroup'            // Represents a group of macro invocations
   | 'Expression'            // General type for expressions (could be literals, identifiers, operations)
   | 'StringLiteral'         // Represents a string literal, including interpolated parts
+  | 'StringInterpolation'   // Represents an interpolated part of a string literal  
   | 'NumberLiteral'         // Represents a numeric literal
   | 'BooleanLiteral'        // Represents a boolean literal
   | 'Variable'              // Represents a variable identifier
@@ -27,12 +28,16 @@ export type ASTNodeType =
 
   export type ExpressionNodeType =
   | 'StringLiteral'
+  | 'StringInterpolation'
   | 'NumberLiteral'
   | 'BooleanLiteral'
   | 'Variable'
   | 'BinaryExpression'
   | 'UnaryExpression'
   | 'ConditionalExpression'
+  | 'MacroInvocation'
+  | 'MacroChain'
+  | 'MacroBranch'
 
 // AST Node interfaces
 export interface ASTNode {

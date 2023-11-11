@@ -1,4 +1,4 @@
-import { Token, Tokenizer, MacroTokenType, TokenizerOptions } from '../../../types/compiler/lexer';
+import { Token, Tokenizer, TokenType, TokenizerOptions } from '../../../types/compiler/lexer';
 
 // Default options for the tokenizer
 const DEFAULT_OPTIONS: TokenizerOptions = {
@@ -15,7 +15,7 @@ const tokenize: Tokenizer = (input: string, options: TokenizerOptions = DEFAULT_
   const { ignoreWhitespace, ignoreComments, ignoreNewLines } = options;
 
   // Regular expressions for the different tokens, ensure to include all necessary patterns
-  const tokenPatterns: [RegExp, MacroTokenType][] = [
+  const tokenPatterns: [RegExp, TokenType][] = [
     [/^\s+/, 'WHITESPACE'], // Ignore whitespace
     [/^@/, 'MACRO_START'],
     [/^\(/, 'PAREN_OPEN'],
@@ -32,8 +32,11 @@ const tokenize: Tokenizer = (input: string, options: TokenizerOptions = DEFAULT_
     [/^"[^"\\]*(\\.[^"\\]*)*"/, 'STRING_LITERAL'], // String literals with escape characters
     [/^\d+(\.\d+)?/, 'NUMBER_LITERAL'],
     [/^(?:&&|\|\|)/, 'LOGICAL_OPERATOR'],
-    [/^(?:==|!=|<=|>=|<|>)/, 'COMPARISON_OPERATOR'],
+    [/^(?:==|===|!=|<=|>=|<|>|<==>]|>==<|>==\||\|==<)/, 'COMPARISON_OPERATOR'],
     [/^=/, 'ASSIGNMENT'],
+    [/^const\b/, 'CONST'],
+    [/^let\b/, 'LET'],
+    [/^var\b/, 'VAR'],
     [/^if\b/, 'IF'],
     [/^else\b/, 'ELSE'],
     [/^elif\b/, 'ELIF'],
