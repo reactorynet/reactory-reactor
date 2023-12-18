@@ -1,3 +1,5 @@
+import { ChatCompletionResponseMessage } from "openai"
+import { TReactorConversationModel } from "../models/ReactorChatState"
 
 export type OpenAIModel = {
   id: string
@@ -162,9 +164,20 @@ export interface ImageExtensionParams extends ImageGenerationParams, ImageVarian
   mask?: string
 }
 
+export interface ChatParams { 
+  botId: string
+  question: string
+  chatSessionId: string
+}
+
+export interface AudioChatParams extends ChatParams {
+  audio: string | Buffer[]
+  format: "mp3" | "wav" | "ogg"
+}
+
 /**
  * The OpenAI API service interface defines the methods that are available for
- * the OpenAI API service. These are based on the OpenAI API endpoints that are
+ * OpenAI API. These are based on the OpenAI API endpoints that are
  * documented here: https://platform.openai.com/docs/api-reference/introduction
  * @name IOpenAPIService
  */
@@ -196,6 +209,124 @@ interface IOpenAIService extends Reactory.Service.IReactoryService {
   extendImage(params: ImageExtensionParams): Promise<OpenAIListResponse<OpenAIImage>>;
 
   listModels(): Promise<OpenAIListResponse<OpenAIModel>>;
+
+  chat(params: ChatParams) : Promise<ChatCompletionResponseMessage>;
+
+  chatAudio(params: AudioChatParams) : Promise<ChatCompletionResponseMessage>;
+
+  speech2Text(audio: string | Buffer[]): Promise<string>;
+}
+
+
+/**
+ * Defines the object shape of the AI Appearance
+ */
+export interface IAIAppearance {
+    voice?: string[];    
+    face?: string[];
+    hair?: string[];
+    body?: string[];
+    clothes?: string[];
+    accessories?: string[];
+    metrics?: {
+      height?: number;
+      weight?: number;
+      age?: number;
+    };
+    skin?: {
+      color: string;
+      tone: string;
+    };
+    background?: [{
+      src: string;
+      type: "image" | "video" | "audio";
+      order: number;
+      options?: {
+        image?: {
+          alpha?: number;
+          brightness?: number;
+          contrast?: number;
+          blur?: number;
+          grayscale?: number;
+          hueRotate?: number;
+          invert?: number;
+          opacity?: number;
+          saturate?: number;
+          sepia?: number;
+          chromaKey?: string;
+        };
+        time: {
+          loop?: boolean;
+          loopStart?: number;
+          loopEnd?: number;
+        }
+        audio?: {
+          volume?: number;  
+          mute?: boolean;
+          autoplay?: boolean;
+        }
+        controls?: boolean;
+      }
+    }];
+}
+
+/**
+ * Defines the shape fo the AI Persona object
+ */
+export interface IAIPersona {
+  id: string;
+  modelId?: string;
+  name: string;
+  description?: string;
+  persona: string;
+  features: string;
+  appearance?: IAIAppearance;
+}
+
+/**
+ * The AI Persona Provider service interface defines the methods that are available for
+ * AI Persona configuration and management.
+ */
+export interface IAIPersonaProviderService { 
+  
+    /**
+    * Returns a list of all the personas that are available for the user.
+    * @returns {Promise<Persona[]>} A promise that resolves to a list of personas.
+    */
+    listPersonas(): Promise<IAIPersona[]>;
+  
+    /**
+    * Returns a list of all the personas that are available for the user.
+    * @returns {Promise<Persona[]>} A promise that resolves to a list of personas.
+    */
+    getPersona(id: string): Promise<IAIPersona>;
+  
+    /**
+    * Creates a new persona for the user.
+    * @param {CreatePersonaParams} params The parameters for creating the persona.
+    * @returns {Promise<Persona>} A promise that resolves to the created persona.
+    */
+    createPersona(params: IAIPersona): Promise<IAIPersona>;
+  
+    /**
+    * Updates an existing persona for the user.
+    * @param {UpdatePersonaParams} params The parameters for updating the persona.
+    * @returns {Promise<Persona>} A promise that resolves to the updated persona.
+    */
+    updatePersona(params: IAIPersona): Promise<IAIPersona>;
+  
+    /**
+    * Deletes an existing persona for the user.
+    * @param {string} id The id of the persona to delete.
+    * @returns {Promise<Persona>} A promise that resolves to the deleted persona.
+    */
+    deletePersona(id: string): Promise<IAIPersona>;
+}
+
+export interface IReactorConversationsService extends Reactory.Service.IReactoryService{ 
+  executeMacro(args: { macro: string, botId: string, chatSessionId: string }): Promise<TReactorConversationModel>;
+  attachImage(args: { image: string, botId: string, chatSessionId: string }): Promise<TReactorConversationModel>;
+  deleteChatSession(args: { id: string }): Promise<TReactorConversationModel>; 
 }
 
 export default IOpenAIService;

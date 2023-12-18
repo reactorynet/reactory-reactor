@@ -235,8 +235,7 @@ export async function handleUserResponse(userResponse: string, state: ChatState)
  */
 export async function makeSelectionFromChoices(choices: CreateCompletionResponseChoicesInner[], state: ChatState): Promise<number> {
   const { rl } = state;
-  let choice_index = 0;
-  const summary = `I have ${choices.length} results :\n`;
+  let choice_index = 0;  
   choices.forEach((choice) => {
     choice_index++;            
     const text = choice.text;
@@ -301,13 +300,11 @@ export async function handleChatCompletionResponse(
   // macro regex is used to identify a macro snippet
   const macroRegex = /@(\w+)\((.*?)\)/g;
   
-  if (macroBlockMatch.length > 0) { 
+  if (macroBlockMatch?.length > 0) { 
     // check each matched block for macros
-
     // we need to execute the the loop for each block in 
     // an async manner so we can prompt the user for each block
     // if they want to execute the macros in the block
-
     for (let i = 0; i < macroBlockMatch.length; i++) {
       const block = macroBlockMatch[i];
       const blockIdRegex = /```rfm #(\w+)/g;
@@ -347,8 +344,8 @@ export async function handleChatCompletionResponse(
     const splitParams = params[0].split(',');
 
     if (macros[macro]) {
-      const replacement = await macros[macro]([...splitParams, message.content], state) as string;
-      message.content = message.content.replace(`@${macro}(${params[0]})`, replacement);
+      const replacement = await macros[macro]([...splitParams, message], state) as string;
+      cloned.choices[choice_index].text = message.replace(`@${macro}(${params[0]})`, replacement);
     } else {
       console.warn(`No function found for macro @${macro}`);
     }

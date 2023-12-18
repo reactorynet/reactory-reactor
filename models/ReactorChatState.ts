@@ -18,8 +18,13 @@ export interface ReactorConversationDocument {
   user: Reactory.Models.IUser
   meta: Reactory.Models.IRecordMeta<ConversationMeta>,
   history: ChatCompletionResponseMessage[]
+  vars: any
   created: Date
   updated: Date
+}
+
+export interface ChatCompletionResponseMessageStore extends ChatCompletionResponseMessage {
+  rating?: number
 }
 
 export interface ReactorConversationDocumentStatics {
@@ -50,10 +55,12 @@ const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<Reacto
   },
   meta: MetaSchema,
   history: [{
+    timestamp: Date,
     role: String,
     content: String,
     rating: Number
   }],
+  vars: {},
   created: {
     type: Date,
     default: () => { return new Date() }
@@ -64,6 +71,79 @@ const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<Reacto
   },
 });
 
-const ReactorConversationModel = mongoose.model<ReactorConversation>('ReactorConversation', ReactorConversationSchema);
+const ReactorConversationModelName = 'ReactorConversation';
+const ReactorConversationModel = mongoose.model<ReactorConversation>(ReactorConversationModelName, ReactorConversationSchema);
+export type TReactorConversationModel = typeof ReactorConversationModel;
+export const ReactorConversationModelComponentRegistryEntry: Reactory.IReactoryComponentDefinition<typeof ReactorConversationModel> = { 
+  name: 'ReactorConversationModel',
+  nameSpace: 'reactor',
+  description: 'Reactor Conversation Model',
+  version: '1.0.0',
+  features: [
+    {
+      feature: 'id',
+      description: 'Reactor Conversation Id',
+      featureType: Reactory.FeatureType.string,
+      action: ['get'],
+      stem: 'id',
+    },
+    {
+      feature: 'botId',
+      description: 'Reactor Conversation Bot Id',
+      featureType: Reactory.FeatureType.string,
+      action: ['get'],
+      stem: 'botId',
+    },
+    {
+      feature: 'started',
+      description: 'Reactor Conversation Start Date',
+      featureType: Reactory.FeatureType.date,
+      action: ['get'],
+      stem: 'started',
+    },
+    {
+      feature: 'modelId',
+      description: 'Reactor Conversation Model Id',
+      featureType: Reactory.FeatureType.string,
+      action: ['get'],
+      stem: 'modelId',
+    },
+    {
+      feature: 'user',
+      description: 'Reactor Conversation User',
+      featureType: Reactory.FeatureType.object,
+      action: ['get'],
+      stem: 'user',
+    },
+    {
+      feature: 'meta',
+      description: 'Reactor Conversation Meta',
+      featureType: Reactory.FeatureType.object,
+      action: ['get'],
+      stem: 'meta',
+    },
+    {
+      feature: 'history',
+      description: 'Reactor Conversation History',
+      featureType: Reactory.FeatureType.object,
+      action: ['get'],
+      stem: 'history',
+    },
+    {
+      feature: 'created',
+      description: 'Reactor Conversation Created Date',
+      featureType: Reactory.FeatureType.date,
+      action: ['get'],
+      stem: 'created',
+    },
+    {
+      feature: 'updated',
+      description: 'Reactor Conversation Updated Date',
+      featureType: Reactory.FeatureType.date,
+      action: ['get'],
+      stem: 'updated',
+    },
+  ]
+}
 
 export default ReactorConversationModel;

@@ -8,13 +8,16 @@ import logger from "@reactory/server-core/logging";
 import { Writable } from "stream";
 import database from "database";
 import ApiError from "@reactory/server-core/exceptions";
-import IOpenAIService, { CreateFineTuningJobParams, FineTuningEvent, FineTuningObjectJob, ImageExtensionParams, ImageGenerationParams, ListFineTuningJobParams, OpenAIFile, OpenAIImage, OpenAIListResponse, OpenAIModel } from "../types/service.types";
+import IOpenAIService, { ChatParams, CreateFineTuningJobParams, FineTuningEvent, FineTuningObjectJob, ImageExtensionParams, ImageGenerationParams, ListFineTuningJobParams, OpenAIFile, OpenAIImage, OpenAIListResponse, OpenAIModel } from "../types/service.types";
+import { ChatCompletionResponseMessage, OpenAIApi } from "openai";
+import * as Chat from "@reactory/server-modules/reactor/ai/openai/chat/questions/factory";
+import { ChatState } from "bin/utils/chatgpt/chat.types";
 
 @service({
   id: "reactor.OpenAIService@1.0.0",
   name: "OpenAI Service",
   description: "Service for managing OpenAI API requests",
-  serviceType: "ai",
+  serviceType:  "ai",
   dependencies: [
     { id: "core.ReactoryFileService@1.0.0", alias: "fileService" },
     { id: "core.UserService@1.0.0", alias: "userService" },
@@ -25,6 +28,7 @@ class OpenAIService implements IOpenAIService {
   
   context: Reactory.Server.IReactoryContext;
   props: Reactory.Service.IReactoryServiceProps;
+  ai: OpenAIApi;
 
   constructor(props: Reactory.Service.IReactoryServiceProps, 
     context: Reactory.Server.IReactoryContext) {
@@ -70,6 +74,18 @@ class OpenAIService implements IOpenAIService {
   }
   listModels(): Promise<OpenAIListResponse<OpenAIModel>> {
     throw new Error("Method not implemented.");
+  }
+
+  chat(params: ChatParams): Promise<ChatState> {
+    const { botId, chatSessionId, question } = params;
+
+    if(chatSessionId && question) { 
+      return Chat.askQuestion(chatSessionId, question, this.context);
+    }
+
+    if(botId && question) { 
+      return Chat.newChatSession(botId, question, this.context);
+    }
   }
 
 

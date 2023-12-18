@@ -495,6 +495,62 @@ export const InsertSnippet: Macro<string> = async (
   }
 };
 
+export const MakeDirectory: Macro<string> = async (
+  paths: string[],
+  state: ChatState
+) => {    
+  let response = '';
+  for(const path of paths) {
+
+    try {
+      await fs.mkdir(path.trim(), { recursive: true });
+      response += `✅ ${path}\n`;
+    } catch (err) {
+      response += `❗ ${path}\n`;
+    }
+  }
+  return response;  
+}
+
+export const MakeDirectoryComponentRegister: Reactory.IReactoryComponentDefinition<typeof MakeDirectory> = { 
+  component: MakeDirectory,
+  name: 'mkdir',
+  nameSpace: 'reactor-macros',
+  version: '1.0.0',
+  description: readFileSync(require.resolve('./mkdir.md'), 'utf-8').toString(),
+  features: [],
+  stem: 'mkdir',
+  tags: ['macro', 'file', 'create', 'make', 'dir', 'folder'],
+}
+
+export const DeleteDirectory: Macro<string> = async (
+  paths: string[],
+  state: ChatState
+) => {    
+  let response = '';
+  for(const path of paths) {
+
+    try {
+      await fs.rmdir(path.trim());
+      response += `✅ ${path}\n`;
+    } catch (err) {
+      response += `❗ ${path}\n`;
+    }
+  }
+  return response;  
+}
+
+export const DeleteDirectoryComponentRegister: Reactory.IReactoryComponentDefinition<typeof DeleteDirectory> = { 
+  component: DeleteDirectory,
+  name: 'rmdir',
+  nameSpace: 'reactor-macros',
+  version: '1.0.0',
+  description: readFileSync(require.resolve('./rmdir.md'), 'utf-8').toString(),
+  features: [],
+  stem: 'rmdir',
+  tags: ['macro', 'file', 'delete', 'remove', 'dir', 'folder'],
+}
+
 export const InsertSnippetComponentRegister: Reactory.IReactoryComponentDefinition<typeof InsertSnippet> = {
   component: InsertSnippet,
   name: 'insertText',

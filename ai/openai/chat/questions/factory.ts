@@ -1,5 +1,5 @@
 import * as fs from 'fs';
-import { ReadLine } from "readline";
+import { Interface, ReadLine } from "readline";
 import { 
   ChatCompletionRequestMessage,
   ChatCompletionResponseMessage, 
@@ -7,7 +7,7 @@ import {
   CreateChatCompletionRequest, 
   OpenAIApi 
 } from "openai";
-import { ChatState, IQuestion, RatedChatCompletionResponseMessage } from "../../types/chat";
+import { ChatState, IQuestion, RatedChatCompletionResponseMessage } from "@reactory/server-modules/reactor/ai/openai/types/chat";
 import {
   handleUserResponse,
   handleChatCompletionResponse,
@@ -16,11 +16,41 @@ import {
 } from '../macro';
 import { colors } from '../../../../helpers';
 import ReactorConversationModel from '@reactory/server-modules/reactor/models/ReactorChatState';
+import AIPersonaProvider from 'modules/reactor/services/PersonaService';
+import { template } from 'lodash';
+import { RecordNotFoundError } from 'exceptions';
 
 export const SYSTEM_INITIALIZER_MESSAGE: ChatCompletionResponseMessage = {
   role: 'system',
   content: fs.readFileSync(require.resolve('../macro/macros.md'), 'utf-8').toString(),
 };
+
+export const getInitializerMessage = async (botId: string, state: ChatState, context: Reactory.Server.IReactoryContext) => {
+  const personaService = context.getService<AIPersonaProvider>('reactor.AIPersonaProvider@1.0.0') as AIPersonaProvider;
+  const persona = await personaService.getPersona(botId);
+  const macros = state.macros.map(macro => `## ${macro.name}\n ## Usage\n${macro.description}`).join('\n');
+
+  if(persona) {
+    context.info(`Found persona for botId: ${botId}`);
+    return {
+      role: SYSTEM_INITIALIZER_MESSAGE.role,
+      content: template(SYSTEM_INITIALIZER_MESSAGE.content)({ 
+        macros, 
+        persona 
+      })
+    }
+  } else {
+    context.warn(`No persona found for botId: ${botId}`);
+    return  {
+      role: SYSTEM_INITIALIZER_MESSAGE.role,
+      content: template(SYSTEM_INITIALIZER_MESSAGE.content)({ macros, persona: { 
+          persona: "You are Reactor default AI bot. You are neutral and have no personality. Your job is to answer questions.",
+          features: "You have the following features: answering questions in general",
+        }
+      })
+    }
+  }
+}
 
 
 export const INITIAL_CHAT_STATE: ChatState = {
@@ -36,6 +66,7 @@ export const INITIAL_CHAT_STATE: ChatState = {
     organization: process.env.OPENAI_ORG,
   })),
   botId: 'Reactor',
+  persona: null,
   macros: MacroRegistry,
   vars: {},
 }
@@ -128,6 +159,112 @@ const pruneHistory = (history: ChatCompletionResponseMessage[]): ChatCompletionR
 
   // Return it to the original order
   return prunedHistory.reverse();
+}
+
+export const askQuestion = async (chatSessionId: string, question: string, context: Reactory.Server.IReactoryContext): Promise<ChatState> => {
+  //load session from database
+  const conversationModel = await ReactorConversationModel.findById(chatSessionId).exec();
+
+  if(conversationModel === null) throw new RecordNotFoundError(`Chat session with id ${chatSessionId} not found`);
+  
+  const chatState: ChatState = {
+    ai: new OpenAIApi(new Configuration({ 
+      apiKey: process.env.OPENAI_API_KEY,
+      organization: process.env.OPENAI_ORG,
+    })),
+    apiKey: process.env.OPENAI_API_KEY || '',
+    apiOrg: process.env.OPENAI_ORG || '',
+    botId: conversationModel.botId,
+    history: conversationModel.history,
+    id: conversationModel.id,
+    macros: MacroRegistry,
+    modelId: conversationModel.modelId,
+    persona: await context.getService<AIPersonaProvider>('reactor.AIPersonaProvider@1.0.0')?.getPersona(conversationModel.botId),
+    started: conversationModel.started,
+    vars: conversationModel.vars,
+    context,
+    authToken: "",
+    created: conversationModel.created,
+    updated: conversationModel.updated,
+  };
+
+  const fakeReadline: ReadLine = {
+    write: (message: string) => {
+      console.log(message);
+    },
+    question: (question: string, callback: (answer: string) => void) => {
+      callback(question);
+    },
+    terminal: false,
+    line: '',
+    cursor: 0,
+    setPrompt: function (prompt: string): void {
+      throw new Error('Function not implemented.');
+    },
+    prompt: function (preserveCursor?: boolean): void {
+      throw new Error('Function not implemented.');
+    },
+    pause: function (): Interface {
+      throw new Error('Function not implemented.');
+    },
+    resume: function (): Interface {
+      throw new Error('Function not implemented.');
+    },
+    close: function (): void {
+      throw new Error('Function not implemented.');
+    },
+    addListener: function (event: string, listener: (...args: any[]) => void): Interface {
+      throw new Error('Function not implemented.');
+    },
+    emit: function (event: string | symbol, ...args: any[]): boolean {
+      throw new Error('Function not implemented.');
+    },
+    on: function (event: string, listener: (...args: any[]) => void): Interface {
+      throw new Error('Function not implemented.');
+    },
+    once: function (event: string, listener: (...args: any[]) => void): Interface {
+      throw new Error('Function not implemented.');
+    },
+    prependListener: function (event: string, listener: (...args: any[]) => void): Interface {
+      throw new Error('Function not implemented.');
+    },
+    prependOnceListener: function (event: string, listener: (...args: any[]) => void): Interface {
+      throw new Error('Function not implemented.');
+    },
+    removeListener: function (event: string | symbol, listener: (...args: any[]) => void): Interface {
+      throw new Error('Function not implemented.');
+    },
+    off: function (event: string | symbol, listener: (...args: any[]) => void): Interface {
+      throw new Error('Function not implemented.');
+    },
+    removeAllListeners: function (event?: string | symbol): Interface {
+      throw new Error('Function not implemented.');
+    },
+    setMaxListeners: function (n: number): Interface {
+      throw new Error('Function not implemented.');
+    },
+    getMaxListeners: function (): number {
+      throw new Error('Function not implemented.');
+    },
+    listeners: function (event: string | symbol): Function[] {
+      throw new Error('Function not implemented.');
+    },
+    rawListeners: function (event: string | symbol): Function[] {
+      throw new Error('Function not implemented.');
+    },
+    listenerCount: function (type: string | symbol): number {
+      throw new Error('Function not implemented.');
+    },
+    eventNames: function (): (string | symbol)[] {
+      throw new Error('Function not implemented.');
+    }
+  }
+
+  ChatFactory(fakeReadline, chatState).handler(question, chatState);
+
+}
+
+export const newChatSession = async (botId: string, question: string, context: Reactory.Server.IReactoryContext): Promise<ChatState> => {
 }
 
 export const ChatFactory = (rl: ReadLine, state: ChatState = INITIAL_CHAT_STATE): IQuestion => {

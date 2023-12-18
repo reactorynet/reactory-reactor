@@ -1,0 +1,136 @@
+
+type ReactorChatHistory {
+  id: String
+  role: String
+  content: String
+  rating: String
+  timestamp: Date
+}
+
+type ReactorChatState {
+   id: String
+   botId: String
+   started: Date
+   user: User
+   history: [ReactorChatHistory]
+}
+
+type ReactorPersonaMetrics {
+  height: Float
+  weight: Float
+  age: Float
+}
+
+type ReactorPersonaSkin {
+  color: String
+  tone: String
+}
+
+type ReactorPersonaBackgroundImage {
+  alpha: Float
+  brightness: Float
+  contrast: Float
+  blur: Float
+  grayscale: Float
+  hueRotate: Float
+  invert: Float
+  opacity: Float
+  saturate: Float
+  sepia: Float
+  chromaKey: String
+}
+
+type ReactorPersonaBackgroundTimerOptions {
+  loop: Boolean
+  loopStart: Float
+  loopEnd: Float
+}
+
+type ReactorPersonaBackgrondAudioOptions {
+  volume: Float
+  mute: Boolean
+  autoplay: Boolean
+}
+
+type ReactorPersonaBackgroundOptions {
+  image: ReactorPersonaBackgroundImage
+  time: ReactorPersonaBackgroundTimerOptions
+  audio: ReactorPersonaBackgrondAudioOptions
+  controls: Boolean
+}
+
+type ReactorPersonaBackground {
+  src: String
+  type: String
+  order: Int
+  options: ReactorPersonaBackgroundOptions
+}
+
+type ReactorPersonaAppearance {
+  voice: [String]
+  face: [String]
+  hair: [String]
+  body: [String]
+  clothes: [String]
+  accessories: [String]
+  metrics: [ReactorPersonaMetrics]
+  skin: [ReactorPersonaSkin]
+  background: [ReactorPersonaBackground]
+}
+
+type ReactorPersona {
+  id: String
+  name: String
+  description: String
+  appearance: ReactorPersonaAppearance
+  createdAt: Date
+  updatedAt: Date
+}
+
+input ReactorConversationFilter {
+  botId: String
+  userId: String
+  modelId: String
+}
+
+extend type Query {
+
+  """
+  Get all the conversations for the logged in user
+  """
+  ReactorConversations(filter: ReactorConversationFilter): [ReactorChatState]
+
+  """
+  Lists all the available personas for the logged in user
+  """
+  ReactorPersonas: [ReactorPersona]
+}
+
+extend type Mutation {
+  """
+  Ask a question to the bot conversation
+  """
+  ReactorAskQuestion(question: String!, botId:String!, chatSessionId: String!): ReactorChatHistory
+
+  """
+  Executes a macro against a chat session
+  """
+  ReactorExecuteMacro(macro: String!, botId:String!, chatSessionId: String!): ReactorChatHistory
+
+
+  """
+  Attaches an image to the bot conversation
+  """
+  ReactorAttachImage(image: String!, botId:String!, chatSessionId: String!): ReactorChatHistory
+
+  """
+  Deletes a chat session
+  """
+  ReactorDeleteChatSession(id: String!): Boolean
+
+  """
+  Asks a question using speech to text
+  """
+  ReactorAskQuestionAudio(audio: Upload!, botId:String!, chatSessionId: String!): ReactorChatHistory
+}
+

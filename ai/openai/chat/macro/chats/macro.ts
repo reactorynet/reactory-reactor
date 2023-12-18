@@ -1,7 +1,14 @@
 import Reactory from "@reactory/reactory-core";
 import { ChatState, Macro } from "../../../types/chat";
+import { 
+  ChatFactory, 
+  SYSTEM_INITIALIZER_MESSAGE, 
+  getInitializerMessage
+} from '@reactory/server-modules/reactor/ai/openai/chat/questions/factory';
 import ReactorConversationModel from '@reactory/server-modules/reactor/models/ReactorChatState';
 import { ObjectId } from "mongodb";
+import AIPersonaProvider from "modules/reactor/services/PersonaService";
+
 
 export const ChatsMacro: Macro<unknown> = async (
   args: any[],
@@ -9,14 +16,14 @@ export const ChatsMacro: Macro<unknown> = async (
   const [k, v] = args;
 
   const {
-    rl,
+    context
   } = state;
 
   try {
     switch(k) {
       case 'new': {
         state.id = ObjectId.generate().toString();
-        state.history = [];
+        state.history = [await getInitializerMessage(state.botId, state, context)];
         return 'New chat session created'
       }
       case 'size': {
@@ -90,9 +97,29 @@ export const ChatsMacro: Macro<unknown> = async (
       }
       case 'exp': {
         // exports a chat
+        return 'Exported chat to data folder'
       }
       case 'train': {
         // triggers a training instruction
+      }
+      case 'personas': {
+        // lists all personas
+        const personas = await state.context.getService<AIPersonaProvider>('reactor.AIPersonaProvider@1.0.0').listPersonas();
+        return `List of personas:\n\t${personas.map((persona) => `  ${persona.id} - ${persona.name}`).join('\n')}
+        `
+      }
+      case 'speakto': {
+        // sets the persona to speak to
+        const persona = await state.context.getService<AIPersonaProvider>('reactor.AIPersonaProvider@1.0.0').getPersona(v);
+        if (persona) {
+          state.botId = persona.id;
+          state.id = ObjectId.generate().toString();
+          state.history.push(await getInitializerMessage(state.botId, state, context));
+          state.persona = persona;
+          return `You are now chatting to ${persona.name}`;
+        } else {
+          return `Persona ${v} not found`;
+        }
       }
       case 'clear': {
         // clears the chat history for the user

@@ -1,7 +1,8 @@
 import { Configuration, OpenAIApi } from "openai";
 import { 
   ChatFactory, 
-  SYSTEM_INITIALIZER_MESSAGE 
+  SYSTEM_INITIALIZER_MESSAGE, 
+  getInitializerMessage
 } from '@reactory/server-modules/reactor/ai/openai/chat/questions/factory';
 import { ask, colors } from '@reactory/server-modules/reactor/helpers';
 import { ChatState } from "modules/reactor/ai/openai/types/chat";
@@ -11,6 +12,9 @@ import { MacroRegistry } from "@reactory/server-modules/reactor/ai/openai/chat/m
 import CANNED_MESSAGES from "@reactory/server-modules/reactor/cli/reactor-cli/messages";
 import logger from "@reactory/server-core/logging";
 import { ObjectId } from "mongodb";
+import { IAIPersonaProviderService } from "@reactory/server-modules/reactor/types/service.types";
+import AIPersonaProvider from "@reactory/server-modules/reactor/services/PersonaService";
+
 
 const DEFAULT_MODEL_ID = 'gpt-3.5-turbo';
 
@@ -19,19 +23,19 @@ const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryCo
   let apiKey = process.env.OPENAI_API_KEY;
   let apiOrg = process.env.OPENAI_ORG;
   let modelId = process.env.OPENAI_DEFAULT_MODEL_ID || DEFAULT_MODEL_ID;
+  let botId = process.env.REACTOR_BOT_ID || 'ReactorAIPersona';
+  const persona = await context.getService<AIPersonaProvider>('reactor.AIPersonaProvider@1.0.0')?.getPersona(botId);
 
-  const getInitializerMessage = (state: ChatState) => {
-    const macros = state.macros.map(macro => `## ${macro.name}\n ## Usage\n${macro.description}`).join('\n');
-    return  {
-      role: SYSTEM_INITIALIZER_MESSAGE.role,
-      content: template(SYSTEM_INITIALIZER_MESSAGE.content)({ macros })
-    }
+  if(!persona) { 
+    context.error(`No persona found for botId: ${botId}`);
+    return;
   }
-
 
   const modelState: ChatState = {
     id: new ObjectId().toHexString(),
-    botId: 'Reactor',
+    host: 'cli',
+    botId,
+    persona,
     modelId: modelId || DEFAULT_MODEL_ID,
     started: new Date(),
     history: [
@@ -46,10 +50,10 @@ const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryCo
     })),
     vars: {
       __created: new Date().valueOf(),
+      __botId: botId,
     }
   }
-
-  modelState.history.push(getInitializerMessage(modelState));
+  modelState.history.push(await getInitializerMessage(botId, modelState, context));
 
   const rl: ReadLine = context.readline as ReadLine;
 

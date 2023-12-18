@@ -14,27 +14,27 @@ import { ReadLine } from 'readline';
  * @returns { Promise<ChatState>} A promise that resolves to the updated ChatState.
  * @throws { Error } If an error occurs during the execution.
  */
-export const ask = async (question: IQuestion, state: ChatState, rl: ReadLine): Promise<ChatState> => {
+export const ask = async (question: IQuestion, state: ChatState, rl?: ReadLine): Promise<ChatState> => {
   try {
-    const { botId = 'Reactor', context } = state;
+    const { context, persona } = state;
     const { i18n, log } = context;
     const { t } = i18n;
-
+    const botName = persona.name;
+    const _rl = rl || state.rl;
     if (question !== null && question !== undefined) {
       const $response = await new Promise<string>((resolve) => {
-
         if(question.question.includes("@")) {
           // the bot has responded with an @ which signals macro processing.
           // we process the macro and send the information back as "me" the user.
-          rl.write(colors.green(`bot has is requesting permission to execute macros`));
-          rl.close();
+          _rl.write(colors.green(`bot has is requesting permission to execute macros`));
+          _rl.close();
         } else {
           // default flow
-          let nextPrompt = `${colors.yellow(`[${botId}]>`)}${colors.green(`${question.question}`)}\n[me]>`;
+          let nextPrompt = `${colors.yellow(`[${botName}]>`)}${colors.green(`${question.question}`)}\n[me]>`;
           if (question.question === "") {
             nextPrompt = '[me]>'
           }
-          rl.question(nextPrompt, (response: string) => {
+          _rl.question(nextPrompt, (response: string) => {
             resolve(response);
           });
         }
@@ -45,8 +45,8 @@ export const ask = async (question: IQuestion, state: ChatState, rl: ReadLine): 
         return ask(handlerResponse.next, handlerResponse.state, rl);
       }
     } else {
-      rl.write(colors.green(`${t('reactor:chat.goodbye')}\r`));
-      rl.close();
+      _rl.write(colors.green(`${t('reactor:chat.goodbye')}\r`));
+      _rl.close();
     }
 
     return state;

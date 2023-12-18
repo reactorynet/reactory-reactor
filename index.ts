@@ -3,6 +3,7 @@ import ReactorGraphql from './graphql';
 import Workflows from './workflow';
 import ReactorCli from './cli';
 import Services from './services';
+import Models from './models';
 
 const ClientCertificate = require.resolve('./certs/reactory-web-client.cert');
 const {
@@ -25,10 +26,7 @@ const ReactorModule: Reactory.Server.IReactoryModule = {
   translations: [
     // Define your translations here
   ],
-  models: [
-    // Define your models here
-    
-  ],
+  models: Models,
   clientPlugins: [
     { 
       nameSpace: 'reactory',

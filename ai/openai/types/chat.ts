@@ -1,6 +1,7 @@
 import { ChatCompletionResponseMessage, OpenAIApi } from "openai"
 import { Interface as ReadLineInterface } from "readline";
 import { Chat } from ".";
+import { IAIPersona } from "modules/reactor/types/service.types";
 
 export type Macro<TResult> = (params: any[], state: ChatState) => Promise<TResult>
 
@@ -34,11 +35,23 @@ export type ChatState = {
    */
   id?: string
   /**
+   * The host that the chat session is running on. Default is server.
+   * 
+   * It is important that we know where the chat sessions is running so that we can 
+   * determine what response format to use and what features we can include in the
+   * chat responses.
+   */
+  host?: "server" | "cli" | "web" | "mobile"
+  /**
    * The unique identifier for the bot that is being used for the chat session.
    * 
    * The id of the bot defines what configuration is used for the bot.
    * */
   botId: string
+  /**
+   * The persona that is associated with the chat session.
+   */
+  persona: IAIPersona,
   /**
    * The date and time the chat session was started.
    */
