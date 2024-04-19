@@ -1,0 +1,119 @@
+[
+  {
+    "nameSpace": "worldremit",
+    "name": "maindb",
+    "version": "1.0.0",
+    "description": "Worldremit main database",
+    "projectType": "tsql",
+    "source": "/Users/wweber/Matrix/wr-database",
+    "subTypes": [],
+    "pathSpecs": [{
+      "path": "Tables",
+      "filter": ".sql",
+      "type": "table"
+    }, {
+      "path": "Views",
+      "filter": ".sql",
+      "type": "view"
+    }, {
+      "path": "Stored Procedures",
+      "filter": ".sql",
+      "type": "stored-procedure"
+    },
+    {
+      "path": "Functions",
+      "filter": ".sql",
+      "type": "function"
+    }],
+    "providerId": "reactor.TSqlProjectProcessor@1.0.0",
+    "providerOptions": {}
+  },
+  {
+    "nameSpace": "worldremit",
+    "name": "onboarding-process-orchestrator",
+    "version": "1.0.0",
+    "description": "Onboarding Process Orchestrator",
+    "projectType": "java",
+    "source": "/Users/wweber/Matrix/FinCrimeKYC/onboarding-process-orchestrator",
+    "subTypes": ["gradle"],
+    "providerId": "reactor.JavaProjectProcessor@1.0.0",
+    "providerOptions": {}
+  },
+  {
+    "nameSpace": "worldremit",
+    "name": "authentication",
+    "version": "1.0.0",
+    "description": "Worldremit authentication services",
+    "source": "/Users/wweber/Matrix/WRExperience/authentication",
+    "projectType": "java",
+    "subTypes": ["gradle"],
+    "providerId": "reactor.JavaProjectProcessor@1.0.0",
+    "providerOptions": {}
+  },
+  {
+    "nameSpace": "worldremit",
+    "name": "customer-api",
+    "version": "1.0.0",
+    "projectType": "csharp",
+    "subTypes": [],
+    "source": "/Users/wweber/Matrix/WRExperience/customer-api",
+    "description": "Worldremit customer api",
+    "providerId": "reactor.CSharpProjectProcessor@1.0.0",
+    "providerOptions": {}
+  },
+  {
+    "nameSpace": "worldremit",
+    "name": "dynamic-form-manager-validation-api",
+    "version": "1.0.0",
+    "projectType": "typescript",
+    "subTypes": ["nodejs", "javascript"],
+    "source": "/Users/wweber/Matrix/WRExperience/dynamic-form-manager-validation-api",
+    "description": "Dynamic form validation API",
+    "providerId": "reactor.NodeJSProjectProcessor@1.0.0",
+    "providerOptions": {}
+  },
+  {
+    "nameSpace": "worldremit",
+    "name": "express-money-transfer-app",
+    "version": "1.0.0",
+    "projectType": "react-native",
+    "source": "/Users/wweber/Matrix/WRExperience/express-money-transfer-app",
+    "subTypes": ["java", "android", "swift", "ios"],
+    "description": "World Remit Application",
+    "providerId": "reactor.ReactNativeProjectProcessor@1.0.0",
+    "providerOptions": {}
+  },
+  {
+    "nameSpace": "worldremit",
+    "name": "submission-flow-facade",
+    "version": "1.0.0",
+    "projectType": "java",
+    "description": "Submission Flow Facade",
+    "subTypes": ["gradle"],
+    "source": "/Users/wweber/Matrix/WRExperience/submission-flow-facade",
+    "providerId": "reactor.JavaProjectProcessor@1.0.0",
+    "providerOptions": {}  
+  },
+  {
+    "nameSpace": "worldremit",
+    "name": "bff-authentication",
+    "version": "1.0.0",
+    "projectType": "java",
+    "description": "BFF Authentication",
+    "subTypes": ["gradle"],
+    "source": "/Users/wweber/Matrix/BFF/bff-authentication",
+    "providerId": "reactor.JavaProjectProcessor@1.0.0",
+    "providerOptions": {}  
+  },
+  {
+    "nameSpace": "worldremit",
+    "name": "bff-graphql-gateway",
+    "version": "1.0.0",
+    "projectType": "nodejs",
+    "description": "Submission Flow Facade",
+    "subTypes": ["express", "graphql"],
+    "source": "/Users/wweber/Matrix/BFF/bff-graphql-gateway",
+    "providerId": "reactor.NodeJSProjectProcessor@1.0.0",
+    "providerOptions": {}  
+  }
+]

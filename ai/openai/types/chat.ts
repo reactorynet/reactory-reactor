@@ -123,10 +123,12 @@ export interface QuestionHandlerResponse {
 export interface IQuestion {
   id?: number,
   when?: Date,
+  askIf?: (state: ChatState) => boolean,
   question: string,
   response?: string,
   output?: unknown,
   valid?: boolean,
+  next?: IQuestion,
   handler: (response: string, state: ChatState) => Promise<QuestionHandlerResponse>
 }
 

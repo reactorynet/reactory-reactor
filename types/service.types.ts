@@ -1,5 +1,9 @@
+import Reactory from '@reactory/reactory-core';
 import { ChatCompletionResponseMessage } from "openai"
 import { TReactorConversationModel } from "../models/ReactorChatState"
+import { ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorNodeType } from "./model.types"
+import { PagingRequest, PagingResult } from "@reactory/server-core/database/types"
+import { ObjectId } from "mongodb"
 
 export type OpenAIModel = {
   id: string
@@ -329,4 +333,202 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
   deleteChatSession(args: { id: string }): Promise<TReactorConversationModel>; 
 }
 
+export type KnownReactorProjectTypes = string | "python" | "javascript" 
+  | "typescript" | "react-web" | "react-native" | "react-server-side" | "java" | "csharp" | "c" 
+  | "cpp" | "go" | "rust" | "swift" | "kotlin" | "dart" | "flutter" | "php" | "ruby" 
+  | "perl" | "shell" | "powershell" | "bash" | "zsh" | "html" | "css" | "scss" | "less"
+  | "sass" | "stylus" | "vue" | "angular" | "svelte" | "d3" | "three" | "unity" | "unreal"
+  | "blender" | "maya" | "3dsmax" | "autocad" | "solidworks" | "catia" | "nx" | "creo"
+  | "excel" | "word" | "powerpoint" | "outlook" | "access" | "visio" | "project" | "onenote" 
+  | "android" | "ios" | "web" | "rest" | "graphql" | "gradle" | "groovy"
+
+export interface IReactorProjectPathSpec {
+  id: number;
+  path: string;
+  filter: string;
+  type: string;
+}
+
+export interface IReactorProjectFileSpec {
+  id: number;
+  path: string;
+  type: string;
+  content: string;
+}
+
+export interface IReactorProject extends Reactory.IComponentFqnDefinition {
+  id?: number;
+  lastSync?: Date;
+  /**
+   * The root folder for the project
+   */  
+  source: string; 
+  projectType: ReactorNodeType;
+  subTypes?: KnownReactorProjectTypes[]; 
+  description?: string;
+  /**
+   * The path specifications to use for 
+   * ingesting the project. If blank then 
+   * the entire project is ingested. 
+   * 
+   * This gives better search results and
+   * allows for better categorization of
+   * the project. However it is more
+   * complex to manage and the data load
+   * increases.
+   */ 
+  pathSpecs?: IReactorProjectPathSpec[];
+  /**
+   * The files to include in the project
+   * if the pathSpecs are not used.
+   * 
+   * Path specs are used to populate the files
+   */
+  files?: Partial<IReactorProjectFileSpec>[];
+  /**
+   * The processor to use for the project.
+   * This is used to process the project.
+   */
+  providerId?: string;
+  providerOptions?: any;
+  errors?: {
+    message: string;
+    stack: string;    
+  }[];
+}
+
+export interface PagedFilter {
+  search?: string
+  comparitor?: Partial<IReactorProject>
+  paging?: PagingRequest
+}
+
+export type PageReactorProjectResult = {
+  projects: Partial<IReactorProject>[]
+  paging: PagingResult
+}
+
+export interface ReactorNodeAttributes extends Reactory.IKeyValuePair<string, any> { 
+  id: number
+}
+
+export interface AttributeProvider extends Reactory.Service.IReactoryService {
+  getAttributes(node: ReactorNode): Promise<ReactorNodeAttributes[]>
+}
+
+export interface ProjectSynchronizer extends Reactory.Service.IReactoryService { 
+  /**
+   * The sync method is used to synchronize the project with the 
+   * reactory data store. This is used to keep the project up to data.
+   * 
+   * The sync process will also run the the search indexing process
+   * @param project 
+   */
+  sync(project: IReactorProject): Promise<IReactorProject>;
+  
+  /**
+   * Used the index the project
+   * @param project 
+   */
+  index(project: IReactorProject): Promise<IReactorProject>;
+}
+
+export interface ISystemGraphManager extends Reactory.Service.IReactoryDefaultService {
+
+  /**
+   * Returns a node using the id
+   * @param id 
+   * @param key - a concatenated key that provides the node tree path i.e. "1|2|3"
+   */
+  getNode(id: number, key?: string): Promise<ReactorNode>;
+  /**
+   * Returns a list of all the projects that are available for the user.
+   */
+  getProjects(filter?: Partial<PagedFilter>): Promise<PageReactorProjectResult>;
+  
+  /**
+   * Get a project by path
+   * @param path 
+   */
+  getProject(path: string): Promise<Partial<IReactorProject>>;
+  
+  /**
+   * 
+   * @param projectSpec 
+   */
+  catalogProject(projectSpec: Partial<IReactorProject>): Promise<Reactory.Models.ISearchable[]>;
+  /**
+   * Returns the root catalog nodes
+   */
+  getCatalogNodes(): Promise<ReactorNode[]>;
+  /**
+   * 
+   * @param id 
+   */
+  getCatalogNode(id: number): Promise<ReactorNode>;
+  /**
+   * Populates the children of the specified nodes.
+   * @param parents 
+   */
+  getChildren(parents: ReactorNode[]): Promise<ReactorNode[]>;
+
+  /**
+   * Populates the children of the specified nodes.
+   * @param parents 
+   */
+  getCategoryNodes(): Promise<ReactorNodeCategory[]>;
+  
+  /**
+   * Returns a project for the specified catalog node
+   * @param node 
+   */
+  getProjectForCatalogNode(node: Partial<ReactorNode>): Promise<Partial<IReactorProject>>;
+  /**
+   * 
+   * @param sources 
+   * @param types 
+   * @param targets 
+   */
+  getLinks(sources: ReactorNode[], types: string[], targets: ReactorNode[]): Promise<ReactorNodeLink[]>;
+
+  /**
+   * Creates a link between two nodes
+   * @param source 
+   * @param type 
+   * @param target 
+   */
+  createLink(source: ReactorNode, type: string, target: ReactorNode): Promise<ReactorNodeLink>;
+
+  /**
+   * Updates a link
+   * @param link 
+   */
+  updateLink(link: ReactorNodeLink): Promise<ReactorNodeLink>;
+
+  /**
+   * Deletes a link
+   * @param link 
+   */
+  deleteLink(link: ReactorNodeLink): Promise<ReactorNodeLink>;
+
+}
+
+export interface IProjectNodeProvider {
+  getProjectNode(project: Partial<IReactorProject>): Promise<Partial<ReactorDataNode<Partial<IReactorProject>>>>;
+  /**
+   * Returns children for a given node id
+   * @param node 
+   * @param treeKey 
+   */
+  getChildrenForNode(node: Partial<ReactorNode>,treeKey: string, filter: string, paging: PagingRequest): Promise<ReactorDataNode<any>[]>;
+}
+
+
+export interface IProjectProcessor extends ProjectSynchronizer, AttributeProvider, IProjectNodeProvider { 
+  getFileSpecs(project: IReactorProject): Partial<IReactorProjectFileSpec>[];
+  process(project: IReactorProject): Reactory.Models.ISearchable[];  
+}
+
+
 export default IOpenAIService;
+

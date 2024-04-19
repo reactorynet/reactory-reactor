@@ -3,7 +3,8 @@ import { fileAsString } from '@reactory/server-core/utils/io';
 
 const ReactorTypeDefinitions: string[] = [];
 [
-  'ReactorChat'
+  'ReactorChat',
+  'ReactorSystemGraph'
 ].forEach((name) => { 
   try {
     const fileName = `./${name}.graphql`;

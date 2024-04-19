@@ -1,5 +1,6 @@
 import Reactory from '@reactory/reactory-core';
 import ReactorCli from './reactor-cli/ReactorCli';
+import GraphManagerCLI from './SystemGraphManager/GraphManager';
 type ReactoryCliApp = (vargs: string[], context: Reactory.Server.IReactoryContext) => Promise<void>
 
 /**
@@ -36,6 +37,7 @@ const ReactorCliApp: Reactory.IReactoryComponentDefinition<ReactoryCliApp> = {
 
 const ReactoryCliApps: Reactory.IReactoryComponentDefinition<ReactoryCliApp>[] = [
   ReactorCliApp,
+  GraphManagerCLI
 ];
 
 export default ReactoryCliApps;

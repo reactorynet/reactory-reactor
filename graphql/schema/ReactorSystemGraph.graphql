@@ -1,0 +1,429 @@
+
+"""
+ReactorNodeTypes represent the node types supported by the system
+"""
+enum ReactorNodeType {
+  INPUT
+  OUTPUT
+  PROCESS
+  SYSTEM
+  DATASTORE
+  CHILD
+  CONNECTION
+  DEPENDENCY
+  CONTAINER
+  CLOUD
+  CONSUMER
+  CONFIG
+  FOLDER
+  FILE
+  FUNCTION 
+  ENDPOINT
+}
+
+"""
+Enums defining the type of link 
+"""
+enum ReactorLinkType {
+  INPUT
+  OUTPUT
+  DEPENDENCY
+  CONNECTION
+  INFERRED
+  DIRECT
+}
+
+"""
+Reactor Node Categories
+"""
+type ReactorNodeCategory {
+  id: ID!
+  name: String!
+  description: String
+  parent: ReactorNodeCategory
+  children: [ReactorNodeCategory!]
+  nodes: [ReactorNode!]
+}
+
+"""
+Reactor Node Metric Type
+"""
+type ReactorNodeMetricType {
+  id: Int!
+  name: String!
+  description: String
+  units: String
+}
+
+type ReactorNodeMetric {
+  id: Int!
+  type: ReactorNodeMetricType!
+  value: String
+}
+
+type ReactorNodeAttributes {
+  id: Int!
+  key: String!
+  value: Any  
+}
+
+"""
+A Reactor Node represents a node within the system. The node can be at any level of the system and can be of any type.
+Each node uses a provider id to identify the provider of the node. The provider is used
+to extract and manage the node within the system.
+"""
+type ReactorNode {
+  id: Int!
+  """
+  The index of the node within the system. The index is used to uniquely identify the node with a search node.
+  """
+  index: Int!
+  """
+  The primary type for the the node. The type is used to identify the primary function of the node.
+  """
+  type: ReactorNodeType!
+  """
+  The key is used to identify the key path of the node, the key is a composite of the 
+  node id and it's ancestors.
+
+  i.e. <id>.<ancestor-id>.<ancestor-id>...
+  """
+  key: String!
+  """
+  The list of categories that the node belongs to
+  """
+  categories: [ReactorNodeCategory!]
+  """
+  Node NameSpace
+  """
+  nameSpace: String!
+  """
+  Node Name
+  """
+  name: String!
+  """
+  Node version
+  """
+  version: String!
+  """
+  description for the node
+  """
+  description: String
+  """
+  A provider id is used to identify the provider of the node. The provider is used
+  to extract and manage the node within the system. The provider id is unique to the provider.
+  Each provider will provide the interfaces to extract attributes, metrics, and reltionships.
+  """
+  providerId: String!
+  """
+  A list of attributes that are associated with the node. The attributes are used to provide
+  additional information about the node like an SVG icon, or other metadata.
+  """
+  attributes: [ReactorNodeAttributes!]
+  """
+  A list of metrics that are associated with the node. The metrics are used to provide
+  additional information about the node like the number of records processed, file sizes,
+  or other metrics that the provider wishes to expose.
+  """
+  metrics: [ReactorNodeMetric!]
+  """
+  A list of children nodes that are associated with the current node. The children nodes are
+  nodes that are directly dependent on the current node.
+  """
+  children(paging: PagingRequest, filter: String): [ReactorNode!]
+  """
+  A list of nodes that are considered inputs to the current node. These inputs could be 
+  data sources, 
+  """
+  inputs: [ReactorNode!]
+  """
+  A list of nodes that are considered outputs to the current node. These outputs could be
+  data outputs or other nodes that are produced.
+  """
+  outputs: [ReactorNode!]
+  """
+  A list of nodes that are considered dependants of the current node. These dependants are
+  nodes that are directly or indirectly dependent on the current node.
+  """
+  dependants: [ReactorNode!]
+  dependencies: [ReactorNode!]
+  """
+  The parent node of the current node. This is the node that the current node is a direct dependent off.
+  This value may be null of the node has no parent.
+  """
+  parent: ReactorNode
+  source: String
+  """
+  The data attribute is used to store any additional data that the provider wishes to store with the node.
+  """
+  data: Any
+}
+
+type ReactorNodeLink {
+  id: Int!
+  source: ReactorNode!
+  types: [ReactorLinkType]!
+  target: ReactorNode!
+  title: String
+  description: String
+  data: Any
+}
+
+type ReactoryNodePosition {
+  x: Float!
+  y: Float!
+}
+
+type ReactorNodeOption {
+  id: String!
+  key: String!
+  value: String!
+}
+
+type ReactorNodeUI {
+  id: Int!
+  node: ReactorNode!
+  position: ReactoryNodePosition!
+  options: [ReactorNodeOption!]!
+}
+
+type ReactorPagedNodes {
+  nodes: [ReactorNode!]
+  paging: PagingResult
+}
+
+type ReactorProjectPathSpec {
+  id: Int!
+  path: String
+  filter: String
+  type: String
+}
+
+type ReactorProjectFileSpec {
+  id: Int!
+  path: String
+  type: String
+  content: String
+}
+
+
+type ReactorProjectError {
+  message: String
+  stack: String
+}
+
+
+type ReactorProject {
+  id: Int!
+  fqn: String!
+  name: String!
+  nameSpace: String!
+  version: String!
+  source: String!
+  projectType: String!
+  subTypes: [String!]
+  lastSync: Date
+  description: String
+  pathSpecs: [ReactorProjectPathSpec]
+  files: [ReactorProjectFileSpec]
+  processor: String
+  processorOptions: Any
+  errors: [ReactorProjectError]
+}
+
+type ReactorPagedProjects {
+  projects: [ReactorProject]
+  paging: PagingResult
+}
+
+input ReactorNodeCategoryFilter {
+  ids: [Int!]
+  name: String
+}
+
+input ReactorProjectFilter {
+  search: String
+  ids: [Int]
+  paging: PagingRequest
+}
+
+type CatalogNodeSyncSuccess {
+  node: ReactorNode!  
+  message: String
+}
+
+type CatalogNodeSyncFailure {  
+  node: ReactorNode!
+  errors: [String!]
+}
+
+union CatalogNodeSyncResult = CatalogNodeSyncSuccess | CatalogNodeSyncFailure
+
+type ReactorNodeCatalogIndexSuccess {
+  nodes: [ReactorNode!]
+  message: String
+}
+
+type ReactorNodeCatalogIndexFailure {  
+  errors: [String!]
+}
+
+union ReactorNodeCatalogIndexResult = ReactorNodeCatalogIndexSuccess | ReactorNodeCatalogIndexFailure
+
+input ReactoryNodeLinkInput {
+  from: Int!
+  to: Int!
+  types: [ReactorLinkType!]
+  title: String
+  description: String
+}
+
+type ReactorCreateNodeLinkSuccess {
+  link: ReactorNodeLink!
+  message: String
+}
+
+type ReactorCreateNodeLinkFailure {
+  link: ReactorNodeLink!
+  error: String
+}
+
+union ReactorNodeLinkCreateResult = ReactorCreateNodeLinkSuccess | ReactorCreateNodeLinkFailure
+
+input ReactorNodeLinkInput {
+  id: Int!
+  types: [ReactorLinkType!]
+  title: String
+  description: String
+}
+
+type ReactorNodeLinkUpdateSuccess {
+  link: ReactorNodeLink!
+  message: String
+}
+
+type ReactorNodeLinkUpdateFailure {
+  link: ReactorNodeLink!
+  error: String
+}
+
+union ReactorNodeLinkUpdateResult = ReactorNodeLinkUpdateSuccess | ReactorNodeLinkUpdateFailure
+
+type ReactorDeleteNodeLinkSuccess {
+  id: Int!
+  message: String
+}
+
+type ReactorDeleteNodeLinkFailure {
+  id: Int!
+  error: String
+}
+
+union ReactorNodeLinkDeleteResult = ReactorDeleteNodeLinkSuccess | ReactorDeleteNodeLinkFailure
+
+input CatalogCrawlRequest {
+  ids: [Int!]  
+}
+
+"""
+The input for the system graph. The system graph is used to represent the nodes and links between the nodes in the system.
+"""
+input ReactorSystemGraphInput {
+  """
+  A title for the graph input, if none is 
+  provided a default will be generated.
+  """
+  title: String
+  """
+  A boolean flag to indicate if the graph is shareable
+  """
+  share: Boolean
+  """
+  The nodes that are part of the system graph. The nodes are used to represent the nodes in the system.
+  """
+  nodes: [Int!]
+  """
+  The links that are part of the system graph. The links are used to represent the links between the nodes in the system.
+  """
+  links: [ReactorNodeLinkInput!]
+}
+
+type ReactorSysteGraphSaveFailure {
+  id: Int!
+  error: String
+}
+
+type ReacorSystemGraphSaveSuccess {
+  success: Boolean
+  message: String
+}
+
+union ReacorSystemGraphSaveResult = ReactorSysteGraphSaveFailure | ReacorSystemGraphSaveSuccess
+
+extend type Query {  
+  ReactorCatalogNodes(paging: PagingRequest): ReactorPagedNodes
+
+  ReactorNodeCategories(filter: ReactorNodeCategoryFilter): [ReactorNodeCategory!]  
+  ReactorNodeCategory(id: Int!): ReactorNodeCategory
+  ReactorNodeByCategory(ids: [Int!]): [ReactorNode!]
+  
+  """
+  The primary method to load a node by its id. 
+  The id is used to uniquely identify the node within the system.
+  """
+  ReactorNode(id: Int!, key: String): ReactorNode
+  
+  ReactorNodesForType(type: [ReactorNodeType]): [ReactorNode!]
+  ReactorNodesByTerm(term: String!): [ReactorNode!]
+  
+  ReactorNodesByNameAndNameSpace(name: String!, nameSpace: String!, term: String, paging: PagingRequest): ReactorPagedNodes
+  
+  ReactorProjects(filter: ReactorProjectFilter): ReactorPagedProjects
+  ReactorProject(id: Int!): ReactorProject
+}
+
+extend type Mutation {
+
+  """
+  Syncs a catalog node with the reactor system and creates
+  node entries in the data store for the catalog node.
+  """
+  ReactorSyncCatalogNode(id: Int!): CatalogNodeSyncResult
+
+  """
+  Indexes the catalog nodes in the reactor system.
+  """
+  ReactorIndexCatalogNodes(ids: [Int!]): ReactorNodeCatalogIndexResult
+
+  """
+  Crawls the catalog nodes in the reactor system and updates the nodes in the data store.
+  """
+  ReactorCrawlCatalogNodes(request: CatalogCrawlRequest): [CatalogNodeSyncResult]
+
+  ReactorNodeCategoryCreate(name: String!, description: String): ReactorNodeCategory
+  ReactorNodeCategoryUpdate(id: Int!, name: String, description: String): ReactorNodeCategory
+  ReactorNodeCategoryDelete(id: Int!): ReactorNodeCategory
+  
+  ReactorNodeCreate(nameSpace: String!, name: String!, version: String!, description: String): ReactorNode
+  ReactorNodeUpdate(id: Int!, nameSpace: String, name: String, version: String, description: String): ReactorPagedNodes
+  ReactorNodeDelete(id: Int!): ReactorNode
+  
+  """
+  Creates a permanent link between two nodes in the reactor system.
+  """
+  ReactorNodeLinkCreate(createInput: ReactoryNodeLinkInput!): ReactorNodeLinkCreateResult  
+  """
+  Deletes a permanent link between two nodes in the reactor system.
+  """
+  ReactorNodeLinkDelete(id: Int!): ReactorNodeLinkDeleteResult
+
+  """
+  Updates a permanent link between two nodes in the reactor system.
+  """
+  ReactorNodeLinkUpdate(updateInput: ReactorNodeLinkInput!): ReactorNodeLinkUpdateResult
+
+  """
+  Saves a system graph to the data store.
+  """
+  ReactorSaveSystemGraph(graph: [ReactorSystemGraphInput!]): ReacorSystemGraphSaveResult
+}

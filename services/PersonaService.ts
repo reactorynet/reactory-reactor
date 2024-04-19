@@ -11,7 +11,9 @@ export type PersonaProviderContext = Reactory.Server.IReactoryContext & {};
 
 @service({
   id: "reactor.AIPersonaProvider@1.0.0",
-  name: "AI Persona Provider",
+  nameSpace: "reactor",
+  name: "AIPersonaProvider",
+  version: "1.0.0",
   description: "Service for managing AI Personas",
   serviceType: "ai",
   dependencies: [

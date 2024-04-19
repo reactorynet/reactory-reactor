@@ -79,6 +79,7 @@ export const ReactorConversationModelComponentRegistryEntry: Reactory.IReactoryC
   nameSpace: 'reactor',
   description: 'Reactor Conversation Model',
   version: '1.0.0',
+  component: ReactorConversationModel,
   features: [
     {
       feature: 'id',
