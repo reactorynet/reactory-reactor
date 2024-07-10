@@ -5,7 +5,6 @@ import {
   IReactorProject,
   IReactorProjectFileSpec,
   IProjectProcessor,
-  ISystemGraphManager,
   AttributeProvider,
   ReactorNodeAttributes,
   IProjectNodeProvider,
@@ -17,15 +16,11 @@ import {
   ReactorNode,
   ReactorNodeType,
 } from "@reactory/server-modules/reactor/types/model.types";
-import { ObjectId } from "mongodb";
 
 import SVGS from "@reactory/server-modules/reactor/data/reactor-svgs";
-import { PagingRequest } from "database/types";
+import { PagingRequest } from "@reactory/server-core/database/types";
 
 import { getReactorProjectCatalogs } from "@reactory/server-modules/reactor/data/index";
-import Cache from "@reactory/server-modules/core/models/CoreCache";
-import { profileEnd } from "console";
-
 
 class TSqlProjectProcessor
   implements IProjectProcessor, AttributeProvider, IProjectNodeProvider

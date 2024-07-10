@@ -4,7 +4,6 @@ import {
   IAIPersona,
   IAIPersonaProviderService,
 } from "@reactory/server-modules/reactor/types/service.types";
-import { exec } from "child_process";
 
 export type PersonaProviderProps = {};
 export type PersonaProviderContext = Reactory.Server.IReactoryContext & {};

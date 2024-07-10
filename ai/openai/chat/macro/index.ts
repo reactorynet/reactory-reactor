@@ -31,7 +31,7 @@ import {
 
 
 import { ChatCompletionResponseMessage, CreateChatCompletionRequest, CreateCompletionResponse, CreateCompletionResponseChoicesInner } from 'openai';
-import Hash from 'utils/hash';
+import Hash from '@reactory/server-core/utils/hash';
 
 export const REACTOR_MACRO_MD = require.resolve('./macros.md');
 

@@ -23,7 +23,7 @@ const ReactorModule: Reactory.Server.IReactoryModule = {
   forms: [
     ...Forms
   ],
-  services: Services,
+  services: [...Services],
   translations: [
     // Define your translations here
   ],
@@ -44,7 +44,10 @@ const ReactorModule: Reactory.Server.IReactoryModule = {
       roles: ['USER'],
     }
   ],
+  passportProviders: [],
   cli: ReactorCli,
+  pdfs: [],
+  description: 'Reactory Reactor Module',
 };
 
 export default ReactorModule;

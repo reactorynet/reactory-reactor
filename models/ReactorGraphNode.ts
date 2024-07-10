@@ -256,7 +256,7 @@ const ReactorNodeUISchema: Schema<ReactorNodeUI> = new Schema<ReactorNodeUI>({
 });
 
 const ReactorNodeCategoryName = 'ReactorNodeCategory';
-const ReactorNodeCategoryModel = mongoose.model<ReactorNodeCategory>(ReactorNodeCategoryName, ReactorNodeCategorySchema);
+const ReactorNodeCategoryModel = mongoose.model<ReactorNodeCategory>(ReactorNodeCategoryName, ReactorNodeCategorySchema, 'reactor_node_categories');
 export type TReactorNodeCategoryModel = typeof ReactorNodeCategoryModel;
 export const ReactorNodeCategoryModelComponentRegistryEntry: Reactory.IReactoryComponentDefinition<typeof ReactorNodeCategoryModel> = { 
   name: 'ReactorNodeCategoryModel',
@@ -268,7 +268,7 @@ export const ReactorNodeCategoryModelComponentRegistryEntry: Reactory.IReactoryC
 }
 
 const ReactorNodeMetricTypeName = 'ReactorNodeMetricType'; 
-const ReactorNodeMetricTypeModel = mongoose.model<ReactorNodeMetricType>(ReactorNodeMetricTypeName, ReactorNodeMetricTypeSchema);
+const ReactorNodeMetricTypeModel = mongoose.model<ReactorNodeMetricType>(ReactorNodeMetricTypeName, ReactorNodeMetricTypeSchema, 'reactor_node_metric_types');
 export type TReactorNodeMetricTypeModel = typeof ReactorNodeMetricTypeModel;
 export const ReactorNodeMetricTypeModelComponentRegistryEntry: Reactory.IReactoryComponentDefinition<typeof ReactorNodeMetricTypeModel> = { 
   name: 'ReactorNodeMetricTypeModel',
@@ -280,7 +280,7 @@ export const ReactorNodeMetricTypeModelComponentRegistryEntry: Reactory.IReactor
 }
 
 const ReactorNodeModelName = 'ReactorNode';
-const ReactorNodeModel = mongoose.model<ReactorNode>(ReactorNodeModelName, ReactorNodeSchema);
+const ReactorNodeModel = mongoose.model<ReactorNode>(ReactorNodeModelName, ReactorNodeSchema, 'reactor_nodes');
 export type TReactorNodeModel = typeof ReactorNodeModel;
 export const ReactorNodeModelComponentRegistryEntry: Reactory.IReactoryComponentDefinition<typeof ReactorNodeModel> = { 
   name: 'ReactorNodeModel',

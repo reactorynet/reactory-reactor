@@ -4,7 +4,6 @@ import {
   resolver,
   property,
 } from "@reactory/server-core/models/graphql/decorators/resolver";
-import { DefaultReactorNodeCategories } from "../../models/ReactorGraphNode";
 
 import {
   AttributeProvider,
@@ -13,7 +12,6 @@ import {
   IReactorProjectPathSpec,
   ISystemGraphManager,
   PageReactorProjectResult,
-  ProjectSynchronizer,
   ReactorNodeAttributes,
 } from "@reactory/server-modules/reactor/types/service.types";
 import { ObjectId } from "mongodb";
@@ -25,10 +23,9 @@ import {
   ReactorNode,
   ReactorNodeType,
   ReactorNodeCategory,
-} from "modules/reactor/types/model.types";
-import Hash from "utils/hash";
-import OBJID from "utils/ObjectId";
-import graph from "templates/server-module/graph";
+} from "@reactory/server-modules/reactor/types/model.types";
+
+import OBJID from "@reactory/server-core/utils/ObjectId";
 
 interface PagedNodes {
   nodes: Partial<ReactorNode>[];

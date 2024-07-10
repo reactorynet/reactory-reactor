@@ -2,12 +2,7 @@ import ApiError from '@reactory/server-core/exceptions';
 import fs from 'fs';
 import { isArray } from 'lodash';
 import { IReactorProject } from "modules/reactor/types/service.types";
-import { ObjectId } from 'mongodb';
-import Hash from 'utils/hash';
-import OBJID from 'utils/ObjectId';
-
-const { deterministicObjectId } = OBJID;
-
+import Hash from '@reactory/server-core/utils/hash';
 
 const getCatalogs = async (context: Reactory.Server.IReactoryContext): Promise<Partial<IReactorProject>[]> => {
   const catalogs: Partial<IReactorProject>[] = [];

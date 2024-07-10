@@ -1,21 +1,13 @@
 import Reactory from "@reactory/reactory-core";
-import path from 'path';
-import fs from 'fs';
-import fetch from 'node-fetch';
-import tar from 'tar';
 import { service } from "@reactory/server-core/application/decorators/service";
-import logger from "@reactory/server-core/logging";
-import { Writable } from "stream";
-import database from "database";
-import ApiError from "@reactory/server-core/exceptions";
 import IOpenAIService, { ChatParams, CreateFineTuningJobParams, FineTuningEvent, FineTuningObjectJob, ImageExtensionParams, ImageGenerationParams, ListFineTuningJobParams, OpenAIFile, OpenAIImage, OpenAIListResponse, OpenAIModel } from "../types/service.types";
 import { ChatCompletionResponseMessage, OpenAIApi } from "openai";
 import * as Chat from "@reactory/server-modules/reactor/ai/openai/chat/questions/factory";
-import { ChatState } from "bin/utils/chatgpt/chat.types";
 
 @service({
   id: "reactor.OpenAIService@1.0.0",
   name: "OpenAI Service",
+  nameSpace: "reactor",
   description: "Service for managing OpenAI API requests",
   serviceType:  "ai",
   dependencies: [
@@ -99,24 +91,6 @@ class OpenAIService implements IOpenAIService {
   nameSpace: string;
   name: string;
   version: string;
-
-  static reactory: Reactory.Service.IReactoryServiceDefinition<OpenAIService> = {
-    name: "OpenAIService",
-    nameSpace: "reactor",
-    version: "1.0.0",
-    description: "Service for managing OpenAI API requests",
-    id: "reactor.OpenAIService@1.0.0",
-    serviceType: "ai",
-    service(props: Reactory.Service.IReactoryServiceProps, context: Reactory.Server.IReactoryContext) {
-      return new OpenAIService(props, context);
-    },    
-    dependencies: [
-      { id: "core.ReactoryFileService@1.0.0", alias: "fileService" },
-      { id: "core.UserService@1.0.0", alias: "userService" },
-      { id: "core.FetchService@1.0.0", alias: "fetchService" },
-    ],
-  };
-  
 }
 
-export default OpenAIService.reactory;
+export default OpenAIService;

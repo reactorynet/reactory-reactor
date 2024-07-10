@@ -18,7 +18,7 @@ import { colors } from '../../../../helpers';
 import ReactorConversationModel from '@reactory/server-modules/reactor/models/ReactorChatState';
 import AIPersonaProvider from 'modules/reactor/services/PersonaService';
 import { template } from 'lodash';
-import { RecordNotFoundError } from 'exceptions';
+import { RecordNotFoundError } from '@reactory/server-core/exceptions';
 
 export const SYSTEM_INITIALIZER_MESSAGE: ChatCompletionResponseMessage = {
   role: 'system',

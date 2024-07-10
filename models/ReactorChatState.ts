@@ -72,7 +72,7 @@ const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<Reacto
 });
 
 const ReactorConversationModelName = 'ReactorConversation';
-const ReactorConversationModel = mongoose.model<ReactorConversation>(ReactorConversationModelName, ReactorConversationSchema);
+const ReactorConversationModel = mongoose.model<ReactorConversation>(ReactorConversationModelName, ReactorConversationSchema, 'reactor_conversations');
 export type TReactorConversationModel = typeof ReactorConversationModel;
 export const ReactorConversationModelComponentRegistryEntry: Reactory.IReactoryComponentDefinition<typeof ReactorConversationModel> = { 
   name: 'ReactorConversationModel',
