@@ -1,6 +1,6 @@
 import Reactory from "@reactory/reactory-core";
 import { readFileSync } from "fs";
-import { ChatState, Macro } from "modules/reactor/ai/openai/types/chat";
+import { ChatState, Macro } from "modules/reactory-reactor/ai/openai/types/chat";
 
 /**
  * A macro that lists all services registered in the system or

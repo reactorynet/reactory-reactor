@@ -2,14 +2,14 @@ import pathModule from 'path';
 import os from 'os';
 import { promises as fs, readFileSync, existsSync, statSync } from 'fs';
 import git from '../git';
-import { ChatState, Macro } from 'modules/reactor/ai/openai/types/chat';
+import { ChatState, Macro } from 'modules/reactory-reactor/ai/openai/types/chat';
 import { 
   FileMacros, 
   RemoveDirectory, 
   ReadFile as fileIn,
   ListDirectory as dirIn, 
   WriteFile as fileOut } from '../../fs/macro';
-import { getAIResponse, createPrompt, extractResponse } from '@reactory/server-modules/reactor/ai/openai/chat/questions/factory';
+import { getAIResponse, createPrompt, extractResponse } from 'modules/reactory-reactor/ai/openai/chat/questions/factory';
 import { template } from 'lodash';
 import { CodeReviewArgs } from './types';
 import { strongRandom } from 'utils';

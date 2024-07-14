@@ -1,6 +1,6 @@
 import { colors, stripColorCodes } from './index';
-import { IQuestion, ChatState } from '@reactory/server-modules/reactor/ai/openai/types/chat';
-import { handleChatCompletionResponse } from '@reactory/server-modules/reactor/ai/openai/chat/macro';
+import { IQuestion, ChatState } from 'modules/reactory-reactor/ai/openai/types/chat';
+import { handleChatCompletionResponse } from 'modules/reactory-reactor/ai/openai/chat/macro';
 import { ReadLine } from 'readline';
 
 

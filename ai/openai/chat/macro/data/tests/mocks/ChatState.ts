@@ -1,4 +1,4 @@
-import { ChatState } from "modules/reactor/ai/openai/types/chat";
+import { ChatState } from "modules/reactory-reactor/ai/openai/types/chat";
 import { OpenAIApi } from "openai";
 import ReactoryContextProvider from './TestContext'
 import { ObjectId } from "mongodb";

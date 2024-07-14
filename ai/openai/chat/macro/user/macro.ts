@@ -1,4 +1,4 @@
-import { ChatState, Macro } from "modules/reactor/ai/openai/types/chat";
+import { ChatState, Macro } from "modules/reactory-reactor/ai/openai/types/chat";
 
 export const GetUser: Macro<string> = async (
   args: string[],

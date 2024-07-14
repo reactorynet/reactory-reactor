@@ -8,19 +8,19 @@ import {
   AttributeProvider,
   ReactorNodeAttributes,
   IProjectNodeProvider,
-} from "@reactory/server-modules/reactor/types/service.types";
+} from "modules/reactory-reactor/types/service.types";
 
 import Hash from "@reactory/server-core/utils/hash";
 import {
   ReactorDataNode,
   ReactorNode,
   ReactorNodeType,
-} from "@reactory/server-modules/reactor/types/model.types";
+} from "modules/reactory-reactor/types/model.types";
 
-import SVGS from "@reactory/server-modules/reactor/data/reactor-svgs";
+import SVGS from "modules/reactory-reactor/data/reactor-svgs";
 import { PagingRequest } from "@reactory/server-core/database/types";
 
-import { getReactorProjectCatalogs } from "@reactory/server-modules/reactor/data/index";
+import { getReactorProjectCatalogs } from "modules/reactory-reactor/data/index";
 
 class TSqlProjectProcessor
   implements IProjectProcessor, AttributeProvider, IProjectNodeProvider

@@ -3,17 +3,17 @@ import {
   ChatFactory, 
   SYSTEM_INITIALIZER_MESSAGE, 
   getInitializerMessage
-} from '@reactory/server-modules/reactor/ai/openai/chat/questions/factory';
-import { ask, colors } from '@reactory/server-modules/reactor/helpers';
-import { ChatState } from "modules/reactor/ai/openai/types/chat";
+} from 'modules/reactory-reactor/ai/openai/chat/questions/factory';
+import { ask, colors } from 'modules/reactory-reactor/helpers';
+import { ChatState } from "modules/reactory-reactor/ai/openai/types/chat";
 import readline, { ReadLine } from 'readline';
 import { template } from 'lodash';
-import { MacroRegistry } from "@reactory/server-modules/reactor/ai/openai/chat/macro";
-import CANNED_MESSAGES from "@reactory/server-modules/reactor/cli/reactor-cli/messages";
+import { MacroRegistry } from "modules/reactory-reactor/ai/openai/chat/macro";
+import CANNED_MESSAGES from "modules/reactory-reactor/cli/reactor-cli/messages";
 import logger from "@reactory/server-core/logging";
 import { ObjectId } from "mongodb";
-import { IAIPersonaProviderService } from "@reactory/server-modules/reactor/types/service.types";
-import AIPersonaProvider from "@reactory/server-modules/reactor/services/PersonaService";
+import { IAIPersonaProviderService } from "modules/reactory-reactor/types/service.types";
+import AIPersonaProvider from "modules/reactory-reactor/services/PersonaService";
 
 
 const DEFAULT_MODEL_ID = 'gpt-3.5-turbo';

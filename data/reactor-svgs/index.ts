@@ -1,4 +1,4 @@
-import { KnownReactorProjectTypes } from "@reactory/server-modules/reactor/types/service.types";
+import { KnownReactorProjectTypes } from "modules/reactory-reactor/types/service.types";
 import fs from 'fs';
 
 export type FileSVG = string

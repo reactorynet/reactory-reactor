@@ -6,7 +6,7 @@ import {
 import { FileMacros, RemoveDirectory } from '../../fs/macro';
 import git from '../git';
 import TestChatState from '../../data/tests/mocks/ChatState';
-import { ChatState } from 'modules/reactor/ai/openai/types/chat';
+import { ChatState } from 'modules/reactory-reactor/ai/openai/types/chat';
 import { CreateChatCompletionRequest, OpenAIApi } from 'openai';
 import logger from '@reactory/server-core/logging';
 import { GitMacroArgs } from '../git/types';

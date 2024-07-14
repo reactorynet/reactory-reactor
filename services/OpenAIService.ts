@@ -2,7 +2,7 @@ import Reactory from "@reactory/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
 import IOpenAIService, { ChatParams, CreateFineTuningJobParams, FineTuningEvent, FineTuningObjectJob, ImageExtensionParams, ImageGenerationParams, ListFineTuningJobParams, OpenAIFile, OpenAIImage, OpenAIListResponse, OpenAIModel } from "../types/service.types";
 import { ChatCompletionResponseMessage, OpenAIApi } from "openai";
-import * as Chat from "@reactory/server-modules/reactor/ai/openai/chat/questions/factory";
+import * as Chat from "modules/reactory-reactor/ai/openai/chat/questions/factory";
 
 @service({
   id: "reactor.OpenAIService@1.0.0",

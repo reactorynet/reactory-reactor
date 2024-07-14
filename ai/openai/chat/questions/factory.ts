@@ -7,7 +7,7 @@ import {
   CreateChatCompletionRequest, 
   OpenAIApi 
 } from "openai";
-import { ChatState, IQuestion, RatedChatCompletionResponseMessage } from "@reactory/server-modules/reactor/ai/openai/types/chat";
+import { ChatState, IQuestion, RatedChatCompletionResponseMessage } from "modules/reactory-reactor/ai/openai/types/chat";
 import {
   handleUserResponse,
   handleChatCompletionResponse,
@@ -15,8 +15,8 @@ import {
   handleCommandAction
 } from '../macro';
 import { colors } from '../../../../helpers';
-import ReactorConversationModel from '@reactory/server-modules/reactor/models/ReactorChatState';
-import AIPersonaProvider from 'modules/reactor/services/PersonaService';
+import ReactorConversationModel from 'modules/reactory-reactor/models/ReactorChatState';
+import AIPersonaProvider from 'modules/reactory-reactor/services/PersonaService';
 import { template } from 'lodash';
 import { RecordNotFoundError } from '@reactory/server-core/exceptions';
 
