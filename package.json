@@ -30,6 +30,6 @@
     "url": "https://github.com/reactorynet/reactory-reactor.git"
   },
   "dependencies": {   
-    "openai": "4.52.7"
+    "openai": "3.2.1"
   }
 }
