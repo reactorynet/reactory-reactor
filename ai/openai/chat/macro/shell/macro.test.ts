@@ -1,6 +1,6 @@
 import { ShellCommand } from './macro';
 
-import { ChatState } from "modules/reactor/ai/openai/types/chat";
+import { ChatState } from "modules/reactory-reactor/ai/openai/types/chat";
 import TestChatState from '../data/tests/mocks/ChatState';
 import { ShellCommandArgs } from './types';
 

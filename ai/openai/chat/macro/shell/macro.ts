@@ -1,11 +1,11 @@
-import { ChatState, Macro } from "modules/reactor/ai/openai/types/chat";
+import { ChatState, Macro } from "modules/reactory-reactor/ai/openai/types/chat";
 import { ChildProcess, SpawnOptions, exec, ExecOptions, spawn } from "child_process";
 import fs, { readFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
 import Reactory from "@reactory/reactory-core";
 import { ComponentDomain, FeatureType } from "@reactory/reactory-core";
-import { ShellCommandArgs, ShellCommandMacroOutput } from "modules/reactor/types/macro.types";
+import { ShellCommandArgs, ShellCommandMacroOutput } from "modules/reactory-reactor/types/macro.types";
 import logger from "@reactory/server-core/logging";
 import { User } from "models";
 import { stderr } from "process";

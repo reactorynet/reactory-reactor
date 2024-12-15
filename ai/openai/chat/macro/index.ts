@@ -1,4 +1,4 @@
-import { ChatState, Macro, MacroFunctions } from 'modules/reactor/ai/openai/types/chat';
+import { ChatState, Macro, MacroFunctions } from 'modules/reactory-reactor/ai/openai/types/chat';
 import FileMacros from './fs';
 import DevelopmentMacros from './develop';
 import EmailMacros from './email';

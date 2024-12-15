@@ -13,6 +13,7 @@ const {
 } = process.env as Reactory.Server.ReactoryEnvironment;
 
 const ReactorModule: Reactory.Server.IReactoryModule = {
+  id: 'reactory-reactor',
   nameSpace: 'reactory',
   version: '1.0.0',
   name: 'Reactor',

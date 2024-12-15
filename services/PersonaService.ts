@@ -3,7 +3,7 @@ import { service } from "@reactory/server-core/application/decorators";
 import {
   IAIPersona,
   IAIPersonaProviderService,
-} from "@reactory/server-modules/reactor/types/service.types";
+} from "modules/reactory-reactor/types/service.types";
 
 export type PersonaProviderProps = {};
 export type PersonaProviderContext = Reactory.Server.IReactoryContext & {};

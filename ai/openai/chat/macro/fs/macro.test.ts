@@ -8,7 +8,7 @@ import {
   InsertSnippet
 } from './macro';
 import TestChatState from '../data/tests/mocks/ChatState';
-import { ChatState } from 'modules/reactor/ai/openai/types/chat';
+import { ChatState } from 'modules/reactory-reactor/ai/openai/types/chat';
 
 describe('file utilities', () => {
   let chatState: ChatState = null;

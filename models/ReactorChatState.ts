@@ -2,7 +2,7 @@ import mongoose, { Schema } from 'mongoose';
 import Reactory from '@reactory/reactory-core';
 import { ObjectId } from 'mongodb';
 import { ChatCompletionResponseMessage } from "openai"
-import { MetaSchema } from '@reactory/server-modules/core/models/shared';
+import { MetaSchema } from 'modules/reactory-core/models/shared';
 
 export interface ConversationMeta { 
   summary: string

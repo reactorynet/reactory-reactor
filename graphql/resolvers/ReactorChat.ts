@@ -1,7 +1,7 @@
 import { mutation, query, resolver } from "@reactory/server-core/models/graphql/decorators/resolver";
-import AIPersonaProvider from "modules/reactor/services/PersonaService";
-import ReactorConversationModel from '@reactory/server-modules/reactor/models/ReactorChatState';
-import IOpenAIService, { IReactorConversationsService } from "modules/reactor/types/service.types";
+import AIPersonaProvider from "modules/reactory-reactor/services/PersonaService";
+import ReactorConversationModel from 'modules/reactory-reactor/models/ReactorChatState';
+import IOpenAIService, { IReactorConversationsService } from "modules/reactory-reactor/types/service.types";
 
 //@ts-ignore
 @resolver
