@@ -8,12 +8,12 @@ import {
   ISystemGraphManager, 
   AttributeProvider,
   ReactorNodeAttributes
-} from "modules/reactory-reactor/types/service.types";
+} from "@reactory/server-modules/reactory-reactor/types/service.types";
 
 import Hash from "@reactory/server-core/utils/hash";
-import { ReactorDataNode, ReactorNode, ReactorNodeType } from 'modules/reactory-reactor/types/model.types';
+import { ReactorDataNode, ReactorNode, ReactorNodeType } from '@reactory/server-modules/reactory-reactor/types/model.types';
 
-import SVGS from 'modules/reactory-reactor/data/reactor-svgs';
+import SVGS from '@reactory/server-modules/reactory-reactor/data/reactor-svgs';
 import { PagingRequest } from '@reactory/server-core/database/types';
 
 class JavaProjectProcessor implements IProjectProcessor, AttributeProvider {

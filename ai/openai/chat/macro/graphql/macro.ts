@@ -1,4 +1,4 @@
-import { ChatState, Macro } from "modules/reactory-reactor/ai/openai/types/chat";
+import { ChatState, Macro } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import { queryGraph as execql, mutateGraph as execml } from "@reactory/server-core/graph/ReactoryApolloClient";
 import Reactory from "@reactory/reactory-core";
 const DEFAULT_GQL = `

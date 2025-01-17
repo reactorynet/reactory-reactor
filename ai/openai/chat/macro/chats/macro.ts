@@ -4,10 +4,10 @@ import {
   ChatFactory, 
   SYSTEM_INITIALIZER_MESSAGE, 
   getInitializerMessage
-} from 'modules/reactory-reactor/ai/openai/chat/questions/factory';
-import ReactorConversationModel from 'modules/reactory-reactor/models/ReactorChatState';
+} from '@reactory/server-modules/reactory-reactor/ai/openai/chat/questions/factory';
+import ReactorConversationModel from '@reactory/server-modules/reactory-reactor/models/ReactorChatState';
 import { ObjectId } from "mongodb";
-import AIPersonaProvider from "modules/reactory-reactor/services/PersonaService";
+import AIPersonaProvider from "@reactory/server-modules/reactory-reactor/services/PersonaService";
 
 
 export const ChatsMacro: Macro<unknown> = async (

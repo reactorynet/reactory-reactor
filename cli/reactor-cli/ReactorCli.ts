@@ -1,19 +1,16 @@
 import { Configuration, OpenAIApi } from "openai";
 import { 
   ChatFactory, 
-  SYSTEM_INITIALIZER_MESSAGE, 
   getInitializerMessage
-} from 'modules/reactory-reactor/ai/openai/chat/questions/factory';
-import { ask, colors } from 'modules/reactory-reactor/helpers';
-import { ChatState } from "modules/reactory-reactor/ai/openai/types/chat";
+} from '@reactory/server-modules//reactory-reactor/ai/openai/chat/questions/factory';
+import { ask, colors } from '@reactory/server-modules//reactory-reactor/helpers';
+import { ChatState } from "@reactory/server-modules//reactory-reactor/ai/openai/types/chat";
 import readline, { ReadLine } from 'readline';
-import { template } from 'lodash';
-import { MacroRegistry } from "modules/reactory-reactor/ai/openai/chat/macro";
-import CANNED_MESSAGES from "modules/reactory-reactor/cli/reactor-cli/messages";
+import { MacroRegistry } from "@reactory/server-modules//reactory-reactor/ai/openai/chat/macro";
+import CANNED_MESSAGES from "@reactory/server-modules//reactory-reactor/cli/reactor-cli/messages";
 import logger from "@reactory/server-core/logging";
 import { ObjectId } from "mongodb";
-import { IAIPersonaProviderService } from "modules/reactory-reactor/types/service.types";
-import AIPersonaProvider from "modules/reactory-reactor/services/PersonaService";
+import AIPersonaProvider from "@reactory/server-modules/reactory-reactor/services/PersonaService";
 
 
 const DEFAULT_MODEL_ID = 'gpt-3.5-turbo';

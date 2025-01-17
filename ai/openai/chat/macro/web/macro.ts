@@ -1,4 +1,4 @@
-import { ChatState, Macro } from "modules/reactory-reactor/ai/openai/types/chat";
+import { ChatState, Macro } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 
 /**
  * A macro that fetches data from the given URL and returns it as text

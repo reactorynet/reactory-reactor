@@ -1,5 +1,5 @@
 import { ask } from './ask';
-import { ChatState } from 'modules/reactory-reactor/ai/openai/types/chat';
+import { ChatState } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import { ReadLine, createInterface } from 'readline';
 import { ReactoryContext } from '@reactory/server-core/context';
 import { OpenAIApi } from 'openai';

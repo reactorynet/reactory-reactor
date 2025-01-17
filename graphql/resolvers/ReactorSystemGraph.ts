@@ -13,7 +13,7 @@ import {
   ISystemGraphManager,
   PageReactorProjectResult,
   ReactorNodeAttributes,
-} from "modules/reactory-reactor/types/service.types";
+} from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { ObjectId } from "mongodb";
 import {
   PagingRequest,
@@ -23,7 +23,7 @@ import {
   ReactorNode,
   ReactorNodeType,
   ReactorNodeCategory,
-} from "modules/reactory-reactor/types/model.types";
+} from "@reactory/server-modules/reactory-reactor/types/model.types";
 
 import OBJID from "@reactory/server-core/utils/ObjectId";
 

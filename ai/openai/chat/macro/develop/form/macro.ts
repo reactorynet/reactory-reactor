@@ -1,6 +1,6 @@
-import { ChatState, IQuestion, Macro, QuestionHandlerResponse } from "modules/reactory-reactor/ai/openai/types/chat";
+import { ChatState, IQuestion, Macro, QuestionHandlerResponse } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import { readFileSync } from "fs";
-import { ask } from "modules/reactory-reactor/helpers/ask";
+import { ask } from "@reactory/server-modules/reactory-reactor/helpers/ask";
 import uuid from "uuid";
 import { ChatFactory } from "../../../questions/factory";
 

@@ -1,7 +1,7 @@
 import { ChatCompletionResponseMessage, OpenAIApi } from "openai"
 import { Interface as ReadLineInterface } from "readline";
 import { Chat } from ".";
-import { IAIPersona } from "modules/reactory-reactor/types/service.types";
+import { IAIPersona } from "@reactory/server-modules/reactory-reactor/types/service.types";
 
 export type Macro<TResult> = (params: any[], state: ChatState) => Promise<TResult>
 

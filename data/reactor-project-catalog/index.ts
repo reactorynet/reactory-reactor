@@ -1,7 +1,7 @@
 import ApiError from '@reactory/server-core/exceptions';
 import fs from 'fs';
 import { isArray } from 'lodash';
-import { IReactorProject } from "modules/reactory-reactor/types/service.types";
+import { IReactorProject } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import Hash from '@reactory/server-core/utils/hash';
 
 const getCatalogs = async (context: Reactory.Server.IReactoryContext): Promise<Partial<IReactorProject>[]> => {

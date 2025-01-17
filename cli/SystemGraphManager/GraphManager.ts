@@ -1,6 +1,6 @@
 import { ReadLine } from "readline";
-import { ask, colors } from 'modules/reactory-reactor/helpers';
-import { ISystemGraphManager } from "modules/reactory-reactor/types/service.types";
+import { ask, colors } from '@reactory/server-modules/reactory-reactor/helpers';
+import { ISystemGraphManager } from "@reactory/server-modules/reactory-reactor/types/service.types";
 
 type ReactoryCliApp = (vargs: string[], context: Reactory.Server.IReactoryContext) => Promise<void>
 /**

@@ -1,7 +1,7 @@
 import pathModule from 'path';
 import os from 'os';
 import { promises as fs, readFileSync, existsSync, mkdirSync } from 'fs';
-import { ChatState, Macro } from 'modules/reactory-reactor/ai/openai/types/chat';
+import { ChatState, Macro } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import { RemoveDirectory } from '../../fs/macro';
 import { ShellCommand } from '../../shell/macro'
 import { template } from 'lodash';

@@ -1,6 +1,6 @@
 import { ingest } from "@reactory/server-core/utils/io"
 import appearance from './appearance';
-import { IAIPersona } from "modules/reactory-reactor/types/service.types";
+import { IAIPersona } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { FeatureType } from "@reactory/reactory-core";
 
 export const ReactoryPersona: IAIPersona = {

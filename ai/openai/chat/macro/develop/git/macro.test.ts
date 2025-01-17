@@ -6,7 +6,7 @@ import {
 } from '../review';
 import { FileMacros, RemoveDirectory } from '../../fs/macro';
 import TestChatState from '../../data/tests/mocks/ChatState';
-import { ChatState } from 'modules/reactory-reactor/ai/openai/types/chat';
+import { ChatState } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import { CreateChatCompletionRequest, OpenAIApi } from 'openai';
 import { GitMacroArgs } from './types';
 import { cwd } from 'process';

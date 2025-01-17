@@ -15,8 +15,8 @@ import {
   handleCommandAction
 } from '../macro';
 import { colors } from '../../../../helpers';
-import ReactorConversationModel from 'modules/reactory-reactor/models/ReactorChatState';
-import AIPersonaProvider from 'modules/reactory-reactor/services/PersonaService';
+import ReactorConversationModel from '@reactory/server-modules/reactory-reactor/models/ReactorChatState';
+import AIPersonaProvider from '@reactory/server-modules/reactory-reactor/services/PersonaService';
 import { template } from 'lodash';
 import { RecordNotFoundError } from '@reactory/server-core/exceptions';
 

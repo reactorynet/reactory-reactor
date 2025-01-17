@@ -2,7 +2,7 @@ import { SelectChangeEvent } from '@mui/material/Select';
 import Reactory, { React } from '@reactory/reactory-core';
 import {
   ReactorNode, ReactorNodeAttribute,
-} from 'modules/reactory-reactor/types/model.types';
+} from '@reactory/server-modules/reactory-reactor/types/model.types';
 
 import { Fragment } from 'react';
 

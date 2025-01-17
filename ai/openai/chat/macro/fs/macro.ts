@@ -2,8 +2,8 @@ import pathModule from 'path';
 import os from 'os';
 import { promises as fs, readFileSync, existsSync } from 'fs';
 import fsExtra from 'fs-extra';
-import { ChatState, Macro } from 'modules/reactory-reactor/ai/openai/types/chat';
-import { PathInfo, DirectoryListFormatter, DirectoryListFormatterService} from 'modules/reactory-reactor/types/macro.types'
+import { ChatState, Macro } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
+import { PathInfo, DirectoryListFormatter, DirectoryListFormatterService} from '@reactory/server-modules/reactory-reactor/types/macro.types'
 import logger from '@reactory/server-core/logging';
 import { R_OK, W_OK } from 'constants';
 
