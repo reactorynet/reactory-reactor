@@ -1,4 +1,4 @@
-import { ChatState, Macro, MacroFunctions } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
+import { ChatState, Macro, MacroComponentDefinition, MacroFunctions } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import FileMacros from './fs';
 import DevelopmentMacros from './develop';
 import EmailMacros from './email';
@@ -30,8 +30,9 @@ import {
 } from './develop';
 
 
-import { ChatCompletionResponseMessage, CreateChatCompletionRequest, CreateCompletionResponse, CreateCompletionResponseChoicesInner } from 'openai';
+import OpenAI from 'openai';
 import Hash from '@reactory/server-core/utils/hash';
+import __index from 'modules/__index';
 
 export const REACTOR_MACRO_MD = require.resolve('./macros.md');
 
@@ -70,7 +71,7 @@ const outputMacros: MacroFunctions = {
 };
 
 
-export const MacroRegistry: Reactory.IReactoryComponentDefinition<Macro<unknown>>[] = [
+export const MacroRegistry: MacroComponentDefinition<unknown>[] = [
   ...FileMacros,
   ...DevelopmentMacros,
   ...EmailMacros,
@@ -205,22 +206,41 @@ export function parse(input: string, state: ChatState): string[] {
 
 
 export async function handleUserResponse(userResponse: string, state: ChatState): Promise<string> {
-  // Extract macros and their parameters from the user response
+  // If userResponse is empty, return it as is
+  if (!userResponse || userResponse.trim() === '') {
+    return userResponse;
+  }
+  
+  // Extract all macros and their parameters from the user response
   const regex = /@(\w+)\((.*?)\)/g;
   let match;
   let result = userResponse;
-
-  while ((match = regex.exec(userResponse)) !== null) {
-    const [macro, ...params] = match.slice(1);
-
-    // Split the parameters by comma
-    const splitParams = params[0].split(',');
-
+  
+  // Collect all matches first
+  const matches = [];
+  let tempUserResponse = userResponse;
+  while ((match = regex.exec(tempUserResponse)) !== null) {
+    matches.push({
+      fullMatch: match[0],
+      macro: match[1],
+      params: match[2]
+    });
+  }
+  
+  // Process matches in reverse order to avoid offset issues
+  for (let i = matches.length - 1; i >= 0; i--) {
+    const { fullMatch, macro, params } = matches[i];
+    const splitParams = params.split(',');
+    
     // Check if there is a function for this macro
     if (inputMacros[macro]) {
-      // Replace the macro with the result of its function
-      const replacement: string = await inputMacros[macro](splitParams, state) as string;
-      result = result.replace(`@${macro}(${params[0]})`, replacement);      
+      try {
+        // Replace the macro with the result of its function
+        const replacement: string = await inputMacros[macro](splitParams, state) as string;
+        result = result.replace(fullMatch, replacement);
+      } catch (error) {
+        console.error(`Error executing macro ${macro}:`, error);
+      }
     } else {
       // console.warn(`No function found for macro @${macro}`);
     }
@@ -233,12 +253,12 @@ export async function handleUserResponse(userResponse: string, state: ChatState)
 /**
  * 
  */
-export async function makeSelectionFromChoices(choices: CreateCompletionResponseChoicesInner[], state: ChatState): Promise<number> {
+export async function makeSelectionFromChoices(choices: OpenAI.ChatCompletionChoice[], state: ChatState): Promise<number> {
   const { rl } = state;
   let choice_index = 0;  
   choices.forEach((choice) => {
     choice_index++;            
-    const text = choice.text;
+    const text = choice.message?.content || '';
     const lines = text.split('\n');      
     rl.write(`${choice_index}. ${lines[0]}\n`);      
   });
@@ -265,16 +285,16 @@ export async function makeSelectionFromChoices(choices: CreateCompletionResponse
  * @returns 
  */
 export async function handleChatCompletionResponse(
-  response: CreateCompletionResponse, 
-  prompt: CreateChatCompletionRequest,
+  response: OpenAI.ChatCompletion, 
+  prompt: OpenAI.ChatCompletionCreateParams,
   state: ChatState
-  ): Promise<CreateCompletionResponse> {
+  ): Promise<OpenAI.Chat.Completions.ChatCompletion.Choice & { __index: number }> {
 
   // Clone the response to avoid mutating the original object
-  const cloned: CreateCompletionResponse = JSON.parse(JSON.stringify(response));
+  const cloned: OpenAI.ChatCompletion = JSON.parse(JSON.stringify(response));
   // first we check if there is a macro block definition
   // which is recognise by the characters ```rfm as the start of the block and ``` as the end of the block
-  const macroBlockRegex = /```rfm([\s\S]*?)```/g;
+  // const macroBlockRegex = /```rfm([\s\S]*?)```/g;
   let choice_index = 0;  
   // if there is more than one choice we need display a short summary of each choice
   // and then ask the user to select one of the choices to display the full text  
@@ -291,67 +311,85 @@ export async function handleChatCompletionResponse(
   }
 
 
-  let macroBlockMatch = macroBlockRegex.exec(cloned.choices[choice_index].text);
-  //if we have matches in our regex, we need to execute the macros
-  //the AI is giving us a request to execute macros and we need to give the user
-  //the option to execute them or not as a safeguard against macros that
-  //may be harmful to the system
+  // let macroBlockMatch = macroBlockRegex.exec(cloned.choices[choice_index].message?.content || '');
+  // //if we have matches in our regex, we need to execute the macros
+  // //the AI is giving us a request to execute macros and we need to give the user
+  // //the option to execute them or not as a safeguard against macros that
+  // //may be harmful to the system
   
-  // macro regex is used to identify a macro snippet
-  const macroRegex = /@(\w+)\((.*?)\)/g;
+  // // macro regex is used to identify a macro snippet
+  // const macroRegex = /@(\w+)\((.*?)\)/g;
   
-  if (macroBlockMatch?.length > 0) { 
-    // check each matched block for macros
-    // we need to execute the the loop for each block in 
-    // an async manner so we can prompt the user for each block
-    // if they want to execute the macros in the block
-    for (let i = 0; i < macroBlockMatch.length; i++) {
-      const block = macroBlockMatch[i];
-      const blockIdRegex = /```rfm #(\w+)/g;
-      const blockIdMatch = blockIdRegex.exec(block);
-      let blockId = i.toString();
-      if(blockIdMatch.length > 0) { 
-        blockId = blockIdMatch[1];
-      }
+  // if (macroBlockMatch?.length > 0) { 
+  //   // check each matched block for macros
+  //   // we need to execute the the loop for each block in 
+  //   // an async manner so we can prompt the user for each block
+  //   // if they want to execute the macros in the block
+  //   for (let i = 0; i < macroBlockMatch.length; i++) {
+  //     const block = macroBlockMatch[i];
+  //     const blockIdRegex = /```rfm #(\w+)/g;
+  //     const blockIdMatch = blockIdRegex.exec(block);
+  //     let blockId = i.toString();
+  //     if(blockIdMatch.length > 0) { 
+  //       blockId = blockIdMatch[1];
+  //     }
 
-      // we need to generate a message to prompt the user if they want to execute the macros
-      // in the code block. We will use the block id as the message 
-      // and the user will have to type (y)es or (n)o to execute the macros
-      // or not
-      state.rl.write(`\n${blockId}\n`);
-      state.rl.write(`${block}\n`);
-      state.rl.write(`\nExecute macros in this block? (y)es or (n)o\n`);
-      const answer: string = await new Promise((resolve, reject) => { 
-        state.rl.question(``, (answer) => { 
-          resolve(answer);
-        })
-      })
+  //     // we need to generate a message to prompt the user if they want to execute the macros
+  //     // in the code block. We will use the block id as the message 
+  //     // and the user will have to type (y)es or (n)o to execute the macros
+  //     // or not
+  //     state.rl.write(`\n${blockId}\n`);
+  //     state.rl.write(`${block}\n`);
+  //     state.rl.write(`\nExecute macros in this block? (y)es or (n)o\n`);
+  //     const answer: string = await new Promise((resolve, reject) => { 
+  //       state.rl.question(``, (answer) => { 
+  //         resolve(answer);
+  //       })
+  //     })
 
-      if (answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes') { 
+  //     if (answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes') { 
+  //       let match;
+  //       const macros = { ...inputMacros, ...outputMacros };
+        
+  //       const input = block;
+  //       while ((match = macroRegex.exec(input)) !== null) {
+  //         const [macro, ...params] = match.slice(1);
+  //         const splitParams = params[0].split(',');
 
-      }
-    }
-  }
+  //         if (macros[macro]) {
+  //           const replacement = await macros[macro]([...splitParams, block], state) as string;
+  //           cloned.choices[choice_index].text = block.replace(`@${macro}(${params[0]})`, replacement);
+  //         } else {
+  //           console.warn(`No function found for macro @${macro}`);
+  //         }
+  //       }
+  //     }
+  //   }
+  // }
 
-  const message = cloned.choices[choice_index].text;
-
-  let match;
-  const macros = { ...inputMacros, ...outputMacros };
+  // const message = cloned.choices[choice_index].message.content;
+  // let match;
+  // const macros = { ...inputMacros, ...outputMacros };
   
-  const input = message;
-  while ((match = macroRegex.exec(input)) !== null) {
-    const [macro, ...params] = match.slice(1);
-    const splitParams = params[0].split(',');
+  // const input = message;
+  // while ((match = macroRegex.exec(input)) !== null) {
+  //   const [macro, ...params] = match.slice(1);
+  //   const splitParams = params[0].split(',');
 
-    if (macros[macro]) {
-      const replacement = await macros[macro]([...splitParams, message], state) as string;
-      cloned.choices[choice_index].text = message.replace(`@${macro}(${params[0]})`, replacement);
-    } else {
-      console.warn(`No function found for macro @${macro}`);
-    }
-  }
+  //   if (macros[macro]) {
+  //     const replacement = await macros[macro]([...splitParams, message], state) as string;
+  //     if (cloned.choices[choice_index].message) {
+  //       cloned.choices[choice_index].message.content = message.replace(`@${macro}(${params[0]})`, replacement);
+  //     }
+  //   } else {
+  //     console.warn(`No function found for macro @${macro}`);
+  //   }
+  // }
 
-  return cloned;
+  return { 
+    ...cloned.choices[choice_index],
+    __index: choice_index
+  };
 }
 
 function generateContentFromResult(result: MacroExecutionResult<unknown>, debug: boolean = false): string {
@@ -402,34 +440,62 @@ function generateContentFromResults(instructionSetResult: MacroInstructionSetRes
 }
 
 /**
- * Responsible for create a set of command actions from a user input.
- * @param response 
- * @param state 
- * @returns 
+ * Responsible for creating and executing a set of command actions from a user input.
+ * Processes a sequence of macros in the order they appear in the input.
+ * @param response - The user input containing macro commands
+ * @param state - The current chat state
+ * @returns OpenAI.ChatCompletionMessageParam - The formatted results as an assistant message
  */
-export const handleCommandAction = async (response: string, state: ChatState): Promise<ChatCompletionResponseMessage> => {
-
+export const handleCommandAction = async (response: string, state: ChatState): Promise<OpenAI.ChatCompletionMessageParam> => {
   const instructionSet: string[] = [];
-
   const regex = /@(\w+)\((.*?)\)/g;  
   let match;
-  const input = response;
-  while ((match = regex.exec(input)) !== null) {
-    const [macro, ...params] = match.slice(1);
-    instructionSet.push(`@${macro}(${params[0]})`);
+  
+  // Extract all macro commands from the input
+  while ((match = regex.exec(response)) !== null) {
+    // Use direct access to match groups to preserve the original parameter string with all commas
+    const macroName = match[1];
+    const paramString = match[2];
+    instructionSet.push(`@${macroName}(${paramString})`);
   }
   
-  if(instructionSet.length === 0) {
+  if (instructionSet.length === 0) {
     return {
-      role: 'system',
-      content: 'No commands found, be sure to use the @ directive',
-    }
+      role: 'assistant',
+      content: 'No commands found. Please use the @macro(params) syntax to execute commands.',      
+    };
   }
 
+  // Process all macros in sequence
   const result = await processMacroInstructionSet(instructionSet, state);
+  
+  // Format the results with sequence information
+  let content = '';
+  
+  if (result.hasErrors) {
+    content += `⚠️ Some commands encountered errors during execution.\n\n`;
+  }
+
+  // Display results in sequence with proper formatting
+  content += result.results.map((macroResult, index) => {
+    const stepNumber = index + 1;
+    const statusIcon = macroResult.error ? '❌' : '✅';
+    
+    let stepOutput = `**Step ${stepNumber}**: ${statusIcon} \`${macroResult.macro}\`\n\n`;
+    
+    if (macroResult.error) {
+      stepOutput += `Error: ${macroResult.error}\n\n`;
+    } else {
+      // Format the result value based on type
+      const formattedValue = generateContentFromResult(macroResult, false);
+      stepOutput += `${formattedValue}\n\n`;
+    }
+    
+    return stepOutput;
+  }).join('---\n\n');
 
   return {
-    role: 'system',
-    content: generateContentFromResults(result),
-  }
+    role: 'assistant',
+    content: content.trim(),
+  };
 }

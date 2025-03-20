@@ -1,36 +1,69 @@
 import mongoose, { Schema } from 'mongoose';
 import Reactory from '@reactory/reactory-core';
 import { ObjectId } from 'mongodb';
-import { ChatCompletionResponseMessage } from "openai"
+import OpenAI from "openai"
 import { MetaSchema } from '@reactory/server-modules/reactory-core/models/shared';
+import { id } from 'schema/reflection';
 
 export interface ConversationMeta { 
   summary: string
   title: string
 }
 
+export interface ChatCompletionResponseMessageStore extends OpenAI.Chat.ChatCompletionMessage {
+  id: string | ObjectId
+  rating?: number
+  created: Date
+  tool_results: any[]
+}
+
+export type ReactorConversationHistory = ChatCompletionResponseMessageStore[]
+
 export interface ReactorConversationDocument {
   //unique id for the conversation
   id: string | ObjectId
+  // The bot persona id
   botId: string
+  // The date the conversation was started
   started: Date,
+  // The model id used for the conversation
   modelId: string
+  // The user associated with the conversation
   user: Reactory.Models.IUser
-  meta: Reactory.Models.IRecordMeta<ConversationMeta>,
-  history: ChatCompletionResponseMessage[]
+  // The meta data for the conversation
+  meta: Reactory.Models.IRecordMeta<ConversationMeta>
+  // The history of the conversation
+  history: ReactorConversationHistory
+  // The variables for the conversation
   vars: any
+  // The date the conversation was created
   created: Date
+  // The date the conversation was last
   updated: Date
 }
 
-export interface ChatCompletionResponseMessageStore extends ChatCompletionResponseMessage {
-  rating?: number
-}
+
 
 export interface ReactorConversationDocumentStatics {
   new(): ReactorConversation
 }
 export type ReactorConversation = ReactorConversationDocument & ReactorConversationDocumentStatics;
+
+const ReactorConversationHistorySchema: Schema<ChatCompletionResponseMessageStore> = new Schema<ChatCompletionResponseMessageStore>({
+  id: ObjectId,
+  content: String,
+  refusal: String,
+  rating: Number,
+  role: String,
+  annotations: [{}],
+  audio: {},
+  tool_calls: [{}],
+  tool_results: [{}],
+  created: {
+    type: Date,
+    default: () => { return new Date() }
+  },
+});
 
 const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<ReactorConversation>({
   id: ObjectId,
@@ -54,12 +87,7 @@ const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<Reacto
     ref: 'User',
   },
   meta: MetaSchema,
-  history: [{
-    timestamp: Date,
-    role: String,
-    content: String,
-    rating: Number
-  }],
+  history: [ReactorConversationHistorySchema],
   vars: {},
   created: {
     type: Date,

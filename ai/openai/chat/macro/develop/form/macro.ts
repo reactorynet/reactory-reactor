@@ -1,4 +1,4 @@
-import { ChatState, IQuestion, Macro, QuestionHandlerResponse } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
+import { ChatState, IQuestion, Macro, MacroComponentDefinition, MacroToolDefinition, QuestionHandlerResponse } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import { readFileSync } from "fs";
 import { ask } from "@reactory/server-modules/reactory-reactor/helpers/ask";
 import uuid from "uuid";
@@ -186,7 +186,7 @@ Form ${name} created in module ${module}.
   * To delete the form use the macro @form(delete, ${form.id})`;
   };
 
-export const FormMacroComponentRegister: Reactory.IReactoryComponentDefinition<typeof FormMacro> = { 
+export const FormMacroComponentRegister: MacroComponentDefinition<typeof FormMacro> = { 
   nameSpace: 'reactor',
   name: 'FormMacro',
   version: '1.0.0',

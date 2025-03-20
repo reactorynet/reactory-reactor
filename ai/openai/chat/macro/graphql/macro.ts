@@ -72,8 +72,27 @@ export const QueryMacroComponentRegister: Reactory.IReactoryComponentDefinition<
   ],
   stem: 'mutation',
   tags: ['macro', 'graphql', 'mutation'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "queryGQL",
+      description: "Executes a GraphQL query and returns the result",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: "Arguments for executing a GraphQL query: [query, variables, options, format, outmap]. query is required, variables and options can be JSON strings, format can be 'string' or 'json', outmap is for mapping output fields.",
+            items: {
+              type: "string"
+            }
+          },
+        },
+        required: ["args"]
+      }
+    }
+  }]
 };
-
 
 export const MutationGQL: Macro<string | string[] | object | object[]> = async (
   args: any[], 
@@ -131,4 +150,24 @@ export const MutationMacroComponentRegister: Reactory.IReactoryComponentDefiniti
   features: [],
   stem: 'mutation',
   tags: ['macro', 'graphql', 'mutation'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "mutationGQL",
+      description: "Executes a GraphQL mutation and returns the result",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: "Arguments for executing a GraphQL mutation: [query, variables, options, format, outmap]. query is required, variables and options can be JSON strings, format can be 'string' or 'json', outmap is for mapping output fields.",
+            items: {
+              type: "string"
+            }
+          },
+        },
+        required: ["args"]
+      }
+    }
+  }]
 };

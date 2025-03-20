@@ -1,4 +1,4 @@
-import { ChatState, Macro } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
+import { ChatState, Macro, MacroComponentDefinition } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import { ChildProcess, SpawnOptions, exec, ExecOptions, spawn } from "child_process";
 import fs, { readFileSync } from 'fs';
 import os from 'os';
@@ -7,8 +7,6 @@ import Reactory from "@reactory/reactory-core";
 import { ComponentDomain, FeatureType } from "@reactory/reactory-core";
 import { ShellCommandArgs, ShellCommandMacroOutput } from "@reactory/server-modules/reactory-reactor/types/macro.types";
 import logger from "@reactory/server-core/logging";
-import { User } from "models";
-import { stderr } from "process";
 
 const DEFAULT_SHELL_TEMPLATE = `
 #!/bin/bash
@@ -38,6 +36,28 @@ export const secureShell = (command: string, state: ChatState): void => {
   const dangerousCommandPatterns = [
     /^rm\s/,
     /^mv\s/,
+    /^cp\s/,
+    /^dd\s/,
+    /^mkfs\s/,
+    /^mke2fs\s/,
+    /^mkswap\s/,
+    /^mkfs\s/,
+    /^useradd\s/,
+    /^usermod\s/,
+    /^userdel\s/,
+    /^groupadd\s/,
+    /^groupmod\s/,
+    /^groupdel\s/,
+    /^passwd\s/,
+    /^chown\s/,
+    /^chmod\s/,
+    /^chgrp\s/,
+    /^chroot\s/,
+    /^mount\s/,
+    /^umount\s/,
+    /^kill\s/,
+    /^pkill\s/,
+    /^pgrep\s/,
   ];
 
   //check if environment variable DENY_SHELL_EXECUTION is set to true
@@ -48,7 +68,7 @@ export const secureShell = (command: string, state: ChatState): void => {
   const { context } = state;
 
   // Check if user is authenticated and has the necessary role
-  if (!context || !context.hasRole('SHELL-EXEC')) {
+  if (!context || !context.hasAnyRole(['ADMIN', 'DEVELOPER', 'SHELL-EXEC'])) {
     throw new Error('Unauthorized: User does not have the necessary role to execute shell commands.');
   }
 
@@ -293,7 +313,7 @@ export const ShellCommand: Macro<ShellCommandMacroOutput> = async (args: ShellCo
   }
 };
 
-const ShellCommandComponentRegister: Reactory.IReactoryComponentDefinition<typeof ShellCommand> = {
+const ShellCommandComponentRegister: MacroComponentDefinition<typeof ShellCommand> = {
   nameSpace: 'reactor-macros',
   name: 'shell',
   version: '1.0.0',
@@ -308,8 +328,35 @@ const ShellCommandComponentRegister: Reactory.IReactoryComponentDefinition<typeo
   }],
   tags: ['shell', 'command', 'execute', 'run', 'script', 'sh'],
   domain: ComponentDomain.function,
-  roles: ['SHELL-EXEC'],
+  roles: ['ADMIN','SHELL-EXEC', 'DEVELOPER'],
   stem: 'shell',
+  tools: [{
+    type: "function",
+    function: {
+      name: "shell",
+      description: "Executes a shell command",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: `The arguments for the shell command:
+            1. command: The shell command to execute
+            2. workingDir: The working directory for the shell command
+            3. templateId: The template id to use for the shell command
+            4. timeoutInSeconds: The timeout in seconds for the shell command
+            5. sudo: Use sudo to execute the shell command
+            6. format: The format of the output (string or object)
+            7. shell: The shell to use for the command`,
+            items: {
+              type: "string",            
+            }
+          },          
+        },
+        required: ["args"],
+      }
+    }
+  }]
 };
 
 export default ShellCommandComponentRegister

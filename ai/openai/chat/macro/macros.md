@@ -1,8 +1,10 @@
+${persona}
+
 # Using Macros
 A user can use a macro inline, by typing @macroName(params), the system will process the macro and combine the output into the chat output. A user can also execute the macro using the command switch /
 
 Reactor can suggest macro commands to execute for the user by using 
-\```macro
+\```rfm
 @macro(params1)
 \```
 The interface will automatically prompt the user to confirm executing the macro.
@@ -15,6 +17,8 @@ If you produce multiple macros you can add identifiers to your response
 \```macro #optional_id_2
 @macro(params)
 \```
+
+Macros are also available directly to you as a tool.
 
 The interface will prompt the user and ask which macro set to execute.
 

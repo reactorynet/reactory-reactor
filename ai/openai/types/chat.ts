@@ -1,7 +1,15 @@
-import { ChatCompletionResponseMessage, OpenAIApi } from "openai"
+import OpenAI from "openai";
 import { Interface as ReadLineInterface } from "readline";
 import { Chat } from ".";
 import { IAIPersona } from "@reactory/server-modules/reactory-reactor/types/service.types";
+import { ReactorConversationHistory } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
+
+// Tool approval modes
+export enum ToolApprovalMode {
+  AUTO = "auto",      // Execute all tools without asking
+  PROMPT = "prompt",  // Ask for confirmation before executing any tool
+  SAFE_AUTO = "safe_auto" // Auto-approve safe tools, prompt for potentially dangerous ones
+}
 
 export type Macro<TResult> = (params: any[], state: ChatState) => Promise<TResult>
 
@@ -9,6 +17,37 @@ export type MacroFunctions = {
   [macro: string]: Macro<unknown>
 };
 
+export type MacroToolDefinition = {
+  type: "function",
+  propsMap?: Record<string, string>,
+  function: {
+    name: string;
+    description?: string;
+    parameters: {
+      type: "object";
+      properties: Record<string, {
+        type: string;
+        description?: string;
+        enum?: string[];
+        items?: {
+          type: string;
+          properties?: Record<string, unknown>;
+        };
+      }>;
+      required?: string[];
+    };
+  }
+};
+
+export type MacroComponentDefinition<TMacro> = Reactory.IReactoryComponentDefinition<TMacro> & {
+  mcp?: any
+  tools?: MacroToolDefinition[]
+  /**
+   * An alias for a macro. The name of the macro and the alias won't always match.
+   * We use this to provide a more human readable name for the macro.
+   */
+  alias?: string
+};
 
 export type KnownCannedMessages = 
   "welcome" | 
@@ -21,9 +60,9 @@ export type CanedMessages = {
   [key in KnownCannedMessages]: string;
 };
 
-export type RatedChatCompletionResponseMessage = ChatCompletionResponseMessage & { rating?: number };
+export type RatedChatCompletionResponseMessage = OpenAI.ChatCompletionMessage & { rating?: number };
 
-export type ChatMessage = ChatCompletionResponseMessage | RatedChatCompletionResponseMessage;
+export type ChatMessage = OpenAI.ChatCompletionMessage | RatedChatCompletionResponseMessage;
 
 /**
  * Represents the state of a chat session.
@@ -71,11 +110,11 @@ export type ChatState = {
   /**
    * The history of the chat session.
    */
-  history: ChatMessage[]
+  history: ReactorConversationHistory
   /**
    * The OpenAI API instance used for the chat session.
    */
-  ai: OpenAIApi
+  ai: OpenAI
   /**
    * The authentication token for the chat session, this is for authentication 
    * against the reactory server.
@@ -102,7 +141,7 @@ export type ChatState = {
    * 
    * The macros that are available for the chat session.
    * */
-  macros: Reactory.IReactoryComponentDefinition<Macro<unknown>>[]
+  macros: MacroComponentDefinition<unknown>[]
   /**
    * The readline interface for the chat session.
    */
@@ -113,6 +152,10 @@ export type ChatState = {
   vars: {
     [key: string]: unknown
   }
+  /**
+   * The tool approval mode for the chat session.
+   */
+  toolApprovalMode?: ToolApprovalMode; // Added field for tool approval mode
 }
 
 export interface QuestionHandlerResponse {
@@ -138,4 +181,19 @@ export interface IQuestionGroup {
 
 export interface IQuestionCollection {
   [key: string | symbol]: IQuestionGroup
+}
+
+export interface IToolCallRequest { 
+  id: string
+  function: {
+    name: string
+    arguments: string
+  }
+  type: "function"
+}
+
+export interface IToolCallResponse {
+  role: "tool"
+  content: string
+  tool_call_id: string
 }

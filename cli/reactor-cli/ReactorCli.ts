@@ -1,4 +1,4 @@
-import { Configuration, OpenAIApi } from "openai";
+import OpenAI from "openai";
 import { 
   ChatFactory, 
   getInitializerMessage
@@ -13,7 +13,7 @@ import { ObjectId } from "mongodb";
 import AIPersonaProvider from "@reactory/server-modules/reactory-reactor/services/PersonaService";
 
 
-const DEFAULT_MODEL_ID = 'gpt-3.5-turbo';
+const DEFAULT_MODEL_ID = 'grok-2-latest';
 
 const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryContext): Promise<void> => {
 
@@ -41,10 +41,10 @@ const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryCo
     apiOrg,
     context,
     macros: MacroRegistry,
-    ai: new OpenAIApi(new Configuration({
-      organization: apiOrg,
+    ai: new OpenAI({
+      baseURL: process.env.OPENAI_BASE_URL,
       apiKey: apiKey,
-    })),
+    }),
     vars: {
       __created: new Date().valueOf(),
       __botId: botId,
@@ -54,6 +54,7 @@ const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryCo
 
   const rl: ReadLine = context.readline as ReadLine;
 
+  rl.setPrompt(colors.yellow('[Reactor]> '));
   let pastedContent: string = '';
 
   // Function to sanitize the pasted content
@@ -132,19 +133,19 @@ const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryCo
   modelState.rl = rl;
 
   try {
-    const configuration = new Configuration({
+    const configuration = {
       organization: apiOrg,
       apiKey: apiKey,
-    });
+    };
 
-    const openai = new OpenAIApi(configuration);
+    const openai = new OpenAI(configuration);
 
     if (!modelId || modelId === '' || modelId === 'select') {
-      const modelListData = await openai.listModels();
+      const modelListData = await openai.models.list();
 
       let responseText = '';
 
-      modelListData.data?.data?.forEach((model) => {
+      modelListData.data.forEach((model) => {
         responseText += `[id: ${model.id}] Owner: ${model.owned_by} Created: ${new Date(model.created * 1000).toISOString()} \r`;
       });
 

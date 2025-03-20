@@ -1,5 +1,5 @@
 import Reactory from "@reactory/reactory-core";
-import { ChatState, Macro } from "../../../types/chat";
+import { ChatState, Macro, MacroComponentDefinition } from "../../../types/chat";
 import { 
   ChatFactory, 
   SYSTEM_INITIALIZER_MESSAGE, 
@@ -141,7 +141,7 @@ export const ChatsMacro: Macro<unknown> = async (
   }
 };
 
-export const ChatsMacroRegistry: Reactory.IReactoryComponentDefinition<typeof ChatsMacro> = {
+export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
   nameSpace: 'reactor-macros',
   name: 'chats',
   version: '1.0.0',
@@ -149,12 +149,16 @@ export const ChatsMacroRegistry: Reactory.IReactoryComponentDefinition<typeof Ch
   description: `# chats macro
   Use this macro to retrieve or switch to a previous chat session
   
-  ## Usage
+  ## Usage as a inline function / command action.
   @chats(list) - lists all sessions for the user
+  @chats(new) - creates a new chat session
+  @chats(size) - calculates the size of the chat in tokens
   @chats(cont, id?) - continues the last session with the user, or continues with the id provided. 
   @chats(del, id?) - del deletes a chat session give the id, or if no id it will delete the current chat session
   @chats(exp, id?) - export the chat to data folder for training
   @chats(train, files, model) - uploads training data for a specific model
+  @chats(personas) - lists all personas
+  @chats(speakto, id) - sets the persona to speak to
   @chats(clear) - clears all chat history for the user
   `,
   features: [
@@ -182,4 +186,37 @@ export const ChatsMacroRegistry: Reactory.IReactoryComponentDefinition<typeof Ch
   ],
   stem: 'chats',
   tags: ['chats', 'continue', 'delete', 'export', 'train'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "chats",
+      description: "Retrieve or switch to a previous chat session",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: ` Provides a list of actions to take on the chat session.
+            The arguments for the chat macro are passed as an array.
+            The first argument is the action to take, and the second argument is the id of the chat session to act on.
+            The following actions are supported: 
+            - list: lists all chat sessions
+            - cont, id: continues a chat session
+            - del, id: deletes a chat session
+            - exp: exports a chat session
+            - train: trains a model with the chat session
+            - clear: clears all chat history for the user
+            - personas: lists all personas
+            - speakto, id: sets the persona to speak to
+            `,
+            items: {
+              type: "string"
+            }
+          },
+        },
+        required: ["action"]
+      }
+    }
+  }],
+  alias: 'chat'
 }

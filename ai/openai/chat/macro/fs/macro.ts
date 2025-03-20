@@ -1,8 +1,8 @@
 import pathModule from 'path';
 import os from 'os';
-import { promises as fs, readFileSync, existsSync } from 'fs';
+import { promises as fs, readFileSync, existsSync, exists } from 'fs';
 import fsExtra from 'fs-extra';
-import { ChatState, Macro } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
+import { ChatState, Macro, MacroComponentDefinition } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import { PathInfo, DirectoryListFormatter, DirectoryListFormatterService} from '@reactory/server-modules/reactory-reactor/types/macro.types'
 import logger from '@reactory/server-core/logging';
 import { R_OK, W_OK } from 'constants';
@@ -22,26 +22,75 @@ const FQN_REGEX = /^(\w+)\.(\w+)(?:@(.*))?$/
 export const ReadFile: Macro<string> = async (
   args: any[],
   state: ChatState): Promise<string> => {
+
+  
   const [path, id] = args;
+  let targetPath = path.trim();
+  
+  if (!targetPath) {
+    return 'No path provided';
+  }
+
+  //determine if the file is relative to any of the following folder
+  // user home, the current working directory, or the root directory
+  if (targetPath.startsWith("~")) {
+    targetPath = targetPath.replace("~", os.homedir());
+  }
+
+  if (targetPath.startsWith(".")) {
+    targetPath = pathModule.resolve(targetPath);
+  }
+
+  // check if the path is in the in the working process directory
+  const WORKING_FOLDER = process.cwd();
+  if ( existsSync(pathModule.join(WORKING_FOLDER, targetPath))) {
+    targetPath = pathModule.join(WORKING_FOLDER, targetPath);
+  }
+
+  const HOME_FOLDER = os.homedir();
+  if (!targetPath.startsWith(HOME_FOLDER)) {
+    return 'Operation not allowed. You can only read files in your home directory';
+  }
+
   try {
-    const data = await fs.readFile(path.trim(), 'utf-8');
-    const mime = path.split('.').pop() || 'txt';
+    const data = await fs.readFile(targetPath.trim(), 'utf-8');
+    const mime = targetPath.split('.').pop() || 'txt';
     return `\`\`\`${mime}${id ? ` id="${id}"` : ''}\n${data.toString()}\n\`\`\``;
   } catch (err) {
-    logger.error(`Error reading file at ${path}:`, err);
+    logger.error(`Error reading file at ${targetPath}:`, err);
     return `\`\`\`\n ## ERROR - Macro ReadFile Failed\'n${err.message}\n\`\`\``;;
   }
 };
 
-export const ReadFileComponentRegister: Reactory.IReactoryComponentDefinition<typeof ReadFile> = {
+export const ReadFileComponentRegister: MacroComponentDefinition<typeof ReadFile> = {
   component: ReadFile,
-  name: 'ReadFile',
-  nameSpace: 'reactor',
+  name: 'readFile',
+  nameSpace: 'reactor-macros',
   version: '1.0.0',
   description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
   features: [],
   stem: 'file',
   tags: ['macro', 'file', 'read'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "readFile",
+      description: "Reads a file and returns its content as a code block",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: "Arguments for reading a file: [path, id]. path is required, id is optional.",
+            items: {
+              type: "string"
+            }
+          },
+        },
+        required: ["args"]
+      }
+    }
+  }]
 }
 
 const CONTENT_BLOCK_REGEX = /(```?.+?)\n([\s\S]+?)\n```/g;
@@ -125,13 +174,33 @@ export const WriteFile: Macro<string> = async (
 
 export const WriteFileComponentRegister: Reactory.IReactoryComponentDefinition<typeof WriteFile> = {
   component: WriteFile,
-  name: 'WriteFile',
+  name: 'writeFile',
   nameSpace: 'reactor',
   version: '1.0.0',
   description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
   features: [],
   stem: 'file',
   tags: ['macro', 'file', 'write', 'save', 'output'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "writeFile",
+      description: "Writes content to a file with different modes",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: "Arguments for writing a file: [path, content, mode, start, end]. path and content are required. mode can be 'overwrite', 'create', 'append', 'prepend', or 'insert'. start and end are line numbers for insert mode.",
+            items: {
+              type: "string"
+            }
+          },
+        },
+        required: ["args"]
+      }
+    }
+  }]
 }
 
 /**
@@ -165,6 +234,15 @@ const getFileInfo = async (path: string): Promise<PathInfo> => {
   }
 
   try {
+    if (!path) {
+      throw new Error('Path is empty');
+    }
+
+    if(existsSync(path) === false) {
+      throw new Error('Path does not exist');
+    }
+
+
     const stat = await fs.stat(path);
     const pathParsed = pathModule.parse(path);
 
@@ -356,29 +434,69 @@ export const PathInfoMacro: Macro<string> = async (
 /**
  * Macro for extracting detailed information about a file or directory
  */
-export const PathInfoComponentRegister: Reactory.IReactoryComponentDefinition<typeof PathInfoMacro> = {
+export const PathInfoComponentRegister: MacroComponentDefinition<typeof PathInfoMacro> = {
   component: PathInfoMacro,
-  name: 'PathInfo',
+  name: 'pathInfo',
   nameSpace: 'reactor',
   version: '1.0.0',
   description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
   features: [],
   stem: 'file',
   tags: ['macro', 'file', 'info', 'path', 'pathInfo'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "pathInfo",
+      description: "Gets detailed information about a file or directory",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: "Arguments for getting path info: [path]. path is required.",
+            items: {
+              type: "string"
+            }
+          },
+        },
+        required: ["args"]
+      }
+    }
+  }]
 }
 
 /**
  * Macro registry entry for the ListDirectory macro
  */
-export const ListDirectoryComponentRegister: Reactory.IReactoryComponentDefinition<typeof ListDirectory> = {
+export const ListDirectoryComponentRegister: MacroComponentDefinition<typeof ListDirectory> = {
   component: ListDirectory,
-  name: 'ListDirectory',
+  name: 'listDirectory',
   nameSpace: 'reactor',
   version: '1.0.0',
   description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
   features: [],
   stem: 'file',
   tags: ['macro', 'file', 'list', 'ls', 'dir'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "listDirectory",
+      description: "Lists files and directories in a specified path",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: "Arguments for listing a directory: [path, subfolders, pattern, format, escape]. path is required. subfolders is boolean ('true'/'false'), pattern is a wildcard filter, format can be 'text', 'json', or a formatter FQN, escape is boolean ('true'/'false').",
+            items: {
+              type: "string"
+            }
+          },
+        },
+        required: ["args"]
+      }
+    }
+  }]
 }
 
 /**
@@ -388,24 +506,61 @@ export const RemoveDirectory: Macro<string> = async (
   args: string[],
   state: ChatState
 ) => {
+  
+  const HOME_FOLDER = os.homedir();
   const [path] = args;
+  let targetPath = path.trim();
+
+  if (targetPath.startsWith("~")) {
+    targetPath = targetPath.replace("~", HOME_FOLDER);
+  }
+
+  if (!targetPath) {
+    return 'No path provided';
+  }
+
+  if (!targetPath.startsWith(HOME_FOLDER)) {
+    return 'Operation not allowed. You can only delete folders in your home directory';
+  }
+  
   try {
-    await fsExtra.rmdir(path.trim(), { recursive: true });
-    return `Folder ${path} deleted successfully`;
+    await fsExtra.rmdir(targetPath.trim(), { recursive: true });
+    return `Folder ${targetPath} deleted successfully`;
   } catch(err) {
-    return `Error deleting folder ${path}: ${err?.message}`;
+    return `Error deleting folder ${targetPath}: ${err?.message}`;
   }
 }
 
-export const RemoveDirectoryComponentRegister: Reactory.IReactoryComponentDefinition<typeof RemoveDirectory> = {
+export const RemoveDirectoryComponentRegister: MacroComponentDefinition<typeof RemoveDirectory> = {
   component: RemoveDirectory,
-  name: 'ListDirectory',
+  name: 'RemoveDirectory',
   nameSpace: 'reactor',
   version: '1.0.0',
   description: `A simple macro that deletes a folder and all subfolders and files`,
   features: [],
   stem: 'file',
   tags: ['macro', 'file', 'list', 'ls', 'dir'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "rmdir",
+      description: "Deletes a folder and all its contents recursively",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: "Arguments for removing a directory: [path]. path is required.",
+            items: {
+              type: "string"
+            }
+          },
+        },
+        required: ["args"]
+      }
+    }
+  }],
+  alias: 'rmdir'
 }
 
 /**
@@ -449,15 +604,36 @@ export const ExtractTextFromFile: Macro<string> = async (
 /**
  * Macro registry entry for the ExtractFile macro
  */
-export const ExtractFileComponentRegister: Reactory.IReactoryComponentDefinition<typeof ExtractTextFromFile> = {
+export const ExtractFileComponentRegister: MacroComponentDefinition<typeof ExtractTextFromFile> = {
   component: ExtractTextFromFile,
-  name: 'snipText',
+  name: 'snip',
   nameSpace: 'reactor-macros',
   version: '1.0.0',
   description: readFileSync(require.resolve('./snipText.md'), 'utf-8').toString(),
   features: [],
   stem: 'snip',
   tags: ['macro', 'file', 'extract', 'portion', 'slice', 'snip'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "snip",
+      description: "Extracts a portion of text from a file between specified line numbers",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: "Arguments for extracting text: [path, start, end]. All arguments are required. start and end are line numbers.",
+            items: {
+              type: "string"
+            }
+          },
+        },
+        required: ["args"]
+      }
+    }
+  }],
+  alias: 'snip'
 }
 
 // A macro that inserts a snippet into a file starting from a specified line
@@ -512,7 +688,7 @@ export const MakeDirectory: Macro<string> = async (
   return response;  
 }
 
-export const MakeDirectoryComponentRegister: Reactory.IReactoryComponentDefinition<typeof MakeDirectory> = { 
+export const MakeDirectoryComponentRegister: MacroComponentDefinition<typeof MakeDirectory> = { 
   component: MakeDirectory,
   name: 'mkdir',
   nameSpace: 'reactor-macros',
@@ -521,6 +697,26 @@ export const MakeDirectoryComponentRegister: Reactory.IReactoryComponentDefiniti
   features: [],
   stem: 'mkdir',
   tags: ['macro', 'file', 'create', 'make', 'dir', 'folder'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "mkdir",
+      description: "Creates directories at the specified paths",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: "Arguments for creating directories: one or more paths to create directories at. Creates parent directories as needed.",
+            items: {
+              type: "string"
+            }
+          },
+        },
+        required: ["args"]
+      }
+    }
+  }]
 }
 
 export const DeleteDirectory: Macro<string> = async (
@@ -540,7 +736,7 @@ export const DeleteDirectory: Macro<string> = async (
   return response;  
 }
 
-export const DeleteDirectoryComponentRegister: Reactory.IReactoryComponentDefinition<typeof DeleteDirectory> = { 
+export const DeleteDirectoryComponentRegister: MacroComponentDefinition<typeof DeleteDirectory> = { 
   component: DeleteDirectory,
   name: 'rmdir',
   nameSpace: 'reactor-macros',
@@ -549,9 +745,29 @@ export const DeleteDirectoryComponentRegister: Reactory.IReactoryComponentDefini
   features: [],
   stem: 'rmdir',
   tags: ['macro', 'file', 'delete', 'remove', 'dir', 'folder'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "rmdir",
+      description: "Removes directories at the specified paths",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: "Arguments for removing directories: one or more paths to directories to remove.",
+            items: {
+              type: "string"
+            }
+          },
+        },
+        required: ["args"]
+      }
+    }
+  }]
 }
 
-export const InsertSnippetComponentRegister: Reactory.IReactoryComponentDefinition<typeof InsertSnippet> = {
+export const InsertSnippetComponentRegister: MacroComponentDefinition<typeof InsertSnippet> = {
   component: InsertSnippet,
   name: 'insertText',
   nameSpace: 'reactor-macros',
@@ -560,10 +776,29 @@ export const InsertSnippetComponentRegister: Reactory.IReactoryComponentDefiniti
   features: [],
   stem: 'insertText',
   tags: ['macro', 'file', 'insert', 'snippet', 'replace', 'insert'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "insertText",
+      description: "Inserts or replaces text in a file at specified line positions",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: "Arguments for inserting text: [path, start, end, snippet]. path, start, and snippet are required. end is optional (defaults to start).",
+            items: {
+              type: "string"
+            }
+          },
+        },
+        required: ["args"]
+      }
+    }
+  }],
 }
 
-
-export const FileMacros: Reactory.IReactoryComponentDefinition<Macro<unknown>>[] = [
+export const FileMacros: MacroComponentDefinition<Macro<unknown>>[] = [
   ReadFileComponentRegister,
   WriteFileComponentRegister,
   ListDirectoryComponentRegister,

@@ -1,7 +1,10 @@
 import Reactory from "@reactory/reactory-core";
-import { ChatState, Macro } from "../../../types/chat";
+import { ChatState, Macro, MacroComponentDefinition, MacroToolDefinition } from "../../../types/chat";
 import { executeMacro } from "..";
 import modules from '@reactory/server-core/modules';
+import { env } from "process";
+import { id } from "schema/reflection";
+import persona from "build/server/reactory/local/app/modules/zepz-customer/ai/persona";
 
 export const VariableMacro: Macro<unknown> = async (
   args: any[],
@@ -31,7 +34,7 @@ export const VariableMacro: Macro<unknown> = async (
   }
 };
 
-export const VariableMacroRegistry: Reactory.IReactoryComponentDefinition<typeof VariableMacro> = {
+export const VariableMacroRegistry: MacroComponentDefinition<typeof VariableMacro> = {
   nameSpace: 'reactor-macros',
   name: 'var',
   version: '1.0.0',
@@ -62,6 +65,27 @@ export const VariableMacroRegistry: Reactory.IReactoryComponentDefinition<typeof
   ],
   stem: 'fetch',
   tags: ['fetch', 'http', 'url', 'data'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "var",
+      description: "Store, retrieve or remove a variable in the chat state",
+      parameters: {
+        type: "object",
+        properties: {
+          key: {
+            type: "string",
+            description: "The key for the variable to set, get or delete"
+          },
+          value: {
+            type: "string",
+            description: "The value to set for the variable (omit for get operation)"
+          },
+        },
+        required: ["key"]
+      }
+    }
+  }]
 }
 
 // a macro that describes modules installed in reactory
@@ -80,7 +104,7 @@ export const ModuleMacro: Macro<unknown> = async (
     return moduleText;
 };
 
-export const ModuleMacroRegistry: Reactory.IReactoryComponentDefinition<typeof ModuleMacro> = { 
+export const ModuleMacroRegistry: MacroComponentDefinition<typeof ModuleMacro> = { 
   nameSpace: 'reactor-macros',
   name: 'modules',
   version: '1.0.0',
@@ -102,4 +126,186 @@ export const ModuleMacroRegistry: Reactory.IReactoryComponentDefinition<typeof M
   ],
   stem: 'list',
   tags: ['list', 'modules', 'installed'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "modules",
+      description: "Lists modules installed in the Reactory system",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: `Arguments for the macro:
+            - details: boolean - show detailed information about the modules`,
+            items: { 
+              type: "string"
+            }
+          }
+        },
+        required: []
+      }
+    }
+  }]
+}
+
+// a macro that provides information about the environment variables
+export const EnvironmentMacro: Macro<unknown> = async (
+  args: any[],
+  state: ChatState): Promise<unknown> => {
+    // If a specific environment variable is requested
+    if(args.length > 0 && typeof args[0] === 'string') {
+      const envKey = args[0];
+      return process.env[envKey] || `Environment variable ${envKey} not found`;
+    }
+    
+    // Return all environment variables (or a safe subset)
+    const safeEnvVars: Record<string, string> = {};
+    // Option to filter sensitive variables or only include specific ones
+    const allowedVars = [
+      'NODE_ENV', 
+      'PORT', 
+      'HOST', 
+      'APP_VERSION', 
+      'APP_NAME', 
+      'REACTORY_HOME', 
+      'REACTORY_SERVER',
+      'REACTORY_CLIENT',
+      'REACTORY_DATA',
+      'REACTORY_NATIVE'
+    ];
+    
+    allowedVars.forEach(varName => {
+      if (process.env[varName]) {
+        safeEnvVars[varName] = process.env[varName] as string;
+      }
+    });
+    
+    return safeEnvVars[args[0]] || `No environment variable ${args[0]} found`;
+};
+
+export const EnvironmentMacroRegistry: MacroComponentDefinition<typeof EnvironmentMacro> = {
+  nameSpace: 'reactor-macros',
+  name: 'env',
+  version: '1.0.0',
+  component: EnvironmentMacro,
+  description: `# env macro
+  Use this macro to access environment variables
+
+  ## Usage
+  @env - returns a JSON object with safe environment variables
+  @env(VAR_NAME) - returns the value of the specific environment variable
+  `,
+  features: [
+    {
+      feature: 'list',
+      featureType: Reactory.FeatureType.function,
+      action: ['list', 'show', 'display'],
+      description: 'Operation that shows environment variables.',
+      stem: 'list'
+    },
+    {
+      feature: 'get',
+      featureType: Reactory.FeatureType.function,
+      action: ['get', 'fetch', 'retrieve'],
+      description: 'Operation that gets a specific environment variable.',
+      stem: 'get'
+    }
+  ],
+  stem: 'environment',
+  tags: ['env', 'environment', 'variables', 'config'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "env",
+      description: "Access environment variables",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: `Arguments for the macro:
+            - envKey: string - the name of the environment variable to retrieve
+          `,
+            items: {
+              type: "string"
+            }
+          }
+        },
+        required: []
+      }
+    }
+  }]
+}
+
+// A macro that provides information about the current chat state
+export const StateMacro: Macro<unknown> = async (
+  args: any[],
+  state: ChatState): Promise<unknown> => {
+    // clone the state to avoid modifying the original
+    
+    const safe_state = { 
+      vars: state.vars,
+      id: state.id,
+      host: state.host,
+      user: {
+        id: state.user.id,
+        email: state.user.loggedIn.user.email,
+        name: state.user.loggedIn.user.name,
+        lastName: state.user.loggedIn.user.lastName,
+      },
+      botId: state.botId,
+      persona: state.persona,
+      modelId: state.modelId,
+      created: state.created,
+      updated: state.updated,
+    };
+
+    return JSON.stringify(safe_state);
+};
+
+export const StateMacroRegistry: MacroComponentDefinition<typeof StateMacro> = {
+  nameSpace: 'reactor-macros',
+  name: 'state',
+  version: '1.0.0',
+  component: StateMacro,
+  description: `# state macro
+  Use this macro to access the current chat state
+
+  ## Usage
+  @state - returns a JSON object with the current chat state
+  `,
+  features: [
+    {
+      feature: 'get',
+      featureType: Reactory.FeatureType.function,
+      action: ['get', 'fetch', 'retrieve'],
+      description: 'Operation that gets the current chat state.',
+      stem: 'get'
+    }
+  ],
+  stem: 'state',
+  tags: ['state', 'chat', 'session', 'context'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "state",
+      description: "Access the current chat state object",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: `Arguments for the macro:
+            - none
+          `,
+            items: {
+              type: "string"
+            }
+          }
+        },
+        required: []
+      }
+    }
+  }]
 }
