@@ -4,6 +4,11 @@ import { Chat } from ".";
 import { IAIPersona } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { ReactorConversationHistory } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse";
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio'
+import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/websocket';
+
 // Tool approval modes
 export enum ToolApprovalMode {
   AUTO = "auto",      // Execute all tools without asking
@@ -64,6 +69,24 @@ export type RatedChatCompletionResponseMessage = OpenAI.ChatCompletionMessage & 
 
 export type ChatMessage = OpenAI.ChatCompletionMessage | RatedChatCompletionResponseMessage;
 
+export interface MCPClient {
+  id: string
+  client: Client
+  transports: {
+    sse?: { 
+      url: URL
+      requestInit?: RequestInit
+      eventSourceInit?: {
+        fetch: (url: string, init?: RequestInit) => Promise<Response>
+      }
+    }
+    stdio?: StdioClientTransport
+    websocket?: WebSocketClientTransport    
+  }
+  name?: string
+  description?: string
+}
+
 /**
  * Represents the state of a chat session.
  */
@@ -86,7 +109,7 @@ export type ChatState = {
    * 
    * The id of the bot defines what configuration is used for the bot.
    * */
-  botId: string
+  personaId: string
   /**
    * The persona that is associated with the chat session.
    */
@@ -144,6 +167,7 @@ export type ChatState = {
   macros: MacroComponentDefinition<unknown>[]
   /**
    * The readline interface for the chat session.
+   * -- only used when running in the CLI
    */
   rl?: ReadLineInterface
   /**
@@ -156,6 +180,15 @@ export type ChatState = {
    * The tool approval mode for the chat session.
    */
   toolApprovalMode?: ToolApprovalMode; // Added field for tool approval mode
+
+  /**
+   * A list of MCP Clients
+   */
+  mcpClients?: MCPClient[]
+  /**
+   * A placeholder for a SSE session. This is used for the MCP client.
+   */
+  sseSession?: any;
 }
 
 export interface QuestionHandlerResponse {

@@ -1,5 +1,5 @@
-import OpenAIService from "./OpenAIService";
-import PersonaService from "./PersonaService";
+import OpenAIService from "./reactor/providers/OpenAIService";
+import PersonaService from "./reactor/AIPersonaProvider";
 import SystemGraphManager from "./SystemGraphManager";
 import { 
   JavaProjectProcessor,

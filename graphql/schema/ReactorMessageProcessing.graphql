@@ -1,0 +1,37 @@
+"""
+Pre-processing options for messages before sending to AI providers.
+"""
+input ReactorMessageProcessingOptions {
+  summarizeContext: Boolean
+  filterSensitiveInfo: Boolean
+  translateToProviderFormat: Boolean
+  includePrevContext: Int
+  optimizePrompt: Boolean
+  tokenLimit: Int
+  convertMedia: Boolean
+}
+
+"""
+A generic template for AI requests that works across providers.
+"""
+input ReactorGenericRequestTemplate {
+  messageTemplate: String!
+  parameters: [String!]
+  requiredCapabilities: [String!]
+  processingOptions: ReactorMessageProcessingOptions
+  routing: ReactorRoutingConfig
+}
+
+extend type Mutation {
+  """
+  Send a generic AI request that will be routed to the appropriate provider
+  based on capabilities and availability. This is a lower-level API designed
+  for advanced use cases requiring specific routing, processing, and capability
+  requirements beyond standard chat interactions.
+  """
+  ReactorSendGenericRequest(
+    template: ReactorGenericRequestTemplate!,
+    parameters: Any,
+    chatSessionId: String
+  ): ReactorChatResponse
+}

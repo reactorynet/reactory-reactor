@@ -3,6 +3,7 @@ import {
   ModuleMacroRegistry,
   EnvironmentMacroRegistry,
   StateMacroRegistry, 
+  AddMacroRegistry
 } from './macro'
 
 export default [
@@ -10,4 +11,5 @@ export default [
   ModuleMacroRegistry,
   EnvironmentMacroRegistry,
   StateMacroRegistry,
+  AddMacroRegistry
 ];

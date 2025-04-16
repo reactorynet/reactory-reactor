@@ -1,0 +1,64 @@
+"""
+Defines capabilities and limitations of a specific AI model from any provider.
+"""
+type ReactorModelDefinition {
+  id: String!
+  providerId: String!
+  name: String!
+  version: String
+  capabilities: [String!]!
+  contextLength: Int
+  costPerToken: Float
+  inputCostPerToken: Float
+  outputCostPerToken: Float
+  maxParallelRequests: Int
+  supportsStreaming: Boolean
+  supportedTools: [String]
+  supportedMediaTypes: [String]
+}
+
+"""
+Configuration for a specific AI provider integration.
+"""
+type ReactorProviderConfig {
+  id: String!
+  name: String!
+  endpointUrl: String
+  apiVersion: String
+  models: [ReactorModelDefinition!]!
+  defaultModel: String
+  status: ReactorProviderStatus!
+  capabilities: [String!]!
+  rateLimits: ReactorProviderRateLimits
+  credentialRequirements: [String]
+}
+
+"""
+Status of a provider including availability and health metrics.
+"""
+type ReactorProviderStatus {
+  available: Boolean!
+  lastChecked: Date
+  uptime: Float
+  responseTime: Float
+  errorRate: Float
+  quotaRemaining: Float
+}
+
+"""
+Rate limiting configuration for an AI provider.
+"""
+type ReactorProviderRateLimits {
+  requestsPerMinute: Int
+  tokensPerMinute: Int
+  concurrentRequests: Int
+}
+
+"""
+Interface that all provider-specific response adapters must implement.
+Allows for consistent mapping between provider formats.
+"""
+interface ReactorProviderResponseAdapter {
+  adaptResponse(response: Any): ReactorChatResponse
+  adaptStreamingResponse(stream: Any): AsyncIterator
+}

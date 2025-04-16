@@ -5,6 +5,7 @@ import ReactorCli from './cli';
 import Services from './services';
 import Models from './models';
 import Forms from './forms';
+import Middlewares from './middleware';
 
 const ClientCertificate = require.resolve('./certs/reactory-web-client.cert');
 const {
@@ -45,6 +46,7 @@ const ReactorModule: Reactory.Server.IReactoryModule = {
       roles: ['USER'],
     }
   ],
+  middleware: Middlewares,
   passportProviders: [],
   cli: ReactorCli,
   pdfs: [],

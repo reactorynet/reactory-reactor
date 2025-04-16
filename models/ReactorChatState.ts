@@ -23,7 +23,7 @@ export interface ReactorConversationDocument {
   //unique id for the conversation
   id: string | ObjectId
   // The bot persona id
-  botId: string
+  personaId: string
   // The date the conversation was started
   started: Date,
   // The model id used for the conversation
@@ -35,7 +35,11 @@ export interface ReactorConversationDocument {
   // The history of the conversation
   history: ReactorConversationHistory
   // The variables for the conversation
-  vars: any
+  vars: {
+    [key: string]: any
+  }
+  // The SSE session id for the conversation 
+  sseSessionId?: string
   // The date the conversation was created
   created: Date
   // The date the conversation was last
@@ -67,7 +71,8 @@ const ReactorConversationHistorySchema: Schema<ChatCompletionResponseMessageStor
 
 const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<ReactorConversation>({
   id: ObjectId,
-  botId: {
+  // the bot id is the persona id we are using for the conversation
+  personaId: {
     type: String,
     required: true,
     default: 'Reactor',
@@ -89,6 +94,10 @@ const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<Reacto
   meta: MetaSchema,
   history: [ReactorConversationHistorySchema],
   vars: {},
+  sseSessionId: {
+    type: String,
+    default: null,
+  },
   created: {
     type: Date,
     default: () => { return new Date() }
@@ -100,7 +109,7 @@ const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<Reacto
 });
 
 const ReactorConversationModelName = 'ReactorConversation';
-const ReactorConversationModel = mongoose.model<ReactorConversation>(ReactorConversationModelName, ReactorConversationSchema, 'reactor_conversations');
+const ReactorConversationModel = mongoose.model(ReactorConversationModelName, ReactorConversationSchema, 'reactor_conversations');
 export type TReactorConversationModel = typeof ReactorConversationModel;
 export const ReactorConversationModelComponentRegistryEntry: Reactory.IReactoryComponentDefinition<typeof ReactorConversationModel> = { 
   name: 'ReactorConversationModel',

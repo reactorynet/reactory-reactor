@@ -44,7 +44,7 @@ export const QueryGQL: Macro<string | string[] | object | object[]> = async (
   }
 
   try {
-    const result = await execql(query, toObject(variables), toObject(options), user, partner);
+    const result = await execql(query, toObject(variables), toObject(options), state.context);
     if(result) { 
       if(format === 'string') {
         return JSON.stringify(result);
@@ -63,7 +63,7 @@ export const QueryGQL: Macro<string | string[] | object | object[]> = async (
 
 export const QueryMacroComponentRegister: Reactory.IReactoryComponentDefinition<Macro<string | string[] | object | object[]>> = {
   component: QueryGQL,
-  name: 'queryMacro',
+  name: 'queryGQL',
   nameSpace: 'reactor-macros',
   version: '1.0.0',
   description: 'Executes a GraphQL query with the provided arguments',
@@ -124,7 +124,7 @@ export const MutationGQL: Macro<string | string[] | object | object[]> = async (
   }
 
   try {
-    const result = await execml(query, toObject(variables), toObject(options), user, partner);
+    const result = await execml(query, toObject(variables), toObject(options), state.context);
     if(result) { 
       if(format === 'string') {
         return JSON.stringify(result);
@@ -143,7 +143,7 @@ export const MutationGQL: Macro<string | string[] | object | object[]> = async (
 
 export const MutationMacroComponentRegister: Reactory.IReactoryComponentDefinition<Macro<string | string[] | object | object[]>> = {
   component: MutationGQL,
-  name: 'mutationMacro',
+  name: 'mutationGQL',
   nameSpace: 'reactor-macros',
   version: '1.0.0',
   description: 'Executes a GraphQL mutation with the provided arguments',
@@ -161,6 +161,146 @@ export const MutationMacroComponentRegister: Reactory.IReactoryComponentDefiniti
           args: {
             type: "array",
             description: "Arguments for executing a GraphQL mutation: [query, variables, options, format, outmap]. query is required, variables and options can be JSON strings, format can be 'string' or 'json', outmap is for mapping output fields.",
+            items: {
+              type: "string"
+            }
+          },
+        },
+        required: ["args"]
+      }
+    }
+  }]
+};
+
+const SCHEMA_INTROSPECTION_QUERY = `
+  query IntrospectionQuery {
+    __schema {
+      queryType { name }
+      mutationType { name }
+      subscriptionType { name }
+      types {
+        kind
+        name
+        description
+        fields(includeDeprecated: true) {
+          name
+          description
+          args {
+            name
+            description
+            type {
+              kind
+              name
+            }
+            defaultValue
+          }
+          type {
+            kind
+            name
+          }
+          isDeprecated
+          deprecationReason
+        }
+        inputFields {
+          name
+          description
+          type {
+            kind
+            name
+          }
+          defaultValue
+        }
+        interfaces {
+          kind
+          name
+        }
+        enumValues(includeDeprecated: true) {
+          name
+          description
+          isDeprecated
+          deprecationReason
+        }
+        possibleTypes {
+          kind
+          name
+        }
+      }
+    }
+  }
+`;
+
+/**
+ * Retrieves the GraphQL schema via introspection
+ * @param args - string[] - [ options, format ] 
+ * @param context - Reactory.Server.IReactoryContext
+ * @returns 
+ */
+export const SchemaGQL: Macro<string | string[] | object | object[]>   = async (
+  args: any[], 
+  state: ChatState
+) => {
+  const [ 
+    options = [], 
+    format = 'string'
+  ] = args;
+  const { user, partner } = state.context;
+
+  if(!user) { 
+    return 'No user found';
+  }
+
+  if(!partner) {
+    return 'No partner found';
+  }
+
+  const toObject = (str: string[]) => { 
+    try {
+      return JSON.parse(str.join(' '));
+    } catch (err) {
+      return {};
+    }
+  }
+
+  try {
+    const result = await execql(SCHEMA_INTROSPECTION_QUERY, {}, toObject(options), state.context);
+    if(result) { 
+      if(format === 'string') {
+        return JSON.stringify(result);
+      } 
+
+      if(format === 'json') {
+        return result;
+      }
+    } else {
+      return 'No schema returned';
+    }
+  } catch (err) {
+    return `Error retrieving GraphQL schema: ${err.message}`;
+  }
+}
+
+export const SchemaMacroComponentRegister: Reactory.IReactoryComponentDefinition<Macro<string | string[] | object | object[]>> = {
+  component: SchemaGQL,
+  name: 'schemaGQL',
+  nameSpace: 'reactor-macros',
+  version: '1.0.0',
+  description: 'Retrieves the GraphQL schema via introspection',
+  features: [
+    { feature: 'schemaGQL', featureType: Reactory.FeatureType.function, description: 'retrieves GraphQL schema', action: [], stem: 'schema'}
+  ],
+  stem: 'schema',
+  tags: ['macro', 'graphql', 'schema', 'introspection'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "schemaGQL",
+      description: "Retrieves the GraphQL schema via introspection",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: "array",
+            description: "Arguments for retrieving schema: [options, format]. Options can be a JSON string, format can be 'string' or 'json'.",
             items: {
               type: "string"
             }

@@ -169,14 +169,46 @@ export interface ImageExtensionParams extends ImageGenerationParams, ImageVarian
 }
 
 export interface ChatParams { 
-  botId: string
-  question: string
-  chatSessionId: string
+  personaId: string
+  message: string
+  chatSessionId?: string
 }
 
 export interface AudioChatParams extends ChatParams {
   audio: string | Buffer[]
   format: "mp3" | "wav" | "ogg"
+}
+
+export interface IOpenAIServiceProps extends Reactory.Service.IReactoryServiceProps {
+  /**
+   * The OpenAI API key to use for the service
+   */
+  apiKey: string
+  /**
+   * The OpenAI API endpoint to use for the service
+   */
+  apiEndpoint: string
+  /**
+   * The OpenAI API version to use for the service
+   */
+  apiVersion: string
+  /**
+   * The OpenAI API organization id to use for the service
+   */
+  apiOrganizationId?: string
+  /**
+   * The OpenAI API base url to use for the service
+   */
+  apiBaseURL?: string
+  
+  /**
+   * The chat session id to use for the service instance
+   */
+  chatSessionId?: string
+  /**
+   * The persona id to use for the service insstance. Defaults to "reactor"
+   */
+  personaId?: string
 }
 
 /**
@@ -185,7 +217,7 @@ export interface AudioChatParams extends ChatParams {
  * documented here: https://platform.openai.com/docs/api-reference/introduction
  * @name IOpenAPIService
  */
-interface IOpenAIService extends Reactory.Service.IReactoryService {
+export interface IOpenAIService extends Reactory.Service.IReactoryService {
 
   // Fine Tuning API Methods
   createFineTuningJob(params: CreateFineTuningJobParams): Promise<FineTuningObjectJob>;
@@ -274,6 +306,12 @@ export interface IAIAppearance {
     }];
 }
 
+export interface IAIPersonaPromptTemplate {
+  content?: string;
+  variables?: string[];
+  role: "user" | "assistant" | "system";
+}
+
 /**
  * Defines the shape fo the AI Persona object
  */
@@ -282,9 +320,22 @@ export interface IAIPersona {
   modelId?: string;
   name: string;
   description?: string;
+  defaultGreeting?: string;
   persona: string;
   features: string;
   appearance?: IAIAppearance;
+  prompts?: {
+    [key: string]: IAIPersonaPromptTemplate
+  },
+  config? : {
+    apiKey?: string;
+    apiOrg?: string;
+    apiEndpoint?: string;
+    apiVersion?: string;
+    apiBaseURL?: string;
+  },
+  tools?: any[]
+  macros?: any[]  
 }
 
 /**
@@ -529,6 +580,57 @@ export interface IProjectProcessor extends ProjectSynchronizer, AttributeProvide
   process(project: IReactorProject): Reactory.Models.ISearchable[];  
 }
 
+/**
+ * Provider abstraction service interface.
+ * Handles provider registry, model discovery, and adapter management.
+ */
+export interface IReactorProviderService extends Reactory.Service.IReactoryService {
+  /**
+   * Get all registered providers
+   */
+  getProviders(): Promise<any[]>;
+
+  /**
+   * Get a specific provider by ID
+   */
+  getProvider(providerId: string): Promise<any>;
+
+  /**
+   * Register a new provider
+   */
+  registerProvider(providerConfig: any): Promise<any>;
+
+  /**
+   * Update provider status
+   */
+  updateProviderStatus(providerId: string, status: any): Promise<any>;
+
+  /**
+   * Get adapter for provider
+   */
+  getAdapter(providerId: string): Promise<any>;
+}
+
+/**
+ * Capability service interface.
+ * Handles capability discovery, routing, and negotiation.
+ */
+export interface IReactorCapabilityService extends Reactory.Service.IReactoryService {
+  /**
+   * Get all capabilities
+   */
+  getCapabilities(): Promise<any[]>;
+
+  /**
+   * Get providers supporting a specific capability
+   */
+  getProvidersForCapability(capabilityId: string): Promise<any[]>;
+
+  /**
+   * Route a request to the appropriate provider based on capabilities
+   */
+  routeRequest(request: any, routingConfig: any): Promise<any>;
+}
 
 export default IOpenAIService;
 

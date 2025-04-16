@@ -10,6 +10,7 @@ import UserMacros from './user';
 import WebMacros from './web';
 import WorkflowMacros from './workflow';
 import ChatsMacros from './chats';
+import MCPMacros from './mcp';
 
 import  { 
   ReadFile, 
@@ -82,7 +83,8 @@ export const MacroRegistry: MacroComponentDefinition<unknown>[] = [
   ...UserMacros,
   ...WebMacros,
   ...WorkflowMacros,
-  ...ChatsMacros
+  ...ChatsMacros,
+  ...MCPMacros,
 ];
 
 export const getMacrosMD = (): string => {
@@ -309,82 +311,6 @@ export async function handleChatCompletionResponse(
       }
     }    
   }
-
-
-  // let macroBlockMatch = macroBlockRegex.exec(cloned.choices[choice_index].message?.content || '');
-  // //if we have matches in our regex, we need to execute the macros
-  // //the AI is giving us a request to execute macros and we need to give the user
-  // //the option to execute them or not as a safeguard against macros that
-  // //may be harmful to the system
-  
-  // // macro regex is used to identify a macro snippet
-  // const macroRegex = /@(\w+)\((.*?)\)/g;
-  
-  // if (macroBlockMatch?.length > 0) { 
-  //   // check each matched block for macros
-  //   // we need to execute the the loop for each block in 
-  //   // an async manner so we can prompt the user for each block
-  //   // if they want to execute the macros in the block
-  //   for (let i = 0; i < macroBlockMatch.length; i++) {
-  //     const block = macroBlockMatch[i];
-  //     const blockIdRegex = /```rfm #(\w+)/g;
-  //     const blockIdMatch = blockIdRegex.exec(block);
-  //     let blockId = i.toString();
-  //     if(blockIdMatch.length > 0) { 
-  //       blockId = blockIdMatch[1];
-  //     }
-
-  //     // we need to generate a message to prompt the user if they want to execute the macros
-  //     // in the code block. We will use the block id as the message 
-  //     // and the user will have to type (y)es or (n)o to execute the macros
-  //     // or not
-  //     state.rl.write(`\n${blockId}\n`);
-  //     state.rl.write(`${block}\n`);
-  //     state.rl.write(`\nExecute macros in this block? (y)es or (n)o\n`);
-  //     const answer: string = await new Promise((resolve, reject) => { 
-  //       state.rl.question(``, (answer) => { 
-  //         resolve(answer);
-  //       })
-  //     })
-
-  //     if (answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes') { 
-  //       let match;
-  //       const macros = { ...inputMacros, ...outputMacros };
-        
-  //       const input = block;
-  //       while ((match = macroRegex.exec(input)) !== null) {
-  //         const [macro, ...params] = match.slice(1);
-  //         const splitParams = params[0].split(',');
-
-  //         if (macros[macro]) {
-  //           const replacement = await macros[macro]([...splitParams, block], state) as string;
-  //           cloned.choices[choice_index].text = block.replace(`@${macro}(${params[0]})`, replacement);
-  //         } else {
-  //           console.warn(`No function found for macro @${macro}`);
-  //         }
-  //       }
-  //     }
-  //   }
-  // }
-
-  // const message = cloned.choices[choice_index].message.content;
-  // let match;
-  // const macros = { ...inputMacros, ...outputMacros };
-  
-  // const input = message;
-  // while ((match = macroRegex.exec(input)) !== null) {
-  //   const [macro, ...params] = match.slice(1);
-  //   const splitParams = params[0].split(',');
-
-  //   if (macros[macro]) {
-  //     const replacement = await macros[macro]([...splitParams, message], state) as string;
-  //     if (cloned.choices[choice_index].message) {
-  //       cloned.choices[choice_index].message.content = message.replace(`@${macro}(${params[0]})`, replacement);
-  //     }
-  //   } else {
-  //     console.warn(`No function found for macro @${macro}`);
-  //   }
-  // }
 
   return { 
     ...cloned.choices[choice_index],

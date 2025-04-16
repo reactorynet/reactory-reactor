@@ -8,7 +8,11 @@ export const ReactoryPersona: IAIPersona = {
   name: "Reactor",
   persona: ingest(require.resolve('./persona.md')),
   features: ingest(require.resolve('./features.md')),
-  appearance
+  appearance,
+  defaultGreeting: "Hello, I am Reactor, your general purpose AI assistant. How can I assist you today?",
+  prompts: [],
+  tools: [],
+  macros: [],
 }
 
 export const ReactoryPersonaComponentRegistryEntry: Reactory.IReactoryComponentDefinition<IAIPersona> = {

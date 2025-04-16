@@ -1,0 +1,47 @@
+"""
+A capability that can be requested when making AI calls.
+"""
+type ReactorCapability {
+  id: String!
+  name: String!
+  description: String
+  providers: [String!]!
+  models: [String!]!
+  parameters: [ReactorCapabilityParameter!]
+}
+
+"""
+Parameters that can be provided when using a capability.
+"""
+type ReactorCapabilityParameter {
+  name: String!
+  type: String!
+  required: Boolean!
+  defaultValue: Any
+  description: String
+}
+
+"""
+Request configuration to route AI requests to appropriate providers.
+"""
+input ReactorRoutingConfig {
+  preferredProvider: String
+  requiredCapabilities: [String!]
+  fallbackProviders: [String]
+  costLimit: Float
+  timeoutMs: Int
+  prioritizePerformance: Boolean
+  prioritizeCost: Boolean
+}
+
+extend type Query {
+  """
+  Get available capabilities across all configured providers.
+  """
+  ReactorCapabilities: [ReactorCapability!]!
+  
+  """
+  Get all configured AI providers with their statuses and capabilities.
+  """
+  ReactorProviders: [ReactorProviderConfig!]!
+}

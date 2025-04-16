@@ -34,7 +34,7 @@ describe('ask function', () => {
     const context: Reactory.Server.IReactoryContext = await ReactoryContext("test-session-id", null);
     const ai = jest.mock('openai-api', () => jest.fn());
     mockState = {
-      botId: 'Reactor',
+      personaId: 'Reactor',
       context,
       ai: mockOpenAI,
       modelId: 'test-model-id',

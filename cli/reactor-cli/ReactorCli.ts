@@ -10,7 +10,11 @@ import { MacroRegistry } from "@reactory/server-modules//reactory-reactor/ai/ope
 import CANNED_MESSAGES from "@reactory/server-modules//reactory-reactor/cli/reactor-cli/messages";
 import logger from "@reactory/server-core/logging";
 import { ObjectId } from "mongodb";
-import AIPersonaProvider from "@reactory/server-modules/reactory-reactor/services/PersonaService";
+import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import Helpers from '@reactory/server-core/authentication/strategies/helpers';
+import { request } from "http";
 
 
 const DEFAULT_MODEL_ID = 'grok-2-latest';
@@ -23,15 +27,54 @@ const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryCo
   let botId = process.env.REACTOR_BOT_ID || 'ReactorAIPersona';
   const persona = await context.getService<AIPersonaProvider>('reactor.AIPersonaProvider@1.0.0')?.getPersona(botId);
 
+  
   if(!persona) { 
     context.error(`No persona found for botId: ${botId}`);
     return;
   }
 
+  const MCP_SERVER_URL = new URL(process.env.MCP_SERVER_URL || 'http://localhost:4000/reactor-mcp/sse');
+  const DEFAULT_MCP_CLIENT_NAME = 'reactory-mcp-client';
+  const DEFAULT_MCP_CLIENT_VERSION = '1.0.0';
+  const DEFAULT_SSE_CLIENT_TRANSPORT = {
+    url: MCP_SERVER_URL,
+    eventSourceInit: {
+      fetch: (url: string, init: any) => {
+        const headers = {
+          ...init?.headers,
+          'x-client-key': process.env.REACTORY_APPLICATION_USERNAME,
+          'x-client-pwd': process.env.REACTORY_APPLICATION_PASSWORD,
+          'Authorization': `Bearer ${Helpers.jwtMake(Helpers.jwtTokenForUser(context.user))}`,
+          'Accept': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+        };
+        return fetch(url, { ...init, headers }).catch((err) => {
+          console.error('SSE fetch error:', err);
+          throw err;
+        });
+      },
+    },
+    requestInit: {
+      headers: {
+        'x-client-key': process.env.REACTORY_APPLICATION_USERNAME,
+        'x-client-pwd': process.env.REACTORY_APPLICATION_PASSWORD,
+        'Authorization': `Bearer ${Helpers.jwtMake(Helpers.jwtTokenForUser(context.user))}`,        
+        'Accept': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+      },
+    }
+  };
+
+  const DEFAULT_CLIENT = new Client({
+    name: DEFAULT_MCP_CLIENT_NAME,
+    version: '2.0',
+    // transport: DEFAULT_SSE_CLIENT_TRANSPORT
+  });
+  
   const modelState: ChatState = {
     id: new ObjectId().toHexString(),
     host: 'cli',
-    botId,
+    personaId: botId,
     persona,
     modelId: modelId || DEFAULT_MODEL_ID,
     started: new Date(),
@@ -48,9 +91,21 @@ const ReactorCli = async (kwargs: string[], context: Reactory.Server.IReactoryCo
     vars: {
       __created: new Date().valueOf(),
       __botId: botId,
-    }
+    },
+    mcpClients: [{ 
+      id: 'reactor-mcp',
+      client: DEFAULT_CLIENT,
+      name: DEFAULT_MCP_CLIENT_NAME,
+      description: 'Default Reactory MCP Client',
+      transports: { 
+        sse: DEFAULT_SSE_CLIENT_TRANSPORT,
+        stdio: null,
+        websocket: null
+      }
+    }],
   }
-  modelState.history.push(await getInitializerMessage(botId, modelState, context));
+
+  modelState.history.push(await getInitializerMessage(botId, modelState, context) as any);
 
   const rl: ReadLine = context.readline as ReadLine;
 

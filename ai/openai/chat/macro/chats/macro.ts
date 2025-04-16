@@ -7,7 +7,7 @@ import {
 } from '@reactory/server-modules/reactory-reactor/ai/openai/chat/questions/factory';
 import ReactorConversationModel from '@reactory/server-modules/reactory-reactor/models/ReactorChatState';
 import { ObjectId } from "mongodb";
-import AIPersonaProvider from "@reactory/server-modules/reactory-reactor/services/PersonaService";
+import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
 
 
 export const ChatsMacro: Macro<unknown> = async (
@@ -23,7 +23,7 @@ export const ChatsMacro: Macro<unknown> = async (
     switch(k) {
       case 'new': {
         state.id = ObjectId.generate().toString();
-        state.history = [await getInitializerMessage(state.botId, state, context)];
+        state.history = [await getInitializerMessage(state.personaId, state, context)];
         return 'New chat session created'
       }
       case 'size': {
@@ -112,9 +112,9 @@ export const ChatsMacro: Macro<unknown> = async (
         // sets the persona to speak to
         const persona = await state.context.getService<AIPersonaProvider>('reactor.AIPersonaProvider@1.0.0').getPersona(v);
         if (persona) {
-          state.botId = persona.id;
+          state.personaId = persona.id;
           state.id = ObjectId.generate().toString();
-          state.history.push(await getInitializerMessage(state.botId, state, context));
+          state.history.push(await getInitializerMessage(state.personaId, state, context));
           state.persona = persona;
           return `You are now chatting to ${persona.name}`;
         } else {

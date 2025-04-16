@@ -2,10 +2,110 @@ import Reactory from "@reactory/reactory-core";
 import { ChatState, Macro, MacroComponentDefinition, MacroToolDefinition } from "../../../types/chat";
 import { executeMacro } from "..";
 import modules from '@reactory/server-core/modules';
-import { env } from "process";
-import { id } from "schema/reflection";
-import persona from "build/server/reactory/local/app/modules/zepz-customer/ai/persona";
 
+/**
+ * A macro that allows the user to or the llm to add a function to the chat state.
+ * This is useful for creating custom functions that can be used in the chat.
+ * @param args - The arguments for the macro: [name, function, description, parameters]
+ * @param state 
+ */
+export const AddMacro: Macro<unknown> = async (
+  args: any[],
+  state: ChatState): Promise<unknown> => {
+  
+  const [name, func, description, parameters] = args;
+  if(!name || !func) {
+    return `Error: Macro name and function are required`;
+  }
+
+  // the func will be text that we need to evaluate 
+  // to create the function
+  let macroFunc;
+
+  try {
+    macroFunc = eval(func);
+  } catch (err) {
+    return `Error: Could not create macro function: ${err}`;
+  }
+  if(typeof macroFunc !== 'function') {
+    return `Error: Macro function is not a function`;
+  }
+  // add the macro to the state
+  state.macros.push({ 
+    name,
+    nameSpace: 'runtime-macro',
+    description,
+    version: '1.0.0',
+    features: [],
+    component: macroFunc,
+    tools: [{
+      type: "function",
+      function: {
+        name,
+        description,
+        parameters: {
+          type: "object",
+          properties: parameters,
+          required: Object.keys(parameters)
+        }
+      }
+    }]
+  });
+
+  return `Macro ${name} added to state: use @${name} to call it`;
+}
+
+export const AddMacroRegistry: MacroComponentDefinition<typeof AddMacro> = {
+  nameSpace: 'reactor-macros',
+  name: 'addMacro',
+  version: '1.0.0',
+  component: AddMacro,
+  description: `# addMacro
+  Use this macro to create a new macro at runtime
+  ## Usage
+  @addMacro(name, function, description, parameters) - creates a new macro
+  @addMacro(name, function) - creates a new macro with no description or parameters
+  @addMacro(name, function, description) - creates a new macro with no parameters
+  `,
+  features: [
+    {
+      feature: 'addMcro',
+      featureType: Reactory.FeatureType.function,
+      action: ['add', 'create', 'define'],
+      description: 'Operation that creates a new macro.',
+      stem: 'add'
+    }
+  ],
+  stem: 'create',
+  tags: ['create', 'macro', 'function'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "addMacro",
+      description: "Creates a new macro at runtime",
+      parameters: {
+        type: "object",
+        properties: {
+          args: {
+            type: 'array',
+            description: `Arguments for the macro:
+            - name: string - the name of the macro
+            - func: string - the function of the macro
+            - description: string - the description of the macro
+            - parameters: string array - the parameters of the macro`,
+            items: {
+              type: "string"
+            } 
+          }
+          
+        },
+        required: ["args"]
+      }
+    }
+  }]
+}
+
+// a macro that allows the user to store, retrieve or remove a variable in the chat state
 export const VariableMacro: Macro<unknown> = async (
   args: any[],
   state: ChatState): Promise<unknown> => {
@@ -254,7 +354,7 @@ export const StateMacro: Macro<unknown> = async (
         name: state.user.loggedIn.user.name,
         lastName: state.user.loggedIn.user.lastName,
       },
-      botId: state.botId,
+      botId: state.personaId,
       persona: state.persona,
       modelId: state.modelId,
       created: state.created,

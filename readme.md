@@ -35,20 +35,8 @@ The module offers various services to extend the functionality of your applicati
 
 The module includes command-line interface (CLI) programs that can be executed from the terminal.
 
-
-
-
-
 Reactor module is a module that enables AI features for the reactory platform.
 The module is a commercial license that is not open source.
-
-## Installation
-
-Use the reactory cli to install the module:
-  
-  ```bash
-  reactory install reactor
-  ```
 
 ## Usage
 You can use the module GraphQL API to interact with the module. The module also provides a UI that can be used to interact with the module.

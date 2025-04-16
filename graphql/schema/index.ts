@@ -4,6 +4,9 @@ import { fileAsString } from '@reactory/server-core/utils/io';
 const ReactorTypeDefinitions: string[] = [];
 [
   'ReactorChat',
+  'ReactorCapabilities',
+  'ReactorMessageProcessing',
+  'ReactorProviders',
   'ReactorSystemGraph'
 ].forEach((name) => { 
   try {

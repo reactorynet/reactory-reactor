@@ -21,13 +21,15 @@
     }
   ],
   "moduleNameMapper": {
-    "^reactory/reactor(.*)$": "<rootDir>/src/"
+    "^reactory/reactory-reactor(.*)$": "<rootDir>/src/modules/reactory-reactor$1"
   },  
   "repository": {
     "type": "git",
     "url": "https://github.com/reactorynet/reactory-reactor.git"
   },
   "dependencies": {   
-    "openai": "4.87.3"
+    "openai": "4.87.3",
+    "@modelcontextprotocol/sdk": "file:./mcpsdk/modelcontextprotocol-sdk-v1.8.1.tgz",
+    "zod": "3.24.2"
   }
 }

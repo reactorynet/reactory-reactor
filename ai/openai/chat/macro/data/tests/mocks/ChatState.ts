@@ -38,7 +38,7 @@ const getMockChatState = async ({
   };
 
   const MockChatState: ChatState = {
-    botId: 'Reactor',
+    personaId: 'Reactor',
     modelId: 'gpt-3.5-turbo-0301',
     started: new Date(),
     history: [],
