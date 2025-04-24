@@ -1,3 +1,4 @@
+
 """
 Defines capabilities and limitations of a specific AI model from any provider.
 """
@@ -52,13 +53,4 @@ type ReactorProviderRateLimits {
   requestsPerMinute: Int
   tokensPerMinute: Int
   concurrentRequests: Int
-}
-
-"""
-Interface that all provider-specific response adapters must implement.
-Allows for consistent mapping between provider formats.
-"""
-interface ReactorProviderResponseAdapter {
-  adaptResponse(response: Any): ReactorChatResponse
-  adaptStreamingResponse(stream: Any): AsyncIterator
 }

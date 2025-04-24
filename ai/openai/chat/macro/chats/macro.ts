@@ -1,8 +1,6 @@
 import Reactory from "@reactory/reactory-core";
 import { ChatState, Macro, MacroComponentDefinition } from "../../../types/chat";
-import { 
-  ChatFactory, 
-  SYSTEM_INITIALIZER_MESSAGE, 
+import {   
   getInitializerMessage
 } from '@reactory/server-modules/reactory-reactor/ai/openai/chat/questions/factory';
 import ReactorConversationModel from '@reactory/server-modules/reactory-reactor/models/ReactorChatState';
@@ -146,6 +144,7 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
   name: 'chats',
   version: '1.0.0',
   component: ChatsMacro,
+  roles: ['USER'],
   description: `# chats macro
   Use this macro to retrieve or switch to a previous chat session
   

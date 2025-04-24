@@ -1,6 +1,7 @@
 import { mutation, query, resolver } from "@reactory/server-core/models/graphql/decorators/resolver";
 import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
 import { IReactorConversationsService } from "@reactory/server-modules/reactory-reactor/types/service.types";
+import { MacroComponentDefinition, MacroToolDefinition } from "modules/reactory-reactor/ai/openai/types/chat";
 
 @resolver
 class ReactorChatResolver {
@@ -15,6 +16,17 @@ class ReactorChatResolver {
   async ReactorConversations(_: any, args: { filter?: { personaId?: string, userId?: string, modelId?: string } }, context: Reactory.Server.IReactoryContext){ 
     const conversationService = context.getService<IReactorConversationsService>("reactor.ReactorConversationService@1.0.0");
     return await conversationService.getConversations(args.filter || {});
+  }
+
+  @mutation("ReactorStartChatSession")
+  async ReactorStartChatSession(_: any, args: { 
+    personaId: string, 
+    message: string, 
+    macros: Partial<MacroComponentDefinition<unknown>>,  
+    tools: Partial<MacroToolDefinition>[]
+  }, context: Reactory.Server.IReactoryContext) {
+    const conversationService = context.getService<IReactorConversationsService>("reactor.ReactorConversationService@1.0.0");
+    return await conversationService.startChatSession(args);
   }
 
   @mutation("ReactorSendMessage")
@@ -33,12 +45,23 @@ class ReactorChatResolver {
       };
     }
     
-    const conversationService = context.getService<IReactorConversationsService>("reactor.ReactorConversationService@1.0.0");
-    return await conversationService.sendMessage({
-      personaId: args.message.personaId,
-      chatSessionId: args.message.chatSessionId,
-      message: args.message.message
-    });
+    try {
+      const conversationService = context.getService<IReactorConversationsService>("reactor.ReactorConversationService@1.0.0");
+      return await conversationService.sendMessage({
+        personaId: args.message.personaId,
+        chatSessionId: args.message.chatSessionId,
+        message: args.message.message
+      });
+    } catch (error) {
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "MESSAGE_PROCESSING_ERROR",
+        message: error.message || "Error processing message",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion: "Try rephrasing your message or check your network connection"
+      };
+    }
   }
 
   @mutation("ReactorExecuteMacro")

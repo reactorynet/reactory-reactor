@@ -69,6 +69,7 @@ export const ReadFileComponentRegister: MacroComponentDefinition<typeof ReadFile
   version: '1.0.0',
   description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
   features: [],
+  roles: ['DEVELOPER', 'ADMIN'],
   stem: 'file',
   tags: ['macro', 'file', 'read'],
   tools: [{
@@ -180,6 +181,7 @@ export const WriteFileComponentRegister: Reactory.IReactoryComponentDefinition<t
   description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
   features: [],
   stem: 'file',
+  roles: ['DEVELOPER', 'ADMIN'],
   tags: ['macro', 'file', 'write', 'save', 'output'],
   tools: [{
     type: "function",
@@ -442,6 +444,7 @@ export const PathInfoComponentRegister: MacroComponentDefinition<typeof PathInfo
   description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
   features: [],
   stem: 'file',
+  roles: ['DEVELOPER', 'ADMIN'],
   tags: ['macro', 'file', 'info', 'path', 'pathInfo'],
   tools: [{
     type: "function",
@@ -476,6 +479,7 @@ export const ListDirectoryComponentRegister: MacroComponentDefinition<typeof Lis
   description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
   features: [],
   stem: 'file',
+  roles: ['DEVELOPER', 'ADMIN'],
   tags: ['macro', 'file', 'list', 'ls', 'dir'],
   tools: [{
     type: "function",
@@ -539,6 +543,7 @@ export const RemoveDirectoryComponentRegister: MacroComponentDefinition<typeof R
   description: `A simple macro that deletes a folder and all subfolders and files`,
   features: [],
   stem: 'file',
+  roles: ['DEVELOPER', 'ADMIN'],
   tags: ['macro', 'file', 'list', 'ls', 'dir'],
   tools: [{
     type: "function",
@@ -612,6 +617,7 @@ export const ExtractFileComponentRegister: MacroComponentDefinition<typeof Extra
   description: readFileSync(require.resolve('./snipText.md'), 'utf-8').toString(),
   features: [],
   stem: 'snip',
+  roles: ['DEVELOPER', 'ADMIN'],
   tags: ['macro', 'file', 'extract', 'portion', 'slice', 'snip'],
   tools: [{
     type: "function",
@@ -696,6 +702,7 @@ export const MakeDirectoryComponentRegister: MacroComponentDefinition<typeof Mak
   description: readFileSync(require.resolve('./mkdir.md'), 'utf-8').toString(),
   features: [],
   stem: 'mkdir',
+  roles: ['DEVELOPER', 'ADMIN'],
   tags: ['macro', 'file', 'create', 'make', 'dir', 'folder'],
   tools: [{
     type: "function",
@@ -744,6 +751,7 @@ export const DeleteDirectoryComponentRegister: MacroComponentDefinition<typeof D
   description: readFileSync(require.resolve('./rmdir.md'), 'utf-8').toString(),
   features: [],
   stem: 'rmdir',
+  roles: ['DEVELOPER', 'ADMIN'],
   tags: ['macro', 'file', 'delete', 'remove', 'dir', 'folder'],
   tools: [{
     type: "function",
@@ -775,6 +783,7 @@ export const InsertSnippetComponentRegister: MacroComponentDefinition<typeof Ins
   description: readFileSync(require.resolve('./insertText.md'), 'utf-8').toString(),
   features: [],
   stem: 'insertText',
+  roles: ['DEVELOPER', 'ADMIN'],
   tags: ['macro', 'file', 'insert', 'snippet', 'replace', 'insert'],
   tools: [{
     type: "function",
@@ -928,6 +937,7 @@ It can also generate content for files based on regex pattern matching.
 ])`,
   features: [],
   stem: 'module',
+  roles: ['DEVELOPER', 'ADMIN'],
   tags: ['macro', 'module', 'structure', 'create', 'generator'],
   tools: [{
     type: "function",

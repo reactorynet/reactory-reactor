@@ -236,6 +236,7 @@ export const CodeReviewComponentRegister: Reactory.IReactoryComponentDefinition<
   nameSpace: 'reactor',
   name: 'CodeReview',
   version: '1.0.0',
+  roles: ['DEVELOPER', 'ADMIN'],
   component: CodeReview,
   description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
   features: [],

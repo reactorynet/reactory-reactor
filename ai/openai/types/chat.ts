@@ -25,6 +25,7 @@ export type MacroFunctions = {
 export type MacroToolDefinition = {
   type: "function",
   propsMap?: Record<string, string>,
+  runat?: "server" | "client",
   function: {
     name: string;
     description?: string;
@@ -46,6 +47,7 @@ export type MacroToolDefinition = {
 
 export type MacroComponentDefinition<TMacro> = Reactory.IReactoryComponentDefinition<TMacro> & {
   mcp?: any
+  runat?: "server" | "client"
   tools?: MacroToolDefinition[]
   /**
    * An alias for a macro. The name of the macro and the alias won't always match.
@@ -144,10 +146,9 @@ export type ChatState = {
    */
   authToken?: string
   /**
-   * The user that is associated with the chat session, this will be in the 
-   * form of an API status object.
+   * The user that is associated with the chat session
    */
-  user?: Reactory.Models.IApiStatus
+  user?: Reactory.Models.IUserDocument
   /**
    * The context for the chat session.
    */

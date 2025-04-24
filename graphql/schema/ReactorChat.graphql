@@ -3,9 +3,13 @@ Represents a single message in a chat conversation between a user and a persona.
 Contains the content and metadata about the message.
 """
 type ReactorChatMessage {
+  sessionId: String!
   id: String
   role: String
   content: String
+  audio: Any
+  annotations: Any
+  images: Any
   rating: String
   timestamp: Date
   tool_calls: Any
@@ -168,15 +172,24 @@ type ReactorPersonaPrompt {
   personaId: String 
 }
 
+enum ReactorMacroRunAt {
+  client
+  server
+}
+
 """
 A pre-defined set of actions that can be executed at specific points
 in a conversation to trigger behaviors or process data.
 """
 type ReactorMacro {
   id: String
+  nameSpace: String
   name: String
+  version: String
+  description: String
+  alias: String
   params: [String]
-  runat: String
+  runat: ReactorMacroRunAt!
 }
 
 """
@@ -195,6 +208,9 @@ allowing it to perform actions beyond conversation.
 """
 type ReactorToolDefinition {
   id: String
+  """
+  The type will always be "function" for now
+  """
   type: String!
   propsMap: Any
   function: ReactorFunction
@@ -279,6 +295,42 @@ input ReactorSendMessageInput {
   message: String!
 }
 
+"""
+Input type for defining a macro that can be executed on the client side
+"""
+input ReactorMacroInput {
+  id: String
+  name: String!
+  nameSpace: String
+  version: String
+  description: String
+  alias: String
+  params: [String]
+}
+
+input ReactorFunctionInput { 
+  name: String!
+  description: String
+  parameters: Any
+}
+
+input ReactorToolDefinitionInput {
+  id: String
+  type: String!
+  propsMap: Any
+  function: ReactorFunctionInput
+}
+
+"""
+Input parameters for starting a new chat session with a persona.
+"""
+input ReactorInitSession { 
+  personaId: String!
+  message: String
+  macros: [ReactorMacroInput]
+  tools: [ReactorToolDefinitionInput]
+}
+
 extend type Query {
 
   """
@@ -294,6 +346,12 @@ extend type Query {
 }
 
 extend type Mutation {
+  """
+  Creates a new chat session with a specified persona and provides
+  the initial message to start the conversation using the persona's default greeting.
+  """
+  ReactorStartChatSession(initSession: ReactorInitSession!): ReactorChatState
+
   """
   Sends a message to a persona and returns either a direct response
   or SSE connection details for streaming responses.

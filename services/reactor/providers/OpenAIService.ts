@@ -1,6 +1,6 @@
 import Reactory from "@reactory/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
-import IOpenAIService, { AudioChatParams, ChatParams, CreateFineTuningJobParams, FineTuningEvent, FineTuningObjectJob, IAIPersonaPromptTemplate, ImageExtensionParams, ImageGenerationParams, IOpenAIServiceProps, ListFineTuningJobParams, OpenAIFile, OpenAIImage, OpenAIListResponse, OpenAIModel } from "../../../types/service.types";
+import IOpenAIService, { AudioChatParams, ChatParams, CreateFineTuningJobParams, FineTuningEvent, FineTuningObjectJob, IAIPersona, IAIPersonaPromptTemplate, ImageExtensionParams, ImageGenerationParams, IOpenAIServiceProps, ListFineTuningJobParams, OpenAIFile, OpenAIImage, OpenAIListResponse, OpenAIModel } from "../../../types/service.types";
 import OpenAI, { ClientOptions } from "openai";
 import AIPersonaProvider from "../AIPersonaProvider";
 import { ChatState, MacroComponentDefinition, MacroToolDefinition, ToolApprovalMode } from "../../../ai/openai/types/chat";
@@ -52,8 +52,6 @@ class OpenAIService implements IOpenAIService {
     context: Reactory.Server.IReactoryContext) {
     this.context = context;
     this.props = props;
-    
-    this.initialize();
   }
 
   /**
@@ -115,16 +113,82 @@ class OpenAIService implements IOpenAIService {
     }
   }
 
-  private async initialize() {
+  /**
+   * Loads a chat state from the database or creates a new one if it doesn't exist
+   * @param chatSessionId Optional chat session ID
+   * @returns Boolean indicating if this is a new chat session
+   */
+  private async loadChatState(chatSessionId?: string): Promise<boolean> {
     const { context } = this;
+    
+    // Generate a new ID if none provided
+    if (!chatSessionId) {
+      chatSessionId = new Mongoose.Types.ObjectId().toString();
+      this.chatStateModel = null;
+      return true; // This is a new chat session
+    }
+    
+    try {
+      // Load existing chat session
+      const chatSession = await ReactorConversationModel.findById(chatSessionId);
+      
+      if (!chatSession) {
+        // Chat session ID was provided but not found
+        this.chatStateModel = null;
+        return true;
+      }
+      
+      // Verify ownership of the chat session
+      if (chatSession.user && chatSession.user._id.toString() !== context.user._id.toString()) {
+        throw new Error(`Chat session ${chatSessionId} does not belong to user ${context.user._id.toString()}`);
+      }
+      
+      // Set the chat state model
+      // @ts-ignore
+      this.chatStateModel = chatSession;
+      
+      // Set the chat state from the model
+      this.chatState = {
+        id: chatSession._id.toString(),
+        user: context.user,
+        modelId: chatSession.modelId,
+        started: chatSession.started,
+        history: chatSession.history,
+        apiKey: process.env.OPENAI_API_KEY || "",
+        apiOrg: process.env.OPENAI_ORG || "",
+        ai: this.ai,
+        personaId: chatSession.personaId,
+        persona: this.personaProvider?.getPersona(chatSession.personaId),
+        macros: MacroRegistry,
+        vars: chatSession.vars || {},
+        sseSession: chatSession.sseSessionId,
+        toolApprovalMode: (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
+      };
+      
+      return false; // This is an existing chat session
+    } catch (error) {
+      if (error.message.includes('does not belong to user')) {
+        throw error; // Rethrow ownership errors
+      }
+      
+      this.context.error(
+        `Error loading chat state: ${error.message || error.toString()}`,
+        { error, chatSessionId },
+        'OpenAIService.loadChatState'
+      );
+      
+      // Fall back to creating a new session
+      this.chatStateModel = null;
+      return true;
+    }
+  }
+
+  public async initialize(chatSessionId: string, persona: IAIPersona) {
+    // Set up OpenAI client
     const {
-      apiEndpoint,
       apiKey,
       apiOrganizationId,
-      apiVersion,
       apiBaseURL,
-      chatSessionId,
-      personaId = "Reactor",
     } = this.props;
     
     const openAIArgs: ClientOptions = {
@@ -133,67 +197,71 @@ class OpenAIService implements IOpenAIService {
       baseURL: `${apiBaseURL || process.env.OPENAI_API_BASE_URL}`
     };
 
-    if (openAIArgs.baseURL.indexOf("xai") > -1) {
+    // Apply any provider-specific configuration
+    if (openAIArgs.baseURL.indexOf("x.ai") > -1) {
       delete openAIArgs.organization;
     }
-    // load the default persona
-    const persona = await this.personaProvider.getPersona(personaId);
-    // check if the persona has a system prompt.
-    if (!persona.prompts || !persona.prompts["system"]) {
-      throw new Error("Persona does not have a system prompt");
-    }
-
-    //  overwrite the configuration with the persona configuration
+    
+    // Apply persona-specific configuration if available
     if (persona.config) {
-      if (persona.config.apiKey) {
-        openAIArgs.apiKey = persona.config.apiKey;
-      }
-      if (persona.config.apiOrg) {
-        openAIArgs.organization = persona.config.apiOrg;
-      }
-      if (persona.config.apiBaseURL) {
-        openAIArgs.baseURL = persona.config.apiBaseURL;
-      }
+      if (persona.config.apiKey) openAIArgs.apiKey = persona.config.apiKey;
+      if (persona.config.apiOrg) openAIArgs.organization = persona.config.apiOrg;
+      if (persona.config.apiBaseURL) openAIArgs.baseURL = persona.config.apiBaseURL;
     }
     
+    // Initialize OpenAI client
     this.ai = new OpenAI(openAIArgs);
-    // create the system prompt message
-    // this will be used to initialize the chat state
-    const promptTemplate: IAIPersonaPromptTemplate = persona.prompts["system"];
-    const SYSTEM_INITIALIZER_MESSAGE: any = {
-      role: "system",
-      content: this.context.utils.lodash.template(promptTemplate.content)({
-        persona: persona,
-        tools: this.getToolsDefinitions(),
+
+    // Load or create chat state
+    const isNewSession = await this.loadChatState(chatSessionId);
+    
+    // For new sessions, initialize with system prompt
+    if (isNewSession) {
+      // Validate persona has system prompt
+      if (!persona.prompts || !persona.prompts["system"]) {
+        throw new Error("Persona does not have a system prompt");
+      }
+      
+      // Create system prompt message
+      const promptTemplate: IAIPersonaPromptTemplate = persona.prompts["system"];
+      const SYSTEM_INITIALIZER_MESSAGE: any = {
+        role: "system",
+        content: this.context.utils.lodash.template(promptTemplate.content)({
+          persona: persona,
+          tools: this.getToolsDefinitions(),
+          macros: MacroRegistry,
+          user: {
+            id: this.context.user.id, 
+            fullName: this.context.user.fullName(false),
+            firstName: this.context.user.firstName,
+            lastName: this.context.user.lastName,
+          },
+        }),
+      };
+      
+      // Set model ID
+      const modelId = persona.modelId || process.env.OPENAI_MODEL_ID;
+      if (!modelId) {
+        throw new Error("Model ID is not set, set config for the environment or for the persona");
+      }
+      
+      // Initialize new chat state
+      this.chatState = {
+        id: chatSessionId,
+        user: this.context.user,
+        modelId,
+        started: new Date(),
+        history: [SYSTEM_INITIALIZER_MESSAGE],
+        apiKey: process.env.OPENAI_API_KEY || "",
+        apiOrg: process.env.OPENAI_ORG || "",
+        ai: this.ai,
+        personaId: persona.id,
+        persona,
         macros: MacroRegistry,
-        user: {
-          id: context.user.id, 
-          fullName: context.user.fullName(false),
-          firstName: context.user.firstName,
-          lastName: context.user.lastName,
-        },
-      }),
-    };
-
-    const modelId = persona.modelId || process.env.OPENAI_MODEL_ID;
-    // check if the model id is set
-    if (!modelId) {
-      throw new Error("Model ID is not set, set config for the environment or for the persona");
+        vars: {},
+        toolApprovalMode: (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
+      };
     }
-
-    this.chatState = {
-      modelId,
-      started: new Date(),
-      history: [SYSTEM_INITIALIZER_MESSAGE],
-      apiKey: process.env.OPENAI_API_KEY || "",
-      apiOrg: process.env.OPENAI_ORG || "",
-      ai: this.ai,
-      personaId,
-      persona,
-      macros: MacroRegistry,
-      vars: {},
-      toolApprovalMode: (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
-    };
   }
 
   chatAudio(params: AudioChatParams): Promise<ChatCompletionResponseMessage> {
@@ -310,24 +378,49 @@ class OpenAIService implements IOpenAIService {
     };
   }
 
-
-  private getToolsDefinitions(): ChatCompletionTool[] {
+  private getMacroRegistry(): MacroComponentDefinition<unknown>[] {
     // convert the macro registry to a list of tools
     const { hasRole } = this.context;
-    const tools: any[] = [];
+    const macros: MacroComponentDefinition<unknown>[] = [];
   
     MacroRegistry.forEach((macro: MacroComponentDefinition<unknown>) => {
       let hasAccess = false;
       if (macro.roles && macro.roles.length > 0) { } 
       else hasAccess = true;
       if (macro.tools && hasAccess === true) {
+        macros.push(macro);
+      }
+    });
+  
+    return macros;
+  }
+
+  private getToolsDefinitions(): ChatCompletionTool[] {
+    // convert the macro registry to a list of tools
+    const { context } = this;
+    const tools: any[] = [];
+  
+    MacroRegistry.forEach((macro: MacroComponentDefinition<unknown>) => {
+      let hasAccess = false;
+      if (macro.roles && macro.roles.length > 0) { 
+        hasAccess = context.hasAnyRole(macro.roles);
+        if (hasAccess === false) {
+          return;
+        }
+      } 
+      else hasAccess = true;
+      
+      if (macro.tools && hasAccess === true) {
         macro.tools.forEach((tool: MacroToolDefinition) => {
           if (tool.type === "function") {
             const { function: func } = tool;
             const toolDefinition = {
-              name: func.name,
-              description: func.description || "",
-              parameters: func.parameters,
+              type: "function",
+              function: {
+                name: func.name,
+                description: func.description || "",
+                parameters: func.parameters,
+              }
             };
             tools.push(toolDefinition);
           }
@@ -350,7 +443,6 @@ class OpenAIService implements IOpenAIService {
       {
         role: "user",
         content: message,
-        name: context.user.fullName(false),
       },
     ];
   
@@ -423,9 +515,7 @@ class OpenAIService implements IOpenAIService {
 
     
     // create the prompt from the user input.
-    const prompt = this.createPrompt(      
-      message,
-    );
+    const prompt = this.createPrompt(message);
 
     // get the response from the AI
     return await this.getAIResponse(prompt);    

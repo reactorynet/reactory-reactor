@@ -1,7 +1,14 @@
 import Reactory from "@reactory/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
-import { IReactorConversationsService, IOpenAIService, IReactorProviderService } from "../../types/service.types";
-import ReactorConversationModel, { TReactorConversationModel } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
+import { IReactorConversationsService, IOpenAIService, IReactorProviderService, IAIPersona } from "../../types/service.types";
+import ReactorConversationModel, { TReactorConversationDocument, TReactorConversationModel, ValidProviderResponseTypes } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
+import AIPersonaProvider from "./AIPersonaProvider";
+import ReactorMessageProcessingService from "./ReactorMessageProcessingService";
+import { v4 } from "uuid";
+import { ObjectId } from "mongodb";
+import OpenAI from "openai";
+import { MacroComponentDefinition, MacroToolDefinition, ToolApprovalMode } from "modules/reactory-reactor/ai/openai/types/chat";
+import { Document } from "mongoose";
 
 @service({
   id: "reactor.ReactorConversationService@1.0.0",
@@ -11,13 +18,17 @@ import ReactorConversationModel, { TReactorConversationModel } from "@reactory/s
   serviceType: "ai",
   dependencies: [
     { id: "reactor.OpenAIService@1.0.0", alias: "openaiService" },
-    { id: "reactor.ReactorProviderService@1.0.0", alias: "providerService" }
+    { id: "reactor.ReactorProviderService@1.0.0", alias: "providerService" },
+    { id: "reactor.ReactorMessageProcessingService@1.0.0", alias: "messageProcessingService" },
+    { id: "reactor.AIPersonaProvider@1.0.0", alias: "personaProvider" }
   ],
 })
 export default class ReactorConversationService implements IReactorConversationsService {
   private context: Reactory.Server.IReactoryContext;
   private openaiService: IOpenAIService;
   private providerService: IReactorProviderService;
+  private personaProvider: AIPersonaProvider;
+  private messageProcessingService: ReactorMessageProcessingService;
   
   constructor(props: Reactory.Service.IReactoryServiceProps, 
     context: Reactory.Server.IReactoryContext) {
@@ -30,6 +41,10 @@ export default class ReactorConversationService implements IReactorConversations
 
   setProviderService(service: IReactorProviderService) {
     this.providerService = service;
+  }
+
+  setMessageProcessingService(service: ReactorMessageProcessingService) {
+    this.messageProcessingService = service;
   }
 
   async getConversations(filter: any): Promise<TReactorConversationModel[]> {
@@ -59,68 +74,151 @@ export default class ReactorConversationService implements IReactorConversations
     return session;
   }
 
+  // Create a new conversation
+  private async getNewConversation(persona: IAIPersona): Promise<TReactorConversationDocument> {
+    // Check if the persona is valid
+    if (!persona || !persona.id) {
+      throw new Error('Invalid persona');
+    }
+
+    // Check if the user is valid
+    if (!this.context.user) {
+      throw new Error('User not found');
+    }
+
+    const sessionId = new ObjectId();
+    const conversation = new ReactorConversationModel({
+          _id: sessionId,
+          id: sessionId,
+          personaId: persona.id,
+          user: this.context.user,
+          modelId: persona.modelId,
+          providerId: persona.providerId,
+          history: [],
+          vars: {},
+          meta: {
+            summary: 'Reactor Chat Session with agent ' + persona.name,
+            title: 'Chat with ' + persona.name,
+          },
+          macros: persona.macros ?? [],
+          tools: persona.tools ?? [],
+          started: new Date(),
+          sseSessionId: sessionId, 
+          toolApprovalMode: ToolApprovalMode.PROMPT,
+        });
+    // @ts-ignore
+    await conversation.save();
+  
+    return conversation;
+  }
+
   async sendMessage(args: { personaId: string, chatSessionId?: string, message: string }): Promise<any> {
     const { personaId, chatSessionId, message } = args;
     const { user } = this.context;
     
     try {
       // Get the persona's provider
-      const persona = await this.context.getService("reactor.AIPersonaProvider@1.0.0").getPersona(personaId);
-      const provider = persona.provider || "openai";
-      
-      // Get provider adapter
-      const adapter = await this.providerService.getAdapter(provider);
-      
-      let response;
-      if (provider === "openai") {
-        // Use OpenAI service for OpenAI provider
-        response = await this.openaiService.chat({
-          personaId,
-          chatSessionId,
-          message
-        });
-      } else {
-        throw new Error(`Provider ${provider} not implemented`);
-      }
+      const persona = await this.context.getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0", {
+        chatSessionId
+      }).getPersona(personaId);
+      const provider = persona.providerId || "xai";
       
       // Save message to conversation history
       let conversation;
       if (chatSessionId) {
         conversation = await ReactorConversationModel.findOne({ _id: chatSessionId }).exec();
+        // add macros and tools to the conversation
+        if (conversation) {
+          // @ts-ignore
+          conversation.macros = persona.macros || [];
+          // @ts-ignore
+          conversation.tools = persona.tools || [];
+        }       
       }
       
       if (!conversation) {
         // Create new conversation
+        const sessionId = new ObjectId();
         conversation = new ReactorConversationModel({
+          _id: sessionId,
+          id: sessionId,
           personaId,
           user,
+          modelId: persona.modelId,
+          providerId: provider,
+          history: [],
+          vars: {},
+          meta: {
+            summary: 'Reactor Chat Session with agent ' + persona.name,
+            title: 'Chat with ' + persona.name,
+          },
+          macros: persona.macros || [],
+          tools: persona.tools || [],
           started: new Date(),
-          history: []
-        });
+          sseSessionId: sessionId, 
+          toolApprovalMode: ToolApprovalMode.PROMPT,
+        }); 
       }
       
       // Add user message
+      // @ts-ignore
       conversation.history.push({
+        id: new ObjectId(),
         role: "user",
         content: message,
         timestamp: new Date()
       });
+
+      // Get provider adapter
+      const adapter = await this.providerService.getAdapter(provider);
       
-      // Add AI response if available
-      if (response.choices && response.choices.length > 0) {
-        const aiMessage = response.choices[0].message;
-        conversation.history.push({
-          role: aiMessage.role,
-          content: aiMessage.content,
-          timestamp: new Date(),
-          tool_calls: aiMessage.tool_calls
-        });
+      let response: any;
+
+      switch (provider) { 
+        case "xai":
+        case "openai":
+          // x-ai and openai use the same service
+          // first we need to initialize the openai service 
+          // to use the correct model and connection parameters.
+          await this.openaiService.initialize(chatSessionId, persona);
+          response = await this.openaiService.chat({
+            personaId,
+            chatSessionId,
+            message
+          });
+
+          // Add AI response if available
+          if (response?.choices && response?.choices?.length > 0) {
+            const aiMessage = response.choices[0].message;
+            conversation.history.push({
+              id: new ObjectId(),
+              response, // add the original response for debugging
+              role: aiMessage.role,
+              content: aiMessage.content,
+              timestamp: new Date(),
+              tool_calls: aiMessage.tool_calls
+            });
+          } else {
+            this.context.warn(`No AI response received for message: ${message}`, { response });            
+            conversation.history.push({
+              id: new ObjectId(),
+              role: "system",
+              content: "No AI response received",
+              timestamp: new Date()
+            });
+          }
+          // Add session ID to response
+          // @ts-ignore
+          response.sessionId = conversation._id.toString();
+          // @ts-ignore
+          await conversation.save();
+          
+          return adapter.adaptResponse(response);
+        default: {
+          this.context.error(`Provider ${provider} not implemented`, { provider });
+          throw new Error(`Provider ${provider} not implemented`);
+        }
       }
-      
-      await conversation.save();
-      
-      // Return adapted response
-      return adapter.adaptResponse(response);
     } catch (error) {
       this.context.error(`Error sending message: ${error.message}`, { error });
       return {
@@ -339,6 +437,66 @@ export default class ReactorConversationService implements IReactorConversations
       this.context.error(`Error deleting chat session: ${error.message}`, { error });
       return false;
     }
+  }
+
+
+  async startChatSession(args: { personaId: string; message: string; macros: Partial<MacroComponentDefinition<unknown>>; tools: Partial<MacroToolDefinition>[]; }): Promise<Any> {
+    const persona = await this.personaProvider.getPersona(args.personaId);
+    if (!persona) {
+      throw new Error(`Persona with id ${args.personaId} not found`);
+    }
+
+    const conversation = await this.getNewConversation(persona);
+    if (!conversation) {
+      throw new Error('Failed to create new conversation');
+    }
+
+    // add the using macros and tools to the conversation
+    if (args.macros) { 
+      args.macros.forEach((macro) => { 
+        conversation.macros.push({
+          name: macro.name,
+          nameSpace: macro.nameSpace,
+          description: macro.description,
+          version: macro.version,
+          component: macro.component,
+          runat: macro?.runat ?? "client",
+          roles: macro?.roles ?? [],
+          alias: macro.alias 
+        });
+      })
+    }
+
+    if (args.tools) { 
+      args.tools.forEach((tool) => { 
+        conversation.tools.push({
+          type: tool.type ?? "function",
+          runat: tool.runat ?? "client",
+          function: tool.function,
+        });
+      })
+    }
+
+    // Get provider adapter
+    const adapter = await this.providerService.getAdapter(persona.providerId || "xai");
+    
+    // create a default greenting without using a the AI providers
+
+    const response: any = {
+      id: new ObjectId(),
+      role: "assistant",
+      content: persona.defaultGreeting || "Hello, how can I assist you today?",
+      timestamp: new Date(),
+      // @ts-ignore
+      tool_calls: [],
+    };
+
+    // @ts-ignore
+    conversation.history.push(initialMessage);
+    // @ts-ignore
+    await conversation.save();
+
+    return adapter.adaptResponse(response);
   }
 
   toString?(includeVersion?: boolean): string {

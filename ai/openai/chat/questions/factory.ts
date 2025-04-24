@@ -22,6 +22,7 @@ import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPerso
 import { get, template } from "lodash";
 import { RecordNotFoundError } from "@reactory/server-core/exceptions";
 import { ChatCompletionMessage } from "openai/resources/chat/completions/completions";
+import uuid from "uuid";
 export const SYSTEM_INITIALIZER_MESSAGE: any = {
   role: "system",
   content: fs.readFileSync(require.resolve('../macro/macros.md'), 'utf-8').toString(),
@@ -32,9 +33,7 @@ export const getInitializerMessage = async (
   state: ChatState,
   context: Reactory.Server.IReactoryContext
 ): Promise<Partial<ChatCompletionMessage>> => {
-  const personaService = context.getService<AIPersonaProvider>(
-    "reactor.AIPersonaProvider@1.0.0"
-  ) as AIPersonaProvider;
+  const personaService = context.getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0");
   const persona = await personaService.getPersona(botId);
   const macros = state.macros
     .map((macro) => `## ${macro.name}\n ## Usage\n${macro.description}`)
@@ -43,6 +42,7 @@ export const getInitializerMessage = async (
   if (persona) {
     context.info(`Found persona for botId: ${botId}`);
     return {
+      id: uuid.v4(),
       role: SYSTEM_INITIALIZER_MESSAGE.role,
       content: template(SYSTEM_INITIALIZER_MESSAGE.content)({
         macros,

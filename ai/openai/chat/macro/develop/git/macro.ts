@@ -271,7 +271,7 @@ const GitMacroComponentDefinition: Reactory.IReactoryComponentDefinition<typeof 
     action: ['clone', 'git', 'repository'],
     description: 'Clones a git repository',
     stem: 'clone'
-  }],
+  }],  
   roles: ['DEVELOPER', 'ADMIN'],
   tags: ['git', 'repository', 'clone', 'pull', 'push', 'commit', 'status', 'checkout'],
 };

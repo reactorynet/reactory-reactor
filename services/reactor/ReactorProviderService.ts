@@ -94,6 +94,7 @@ class ReactorProviderService implements IReactorProviderService {
           const message = response.choices[0].message;
           return {
             __typename: "ReactorChatMessage",
+            sessionId: response.sessionId, 
             id: response.id,
             role: message.role,
             content: message.content,
@@ -132,15 +133,26 @@ class ReactorProviderService implements IReactorProviderService {
           name: "Grok 2 [Latest]",
           version: "2",
           capabilities: ["text-generation", "code-generation", "reasoning"],
-          contextLength: 8192,
+          contextLength: 131072,
           supportsStreaming: true,
           supportedTools: ["function-calling"],
           supportedMediaTypes: ["text", "image"]
+        },
+        {
+          id: "grok-3-mini-beta",
+          providerId: "xai",
+          name: "Grok 3 Mini [Beta]",
+          version: "3",
+          capabilities: ["text-generation", "code-generation", "reasoning"],
+          contextLength: 131072,
+          supportsStreaming: true,
+          supportedTools: ["function-calling"],
+          supportedMediaTypes: ["text"]
         }
       ],
-      defaultModel: "grok-2-latest",
+      defaultModel: "grok-3-mini-beta",
       status: {
-        available: process.env.XAI_API_KEY ? true : false,
+        available: `${process.env.XAI_API_KEY}`.trim() !== "",
         lastChecked: new Date(),
         uptime: 99.5,
         responseTime: 400,
@@ -155,6 +167,17 @@ class ReactorProviderService implements IReactorProviderService {
     // Create adapter for X AI
     const xaiAdapter = {
       adaptResponse: (response: any): any => {
+        
+        if (response === null) { 
+          return {
+            __typename: "ReactorErrorResponse",
+            code: "PROVIDER_ERROR",
+            message: "No response from provider",
+            timestamp: new Date(),
+            recoverable: false,
+          };
+        }
+
         if (response.error) {
           return {
             __typename: "ReactorErrorResponse",
@@ -169,7 +192,8 @@ class ReactorProviderService implements IReactorProviderService {
           const message = response.choices[0].message;
           return {
             __typename: "ReactorChatMessage",
-            id: response.id || Math.random().toString(36).substring(2, 15),
+            sessionId: response.sessionId, 
+            id: response.id,
             role: message.role,
             content: message.content,
             timestamp: new Date(),

@@ -1,9 +1,10 @@
 import Reactory from '@reactory/reactory-core';
-import { ChatCompletionResponseMessage } from "openai"
+import OpenAI from "openai"
 import { TReactorConversationModel } from "../models/ReactorChatState"
 import { ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorNodeType } from "./model.types"
 import { PagingRequest, PagingResult } from "@reactory/server-core/database/types"
 import { ObjectId } from "mongodb"
+import { MacroComponentDefinition, MacroToolDefinition } from '../ai/openai/types/chat';
 
 export type OpenAIModel = {
   id: string
@@ -219,6 +220,7 @@ export interface IOpenAIServiceProps extends Reactory.Service.IReactoryServicePr
  */
 export interface IOpenAIService extends Reactory.Service.IReactoryService {
 
+  initialize(chatSessionId: string, persona: IAIPersona): Promise<void>;
   // Fine Tuning API Methods
   createFineTuningJob(params: CreateFineTuningJobParams): Promise<FineTuningObjectJob>;
 
@@ -246,9 +248,9 @@ export interface IOpenAIService extends Reactory.Service.IReactoryService {
 
   listModels(): Promise<OpenAIListResponse<OpenAIModel>>;
 
-  chat(params: ChatParams) : Promise<ChatCompletionResponseMessage>;
+  chat(params: ChatParams) : Promise<OpenAI.Chat.Completions.ChatCompletion>;
 
-  chatAudio(params: AudioChatParams) : Promise<ChatCompletionResponseMessage>;
+  chatAudio(params: AudioChatParams) : Promise<OpenAI.Chat.Completions.ChatCompletion>;
 
   speech2Text(audio: string | Buffer[]): Promise<string>;
 }
@@ -318,6 +320,7 @@ export interface IAIPersonaPromptTemplate {
 export interface IAIPersona {
   id: string;
   modelId?: string;
+  providerId?: string;
   name: string;
   description?: string;
   defaultGreeting?: string;
@@ -335,7 +338,7 @@ export interface IAIPersona {
     apiBaseURL?: string;
   },
   tools?: any[]
-  macros?: any[]  
+  macros?: MacroComponentDefinition<unknown>[]  
 }
 
 /**
@@ -379,9 +382,16 @@ export interface IAIPersonaProviderService {
 }
 
 export interface IReactorConversationsService extends Reactory.Service.IReactoryService{ 
-  executeMacro(args: { macro: string, botId: string, chatSessionId: string }): Promise<TReactorConversationModel>;
-  attachImage(args: { image: string, botId: string, chatSessionId: string }): Promise<TReactorConversationModel>;
-  deleteChatSession(args: { id: string }): Promise<TReactorConversationModel>; 
+  startChatSession(args: {
+    personaId: string, 
+    message: string, 
+    macros: Partial<MacroComponentDefinition<unknown>>,  
+    tools: Partial<MacroToolDefinition>[]
+  }): Promise<any>;
+  executeMacro(args: { macro: string, personaId: string, chatSessionId: string }): Promise<any>;
+  attachImage(args: { image: string, personaId: string, chatSessionId: string }): Promise<any>;
+  deleteChatSession(args: { id: string }): Promise<any>; 
+  sendMessage(args: { message: string, personaId: string, chatSessionId?: string }): Promise<any>;
 }
 
 export type KnownReactorProjectTypes = string | "python" | "javascript" 

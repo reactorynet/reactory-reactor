@@ -60,8 +60,9 @@ export const AddMacroRegistry: MacroComponentDefinition<typeof AddMacro> = {
   name: 'addMacro',
   version: '1.0.0',
   component: AddMacro,
+  roles: ['ADMIN', 'DEVELOPER'],
   description: `# addMacro
-  Use this macro to create a new macro at runtime
+  Use this macro to create a new macro at runtime [Experimental]
   ## Usage
   @addMacro(name, function, description, parameters) - creates a new macro
   @addMacro(name, function) - creates a new macro with no description or parameters
@@ -139,6 +140,7 @@ export const VariableMacroRegistry: MacroComponentDefinition<typeof VariableMacr
   name: 'var',
   version: '1.0.0',
   component: VariableMacro,
+  roles: ['ADMIN', 'DEVELOPER'],
   description: `# var macro
   Use this macro to store, retrieve or remove a variable
   
@@ -209,6 +211,7 @@ export const ModuleMacroRegistry: MacroComponentDefinition<typeof ModuleMacro> =
   name: 'modules',
   version: '1.0.0',
   component: ModuleMacro,
+  roles: ['ADMIN', 'DEVELOPER'],
   description: `# modules macro
   Use this macro to list the modules installed in reactory
   
@@ -289,6 +292,7 @@ export const EnvironmentMacroRegistry: MacroComponentDefinition<typeof Environme
   name: 'env',
   version: '1.0.0',
   component: EnvironmentMacro,
+  roles: ['ADMIN', 'DEVELOPER'],
   description: `# env macro
   Use this macro to access environment variables
 

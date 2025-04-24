@@ -398,6 +398,7 @@ export const McpClientMacroRegistry: MacroComponentDefinition<typeof McpCli> = {
   }],
   stem: 'mcp',
   tags: ['mcp', 'chat', 'session', 'context'],
+  roles: ['USER'],
   tools: [{
     type: "function",
     function: {

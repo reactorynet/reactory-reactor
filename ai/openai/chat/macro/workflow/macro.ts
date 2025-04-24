@@ -29,7 +29,6 @@ export const ServiceRegister: Macro<string | object | object[]> = async (args: a
     switch(args[0]) {
       case 'list': {
         return list(args[1] || 'string');
-        break;
       }
       case 'get': { 
         const [ , name, nameSpace, version, props = null, func = null, funcParams ] = args;
@@ -62,6 +61,6 @@ export const ServiceRegisterComponentDefinition: Reactory.IReactoryComponentDefi
   description: readFileSync(require.resolve('./ServiceRegister.md')).toString(),
   features: [],
   stem: 'mutation',
+  roles: ['DEVELOPER', 'ADMIN'],
   tags: ['macro', 'graphql', 'mutation'],
 };
-

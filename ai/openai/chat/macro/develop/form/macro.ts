@@ -190,6 +190,7 @@ export const FormMacroComponentRegister: MacroComponentDefinition<typeof FormMac
   nameSpace: 'reactor',
   name: 'FormMacro',
   version: '1.0.0',
+  roles: ['DEVELOPER', 'FORM_DEVELOPER'],
   component: FormMacro,
   description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
   features: [],

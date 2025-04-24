@@ -4,16 +4,24 @@ import { ObjectId } from 'mongodb';
 import OpenAI from "openai"
 import { MetaSchema } from '@reactory/server-modules/reactory-core/models/shared';
 import { id } from 'schema/reflection';
+import { MacroComponentDefinition, MacroToolDefinition, ToolApprovalMode } from '../ai/openai/types/chat';
+// Removed incorrect import as 'ChatCompletionResponseMessage' is not exported by 'openai'
 
 export interface ConversationMeta { 
   summary: string
   title: string
 }
 
+// Add more specific types for other providers if needed
+export type ValidProviderResponseTypes = OpenAI.Chat.Completions.ChatCompletion | unknown
+
 export interface ChatCompletionResponseMessageStore extends OpenAI.Chat.ChatCompletionMessage {
   id: string | ObjectId
+  // Original content of the message by the provider
+  response?: ValidProviderResponseTypes;
   rating?: number
-  created: Date
+  component?: string
+  timestamp: Date
   tool_results: any[]
 }
 
@@ -44,6 +52,12 @@ export interface ReactorConversationDocument {
   created: Date
   // The date the conversation was last
   updated: Date
+  // The tool approval mode for the conversation
+  toolApprovalMode: ToolApprovalMode  
+  // The macros used in the conversation
+  macros?: Partial<MacroComponentDefinition<any>>[]
+  // The tools used in the conversation
+  tools?: Partial<MacroToolDefinition>[]
 }
 
 
@@ -55,15 +69,17 @@ export type ReactorConversation = ReactorConversationDocument & ReactorConversat
 
 const ReactorConversationHistorySchema: Schema<ChatCompletionResponseMessageStore> = new Schema<ChatCompletionResponseMessageStore>({
   id: ObjectId,
+  response: {},
   content: String,
   refusal: String,
+  component: String,
   rating: Number,
   role: String,
   annotations: [{}],
   audio: {},
   tool_calls: [{}],
   tool_results: [{}],
-  created: {
+  timestamp: {
     type: Date,
     default: () => { return new Date() }
   },
@@ -85,7 +101,7 @@ const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<Reacto
   modelId: {
     type: String,
     required: true,
-    default: 'gpt-3.5',
+    default: process.env.OPENAI_DEFAULT_MODEL_ID || 'grok-2-latest',
   },
   user: {
     type: ObjectId,
@@ -106,10 +122,16 @@ const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<Reacto
     type: Date,
     default: () => { return new Date() }
   },
+  toolApprovalMode: {
+    type: String,
+    enum: Object.values(ToolApprovalMode),
+    default: ToolApprovalMode.PROMPT,
+  },
 });
 
 const ReactorConversationModelName = 'ReactorConversation';
-const ReactorConversationModel = mongoose.model(ReactorConversationModelName, ReactorConversationSchema, 'reactor_conversations');
+const ReactorConversationModel = mongoose.model<Schema<ReactorConversation>>(ReactorConversationModelName, ReactorConversationSchema, 'reactor_conversations');
+export type TReactorConversationDocument = mongoose.Document<ReactorConversation>;
 export type TReactorConversationModel = typeof ReactorConversationModel;
 export const ReactorConversationModelComponentRegistryEntry: Reactory.IReactoryComponentDefinition<typeof ReactorConversationModel> = { 
   name: 'ReactorConversationModel',

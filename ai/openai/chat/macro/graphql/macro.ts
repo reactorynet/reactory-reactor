@@ -1,4 +1,4 @@
-import { ChatState, Macro } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
+import { ChatState, Macro, MacroComponentDefinition } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import { queryGraph as execql, mutateGraph as execml } from "@reactory/server-core/graph/ReactoryApolloClient";
 import Reactory from "@reactory/reactory-core";
 const DEFAULT_GQL = `
@@ -61,7 +61,7 @@ export const QueryGQL: Macro<string | string[] | object | object[]> = async (
   }
 }
 
-export const QueryMacroComponentRegister: Reactory.IReactoryComponentDefinition<Macro<string | string[] | object | object[]>> = {
+export const QueryMacroComponentRegister: MacroComponentDefinition<Macro<string | string[] | object | object[]>> = {
   component: QueryGQL,
   name: 'queryGQL',
   nameSpace: 'reactor-macros',
@@ -70,8 +70,9 @@ export const QueryMacroComponentRegister: Reactory.IReactoryComponentDefinition<
   features: [
     { feature: 'queryMacro', featureType: Reactory.FeatureType.function, description: 'executes graphql query', action: [], stem: 'query'}
   ],
-  stem: 'mutation',
-  tags: ['macro', 'graphql', 'mutation'],
+  stem: 'query',
+  tags: ['macro', 'graphql', 'query'],
+  roles: ['DEVELOPER', 'ADMIN'],
   tools: [{
     type: "function",
     function: {
@@ -141,7 +142,7 @@ export const MutationGQL: Macro<string | string[] | object | object[]> = async (
   }
 }
 
-export const MutationMacroComponentRegister: Reactory.IReactoryComponentDefinition<Macro<string | string[] | object | object[]>> = {
+export const MutationMacroComponentRegister: MacroComponentDefinition<Macro<string | string[] | object | object[]>> = {
   component: MutationGQL,
   name: 'mutationGQL',
   nameSpace: 'reactor-macros',
@@ -150,6 +151,7 @@ export const MutationMacroComponentRegister: Reactory.IReactoryComponentDefiniti
   features: [],
   stem: 'mutation',
   tags: ['macro', 'graphql', 'mutation'],
+  roles: ['DEVELOPER', 'ADMIN'],
   tools: [{
     type: "function",
     function: {
@@ -191,12 +193,36 @@ const SCHEMA_INTROSPECTION_QUERY = `
             type {
               kind
               name
+              ofType {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                  ofType {
+                    kind
+                    name
+                  }
+                }
+              }
             }
             defaultValue
           }
           type {
             kind
             name
+            ofType {
+              kind
+              name
+              ofType {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                }
+              }
+            }
           }
           isDeprecated
           deprecationReason
@@ -207,6 +233,18 @@ const SCHEMA_INTROSPECTION_QUERY = `
           type {
             kind
             name
+            ofType {
+              kind
+              name
+              ofType {
+                kind
+                name
+                ofType {
+                  kind
+                  name
+                }
+              }
+            }
           }
           defaultValue
         }
@@ -230,18 +268,20 @@ const SCHEMA_INTROSPECTION_QUERY = `
 `;
 
 /**
- * Retrieves the GraphQL schema via introspection
- * @param args - string[] - [ options, format ] 
- * @param context - Reactory.Server.IReactoryContext
- * @returns 
+ * Retrieves the GraphQL schema via introspection with various filtering options
+ * @param args - string[] - [ typename, detailLevel, options, format ] 
+ * @param state - ChatState
+ * @returns Markdown formatted schema information
  */
-export const SchemaGQL: Macro<string | string[] | object | object[]>   = async (
+export const SchemaGQL: Macro<string | string[] | object | object[]> = async (
   args: any[], 
   state: ChatState
 ) => {
   const [ 
+    typename = '',
+    detailLevel = 'summary',
     options = [], 
-    format = 'string'
+    format = 'markdown'
   ] = args;
   const { user, partner } = state.context;
 
@@ -262,45 +302,198 @@ export const SchemaGQL: Macro<string | string[] | object | object[]>   = async (
   }
 
   try {
-    const result = await execql(SCHEMA_INTROSPECTION_QUERY, {}, toObject(options), state.context);
-    if(result) { 
-      if(format === 'string') {
-        return JSON.stringify(result);
-      } 
-
-      if(format === 'json') {
-        return result;
+    // Check if the schema is already cached
+    let schema: any = state.vars?.GRAPH_SCHEMA;
+    if(!schema) {
+      const result = await execql(SCHEMA_INTROSPECTION_QUERY, {}, toObject(options), state.context);
+      
+      if(!result || !result.data || !result.data.__schema) {
+        return 'No schema returned';
       }
+      schema = result.data.__schema;
+      state.vars.GRAPH_SCHEMA = schema; // Cache the schema for future use
+    }
+  
+    // Format output as markdown
+    if (typename) {
+      // Return details for a specific type
+      const type = schema.types.find((t: any)=> t.name === typename);
+      if (!type) {
+        return `Type "${typename}" not found in schema`;
+      }
+      
+      return formatTypeAsMarkdown(type, detailLevel === 'detail');
     } else {
-      return 'No schema returned';
+      // Return only root queries and mutations
+      let markdown = '# GraphQL Schema Summary\n\n';
+      
+      const queryType = schema.types.find(t => t.name === schema.queryType.name);
+      const mutationType = schema.types.find(t => t.name === schema.mutationType?.name);
+      
+      if (queryType) {
+        markdown += '## Queries\n\n';
+        queryType.fields.forEach((field: any) => {
+          markdown += `- **${field.name}**`;
+          if (field.description) {
+            markdown += `: ${field.description.split('\n')[0]}`;
+          }
+          markdown += '\n';
+        });
+        markdown += '\n';
+      }
+      
+      if (mutationType) {
+        markdown += '## Mutations\n\n';
+        mutationType.fields.forEach((field: any) => {
+          markdown += `- **${field.name}**`;
+          if (field.description) {
+            markdown += `: ${field.description.split('\n')[0]}`;
+          }
+          markdown += '\n';
+        });
+      }
+      
+      return markdown;
     }
   } catch (err) {
     return `Error retrieving GraphQL schema: ${err.message}`;
   }
 }
 
-export const SchemaMacroComponentRegister: Reactory.IReactoryComponentDefinition<Macro<string | string[] | object | object[]>> = {
+/**
+ * Formats a GraphQL type as markdown
+ * @param type The GraphQL type to format
+ * @param detailed Whether to include detailed information
+ * @returns Markdown formatted type information
+ */
+function formatTypeAsMarkdown(type, detailed = false) {
+  let markdown = `# Type: ${type.name}\n\n`;
+  
+  if (type.description) {
+    markdown += `${type.description}\n\n`;
+  }
+  
+  markdown += `**Kind**: ${type.kind}\n\n`;
+  
+  if (type.fields && type.fields.length > 0) {
+    markdown += '## Fields\n\n';
+    
+    type.fields.forEach((field: any) => {
+      markdown += `### ${field.name}\n\n`;
+      
+      if (field.description) {
+        markdown += `${field.description}\n\n`;
+      }
+      
+      markdown += `**Type**: ${formatFieldType(field.type)}\n`;
+      
+      if (field.isDeprecated) {
+        markdown += `**Deprecated**: ${field.deprecationReason || 'Yes'}\n`;
+      }
+      
+      if (detailed && field.args && field.args.length > 0) {
+        markdown += '\n**Arguments**:\n\n';
+        
+        field.args.forEach((arg: any) => {
+          markdown += `- \`${arg.name}\`: ${formatFieldType(arg.type)}`;
+          
+          if (arg.defaultValue) {
+            markdown += ` (default: ${arg.defaultValue})`;
+          }
+          
+          if (arg.description) {
+            markdown += ` - ${arg.description.split('\n')[0]}`;
+          }
+          
+          markdown += '\n';
+        });
+      }
+      
+      markdown += '\n';
+    });
+  }
+  
+  if (detailed && type.inputFields && type.inputFields.length > 0) {
+    markdown += '## Input Fields\n\n';
+    
+    type.inputFields.forEach(field => {
+      markdown += `- \`${field.name}\`: ${formatFieldType(field.type)}`;
+      
+      if (field.defaultValue) {
+        markdown += ` (default: ${field.defaultValue})`;
+      }
+      
+      if (field.description) {
+        markdown += ` - ${field.description.split('\n')[0]}`;
+      }
+      
+      markdown += '\n';
+    });
+    
+    markdown += '\n';
+  }
+  
+  if (detailed && type.enumValues && type.enumValues.length > 0) {
+    markdown += '## Enum Values\n\n';
+    
+    type.enumValues.forEach(value => {
+      markdown += `- \`${value.name}\``;
+      
+      if (value.description) {
+        markdown += `: ${value.description.split('\n')[0]}`;
+      }
+      
+      if (value.isDeprecated) {
+        markdown += ` (deprecated: ${value.deprecationReason || 'Yes'})`;
+      }
+      
+      markdown += '\n';
+    });
+  }
+  
+  return markdown;
+}
+
+/**
+ * Formats a GraphQL field type
+ * @param type The GraphQL field type to format
+ * @returns Formatted type string
+ */
+function formatFieldType(type) {
+  if (type.kind === 'NON_NULL') {
+    return `${formatFieldType(type.ofType)}!`;
+  }
+  
+  if (type.kind === 'LIST') {
+    return `[${formatFieldType(type.ofType)}]`;
+  }
+  
+  return type.name;
+}
+
+export const SchemaMacroComponentRegister: MacroComponentDefinition<Macro<string | string[] | object | object[]>> = {
   component: SchemaGQL,
   name: 'schemaGQL',
   nameSpace: 'reactor-macros',
   version: '1.0.0',
-  description: 'Retrieves the GraphQL schema via introspection',
+  description: 'Retrieves and formats GraphQL schema information. With no parameters, returns only root Queries and Mutations. When a typename is provided, returns details about that specific type.',
   features: [
     { feature: 'schemaGQL', featureType: Reactory.FeatureType.function, description: 'retrieves GraphQL schema', action: [], stem: 'schema'}
   ],
   stem: 'schema',
   tags: ['macro', 'graphql', 'schema', 'introspection'],
+  roles: ['DEVELOPER', 'ADMIN'],
   tools: [{
     type: "function",
     function: {
       name: "schemaGQL",
-      description: "Retrieves the GraphQL schema via introspection",
+      description: "Retrieves and formats GraphQL schema information",
       parameters: {
         type: "object",
         properties: {
           args: {
             type: "array",
-            description: "Arguments for retrieving schema: [options, format]. Options can be a JSON string, format can be 'string' or 'json'.",
+            description: "Arguments for retrieving schema: [typename, detailLevel, options, format]. typename is optional and filters to a specific type. detailLevel can be 'summary' or 'detail'. Options can be a JSON string. format defaults to 'markdown'.",
             items: {
               type: "string"
             }

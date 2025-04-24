@@ -122,6 +122,7 @@ export const CreateUserRegistry: MacroComponentDefinition<typeof CreateUser> = {
     }
   ],
   stem: 'user',
+  roles: ['ADMIN'],
   tags: ['user', 'create', 'register', 'new'],
   tools: [{
     type: "function",

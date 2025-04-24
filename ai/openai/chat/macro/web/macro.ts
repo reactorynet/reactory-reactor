@@ -170,6 +170,7 @@ export const HttpMacroRegistry: MacroComponentDefinition<typeof HttpMacro> = {
   description: 'A base macro for HTTP requests',
   features: [],
   stem: 'http',
+  roles: ['USER'],
   tags: ['http', 'fetch', 'url', 'api'],
   tools: [{
     type: "function",
@@ -210,6 +211,7 @@ export const GetMacroRegistry: MacroComponentDefinition<typeof GetMacro> = {
   description: 'A macro for HTTP GET requests',
   features: [],
   stem: 'get',
+  roles: ['USER'],
   tags: ['http', 'get', 'url', 'api'],
   tools: [{
     type: "function",
@@ -243,6 +245,7 @@ export const PostMacroRegistry: MacroComponentDefinition<typeof PostMacro> = {
   name: 'post',
   version: '1.0.0',
   component: PostMacro,
+  roles: ['USER'],
   description: 'A macro for HTTP POST requests',
   features: [],
   stem: 'post',
@@ -280,6 +283,7 @@ export const PutMacroRegistry: MacroComponentDefinition<typeof PutMacro> = {
   version: '1.0.0',
   component: PutMacro,
   description: 'A macro for HTTP PUT requests',
+  roles: ['USER'],
   features: [],
   stem: 'put',
   tags: ['http', 'put', 'url', 'api'],
@@ -319,6 +323,7 @@ export const DeleteMacroRegistry: MacroComponentDefinition<typeof DeleteMacro> =
   features: [],
   stem: 'delete',
   tags: ['http', 'delete', 'url', 'api'],
+  roles: ['USER'],
   tools: [{
     type: "function",
     function: {
@@ -355,6 +360,7 @@ export const PatchMacroRegistry: MacroComponentDefinition<typeof PatchMacro> = {
   features: [],
   stem: 'patch',
   tags: ['http', 'patch', 'url', 'api'],
+  roles: ['USER'],
   tools: [{
     type: "function",
     function: {
@@ -391,6 +397,7 @@ export const FetchMacroRegistry: MacroComponentDefinition<typeof FetchMacro> = {
   features: [],
   stem: 'fetch',
   tags: ['fetch', 'http', 'url', 'data', 'json'],
+  roles: ['USER'],
   tools: [{
     type: "function",
     function: {

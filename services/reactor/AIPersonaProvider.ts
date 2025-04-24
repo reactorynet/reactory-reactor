@@ -60,7 +60,7 @@ export default class AIPersonaProvider
     let personas: IAIPersona[] = await this.modelRegistry.getModels<IAIPersona>({
       name: "*aipersona",
     });
-    
+
     return personas;
   }
 
