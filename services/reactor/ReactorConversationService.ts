@@ -1,7 +1,7 @@
 import Reactory from "@reactory/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
 import { IReactorConversationsService, IOpenAIService, IReactorProviderService, IAIPersona } from "../../types/service.types";
-import ReactorConversationModel, { TReactorConversationDocument, TReactorConversationModel, ValidProviderResponseTypes } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
+import ReactorConversationModel, { ReactorConversationDocument, TReactorConversationDocument, TReactorConversationModel, ValidProviderResponseTypes } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import AIPersonaProvider from "./AIPersonaProvider";
 import ReactorMessageProcessingService from "./ReactorMessageProcessingService";
 import { v4 } from "uuid";
@@ -87,26 +87,26 @@ export default class ReactorConversationService implements IReactorConversations
     }
 
     const sessionId = new ObjectId();
-    const conversation = new ReactorConversationModel({
-          _id: sessionId,
-          id: sessionId,
-          personaId: persona.id,
-          user: this.context.user,
-          modelId: persona.modelId,
-          providerId: persona.providerId,
-          history: [],
-          vars: {},
-          meta: {
-            summary: 'Reactor Chat Session with agent ' + persona.name,
-            title: 'Chat with ' + persona.name,
-          },
-          macros: persona.macros ?? [],
-          tools: persona.tools ?? [],
-          started: new Date(),
-          sseSessionId: sessionId, 
-          toolApprovalMode: ToolApprovalMode.PROMPT,
-        });
-    // @ts-ignore
+    const conversation  = new ReactorConversationModel({
+      _id: sessionId,
+      id: sessionId,
+      personaId: persona.id,
+      user: this.context.user,
+      modelId: persona.modelId,
+      providerId: persona.providerId,
+      history: [],
+      vars: {},
+      meta: {
+        summary: 'Reactor Chat Session with agent ' + persona.name,
+        title: 'Chat with ' + persona.name,
+      },
+      macros: persona.macros ?? [],
+      tools: persona.tools ?? [],
+      started: new Date(),
+      sseSessionId: sessionId,
+      toolApprovalMode: ToolApprovalMode.PROMPT,
+    }) as unknown as TReactorConversationDocument;
+    
     await conversation.save();
   
     return conversation;
@@ -212,6 +212,31 @@ export default class ReactorConversationService implements IReactorConversations
           response.sessionId = conversation._id.toString();
           // @ts-ignore
           await conversation.save();
+
+          // process the tool calls if any exist.
+          if (response?.choices && response?.choices?.length > 0) {
+            const aiMessage = response.choices[0].message;
+            if (aiMessage.tool_calls && aiMessage.tool_calls.length > 0) {
+              // process the tool calls
+              const toolCalls = aiMessage.tool_calls;
+              for (const toolCall of toolCalls) {
+                const result = await this.executeTool({
+                  tool: toolCall.tool,
+                  personaId,
+                  chatSessionId
+                });
+                if (result) {
+                  // add the result to the conversation history
+                  conversation.history.push({
+                    id: new ObjectId(),
+                    role: "system",
+                    content: `Tool call result: ${JSON.stringify(result)}`,
+                    timestamp: new Date()
+                  });
+                }
+              }
+            }
+          }
           
           return adapter.adaptResponse(response);
         default: {
@@ -233,7 +258,11 @@ export default class ReactorConversationService implements IReactorConversations
     }
   }
 
-  async executeMacro(args: { macro: string, personaId: string, chatSessionId: string }): Promise<any> {
+  async executeMacro(args: { 
+    macro: string, 
+    personaId: string, 
+    chatSessionId: string 
+  }): Promise<any> {
     const { macro, personaId, chatSessionId } = args;
     
     try {
@@ -244,42 +273,43 @@ export default class ReactorConversationService implements IReactorConversations
       // Get provider adapter
       const adapter = await this.providerService.getAdapter(provider);
       
-      let response;
-      if (provider === "openai") {
-        // Execute macro using OpenAI service
-        response = await this.openaiService.chat({
-          personaId,
-          chatSessionId,
-          message: `[EXECUTE MACRO: ${macro}]` // Special syntax to indicate macro execution
-        });
-      } else {
-        throw new Error(`Provider ${provider} not implemented`);
-      }
-      
       // Update conversation
-      const conversation = await ReactorConversationModel.findOne({ _id: chatSessionId }).exec();
+      const conversation = await this.getChatSession({ id: chatSessionId });
       if (!conversation) {
         throw new Error('Conversation not found');
       }
       
       // Add macro execution record
+      // @ts-ignore
       conversation.history.push({
         role: "system",
         content: `Executed macro: ${macro}`,
         timestamp: new Date()
       });
-      
-      // Add AI response if available
-      if (response.choices && response.choices.length > 0) {
-        const aiMessage = response.choices[0].message;
-        conversation.history.push({
-          role: aiMessage.role,
-          content: aiMessage.content,
-          timestamp: new Date(),
-          tool_calls: aiMessage.tool_calls
-        });
+
+      // check if the macro is available on the chat session
+      const macroDef = conversation.macros.find((m) => m.name === macro);
+      if (!macroDef) {
+        throw new Error(`Macro ${macro} not found in chat session`);
       }
+
+      // Execute the macro
+      const macroFunction = macroDef.component as MacroComponentDefinition<unknown>;
+      const result = await macroFunction.component(args, conversation, this.context);
+      if (!result) {
+        throw new Error(`Macro ${macro} returned no result`);
+      } 
+
+      // Add macro result to conversation history
+      conversation.history.push({
+        role: "user",
+        content: result.content,
+        timestamp: new Date(),
+        props: result.props,
+        tool_calls: result.tool_calls
+      });
       
+    
       await conversation.save();
       
       // Return adapted response
@@ -298,7 +328,12 @@ export default class ReactorConversationService implements IReactorConversations
     }
   }
 
-  async executeTool(args: { tool: string, personaId: string, chatSessionId: string }): Promise<any> {
+  async executeTool(args: { 
+    tool: string,
+    toolArgs?: any, 
+    personaId: string, 
+    chatSessionId: string 
+  }): Promise<any> {
     const { tool, personaId, chatSessionId } = args;
     
     try {
@@ -307,23 +342,20 @@ export default class ReactorConversationService implements IReactorConversations
       const provider = persona.provider || "openai";
       const adapter = await this.providerService.getAdapter(provider);
       
-      let response;
-      if (provider === "openai") {
-        response = await this.openaiService.chat({
-          personaId,
-          chatSessionId,
-          message: `[EXECUTE TOOL: ${tool}]` // Special syntax to indicate tool execution
-        });
-      } else {
-        throw new Error(`Provider ${provider} not implemented`);
-      }
+     
       
       // Update conversation with tool execution
-      const conversation = await ReactorConversationModel.findOne({ _id: chatSessionId }).exec();
+      const conversation = await this.getChatSession({ id: chatSessionId });
       if (!conversation) {
         throw new Error('Conversation not found');
       }
       
+      // check if the is available on the chat session
+      const toolDef = conversation.tools.find((t) => t.function.name === tool);
+      if (!toolDef) {
+        throw new Error(`Tool ${tool} not found in chat session`);
+      }
+
       conversation.history.push({
         role: "system",
         content: `Executed tool: ${tool}`,
@@ -440,7 +472,11 @@ export default class ReactorConversationService implements IReactorConversations
   }
 
 
-  async startChatSession(args: { personaId: string; message: string; macros: Partial<MacroComponentDefinition<unknown>>; tools: Partial<MacroToolDefinition>[]; }): Promise<Any> {
+  async startChatSession(args: { 
+    personaId: string; 
+    message: string; 
+    macros: Partial<MacroComponentDefinition<unknown>>[]; 
+    tools: Partial<MacroToolDefinition>[]; }): Promise<any> {
     const persona = await this.personaProvider.getPersona(args.personaId);
     if (!persona) {
       throw new Error(`Persona with id ${args.personaId} not found`);
@@ -450,8 +486,7 @@ export default class ReactorConversationService implements IReactorConversations
     if (!conversation) {
       throw new Error('Failed to create new conversation');
     }
-
-    // add the using macros and tools to the conversation
+    // add the macros and tools to the conversation
     if (args.macros) { 
       args.macros.forEach((macro) => { 
         conversation.macros.push({
@@ -477,26 +512,10 @@ export default class ReactorConversationService implements IReactorConversations
       })
     }
 
-    // Get provider adapter
-    const adapter = await this.providerService.getAdapter(persona.providerId || "xai");
-    
-    // create a default greenting without using a the AI providers
-
-    const response: any = {
-      id: new ObjectId(),
-      role: "assistant",
-      content: persona.defaultGreeting || "Hello, how can I assist you today?",
-      timestamp: new Date(),
-      // @ts-ignore
-      tool_calls: [],
-    };
-
-    // @ts-ignore
-    conversation.history.push(initialMessage);
     // @ts-ignore
     await conversation.save();
 
-    return adapter.adaptResponse(response);
+    return conversation;
   }
 
   toString?(includeVersion?: boolean): string {

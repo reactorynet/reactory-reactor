@@ -382,16 +382,31 @@ export interface IAIPersonaProviderService {
 }
 
 export interface IReactorConversationsService extends Reactory.Service.IReactoryService{ 
+  /**
+   * Initializes the chat session for the user.
+   * 
+   * Use this call when you want to specify the tools and macros. If you do not need to provide
+   * client tools and macros then you can just start to sendMessages to the chat session. If no chat 
+   * session is found then a new one will be created.
+   * @param args 
+   */
   startChatSession(args: {
     personaId: string, 
     message: string, 
     macros: Partial<MacroComponentDefinition<unknown>>,  
     tools: Partial<MacroToolDefinition>[]
   }): Promise<any>;
+  /**
+   * 
+   * @param args 
+   */
   executeMacro(args: { macro: string, personaId: string, chatSessionId: string }): Promise<any>;
   attachImage(args: { image: string, personaId: string, chatSessionId: string }): Promise<any>;
   deleteChatSession(args: { id: string }): Promise<any>; 
-  sendMessage(args: { message: string, personaId: string, chatSessionId?: string }): Promise<any>;
+  sendMessage(args: { 
+    message: string, 
+    personaId: string, 
+    chatSessionId?: string }): Promise<any>;
 }
 
 export type KnownReactorProjectTypes = string | "python" | "javascript" 

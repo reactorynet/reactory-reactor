@@ -19,14 +19,14 @@ class ReactorChatResolver {
   }
 
   @mutation("ReactorStartChatSession")
-  async ReactorStartChatSession(_: any, args: { 
+  async ReactorStartChatSession(_: any, args: { initSession: { 
     personaId: string, 
     message: string, 
     macros: Partial<MacroComponentDefinition<unknown>>,  
     tools: Partial<MacroToolDefinition>[]
-  }, context: Reactory.Server.IReactoryContext) {
+  }}, context: Reactory.Server.IReactoryContext) {
     const conversationService = context.getService<IReactorConversationsService>("reactor.ReactorConversationService@1.0.0");
-    return await conversationService.startChatSession(args);
+    return await conversationService.startChatSession(args.initSession);
   }
 
   @mutation("ReactorSendMessage")

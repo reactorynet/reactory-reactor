@@ -382,10 +382,15 @@ class OpenAIService implements IOpenAIService {
     // convert the macro registry to a list of tools
     const { hasRole } = this.context;
     const macros: MacroComponentDefinition<unknown>[] = [];
-  
+    const { context } = this;
     MacroRegistry.forEach((macro: MacroComponentDefinition<unknown>) => {
       let hasAccess = false;
-      if (macro.roles && macro.roles.length > 0) { } 
+      if (macro.roles && macro.roles.length > 0) { 
+        hasAccess = context.hasAnyRole(macro.roles);
+        if (hasAccess === false) {
+          return;
+        }
+      } 
       else hasAccess = true;
       if (macro.tools && hasAccess === true) {
         macros.push(macro);

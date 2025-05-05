@@ -22,7 +22,7 @@ import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPerso
 import { get, template } from "lodash";
 import { RecordNotFoundError } from "@reactory/server-core/exceptions";
 import { ChatCompletionMessage } from "openai/resources/chat/completions/completions";
-import uuid from "uuid";
+import { v4 } from "uuid";
 export const SYSTEM_INITIALIZER_MESSAGE: any = {
   role: "system",
   content: fs.readFileSync(require.resolve('../macro/macros.md'), 'utf-8').toString(),
@@ -42,7 +42,7 @@ export const getInitializerMessage = async (
   if (persona) {
     context.info(`Found persona for botId: ${botId}`);
     return {
-      id: uuid.v4(),
+      id: v4(),
       role: SYSTEM_INITIALIZER_MESSAGE.role,
       content: template(SYSTEM_INITIALIZER_MESSAGE.content)({
         macros,

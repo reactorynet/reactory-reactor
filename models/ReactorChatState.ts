@@ -62,7 +62,7 @@ export interface ReactorConversationDocument {
 
 
 
-export interface ReactorConversationDocumentStatics {
+export type ReactorConversationDocumentStatics = {
   new(): ReactorConversation
 }
 export type ReactorConversation = ReactorConversationDocument & ReactorConversationDocumentStatics;
@@ -114,6 +114,14 @@ const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<Reacto
     type: String,
     default: null,
   },
+  macros: {
+    type: [Object],
+    default: [],
+  },
+  tools: {
+    type: [Object],
+    default: [],
+  },
   created: {
     type: Date,
     default: () => { return new Date() }
@@ -131,7 +139,7 @@ const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<Reacto
 
 const ReactorConversationModelName = 'ReactorConversation';
 const ReactorConversationModel = mongoose.model<Schema<ReactorConversation>>(ReactorConversationModelName, ReactorConversationSchema, 'reactor_conversations');
-export type TReactorConversationDocument = mongoose.Document<ReactorConversation>;
+export type TReactorConversationDocument = mongoose.Document<ReactorConversation> & ReactorConversation;
 export type TReactorConversationModel = typeof ReactorConversationModel;
 export const ReactorConversationModelComponentRegistryEntry: Reactory.IReactoryComponentDefinition<typeof ReactorConversationModel> = { 
   name: 'ReactorConversationModel',

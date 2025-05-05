@@ -53,11 +53,14 @@ Represents the overall state of a chat conversation, including
 its history and metadata.
 """
 type ReactorChatState {
-   id: String
-   personaId: String
-   started: Date
-   user: User
-   history: [ReactorChatMessage]
+  id: String
+  personaId: String
+  started: Date
+  user: User
+  history: [ReactorChatMessage]
+  tools: [ReactorToolDefinition]
+  macros: [ReactorMacro]
+  vars: Any
 }
 
 """
