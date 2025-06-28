@@ -2,18 +2,19 @@ import Reactory from "@reactory/reactory-core";
 import { ChatState, Macro, MacroComponentDefinition, MacroToolDefinition } from "../../../types/chat";
 import { executeMacro } from "..";
 import modules from '@reactory/server-core/modules';
+import { AddMacroProps, VariableMacroProps, ModuleMacroProps, EnvironmentMacroProps, StateMacroProps } from './types';
 
 /**
  * A macro that allows the user to or the llm to add a function to the chat state.
  * This is useful for creating custom functions that can be used in the chat.
- * @param args - The arguments for the macro: [name, function, description, parameters]
+ * @param props - The props for the macro containing name, func, description, and parameters
  * @param state 
  */
-export const AddMacro: Macro<unknown> = async (
-  args: any[],
+export const AddMacro: Macro<unknown, AddMacroProps> = async (
+  props: AddMacroProps,
   state: ChatState): Promise<unknown> => {
   
-  const [name, func, description, parameters] = args;
+  const { name, func, description, parameters } = props;
   if(!name || !func) {
     return `Error: Macro name and function are required`;
   }
@@ -87,51 +88,65 @@ export const AddMacroRegistry: MacroComponentDefinition<typeof AddMacro> = {
       parameters: {
         type: "object",
         properties: {
-          args: {
-            type: 'array',
-            description: `Arguments for the macro:
-            - name: string - the name of the macro
-            - func: string - the function of the macro
-            - description: string - the description of the macro
-            - parameters: string array - the parameters of the macro`,
-            items: {
-              type: "string"
-            } 
+          name: {
+            type: "string",
+            description: "The name of the macro"
+          },
+          func: {
+            type: "string",
+            description: "The function code as a string"
+          },
+          description: {
+            type: "string",
+            description: "Description of the macro"
+          },
+          parameters: {
+            type: "object",
+            description: "Parameters for the macro"
           }
-          
         },
-        required: ["args"]
+        required: ["name", "func"]
       }
     }
   }]
 }
 
 // a macro that allows the user to store, retrieve or remove a variable in the chat state
-export const VariableMacro: Macro<unknown> = async (
-  args: any[],
+export const VariableMacro: Macro<unknown, VariableMacroProps> = async (
+  props: VariableMacroProps,
   state: ChatState): Promise<unknown> => {
-  const [k, v] = args;
+  const { key, value } = props;
   try {
-    if(k === 'get') {
-      return state.vars[v];
+
+    if(!state) {
+      return `Error: Chat state is not defined`;
     }
 
-    if(k === 'del') {
-      delete state.vars[k];
+    if(!state.vars) {
+      state.vars = {};
     }
 
-    if(state.vars[k]) {
-      if(v && typeof v === 'string' && v.startsWith('@')) {
-        // process the inner macro
-        const result = await executeMacro<unknown>(v, state);
-        state = result.state;
-        state.vars[k] = result.error ? result.error : result.value;
-      } else {
-        state.vars[k] = v;
-      }
+    if(value === undefined || value === null) {
+      return state.vars[key || ''];
     }
+
+    if(value === 'del') {
+      delete state.vars[key];
+      return `Variable ${key} deleted`;
+    }
+
+    if(value && typeof value === 'string' && value.startsWith('@')) {
+      // process the inner macro
+      const result = await executeMacro<unknown>(value, state);
+      state = result.state;
+      state.vars[key] = result.error ? result.error : result.value;
+    } else {
+      state.vars[key] = value;
+    }
+    
+    return `Variable ${key} set to ${value}`;
   } catch (err) {
-    return `Error in variable macro`;
+    return `Error in variable macro: ${err instanceof Error ? err.message : 'Unknown error'}`;
   }
 };
 
@@ -181,7 +196,7 @@ export const VariableMacroRegistry: MacroComponentDefinition<typeof VariableMacr
           },
           value: {
             type: "string",
-            description: "The value to set for the variable (omit for get operation)"
+            description: "The value to set for the variable (omit for get operation, use 'del' for delete)"
           },
         },
         required: ["key"]
@@ -191,18 +206,25 @@ export const VariableMacroRegistry: MacroComponentDefinition<typeof VariableMacr
 }
 
 // a macro that describes modules installed in reactory
-export const ModuleMacro: Macro<unknown> = async (
-  args: any[],
+export const ModuleMacro: Macro<unknown, ModuleMacroProps> = async (
+  props: ModuleMacroProps,
   state: ChatState): Promise<unknown> => {    
+    const { details = false } = props;
+    
     const describeModule = (module: Reactory.Server.IReactoryModule) => { 
-      return `
-      Module Id: ${module.nameSpace}.${module.name}@${module.version}
-      Depencies: ${module.dependencies.map((dep) => `${dep}`).join('\n')}
-      Services:
-      ${module.services.map((service) => `\t${service.id}`).join('\n')} 
-      `
+      if (details) {
+        return `
+        Module Id: ${module.nameSpace}.${module.name}@${module.version}
+        Dependencies: ${module.dependencies.map((dep) => `${dep}`).join('\n')}
+        Services:
+        ${module.services.map((service) => `\t${service.id}`).join('\n')} 
+        `;
+      } else {
+        return `${module.nameSpace}.${module.name}@${module.version}`;
+      }
     };
-    let moduleText =  `Enabled Modules: ${modules.enabled?.map((mod) => { return describeModule(mod) })}`;    
+    
+    let moduleText = `Enabled Modules: \n${modules.enabled?.map((mod) => { return describeModule(mod) }).join('\n')}`;    
     return moduleText;
 };
 
@@ -237,13 +259,9 @@ export const ModuleMacroRegistry: MacroComponentDefinition<typeof ModuleMacro> =
       parameters: {
         type: "object",
         properties: {
-          args: {
-            type: "array",
-            description: `Arguments for the macro:
-            - details: boolean - show detailed information about the modules`,
-            items: { 
-              type: "string"
-            }
+          details: {
+            type: "boolean",
+            description: "Show detailed information about the modules"
           }
         },
         required: []
@@ -253,12 +271,13 @@ export const ModuleMacroRegistry: MacroComponentDefinition<typeof ModuleMacro> =
 }
 
 // a macro that provides information about the environment variables
-export const EnvironmentMacro: Macro<unknown> = async (
-  args: any[],
+export const EnvironmentMacro: Macro<unknown, EnvironmentMacroProps> = async (
+  props: EnvironmentMacroProps,
   state: ChatState): Promise<unknown> => {
+    const { envKey } = props;
+    
     // If a specific environment variable is requested
-    if(args.length > 0 && typeof args[0] === 'string') {
-      const envKey = args[0];
+    if(envKey && typeof envKey === 'string') {
       return process.env[envKey] || `Environment variable ${envKey} not found`;
     }
     
@@ -275,7 +294,8 @@ export const EnvironmentMacro: Macro<unknown> = async (
       'REACTORY_SERVER',
       'REACTORY_CLIENT',
       'REACTORY_DATA',
-      'REACTORY_NATIVE'
+      'REACTORY_NATIVE',
+      'HOME'
     ];
     
     allowedVars.forEach(varName => {
@@ -284,7 +304,7 @@ export const EnvironmentMacro: Macro<unknown> = async (
       }
     });
     
-    return safeEnvVars[args[0]] || `No environment variable ${args[0]} found`;
+    return JSON.stringify(safeEnvVars, null, 2);
 };
 
 export const EnvironmentMacroRegistry: MacroComponentDefinition<typeof EnvironmentMacro> = {
@@ -326,14 +346,9 @@ export const EnvironmentMacroRegistry: MacroComponentDefinition<typeof Environme
       parameters: {
         type: "object",
         properties: {
-          args: {
-            type: "array",
-            description: `Arguments for the macro:
-            - envKey: string - the name of the environment variable to retrieve
-          `,
-            items: {
-              type: "string"
-            }
+          envKey: {
+            type: "string",
+            description: "The name of the environment variable to retrieve"
           }
         },
         required: []
@@ -343,8 +358,8 @@ export const EnvironmentMacroRegistry: MacroComponentDefinition<typeof Environme
 }
 
 // A macro that provides information about the current chat state
-export const StateMacro: Macro<unknown> = async (
-  args: any[],
+export const StateMacro: Macro<unknown, StateMacroProps> = async (
+  props: StateMacroProps,
   state: ChatState): Promise<unknown> => {
     // clone the state to avoid modifying the original
     
@@ -354,9 +369,9 @@ export const StateMacro: Macro<unknown> = async (
       host: state.host,
       user: {
         id: state.user.id,
-        email: state.user.loggedIn.user.email,
-        name: state.user.loggedIn.user.name,
-        lastName: state.user.loggedIn.user.lastName,
+        email: (state.user as any).loggedIn?.user?.email,
+        name: (state.user as any).loggedIn?.user?.name,
+        lastName: (state.user as any).loggedIn?.user?.lastName,
       },
       botId: state.personaId,
       persona: state.persona,
@@ -388,6 +403,7 @@ export const StateMacroRegistry: MacroComponentDefinition<typeof StateMacro> = {
       stem: 'get'
     }
   ],
+  roles: ['USER'],
   stem: 'state',
   tags: ['state', 'chat', 'session', 'context'],
   tools: [{
@@ -397,17 +413,7 @@ export const StateMacroRegistry: MacroComponentDefinition<typeof StateMacro> = {
       description: "Access the current chat state object",
       parameters: {
         type: "object",
-        properties: {
-          args: {
-            type: "array",
-            description: `Arguments for the macro:
-            - none
-          `,
-            items: {
-              type: "string"
-            }
-          }
-        },
+        properties: {},
         required: []
       }
     }

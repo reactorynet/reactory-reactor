@@ -1,0 +1,24 @@
+# UI and Node UI types
+
+type ReactoryNodePosition {
+  x: Float!
+  y: Float!
+}
+
+type ReactorNodeOption {
+  id: String!
+  key: String!
+  value: String!
+}
+
+type ReactorNodeUI {
+  id: Int!
+  node: ReactorNode!
+  position: ReactoryNodePosition!
+  options: [ReactorNodeOption!]!
+}
+
+type ReactorPagedNodes {
+  nodes: [ReactorNode!]
+  paging: PagingResult
+}

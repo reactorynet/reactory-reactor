@@ -13,6 +13,7 @@ import {
   ISystemGraphManager,
   PageReactorProjectResult,
   ReactorNodeAttributes,
+  ReactorProjectService,
 } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { ObjectId } from "mongodb";
 import {
@@ -205,13 +206,13 @@ class ReactorSystemGraph {
   @query("ReactorProjects")
   async ReactorProjects(
     _: any,
-    args: ReactorProjectFilterArgs,
+    args: { filter: ReactorProjectFilterArgs },
     context: Reactory.Server.IReactoryContext
   ): Promise<PageReactorProjectResult> {
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
+    const projectSvc = context.getService<ReactorProjectService>(
+      "reactor.ReactorProjectService@1.0.0"
     );
-    return graphSvc.getProjects({});
+    return projectSvc.getProjects(args.filter);
   }
 
   @property("ReactorProjectPathSpec", "id")
@@ -327,6 +328,191 @@ class ReactorSystemGraph {
       }
       
       
+  }
+
+  @query("ReactorNodeCategory")
+  async ReactorNodeCategory(
+    _: any,
+    args: { id: number },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNodeCategory> | undefined> {
+    const graphSvc = context.getService<ISystemGraphManager>(
+      "reactor.SystemGraphManager@1.0.0"
+    );
+    // Filter from getCategoryNodes
+    const categories = await graphSvc.getCategoryNodes();
+    return categories.find((cat) => cat.id === args.id);
+  }
+
+  @query("ReactorNodeByCategory")
+  async ReactorNodeByCategory(
+    _: any,
+    args: { ids: number[] },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode>[]> {
+    // Not directly supported, so filter nodes by category ids
+    const graphSvc = context.getService<ISystemGraphManager>(
+      "reactor.SystemGraphManager@1.0.0"
+    );
+    const allNodes = await graphSvc.getCatalogNodes();
+    return allNodes.filter((node) =>
+      node.categories && node.categories.some((cat) => args.ids.includes(cat.id))
+    );
+  }
+
+  @query("ReactorNodesForType")
+  async ReactorNodesForType(
+    _: any,
+    args: { type: string[] },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode>[]> {
+    // Not directly supported, so filter nodes by type
+    const graphSvc = context.getService<ISystemGraphManager>(
+      "reactor.SystemGraphManager@1.0.0"
+    );
+    const allNodes = await graphSvc.getCatalogNodes();
+    return allNodes.filter((node) => args.type.includes(node.type));
+  }
+
+  @query("ReactorNodesByTerm")
+  async ReactorNodesByTerm(
+    _: any,
+    args: { term: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode>[]> {
+    // Not directly supported, so filter nodes by term in name, description, etc.
+    const graphSvc = context.getService<ISystemGraphManager>(
+      "reactor.SystemGraphManager@1.0.0"
+    );
+    const allNodes = await graphSvc.getCatalogNodes();
+    const term = args.term.toLowerCase();
+    return allNodes.filter((node) =>
+      (node.name && node.name.toLowerCase().includes(term)) ||
+      (node.description && node.description.toLowerCase().includes(term))
+    );
+  }
+
+  @query("ReactorProject")
+  async ReactorProject(
+    _: any,
+    args: { id: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<IReactorProject> | undefined> {
+    const graphSvc = context.getService<ISystemGraphManager>(
+      "reactor.SystemGraphManager@1.0.0"
+    );
+    const projects = (await graphSvc.getProjects()).projects;
+    return projects.find((p) => p.id === args.id);
+  }
+
+  @mutation("ReactorCrawlCatalogNodes")
+  async ReactorCrawlCatalogNodes(
+    _: any,
+    args: { request: { ids: number[] } },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<CatalogNodeSyncResult[]> {
+    // Not implemented in SystemGraphManager
+    throw new Error("crawlCatalogNodes not implemented");
+  }
+
+  @mutation("ReactorNodeCategoryCreate")
+  async ReactorNodeCategoryCreate(
+    _: any,
+    args: { name: string; description?: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNodeCategory>> {
+    // Not implemented in SystemGraphManager
+    throw new Error("createNodeCategory not implemented");
+  }
+
+  @mutation("ReactorNodeCategoryUpdate")
+  async ReactorNodeCategoryUpdate(
+    _: any,
+    args: { id: number; name?: string; description?: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNodeCategory>> {
+    // Not implemented in SystemGraphManager
+    throw new Error("updateNodeCategory not implemented");
+  }
+
+  @mutation("ReactorNodeCategoryDelete")
+  async ReactorNodeCategoryDelete(
+    _: any,
+    args: { id: number },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNodeCategory>> {
+    // Not implemented in SystemGraphManager
+    throw new Error("deleteNodeCategory not implemented");
+  }
+
+  @mutation("ReactorNodeCreate")
+  async ReactorNodeCreate(
+    _: any,
+    args: { nameSpace: string; name: string; version: string; description?: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode>> {
+    // Not implemented in SystemGraphManager
+    throw new Error("createNode not implemented");
+  }
+
+  @mutation("ReactorNodeUpdate")
+  async ReactorNodeUpdate(
+    _: any,
+    args: { id: number; nameSpace?: string; name?: string; version?: string; description?: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<PagedNodes> {
+    // Not implemented in SystemGraphManager
+    throw new Error("updateNode not implemented");
+  }
+
+  @mutation("ReactorNodeDelete")
+  async ReactorNodeDelete(
+    _: any,
+    args: { id: number },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode>> {
+    // Not implemented in SystemGraphManager
+    throw new Error("deleteNode not implemented");
+  }
+
+  @mutation("ReactorNodeLinkCreate")
+  async ReactorNodeLinkCreate(
+    _: any,
+    args: { createInput: any },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<any> {
+    // Not implemented in SystemGraphManager
+    throw new Error("createNodeLink not implemented");
+  }
+
+  @mutation("ReactorNodeLinkDelete")
+  async ReactorNodeLinkDelete(
+    _: any,
+    args: { id: number },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<any> {
+    // Not implemented in SystemGraphManager
+    throw new Error("deleteNodeLink not implemented");
+  }
+
+  @mutation("ReactorNodeLinkUpdate")
+  async ReactorNodeLinkUpdate(
+    _: any,
+    args: { updateInput: any },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<any> {
+    // Not implemented in SystemGraphManager
+    throw new Error("updateNodeLink not implemented");
+  }
+
+  @mutation("ReactorSaveSystemGraph")
+  async ReactorSaveSystemGraph(
+    _: any,
+    args: { graph: any[] },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<any> {
+    // Not implemented in SystemGraphManager
+    throw new Error("saveSystemGraph not implemented");
   }
 }
 

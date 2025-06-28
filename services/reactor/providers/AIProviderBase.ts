@@ -1,0 +1,292 @@
+import Reactory from "@reactory/reactory-core";
+import Mongoose from "mongoose";
+import ReactorConversationModel from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
+import { ChatState, ToolApprovalMode } from "../../../ai/openai/types/chat";
+import {
+  AIModel,
+  AIListResponse,
+  AIFineTuningJob,
+  CreateAIFineTuningJobParams,
+  AIFineTuningEvent,
+  AIFile,
+  AIImage,
+  AIImageGenerationParams,
+  AIChatParams,
+  AIAudioChatParams,
+  AIChatCompletion
+} from "../../../types/model.types";
+import { IAIPersona, IAIPersonaPromptTemplate, IAIProviderService } from "../../../types/service.types";
+import { AIProviderError } from "./AIProviderError";
+
+abstract class AIProviderBase implements IAIProviderService {
+  context: Reactory.Server.IReactoryContext;
+  props: any;
+  chatStateModel: Mongoose.Document;
+  chatState: ChatState;
+  personaProvider: any;
+
+  constructor(props: any, context: Reactory.Server.IReactoryContext) {
+    this.context = context;
+    this.props = props;
+  }
+
+  /**
+   * Persists the chat state to the database
+   */
+  protected async persistChatState(): Promise<void> {
+    const { history, personaId, modelId, started, id, sseSession, vars } = this.chatState;
+    const { user } = this.context;
+    const meta = {
+      summary: "Chat session",
+      title: `Chat session`,
+    };
+
+    try {
+      let nextStateModel = null;
+      if (this.chatStateModel !== null && this.chatStateModel._id.toString() === id &&
+        this.chatStateModel.user._id.toString() === user._id.toString()) {
+        nextStateModel = this.chatStateModel;
+      }
+      
+      if (!nextStateModel) {
+        nextStateModel = new ReactorConversationModel({
+          _id: id,
+          id,
+          personaId,
+          modelId,
+          started,
+          history,
+          sseSessionId: sseSession,
+          user,
+          vars,
+          created: new Date(),
+          updated: new Date(),
+          meta
+        });
+        await nextStateModel.save();
+      } else {
+        if (nextStateModel.user && nextStateModel.user._id.toString() !== user._id.toString()) {
+          throw new AIProviderError(`User ${user._id.toString()} does not match chat state user ${nextStateModel.user._id.toString()}`);
+        } else {
+          nextStateModel.history = history;
+          nextStateModel.updated = new Date();
+          nextStateModel.sseSessionId = sseSession;
+          await nextStateModel.save();
+        }
+
+        this.chatStateModel = nextStateModel;
+      }
+    } catch (error) {
+      this.context.error(
+        `Error persisting chat state: ${error.message || error.toString()}`,
+        { error },
+        'AIProviderBase.persistChatState'
+      );
+      throw new AIProviderError('Failed to persist chat state');
+    }
+  }
+
+  /**
+   * Loads a chat state from the database or creates a new one if it doesn't exist
+   */
+  protected async loadChatState(chatSessionId?: string): Promise<boolean> {
+    const { context } = this;
+    
+    if (!chatSessionId) {
+      chatSessionId = new Mongoose.Types.ObjectId().toString();
+      this.chatStateModel = null;
+      return true;
+    }
+    
+    try {
+      const chatSession = await ReactorConversationModel.findById(chatSessionId).exec();
+      
+      if (!chatSession) {
+        this.chatStateModel = null;
+        return true;
+      }
+      
+      if (chatSession.user && chatSession.user._id.toString() !== context.user._id.toString()) {
+        throw new AIProviderError(`Chat session ${chatSessionId} does not belong to user ${context.user._id.toString()}`);
+      }
+      
+      // @ts-ignore
+      this.chatStateModel = chatSession;
+      
+      this.chatState = {
+        id: chatSession._id.toString(),
+        user: context.user,
+        modelId: chatSession.modelId,
+        started: chatSession.started,
+        history: chatSession.history,        
+        personaId: chatSession.personaId,
+        persona: this.personaProvider?.getPersona(chatSession.personaId),
+        vars: chatSession.vars || {},
+        sseSession: chatSession.sseSessionId,
+        macros: chatSession.macros || [],        
+        toolApprovalMode: (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
+      };
+      
+      return false;
+    } catch (error) {
+      if (error.message.includes('does not belong to user')) {
+        throw error;
+      }
+      
+      this.context.error(
+        `Error loading chat state: ${error.message || error.toString()}`,
+        { error, chatSessionId },
+        'AIProviderBase.loadChatState'
+      );
+      
+      this.chatStateModel = null;
+      return true;
+    }
+  }
+
+  /**
+   * Initialize provider client with appropriate model
+   */
+  protected abstract initializeClient(persona: IAIPersona): Promise<void>;
+
+  /**
+   * Create system prompt message based on persona
+   */
+  protected createSystemPrompt(persona: IAIPersona): any {
+    if (!persona.prompts || !persona.prompts["system"]) {
+      throw new AIProviderError(`Persona ${persona.id} does not have a system prompt`);
+    }
+    
+    const promptTemplate: IAIPersonaPromptTemplate = persona.prompts["system"];
+    return {
+      role: "system",
+      content: this.context.utils.lodash.template(promptTemplate.content)({
+        persona: persona,
+        tools: persona.tools,
+        macros: persona.macros,
+        user: {
+          id: this.context.user.id, 
+          fullName: this.context.user.fullName(false),
+          firstName: this.context.user.firstName,
+          lastName: this.context.user.lastName,
+        },
+      }),
+    };
+  }
+
+  /**
+   * Initialize the AI provider with a chat session and persona
+   */
+  public async initialize(chatSessionId: string, persona: IAIPersona): Promise<void> {
+    try {
+      await this.initializeClient(persona);
+      
+      const isNewSession = await this.loadChatState(chatSessionId);
+      
+      if (isNewSession) {
+        const SYSTEM_INITIALIZER_MESSAGE = this.createSystemPrompt(persona);
+        
+        //@ts-ignore
+        this.chatState = {
+          id: chatSessionId,
+          user: this.context.user,
+          modelId: persona.modelId,
+          started: new Date(),
+          history: [SYSTEM_INITIALIZER_MESSAGE],      
+          personaId: persona.id,
+          persona,
+          vars: {},
+          macros: persona.macros || [],          
+          toolApprovalMode: (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
+        };
+
+        await this.persistChatState();
+      }
+    } catch (error) {
+      this.context.error(
+        `Error initializing AI provider: ${error.message || error.toString()}`,
+        { error },
+        'AIProviderBase.initialize'
+      );
+      throw error;
+    }
+  }
+
+  // Default implementations that throw errors - should be implemented by providers
+  async chat(params: AIChatParams): Promise<AIChatCompletion> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async chatAudio(params: AIAudioChatParams): Promise<AIChatCompletion> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async speech2Text(audio: string | Buffer[]): Promise<string> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async createFineTuningJob(params: CreateAIFineTuningJobParams): Promise<AIFineTuningJob> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async listFineTuningJobs(params?: Record<string, any>): Promise<AIFineTuningJob[]> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async getFineTuningJob(jobId: string): Promise<AIFineTuningJob> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async cancelFineTuningJob(jobId: string): Promise<AIFineTuningJob> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async listFineTuningEvents(jobId: string): Promise<AIFineTuningEvent[]> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async listFiles(): Promise<AIFile[]> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async uploadFile(filename: string, purpose: string): Promise<AIFile> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async deleteFile(fileId: string): Promise<AIFile> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async getFile(fileId: string): Promise<AIFile> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async getFileContents(fileId: string): Promise<string> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async generateImage(params: AIImageGenerationParams): Promise<AIListResponse<AIImage>> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async extendImage(params: AIImageGenerationParams): Promise<AIListResponse<AIImage>> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  async listModels(): Promise<AIListResponse<AIModel>> {
+    throw new AIProviderError("Method not implemented");
+  }
+
+  // Required by IReactoryService interface
+  toString?(includeVersion?: boolean): string {
+    return `AIProvider${includeVersion ? `@${this.version}` : ''}`;
+  }
+
+  description?: string = "Base AI Provider Service";
+  tags?: string[] = ["ai", "provider"];
+  nameSpace: string = "reactor";
+  name: string = "AIProviderBase";
+  version: string = "1.0.0";
+}
+
+export default AIProviderBase;

@@ -1,70 +1,64 @@
 import Reactory from "@reactory/reactory-core";
 import { ChatState, Macro, MacroComponentDefinition } from "../../../types/chat";
-import {   
+import {
   getInitializerMessage
 } from '@reactory/server-modules/reactory-reactor/ai/openai/chat/questions/factory';
 import ReactorConversationModel from '@reactory/server-modules/reactory-reactor/models/ReactorChatState';
 import { ObjectId } from "mongodb";
 import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
+import { ChatsMacroProps } from './types';
 
 
-export const ChatsMacro: Macro<unknown> = async (
-  args: any[],
-  state: ChatState): Promise<unknown> => {
-  const [k, v] = args;
-
-  const {
-    context
-  } = state;
+export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
+  props: ChatsMacroProps,
+  state: ChatState
+): Promise<unknown> => {
+  const { action, id, files, model } = props;
+  const { context } = state;
 
   try {
-    switch(k) {
-      case 'new': {
+    switch (action) {
+      case "new": {
         state.id = ObjectId.generate().toString();
         state.history = [await getInitializerMessage(state.personaId, state, context)];
-        return 'New chat session created'
+        return "New chat session created";
       }
-      case 'size': {
-        //calculates the size of the chat in tokens from the history
+      case "size": {
         let size = 0;
         state.history.forEach((message) => {
-          if(message?.content) {
-            size += message.content.split(' ').length;
+          if (message?.content) {
+            size += message.content.split(" ").length;
           }
-        })
-
+        });
         return `Chat size is ~${size} tokens`;
       }
-      case 'list': {
-        // list all chats
+      case "list": {
         const chats = await ReactorConversationModel.find({
-          user: state.context.user
+          user: state.context.user,
         }).then();
-        let chat_list = 'Here are your chats:';
+        let chat_list = "Here are your chats:";
         if (chats && chats.length > 0) {
           chats.forEach((chat) => {
-            let summary = '';
+            let summary = "";
             chat.history.forEach((message) => {
-              if (message.role === 'user' && !summary) {
-                summary = message?.content && message.content.length > 30 ? message.content.substring(0,30) : message.content;
+              if (message.role === "user" && !summary) {
+                summary = message?.content && message.content.length > 30 ? message.content.substring(0, 30) : message.content;
               }
-            })
-            chat_list += `${chat.id} - ${summary}\n`
-          })          
+            });
+            chat_list += `${chat.id} - ${summary}\n`;
+          });
         } else {
-          chat_list = 'You have no chat history';
+          chat_list = "You have no chat history";
         }
-
         return chat_list;
       }
-      case 'cont': {
-        // load chat state
-        // if v is null or undefined, we find the last chat 
-        // for the user
-        if(v === undefined || null) {
+      case "cont": {
+        if (!id) {
           const chat = await ReactorConversationModel.findOne({
-            user: state.context.user
-          }).sort({ started: -1 }).then();
+            user: state.context.user,
+          })
+            .sort({ started: -1 })
+            .then();
           if (chat) {
             state.history = chat.history;
             state.id = chat.id;
@@ -73,42 +67,38 @@ export const ChatsMacro: Macro<unknown> = async (
             return `No chat history found`;
           }
         } else {
-          const chat = await ReactorConversationModel.findById(v);
+          const chat = await ReactorConversationModel.findById(id);
           if (chat) {
             state.history = chat.history;
             state.id = chat.id;
-            return `Continuing chat ${v}`;
+            return `Continuing chat ${id}`;
           } else {
-            return `Chat ${v} not found`;
+            return `Chat ${id} not found`;
           }
         }
       }
-      case 'del': {
-        // delete chats
-        const chat = await ReactorConversationModel.findById(v);
+      case "del": {
+        const chat = await ReactorConversationModel.findById(id);
         if (chat) {
           await chat.deleteOne();
-          return `Deleted chat ${v}`;
+          return `Deleted chat ${id}`;
         } else {
-          return `Chat ${v} not found`;
+          return `Chat ${id} not found`;
         }
       }
-      case 'exp': {
-        // exports a chat
-        return 'Exported chat to data folder'
+      case "exp": {
+        return "Exported chat to data folder";
       }
-      case 'train': {
+      case "train": {
         // triggers a training instruction
+        return "Training triggered";
       }
-      case 'personas': {
-        // lists all personas
-        const personas = await state.context.getService<AIPersonaProvider>('reactor.AIPersonaProvider@1.0.0').listPersonas();
-        return `List of personas:\n\t${personas.map((persona) => `  ${persona.id} - ${persona.name}`).join('\n')}
-        `
+      case "personas": {
+        const personas = await state.context.getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0").listPersonas();
+        return `List of personas:\n\t${personas.map((persona) => `  ${persona.id} - ${persona.name}`).join("\n")}`;
       }
-      case 'speakto': {
-        // sets the persona to speak to
-        const persona = await state.context.getService<AIPersonaProvider>('reactor.AIPersonaProvider@1.0.0').getPersona(v);
+      case "speakto": {
+        const persona = await state.context.getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0").getPersona(id);
         if (persona) {
           state.personaId = persona.id;
           state.id = ObjectId.generate().toString();
@@ -116,106 +106,91 @@ export const ChatsMacro: Macro<unknown> = async (
           state.persona = persona;
           return `You are now chatting to ${persona.name}`;
         } else {
-          return `Persona ${v} not found`;
+          return `Persona ${id} not found`;
         }
       }
-      case 'clear': {
-        // clears the chat history for the user
+      case "clear": {
         const chats = await ReactorConversationModel.find({
-          user: state.context.user
+          user: state.context.user,
         }).then();
         if (chats && chats.length > 0) {
-          chats.forEach(async (chat) => {
+          for (const chat of chats) {
             await chat.deleteOne();
-          })
+          }
         }
         return `Cleared chat history`;
       }
+      default:
+        return `Unknown action: ${action}`;
     }
-
-    
   } catch (err) {
-    return `Error in variable macro`;
+    return `Error in chats macro: ${err.message}`;
   }
 };
 
 export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
-  nameSpace: 'reactor-macros',
-  name: 'chats',
-  version: '1.0.0',
+  nameSpace: "reactor-macros",
+  name: "chats",
+  version: "1.0.0",
   component: ChatsMacro,
-  roles: ['USER'],
-  description: `# chats macro
-  Use this macro to retrieve or switch to a previous chat session
-  
-  ## Usage as a inline function / command action.
-  @chats(list) - lists all sessions for the user
-  @chats(new) - creates a new chat session
-  @chats(size) - calculates the size of the chat in tokens
-  @chats(cont, id?) - continues the last session with the user, or continues with the id provided. 
-  @chats(del, id?) - del deletes a chat session give the id, or if no id it will delete the current chat session
-  @chats(exp, id?) - export the chat to data folder for training
-  @chats(train, files, model) - uploads training data for a specific model
-  @chats(personas) - lists all personas
-  @chats(speakto, id) - sets the persona to speak to
-  @chats(clear) - clears all chat history for the user
-  `,
+  roles: ["USER"],
+  description: `# chats macro\nUse this macro to retrieve or switch to a previous chat session\n\n## Usage as a inline function / command action.\n@chats(list) - lists all sessions for the user\n@chats(new) - creates a new chat session\n@chats(size) - calculates the size of the chat in tokens\n@chats(cont, id?) - continues the last session with the user, or continues with the id provided. \n@chats(del, id?) - del deletes a chat session give the id, or if no id it will delete the current chat session\n@chats(exp, id?) - export the chat to data folder for training\n@chats(train, files, model) - uploads training data for a specific model\n@chats(personas) - lists all personas\n@chats(speakto, id) - sets the persona to speak to\n@chats(clear) - clears all chat history for the user\n`,
   features: [
     {
-      feature: 'list',
+      feature: "list",
       featureType: Reactory.FeatureType.function,
-      action: ['list'],
-      description: 'Lists chat sessions',
-      stem: 'list'
+      action: ["list"],
+      description: "Lists chat sessions",
+      stem: "list",
     },
     {
-      feature: 'cont',
+      feature: "cont",
       featureType: Reactory.FeatureType.function,
-      action: ['continue'],
-      description: 'Continue a chat session',
-      stem: 'continue'
+      action: ["continue"],
+      description: "Continue a chat session",
+      stem: "continue",
     },
     {
-      feature: 'del',
+      feature: "del",
       featureType: Reactory.FeatureType.function,
-      action: ['delete'],
-      description: 'Deletes a chat session',
-      stem: 'delete'
-    }
+      action: ["delete"],
+      description: "Deletes a chat session",
+      stem: "delete",
+    },
   ],
-  stem: 'chats',
-  tags: ['chats', 'continue', 'delete', 'export', 'train'],
-  tools: [{
-    type: "function",
-    function: {
-      name: "chats",
-      description: "Retrieve or switch to a previous chat session",
-      parameters: {
-        type: "object",
-        properties: {
-          args: {
-            type: "array",
-            description: ` Provides a list of actions to take on the chat session.
-            The arguments for the chat macro are passed as an array.
-            The first argument is the action to take, and the second argument is the id of the chat session to act on.
-            The following actions are supported: 
-            - list: lists all chat sessions
-            - cont, id: continues a chat session
-            - del, id: deletes a chat session
-            - exp: exports a chat session
-            - train: trains a model with the chat session
-            - clear: clears all chat history for the user
-            - personas: lists all personas
-            - speakto, id: sets the persona to speak to
-            `,
-            items: {
-              type: "string"
-            }
+  stem: "chats",
+  tags: ["chats", "continue", "delete", "export", "train"],
+  tools: [
+    {
+      type: "function",
+      function: {
+        name: "chats",
+        description: "Retrieve or switch to a previous chat session",
+        parameters: {
+          type: "object",
+          properties: {
+            action: {
+              type: "string",
+              description: "The action to take on the chat session.",
+            },
+            id: {
+              type: "string",
+              description: "The id of the chat session to act on (optional).",
+            },
+            files: {
+              type: "array",
+              description: "Files for training (optional).",
+              items: { type: "string" },
+            },
+            model: {
+              type: "string",
+              description: "Model for training (optional).",
+            },
           },
+          required: ["action"],
         },
-        required: ["action"]
-      }
-    }
-  }],
-  alias: 'chat'
-}
+      },
+    },
+  ],
+  alias: "chats",
+};

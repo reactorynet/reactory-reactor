@@ -1,0 +1,56 @@
+# Platform, Cluster, Resource, Pod, and Environment types
+
+type ReactorCluster {
+  id: Int!
+  name: String!
+  type: String!
+  description: String
+  status: String
+  region: String
+  provider: String
+  nodeCount: Int
+  cpuCapacity: Float
+  memoryCapacity: Float
+  pods: [ReactorPod]
+  resources: [ReactorResource]
+  created: Date
+  updated: Date
+}
+
+type ReactorResource {
+  id: Int!
+  name: String!
+  type: String!
+  description: String
+  status: String
+  owner: String
+  created: Date
+  updated: Date
+}
+
+type ReactorPod {
+  id: Int!
+  name: String!
+  namespace: String
+  cluster: ReactorCluster
+  status: String
+  nodeName: String
+  containers: [String]
+  cpuUsage: Float
+  memoryUsage: Float
+  restarts: Int
+  created: Date
+  updated: Date
+}
+
+type ReactorProjectEnvironment {
+  id: Int!
+  name: String!
+  description: String
+  deployments: [ReactorProjectDeployment]
+  projects: [ReactorProject]
+  clusters: [String]
+  resources: [String]
+  created: Date
+  updated: Date
+}

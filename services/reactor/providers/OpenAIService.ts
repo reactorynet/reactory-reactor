@@ -3,9 +3,17 @@ import { service } from "@reactory/server-core/application/decorators/service";
 import IOpenAIService, { AudioChatParams, ChatParams, CreateFineTuningJobParams, FineTuningEvent, FineTuningObjectJob, IAIPersona, IAIPersonaPromptTemplate, ImageExtensionParams, ImageGenerationParams, IOpenAIServiceProps, ListFineTuningJobParams, OpenAIFile, OpenAIImage, OpenAIListResponse, OpenAIModel } from "../../../types/service.types";
 import OpenAI, { ClientOptions } from "openai";
 import AIPersonaProvider from "../AIPersonaProvider";
-import { ChatState, MacroComponentDefinition, MacroToolDefinition, ToolApprovalMode } from "../../../ai/openai/types/chat";
-import fs from "fs";
-import { ChatCompletionTool, CompletionChoice } from "openai/resources";
+import { 
+  ChatState, 
+  MacroComponentDefinition, 
+  MacroToolDefinition, 
+  ToolApprovalMode 
+} from "../../../ai/openai/types/chat";
+import { 
+  ChatCompletionMessageParam, 
+  ChatCompletionTool, 
+  CompletionChoice 
+} from "openai/resources";
 import Mongoose from "mongoose";
 import ReactorConversationModel, { TReactorConversationModel } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 
@@ -15,6 +23,7 @@ import {
   MacroRegistry,
   handleCommandAction,
 } from "../../../ai/openai/chat/macro";
+import ReactorMacroService from "./ReactorMacroService";
 
 
 @service({
@@ -27,7 +36,8 @@ import {
     { id: "core.ReactoryFileService@1.0.0", alias: "fileService" },
     { id: "core.UserService@1.0.0", alias: "userService" },
     { id: "core.FetchService@1.0.0", alias: "fetchService" },
-    { id: "reactor.AIPersonaProvider@1.0.0", alias: "personaProvider" },  
+    { id: "reactor.AIPersonaProvider@1.0.0", alias: "personaProvider" },
+    { id: "reactor.ReactorMacroService@1.0.0", alias: "macroService" },  
   ],
 })
 class OpenAIService implements IOpenAIService {
@@ -39,6 +49,7 @@ class OpenAIService implements IOpenAIService {
   userService: Reactory.Service.IReactoryUserService;
   fetchService: Reactory.Service.IFetchService;
   personaProvider: AIPersonaProvider;
+  macroService: ReactorMacroService;
   // keep a local copy of the chat state model
   // for the duration of the service to reduce 
   // the number of calls to the database to load 
@@ -165,7 +176,7 @@ class OpenAIService implements IOpenAIService {
         toolApprovalMode: (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
       };
       
-      return false; // This is an existing chat session
+      return this.chatState.history?.length > 0;
     } catch (error) {
       if (error.message.includes('does not belong to user')) {
         throw error; // Rethrow ownership errors
@@ -228,8 +239,8 @@ class OpenAIService implements IOpenAIService {
         role: "system",
         content: this.context.utils.lodash.template(promptTemplate.content)({
           persona: persona,
-          tools: this.getToolsDefinitions(),
-          macros: MacroRegistry,
+          tools: persona.tools,
+          macros: persona.macros,
           user: {
             id: this.context.user.id, 
             fullName: this.context.user.fullName(false),
@@ -400,22 +411,13 @@ class OpenAIService implements IOpenAIService {
     return macros;
   }
 
-  private getToolsDefinitions(): ChatCompletionTool[] {
-    // convert the macro registry to a list of tools
-    const { context } = this;
+  private async getToolsDefinitions(): Promise<ChatCompletionTool[]> {
+    // convert the macro registry to a list of tools    
     const tools: any[] = [];
-  
-    MacroRegistry.forEach((macro: MacroComponentDefinition<unknown>) => {
-      let hasAccess = false;
-      if (macro.roles && macro.roles.length > 0) { 
-        hasAccess = context.hasAnyRole(macro.roles);
-        if (hasAccess === false) {
-          return;
-        }
-      } 
-      else hasAccess = true;
-      
-      if (macro.tools && hasAccess === true) {
+    const macros = await this.macroService.listMacrosForPersona(this.chatState.personaId);
+    
+    macros.forEach((macro: MacroComponentDefinition<unknown>) => {      
+      if (macro.tools) {
         macro.tools.forEach((tool: MacroToolDefinition) => {
           if (tool.type === "function") {
             const { function: func } = tool;
@@ -436,22 +438,32 @@ class OpenAIService implements IOpenAIService {
     return tools;
   }
 
-  private createPrompt(    
+  private async createPrompt(    
     message: string,    
-  ): OpenAI.Chat.Completions.ChatCompletionCreateParams {
+  ): Promise<OpenAI.Chat.Completions.ChatCompletionCreateParams> {
 
-    const { context, chatState } = this;
+    const { chatState } = this;
     const { history, modelId } = chatState;
 
-    let messages: any[] = [
-      ...history,
-      {
-        role: "user",
-        content: message,
-      },
-    ];
+    let messages: ChatCompletionMessageParam[] = [];
+
+    history.forEach((msg) => {
+      if (msg?.content && typeof msg.content === "string") {
+        //@ts-ignore
+        messages.push({
+          // @ts-ignore
+          role: msg.role,
+          content: msg.content,          
+        });
+      }
+    });
+
+    messages.push({
+      role: "user",
+      content: message,
+    });
   
-    const tools = this.getToolsDefinitions();
+    const tools = await this.getToolsDefinitions();
     if (tools.length > 0) {
       return {
         model: modelId,
@@ -507,20 +519,9 @@ class OpenAIService implements IOpenAIService {
   }
 
   async chat(params: ChatParams): Promise<OpenAI.Chat.Completions.ChatCompletion> { 
-    const { personaId, chatSessionId, message } = params;
-    const {
-      createPrompt,
-      getAIResponse,
-      handleChatCompletionResponse,
-      persistChatState, 
-      chatState
-    } = this;
-    // check the chat session id vs the chat state id
-    // if they are not the same we need to load the chat state from the database
-
-    
+    const { message } = params;
     // create the prompt from the user input.
-    const prompt = this.createPrompt(message);
+    const prompt = await this.createPrompt(message);
 
     // get the response from the AI
     return await this.getAIResponse(prompt);    
@@ -538,6 +539,9 @@ class OpenAIService implements IOpenAIService {
   }
   setPersonaProvider(personaProvider: AIPersonaProvider) {
     this.personaProvider = personaProvider;
+  }
+  setMacroService(macroService: ReactorMacroService) {
+    this.macroService = macroService;
   }
 
   toString?(includeVersion?: boolean): string {

@@ -1,0 +1,10 @@
+# Link and link-related types
+type ReactorNodeLink {
+  id: Int!
+  source: ReactorNode!
+  types: [ReactorLinkType]!
+  target: ReactorNode!
+  title: String
+  description: String
+  data: Any
+}

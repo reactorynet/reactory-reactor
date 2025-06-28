@@ -2,6 +2,7 @@ import MCPRequestHandlers from "./MCPRequestHandlers";
 import Express, { Response } from 'express';
 import http from 'http';
 import logger from '@reactory/server-core/logging';
+import passport from 'passport';
 
 
 
@@ -15,11 +16,11 @@ const ReactoryMCP = async (app: Express.Application, httpServer: http.Server) =>
     
     
     // Add routes or middleware for MCP if needed
-    app.get('/reactor-mcp/sse', async (req, res, next) => {    
+    app.get('/reactor-mcp/sse', passport.authenticate("jwt", { session: false }), async (req, res, next) => {    
       MCPRequestHandlers.handleSSERequest(req, res);
     });
 
-    app.post('/reactor-mcp/messages', async (req, res, next) => { 
+    app.post('/reactor-mcp/messages', passport.authenticate("jwt", { session: false }), async (req, res, next) => { 
      MCPRequestHandlers.handeMessageRequest(req, res);
     });
 

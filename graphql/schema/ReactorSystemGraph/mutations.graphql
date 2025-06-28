@@ -1,0 +1,72 @@
+# Mutation and union types for system graph
+
+type CatalogNodeSyncSuccess {
+  node: ReactorNode!
+  message: String
+}
+
+type CatalogNodeSyncFailure {
+  node: ReactorNode!
+  errors: [String!]
+}
+
+union CatalogNodeSyncResult = CatalogNodeSyncSuccess | CatalogNodeSyncFailure
+
+type ReactorNodeCatalogIndexSuccess {
+  nodes: [ReactorNode!]
+  message: String
+}
+
+type ReactorNodeCatalogIndexFailure {
+  errors: [String!]
+}
+
+union ReactorNodeCatalogIndexResult = ReactorNodeCatalogIndexSuccess | ReactorNodeCatalogIndexFailure
+
+type ReactorCreateNodeLinkSuccess {
+  link: ReactorNodeLink!
+  message: String
+}
+
+type ReactorCreateNodeLinkFailure {
+  link: ReactorNodeLink!
+  error: String
+}
+
+union ReactorNodeLinkCreateResult = ReactorCreateNodeLinkSuccess | ReactorCreateNodeLinkFailure
+
+type ReactorNodeLinkUpdateSuccess {
+  link: ReactorNodeLink!
+  message: String
+}
+
+type ReactorNodeLinkUpdateFailure {
+  link: ReactorNodeLink!
+  error: String
+}
+
+union ReactorNodeLinkUpdateResult = ReactorNodeLinkUpdateSuccess | ReactorNodeLinkUpdateFailure
+
+type ReactorDeleteNodeLinkSuccess {
+  id: Int!
+  message: String
+}
+
+type ReactorDeleteNodeLinkFailure {
+  id: Int!
+  error: String
+}
+
+union ReactorNodeLinkDeleteResult = ReactorDeleteNodeLinkSuccess | ReactorDeleteNodeLinkFailure
+
+type ReactorSysteGraphSaveFailure {
+  id: Int!
+  error: String
+}
+
+type ReactorSystemGraphSaveSuccess {
+  success: Boolean
+  message: String
+}
+
+union ReacorSystemGraphSaveResult = ReactorSysteGraphSaveFailure | ReactorSystemGraphSaveSuccess

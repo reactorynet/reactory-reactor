@@ -11,6 +11,29 @@ export type DirectoryListFormatter = (pathInfos: PathInfo[]) => string;
 export type DirectoryListFormatterService = Reactory.Service.IReactoryService & {
   formatter: DirectoryListFormatter;
 }
+
+/**
+ * Properties for ServiceRegister macro
+ */
+export interface ServiceRegisterProps {
+  /** The action to perform: 'list' or 'get' */
+  action?: 'list' | 'get';
+  /** The service name (for get action) */
+  name?: string;
+  /** The service namespace (for get action) */
+  nameSpace?: string;
+  /** The service version (for get action) */
+  version?: string;
+  /** Properties for service initialization */
+  props?: any;
+  /** Function to call on the service */
+  func?: string;
+  /** Parameters for the function call */
+  funcParams?: any[];
+  /** Format for list output */
+  format?: 'string' | 'object';
+}
+
 /**
  * Defines a Path Informaiton object that contains information about a file or directory
  */

@@ -290,5 +290,3 @@ export const ReactorNodeModelComponentRegistryEntry: Reactory.IReactoryComponent
   component: ReactorNodeModel,
   features: []
 }
-
-

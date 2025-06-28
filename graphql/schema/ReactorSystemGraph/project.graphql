@@ -1,0 +1,239 @@
+# Project and Project-related types
+
+type ReactorProjectPathSpec {
+  id: Int!
+  path: String
+  filter: String
+  type: String
+}
+
+type ReactorProjectFileSpec {
+  id: Int!
+  path: String
+  type: String
+  content: String
+}
+
+type ReactorProjectError {
+  message: String
+  stack: String
+  provider: String
+  link: String
+  created: Date
+  updated: Date
+}
+
+enum ReactorProjectDeploymentStatus {
+  PENDING
+  DEPLOYING
+  SUCCESS
+  FAILED
+  ROLLBACK
+}
+
+type ReactorProjectDeployment {
+  id: Int!
+  environment: String!
+  status: ReactorProjectDeploymentStatus!
+  name: String
+  description: String
+  version: String!
+  ciProvider: String
+  ciPipeline: String
+  ciBranch: String
+  ciBuildId: String
+  ciBuildUrl: String
+  commitHash: String
+  commitMessage: String
+  commitAuthor: String
+  created: Date
+  updated: Date
+  project: ReactorProject
+}
+
+enum ReactorProjectDashboardType {
+  CHART
+  TABLE
+  MAP
+  TEXT
+  CUSTOM
+  LINK
+}
+
+type ReactorProjectDashboard {
+  id: Int!
+  name: String!
+  description: String
+  component: String
+  componentProps: Any
+  url: String!
+  type: ReactorProjectDashboardType!  
+  created: Date
+  updated: Date
+  project: ReactorProject
+}
+
+type ReactoryProjectSlack {
+  channel: String!
+  channelId: String!
+  webhookUrl: String!
+  chatBotId: String
+  created: Date
+  updated: Date
+}
+
+type ReactorProjectNote {
+  id: Int!
+  title: String
+  content: String!
+  format: String
+  createdBy: User
+  created: Date
+}
+
+type ReactorProjectSecurity {
+  securityContact: User
+  complianceTags: [String!]
+  riskLevel: String
+  dataClassification: String
+  vulnerabilityStatus: String
+  lastSecurityReview: Date
+  securityNotes: String
+  securityPoliciesUrl: String
+  encryptionAtRest: Boolean
+  encryptionInTransit: Boolean
+  dependenciesWithKnownVulnerabilities: Int
+  vulnerabilityReportUrl: String
+}
+
+enum ReactorProjectStatus {
+  ACTIVE
+  INACTIVE
+  ARCHIVED
+  DEPRECATED
+}
+
+enum ReactorProjectProcessingStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+type ReactorProjectProcessingEntry {
+  id: Int!
+  project: ReactorProject!
+  status: ReactorProjectProcessingStatus!
+  started: Date
+  completed: Date
+  errors: [String!]
+  notes: String
+}
+
+"""
+ReactorProjectDocumentation represents documentation for a project in the Reactor module ecosystem.
+Provide content in Markdown format.
+This type includes fields for the documentation's title, URL, path, content, format, and metadata such as creation and update timestamps.
+It also includes a reference to the user who created the documentation
+"""
+type ReactorProjectDocumentation {
+  id: Int!
+  title: String!
+  url: String
+  path: String
+  content: String
+  format: String
+  createdBy: User
+  created: Date
+  updated: Date
+}
+
+type ReactorSlackChannel {
+  id: String!
+  name: String!
+  description: String
+}
+
+type ReactorProjectAlerts {
+  id: Int!
+  project: ReactorProject!
+  alertType: String!
+  message: String!
+  severity: String! 
+  priority: String
+  source: String
+  status: String
+  createdBy: User
+  created: Date
+  updated: Date
+}
+
+type ReactorProjectTask {
+  id: Int!
+  reference: String
+  title: String!
+  description: String
+  status: String!
+  priority: String
+  assignedTo: User
+  dueDate: Date
+  createdBy: User
+  created: Date
+  updated: Date
+}
+
+type ReactorProject {
+  id: Int!
+  client: ReactoryClient
+  businessUnit: BusinessUnit
+  fqn: String!
+  name: String!
+  nameSpace: String!
+  version: String!
+  avatar: String
+  icon: String
+  repoPath: String
+  repoUrl: String
+  projectType: String!
+  subTypes: [String!]
+  lastSync: Date
+  description: String
+  tasksUrl: String
+  tasks: [ReactorProjectTask]
+  primaryDocumentation: ReactorProjectDocumentation
+  additionalDocumentation: [ReactorProjectDocumentation]
+  primarySlack: ReactoryProjectSlack
+  secondarySlack: [ReactoryProjectSlack]
+  dependencies: [ReactorProject]
+  pathSpecs: [ReactorProjectPathSpec]
+  files: [ReactorProjectFileSpec]
+  activeDeployment: ReactorProjectDeployment
+  deployments: [ReactorProjectDeployment]
+  dashboards: [ReactorProjectDashboard]
+  alerts: [ReactorProjectAlerts]
+  processor: String
+  processorOptions: Any
+  owner: User
+  ownerTeam: Team
+  teams: [Team]
+  engineers: [User]
+  activeBranch: String
+  mainBranch: String!
+  branches: [String!]
+  tags: [String!]
+  created: Date
+  updated: Date
+  incidentActive: Boolean
+  incidentCount: Int
+  errors: [ReactorProjectError]
+  notes: [ReactorProjectNote]
+  projectStatus: ReactorProjectStatus!
+  processingHistory: [ReactorProjectProcessingEntry]
+  security: ReactorProjectSecurity
+}
+
+type ReactorPagedProjects {
+  projects: [ReactorProject]
+  paging: PagingResult
+}

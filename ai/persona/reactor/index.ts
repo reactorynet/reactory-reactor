@@ -2,9 +2,34 @@ import { ingest } from "@reactory/server-core/utils/io"
 import appearance from './appearance';
 import { IAIPersona } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { FeatureType } from "@reactory/reactory-core";
+import { MacroRegistry } from "@reactory/server-modules/reactory-reactor/ai/openai/chat/macro";
+import { MacroComponentDefinition, MacroToolDefinition } from "../../openai/types/chat";
 
 const REACTOR_PERSONA_TEXT = ingest(require.resolve('./persona.md'));
 const REACTOR_FEATURES_TEXT = ingest(require.resolve('./features.md'));
+
+const REACTOR_TOOLS: MacroToolDefinition[] = [];
+const REACTOR_MACROS: MacroComponentDefinition<any>[] = [];
+MacroRegistry.forEach(m => {
+  if (m.tools) {
+    m.tools.forEach(t => {
+      if (t.type === "function") {
+        if (!t.roles || t.roles.length === 0) t.roles = m.roles || [];
+        REACTOR_TOOLS.push(t);
+      }
+    });
+  }
+});
+
+// Add the macro tools to the tools array
+MacroRegistry.forEach(m => {
+  const macro = {
+    ...m,
+    runat: m.runat ?? "server",
+  };
+  REACTOR_MACROS.push(macro);
+});
+
 
 export const ReactoryPersona: IAIPersona = {
   id: "ReactorAIPersona",
@@ -25,25 +50,24 @@ export const ReactoryPersona: IAIPersona = {
     apiKey: process.env.OPENAI_API_KEY,
     apiBaseURL: process.env.OPENAI_API_BASE_URL || "https://api.x.ai/v1",
   },
-  tools: [],
-  macros: [
-    {
-      nameSpace: "reactor-macros",
-      name: "Greeting",
-      description: "A macro that provides a canned greeting from the user.",
-      version: "1.0.0",
-      component: "greet",
-      runat: "client",
-      roles: ['ANON', 'USER'],
-      alias: 'greet',
-    }
-  ],
+  tools: REACTOR_TOOLS,
+  macros: REACTOR_MACROS,
 }
 
 export const ReactoryPersonaComponentRegistryEntry: Reactory.IReactoryComponentDefinition<IAIPersona> = {
   nameSpace: "reactor",
   name: "ReactoryAIPersona",
-  description: "Reactory AI Persona",
+  description: `Reactor AI Persona. General Purpose AI Assistant focussed on Reactory and Reactor.
+  This persona is designed to assist users with a wide range of tasks, including but not limited to:
+  - Answering questions about Reactory and Reactor
+  - Providing information about Reactory and Reactor features
+  - Assisting with Reactory and Reactor development
+  - Offering guidance on best practices for using Reactory and Reactor
+  - Helping users navigate the Reactory and Reactor ecosystem
+  - Providing support for Reactory and Reactor-related issues
+  - Offering insights and tips for optimizing Reactory and Reactor usage
+  - Assisting with troubleshooting and debugging Reactory and Reactor applications
+  - Providing recommendations for Reactory and Reactor tools and resources`,
   version: "1.0.0",
   component: ReactoryPersona,
   features: [

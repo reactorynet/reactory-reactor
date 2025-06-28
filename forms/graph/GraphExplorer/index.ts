@@ -4,12 +4,12 @@ import graphql from './graphql';
 import modules from './modules';
 
 const GraphExplorerForm: Reactory.Forms.IReactoryForm = { 
-  id: `reactor.GraphExplorerForm@1.0.0`,
+  id: `reactor.ServiceGraph@1.0.0`,
   schema,
-  description: `A D3 graph explorer for systems and their dependencies`,
+  description: `A graph explorer for systems and their dependencies`,
   uiFramework: 'material',
   uiSupport: ['material'],
-  uiSchema: GridUISchema,
+  uiSchema: GraphExplorerSchema,
   uiSchemas: [{
     id: 'Default',
     key: 'default',
@@ -36,7 +36,7 @@ const GraphExplorerForm: Reactory.Forms.IReactoryForm = {
     { componentFqn: 'reactor.ReactorGraphExplorerWidget@1.0.0', widget: 'GraphExplorerWidget' }
   ],
   nameSpace: "reactor",
-  name: "GraphExplorerForm",  
+  name: "ServiceGraph",  
   version: '1.0.0',
   modules
 }

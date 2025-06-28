@@ -1,6 +1,8 @@
 import { ReadLine } from "readline";
+import fs from 'fs';
 import { ask, colors } from '@reactory/server-modules/reactory-reactor/helpers';
-import { ISystemGraphManager } from "@reactory/server-modules/reactory-reactor/types/service.types";
+import { IReactorProject, ISystemGraphManager, ReactorProjectProcessingStatus, ReactorProjectService, ReactorProjectStatus } from "@reactory/server-modules/reactory-reactor/types/service.types";
+import { patch } from "superagent";
 
 type ReactoryCliApp = (vargs: string[], context: Reactory.Server.IReactoryContext) => Promise<void>
 /**
@@ -44,6 +46,9 @@ const GraphManagerCli: ReactoryCliApp = async (kwargs: string[], context: Reacto
   let graphId: string = 'SystemGraph';
   let doIndex: boolean = false;
   let deleteIndex: boolean = false;
+  let createCatalog: boolean = false;
+  let catalogPath: string = '';
+  let patchData: any = null;
   let doSearch: boolean = false;
   let searchTerm: string = '';
   let output: string = '';
@@ -52,18 +57,18 @@ const GraphManagerCli: ReactoryCliApp = async (kwargs: string[], context: Reacto
   let help: boolean = false;
   let verbose: boolean = false;
   let indexKey = 'reactory_SystemGraph';
-  for(let i = 0; i < kwargs.length; i++) { 
+  for (const kwarg of kwargs) {
     let arg: string;
     let argv: string | boolean = null;
-    if(kwargs[i].indexOf('=') === -1) { 
-      arg = kwargs[i];
-      argv = true;      
+    if (kwarg.indexOf('=') === -1) {
+      arg = kwarg;
+      argv = true;
     } else {
-      arg = kwargs[i].split('=')[0];
-      argv = kwargs[i].split('=')[1];
+      arg = kwarg.split('=')[0];
+      argv = kwarg.split('=')[1];
     }
 
-    switch(arg) { 
+    switch (arg) {
       case '--dindex': {
         deleteIndex = true;
         indexKey = argv as string ? argv as string : `graph_${systemId}_${graphId}`;
@@ -76,6 +81,15 @@ const GraphManagerCli: ReactoryCliApp = async (kwargs: string[], context: Reacto
       case '-r':
       case '--remove':
         remove.push(argv as string);
+        break;
+      case '-c':
+      case '--catalog':
+        createCatalog = true;
+        catalogPath = argv as string;
+        break;
+      case '--patchfile': 
+        patchData = fs.readFileSync(argv as string, 'utf-8');
+        patchData = JSON.parse(patchData);
         break;
       case '-proc':
       case '--processor':
@@ -93,37 +107,35 @@ const GraphManagerCli: ReactoryCliApp = async (kwargs: string[], context: Reacto
         break;
       case '-i':
       case '--index':
-        doIndex = true;      
+        // doIndex = true; // Removed useless assignment
         break;
       case '-s':
       case '--search':
-        doSearch = true;
-        searchTerm = argv as string;
+        // doSearch = true; // Removed useless assignment
+        // searchTerm = argv as string; // Removed useless assignment
         break;
       case '-o':
       case '--output':
-        output = argv as string;
+        // output = argv as string; // Removed useless assignment
         break;
       case '-fmt':
       case '--format':
-        format = argv as string;
+        // format = argv as string; // Removed useless assignment
         break;
       case '-h':
       case '--help':
         help = true;
         break;
-      case '-s':
       case '--silent':
-        silent = true;
+        // silent = true; // Removed useless assignment
         break;
       case '-v':
       case '--verbose':
-        verbose = true;
+        // verbose = true; // Removed useless assignment
         break;
       default:
         break;
     }
-    
   }
 
   if(help === true) { 
@@ -131,6 +143,7 @@ const GraphManagerCli: ReactoryCliApp = async (kwargs: string[], context: Reacto
     Reactory GraphManagerCLI. Use this CLI to manage your Reactory system graph.
     to provide a visual representation of your application architecture. The CLI accepts the following command line arguments:
     --add=<filepath> eg --add=./path/to/file
+    --catalog=<catalog-path> eg --catalog=./path/to/catalog
     --remove=<filepath> eg -remove=./path/to/file
     --processor=<processor-id> eg. --processor=reactor.SimpleProjectProcessor@1.0.0
     --sid=<system-id> Default is Reactory, eg. --sid Acme
@@ -186,6 +199,89 @@ const GraphManagerCli: ReactoryCliApp = async (kwargs: string[], context: Reacto
     }
   
   }
+
+  if (createCatalog) {
+    if (!catalogPath || catalogPath.trim() === '') {
+      context.error(`Catalog path is required when using --catalog option.`);
+      process.exit(1);
+    }
+
+    if (!fs.existsSync(catalogPath) || !fs.lstatSync(catalogPath).isDirectory()) {
+      context.error(`Catalog path '${catalogPath}' does not exist or is not a directory.`);
+      process.exit(1);
+    }
+    context.info(`Cataloging all subfolders in ${catalogPath}`);
+    const projectSvc = context.getService<ReactorProjectService>("reactor.ReactorProjectService@1.0.0");
+    const folders = fs.readdirSync(catalogPath).filter(f => fs.lstatSync(`${catalogPath}/${f}`).isDirectory());
+    for (const folder of folders) {
+      // if the folder is a special folder like .git, skip it
+      if (folder.startsWith('.') || folder === 'node_modules') {
+        context.info(`Skipping special folder: ${folder}`);
+        continue;
+      }
+      const folderPath = `${catalogPath}/${folder}`;      
+      try {
+        let patchItem: Partial<IReactorProject> = null;
+        if (patchData) { 
+          // check if patch data is an array or single object.
+          // if the patchData is an array, we try and match the folder name with the patchData name
+          if (Array.isArray(patchData)) {
+            patchItem = patchData.find((item: any) => item.name === folder);            
+          } else if (typeof patchData === 'object' && patchData.name === folder) {
+            patchItem = patchData;
+          }
+        }
+
+        const project: Partial<IReactorProject> = { 
+          nameSpace: systemId,
+          name: folder,
+          version: 'unknown',
+          repoPath: folderPath,
+          repoUrl: patchItem?.repoUrl || '',
+          files: [], 
+          pathSpecs: [],
+          description: `Cataloged project from folder ${folder}`,
+          fqn: `${systemId}.${folder}@unknown`,
+          created: new Date(),
+          updated: new Date(),
+          dependencies: [],
+          tasksUrl: '',
+          docsUrl: '',
+          docsPath: '',
+          slackChannel: '',
+          slackChannelId: '',
+          owner: context?.user || null,
+          ownerTeam: null,
+          teams: [],
+          engineers: [],
+          activeBranch: 'main',
+          mainBranch: 'main',
+          branches: ['main'],
+          tags: [],
+          processor: processor,
+          processorOptions: {},
+          client: context?.partner || null,
+          projectStatus: ReactorProjectStatus.ACTIVE,
+          processingHistory: [],
+          errors: [],
+          notes: [],
+          security: {
+            securityPoliciesUrl: '',
+            encryptionAtRest: false,
+            encryptionInTransit: false,
+            dependenciesWithKnownVulnerabilities: 0,
+            vulnerabilityReportUrl: ''
+          }
+        };
+
+        await projectSvc.catalogProject(project);
+        context.info(`Cataloged: ${folderPath}`);
+      } catch (err) {
+        context.error(`Failed to catalog ${folderPath}: ${err.message}`);
+      }
+    }
+    process.exit(0);
+  }
 };
 
 /**
@@ -222,4 +318,4 @@ const ReactorCliAppDefinition: Reactory.IReactoryComponentDefinition<ReactoryCli
 
 }
 
-export default ReactorCliAppDefinition
+export default ReactorCliAppDefinition;

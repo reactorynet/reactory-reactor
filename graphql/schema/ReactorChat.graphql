@@ -13,6 +13,9 @@ type ReactorChatMessage {
   rating: String
   timestamp: Date
   tool_calls: Any
+  tool_results: Any
+  toolApproval: String
+  refusal: String    
 }
 
 """
@@ -48,6 +51,17 @@ or error information.
 """
 union ReactorChatResponse = ReactorChatMessage | ReactorInitiateSSE | ReactorErrorResponse
 
+enum ReactorToolApprovalMode {
+  auto
+  prompt
+  safe_auto
+}
+
+type ReactorSessionVar {
+  key: String!
+  value: Any
+}
+
 """
 Represents the overall state of a chat conversation, including
 its history and metadata.
@@ -55,229 +69,31 @@ its history and metadata.
 type ReactorChatState {
   id: String
   personaId: String
-  started: Date
+  created: Date
+  updated: Date
   user: User
   history: [ReactorChatMessage]
   tools: [ReactorToolDefinition]
   macros: [ReactorMacro]
   vars: Any
+  hasMcpClient: Boolean
+  mcpSessions: [ReactorMCPSession]
+  toolApprovalMode: ReactorToolApprovalMode
 }
 
 """
-Physical measurements used to define a persona's appearance.
+Represents a Model Context Protocol (MCP) session and its configuration details.
 """
-type ReactorPersonaMetrics {
-  height: Float
-  weight: Float
-  age: Float
-}
-
-"""
-Defines skin characteristics for a persona's appearance.
-"""
-type ReactorPersonaSkin {
-  color: String
-  tone: String
-}
-
-"""
-Controls for image adjustments and filters for persona backgrounds.
-"""
-type ReactorPersonaBackgroundImage {
-  alpha: Float
-  brightness: Float
-  contrast: Float
-  blur: Float
-  grayscale: Float
-  hueRotate: Float
-  invert: Float
-  opacity: Float
-  saturate: Float
-  sepia: Float
-  chromaKey: String
-}
-
-"""
-Controls for timing options when using video backgrounds.
-"""
-type ReactorPersonaBackgroundTimerOptions {
-  loop: Boolean
-  loopStart: Float
-  loopEnd: Float
-}
-
-"""
-Audio settings for persona backgrounds that include sound.
-"""
-type ReactorPersonaBackgrondAudioOptions {
-  volume: Float
-  mute: Boolean
-  autoplay: Boolean
-}
-
-"""
-Combined settings for managing all aspects of a persona's background.
-"""
-type ReactorPersonaBackgroundOptions {
-  image: ReactorPersonaBackgroundImage
-  time: ReactorPersonaBackgroundTimerOptions
-  audio: ReactorPersonaBackgrondAudioOptions
-  controls: Boolean
-}
-
-"""
-Defines a background element for a persona, including its source and display options.
-"""
-type ReactorPersonaBackground {
-  src: String
-  type: String
-  order: Int
-  options: ReactorPersonaBackgroundOptions
-}
-
-"""
-Defines the complete visual and auditory representation of a persona.
-"""
-type ReactorPersonaAppearance {
-  voice: [String]
-  face: [String]
-  hair: [String]
-  body: [String]
-  clothes: [String]
-  accessories: [String]
-  metrics: [ReactorPersonaMetrics]
-  skin: [ReactorPersonaSkin]
-  background: [ReactorPersonaBackground]
-}
-
-"""
-A pre-defined message template that can be used to orchestrate 
-conversations with other agents or to provide context for the conversation.
-"""
-type ReactorPersonaPrompt {
-  id: String
-  """
-  The prompt id to use for this prompt.
-  """
-  content: String
-  """
-  variables that is required for this prompt.
-  """
-  variables: [String]
-  """
-  The role of the prompt. 
-  This could be a system prompt, user prompt or assistant prompt.
-  """
-  role: String
-  """
-  The persona id to use for this prompt.
-  """
-  personaId: String 
-}
-
-enum ReactorMacroRunAt {
-  client
-  server
-}
-
-"""
-A pre-defined set of actions that can be executed at specific points
-in a conversation to trigger behaviors or process data.
-"""
-type ReactorMacro {
-  id: String
-  nameSpace: String
-  name: String
-  version: String
+type ReactorMCPSession {
+  id: String!
+  serverName: String!
   description: String
-  alias: String
-  params: [String]
-  runat: ReactorMacroRunAt!
-}
-
-"""
-Defines a function that can be called by AI models during conversation
-to execute specific capabilities.
-"""
-type ReactorFunction {
-  name: String!
-  description: String
-  parameters: Any
-}
-
-"""
-Represents a tool that extends the capabilities of the AI persona,
-allowing it to perform actions beyond conversation.
-"""
-type ReactorToolDefinition {
-  id: String
-  """
-  The type will always be "function" for now
-  """
-  type: String!
-  propsMap: Any
-  function: ReactorFunction
-  runat: String
-}
-
-"""
-Represents an AI personality with specific characteristics, capabilities,
-and behavior patterns that can engage in conversations.
-"""
-type ReactorPersona {
-  """
-  unique id for the persona
-  """
-  id: String
-  """
-  The name of the persona. This is a easy to read name that will be used in the UI
-  """
-  name: String
-  """
-  The model id that will be used for the persona.
-  models are gpt4, gpt3.5, etc.
-  """
-  modelId: String
-  """
-  The model provider is the organization that provides / process the requests
-  eg. openai, google, xai, etc.
-  """
-  provider: String
-  """
-  A description of the persona. This is a easy to read description that will be used in the UI
-  """
-  description: String
-  """
-  The defaultGreeting used for the persona.
-  """
-  defaultGreeting: String
-  """
-  Appearance is the visual representation of the persona.
-  This is for future use to create a realtime avatar of the persona.
-  """
-  appearance: ReactorPersonaAppearance
-  """
-  A set of pre defined prompts that can be used by the persona
-  """
-  prompts: [ReactorPersonaPrompt]
-  """
-  macros is a set of pre defined actions that can be used by the persona
-  macros will either run on client side or on the server side.
-  """
-  macros: [ReactorMacro]
-  """
-  A set of tools that can be used by the persona. These tools are for use with 
-  mcp client and server utilities.
-  """
+  sessionId: String
+  serviceCommand: String
+  url: String!
+  headers: Any
+  status: String # started, stopped, error
   tools: [ReactorToolDefinition]
-  """
-  The date the persona was created.
-  """
-  createdAt: Date
-  """
-  The date the persona was last updated.
-  """
-  updatedAt: Date
 }
 
 """
@@ -299,40 +115,31 @@ input ReactorSendMessageInput {
 }
 
 """
-Input type for defining a macro that can be executed on the client side
+Input parameters for executing a macro within a chat session on the server side.
 """
-input ReactorMacroInput {
-  id: String
-  name: String!
-  nameSpace: String
-  version: String
-  description: String
-  alias: String
-  params: [String]
-}
-
-input ReactorFunctionInput { 
-  name: String!
-  description: String
-  parameters: Any
-}
-
-input ReactorToolDefinitionInput {
-  id: String
-  type: String!
-  propsMap: Any
-  function: ReactorFunctionInput
-}
-
-"""
-Input parameters for starting a new chat session with a persona.
-"""
-input ReactorInitSession { 
+input ReactorMacroExecuteInput {
+  macro: String!
   personaId: String!
-  message: String
-  macros: [ReactorMacroInput]
-  tools: [ReactorToolDefinitionInput]
+  chatSessionId: String!
+  calledBy: String
+  callId: String
+  args: Any
 }
+
+"""
+Input parameters for executing a tool within a chat session.
+"""
+input ReactorToolExecuteInput {
+  tool: String!
+  personaId: String!
+  chatSessionId: String!
+  calledBy: String
+  callId: String
+  args: Any
+}
+
+union ReactorChatStateOrError = ReactorChatState | ReactorErrorResponse
+
 
 extend type Query {
 
@@ -343,10 +150,17 @@ extend type Query {
   ReactorConversations(filter: ReactorConversationFilter): [ReactorChatState]
 
   """
+  Retrieves a specific chat conversation by its ID.
+  """
+  ReactorConversation(id: String!): ReactorChatStateOrError
+
+  """
   Lists all available AI personas that the current user can access.
   """
   ReactorPersonas: [ReactorPersona]
 }
+
+
 
 extend type Mutation {
   """
@@ -354,6 +168,15 @@ extend type Mutation {
   the initial message to start the conversation using the persona's default greeting.
   """
   ReactorStartChatSession(initSession: ReactorInitSession!): ReactorChatState
+
+  """
+  Set the tool approval mode for a chat session.
+  This determines how tools are approved for use by the persona.
+  """
+  ReactorSetChatToolApprovalMode(
+    chatSessionId: String!
+    mode: ReactorToolApprovalMode!
+  ): ReactorChatState
 
   """
   Sends a message to a persona and returns either a direct response
@@ -364,17 +187,17 @@ extend type Mutation {
   """
   Executes a predefined macro within the context of a chat session.
   """
-  ReactorExecuteMacro(macro: String!, personaId:String!, chatSessionId: String!): ReactorChatResponse
+  ReactorExecuteMacro(macroInput: ReactorMacroExecuteInput!): ReactorChatResponse
 
   """
   Activates a specific tool for use by the persona in the current chat session.
   """
-  ReactorExecuteTool(tool: String!, personaId:String!, chatSessionId: String!): ReactorChatResponse
+  ReactorExecuteTool(toolInput: ReactorToolDefinitionInput!): ReactorChatResponse
   
   """
   Adds an image to the current chat conversation for analysis by the persona.
   """
-  ReactorAttachImage(image: String!, personaId:String!, chatSessionId: String!): ReactorChatResponse
+  ReactorAttachFile(file: Upload!, chatSessionId: String!): ReactorChatResponse
 
   """
   Permanently removes a chat session and all its messages.
@@ -384,6 +207,6 @@ extend type Mutation {
   """
   Converts spoken audio to text and sends it as a message to the persona.
   """
-  ReactorAskQuestionAudio(audio: Upload!, personaId:String!, chatSessionId: String!): ReactorChatResponse
+  ReactorAskQuestionAudio(audio: Upload!, chatSessionId: String!): ReactorChatResponse
 }
 

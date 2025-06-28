@@ -53,6 +53,25 @@ flowchart TD
     J -- No --> L[Add System Message: No Response]
     K & L --> M[Save Conversation]
     M --> N[Adapt and Return Response]
+    N --> O[Client Processes Response]
+    O --> P{Contains Tool Calls?}
+    P -- No --> Q[Display Response to User]
+    P -- Yes --> R[Check Tool Approval Mode]
+    R -- "Prompt" --> S[Prompt User to Run Tool]
+    R -- "Auto" --> T[Execute Tool Call]
+    S --> U[Check Client for Tool]
+    T --> U
+    U --> V{Tool Found on Client?}
+    V -- Yes --> W[Execute Tool on Client]
+    V -- No --> X[Send Request to Backend to Execute Tool]
+    X --> Y[Backend Returns Response]
+    Y --> Z{Contains Tool Calls?}
+    Z -- Yes --> AA{Requires Different Persona?}
+    AA -- No --> R
+    AA -- Yes --> B[sendMessage to Backend]
+    AB --> AC[Create New Conversation]
+    AC --> R
+    Z -- No --> Q
 ```
 
 ## Example Usage

@@ -2,7 +2,7 @@ import pathModule from 'path';
 import os from 'os';
 import { promises as fs, readFileSync, existsSync, statSync } from 'fs';
 import git from '../git';
-import { ChatState, Macro } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
+import { ChatState, Macro, MacroComponentDefinition } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import { 
   FileMacros, 
   RemoveDirectory, 
@@ -11,7 +11,7 @@ import {
   WriteFile as fileOut } from '../../fs/macro';
 import { getAIResponse, createPrompt, extractResponse } from '@reactory/server-modules/reactory-reactor/ai/openai/chat/questions/factory';
 import { template } from 'lodash';
-import { CodeReviewArgs } from './types';
+import { CodeReviewFileProps, CodeReviewProps } from './types';
 import { strongRandom } from 'utils';
 
 /**
@@ -32,21 +32,20 @@ export const isDirectory = (path) => {
 
 /**
  * Macro that performs a review on a file using a set of specifications
- * @param args 
+ * @param props 
  * @param state 
  * @returns 
  */
-export const CodeReviewFile: Macro<string> = async (
-  args: string[],
+export const CodeReviewFile: Macro<string, CodeReviewFileProps> = async (
+  props: CodeReviewFileProps,
   state: ChatState) => {
   
-  const [
+  const {
     path, 
     specs, 
-    //options are inline or file
     target = 'inline',
     targetPath
-  ] = args;
+  } = props;
 
   const {
     ai,
@@ -76,7 +75,7 @@ export const CodeReviewFile: Macro<string> = async (
 
   if(!fileIn) return FAILURE_MESSAGE('No file input macro found');
 
-  const fileContents = await fileIn.component([path], state);
+  const fileContents = await fileIn.component({ path }, state);
   const prompt = createPrompt(
     modelId,
     `Write code review for: \n${fileContents}\n using the specifications :\n ${specificationContent}`,
@@ -96,42 +95,73 @@ export const CodeReviewFile: Macro<string> = async (
   if(target === 'file') {
     const fileOut = macros.find(macro => macro.name === 'WriteFile');
     if(!fileOut) return FAILURE_MESSAGE('No file output macro found');
-    await fileOut.component([targetPath, review, 'overwrite'], state);
+    await fileOut.component({ path: targetPath, content: review, mode: 'overwrite' }, state);
     return SUCCESS_MESSAGE(review);
   }
 }
 
 /**
- * Registry entry for the CodeReview macro
+ * Registry entry for the CodeReviewFile macro
  */
-export const CodeReviewFileComponentRegister: Reactory.IReactoryComponentDefinition<typeof CodeReviewFile> = {
+export const CodeReviewFileComponentRegister: MacroComponentDefinition<typeof CodeReviewFile> = {
   nameSpace: 'reactor',
-  name: 'CodeReview',
+  name: 'CodeReviewFile',
   version: '1.0.0',
   component: CodeReviewFile,
   description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
   features: [],
-  stem: 'review',
-  tags: ['code', 'review', 'development', 'file', 'directory'],
+  roles: ['DEVELOPER', 'ADMIN'],
+  stem: 'reviewFile',
+  tags: ['code', 'review', 'development', 'file'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "CodeReviewFile",
+      description: "Performs a code review on a single file using specifications",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Path to the file to review"
+          },
+          specs: {
+            type: "string",
+            description: "Path to specification file (optional)"
+          },
+          target: {
+            type: "string",
+            enum: ["inline", "file"],
+            description: "Target output type - 'inline' or 'file'"
+          },
+          targetPath: {
+            type: "string",
+            description: "Target file path when target is 'file'"
+          }
+        },
+        required: ["path"]
+      }
+    }
+  }]
 }
 
 /**
  * Performs a code review of the give folder and returns the results.
- * @param args 
+ * @param props 
  * @param state 
  */
-export const CodeReview: Macro<string> = async (
-  args: CodeReviewArgs,
+export const CodeReview: Macro<string, CodeReviewProps> = async (
+  props: CodeReviewProps,
   state: ChatState) => {
 
-  const [
+  const {
     path, 
     specs,
     target = 'inline',
     targetPath,
     throttle = '500',
     verbose = 'false'
-  ] = args;
+  } = props;
   const {
     ai,
     macros,
@@ -152,7 +182,7 @@ export const CodeReview: Macro<string> = async (
   
   // we get the directory contents using the dirIn macro
   const dirContents: { name: string, extension?: string, size?: number, path: string}[] = JSON.parse(
-    await dirIn([$path, 'true', '*', 'json', 'false'], state)
+    await dirIn({ path: $path, recursive: true, pattern: '*', format: 'json' }, state)
   );
 
   let question = `Write a review on file structure for the following directory: ${$path}
@@ -187,7 +217,7 @@ export const CodeReview: Macro<string> = async (
       if (file.size > 0 && isDirectory(file.path) === false) {
         if (file.size < 100000) {
           const filePath = pathModule.join($path, file.name);
-          const fileResult = await CodeReviewFile([filePath, specs], state);
+          const fileResult = await CodeReviewFile({ path: filePath, specs }, state);
           state.vars.review = `${state.vars.review}\n\n${fileResult}`;
         } else {
           state.vars.review = `${state.vars.review}\n\n${file.name} is too large to review - Skipping review`;
@@ -224,7 +254,7 @@ export const CodeReview: Macro<string> = async (
   // we return the final message & overwite the review file with the updated review
   if(target === 'inline') return finalMessage.content;
   if(target === 'file') { 
-    await fileOut([pathModule.join($path, 'reactor_code_review.md'), finalMessage.content], state);
+    await fileOut({ path: pathModule.join($path, 'reactor_code_review.md'), content: finalMessage.content }, state);
   }
   return finalMessage.content;
 }
@@ -232,7 +262,7 @@ export const CodeReview: Macro<string> = async (
 /**
  * Registry entry for the CodeReview macro
  */
-export const CodeReviewComponentRegister: Reactory.IReactoryComponentDefinition<typeof CodeReview> = { 
+export const CodeReviewComponentRegister: MacroComponentDefinition<typeof CodeReview> = { 
   nameSpace: 'reactor',
   name: 'CodeReview',
   version: '1.0.0',
@@ -242,13 +272,51 @@ export const CodeReviewComponentRegister: Reactory.IReactoryComponentDefinition<
   features: [],
   stem: 'review',
   tags: ['code', 'review', 'development', 'file', 'directory'],
+  tools: [{
+    type: "function",
+    function: {
+      name: "CodeReview",
+      description: "Performs a comprehensive code review on a directory and its files",
+      parameters: {
+        type: "object",
+        properties: {
+          path: {
+            type: "string",
+            description: "Path to the directory to review"
+          },
+          specs: {
+            type: "string",
+            description: "Path to specification file (optional)"
+          },
+          target: {
+            type: "string",
+            enum: ["inline", "file"],
+            description: "Target output type - 'inline' or 'file'"
+          },
+          targetPath: {
+            type: "string",
+            description: "Target file path when target is 'file'"
+          },
+          throttle: {
+            type: "string",
+            description: "Throttle delay between reviews in milliseconds"
+          },
+          verbose: {
+            type: "string",
+            description: "Enable verbose output"
+          }
+        },
+        required: ["path"]
+      }
+    }
+  }]
 }
 
 
 /**
  * Registry of development macros
  */
-export const DevelopmentMacros: Reactory.IReactoryComponentDefinition<Macro<unknown>>[] = [
+export const DevelopmentMacros: MacroComponentDefinition<Macro<unknown>>[] = [
   CodeReviewComponentRegister,
   CodeReviewFileComponentRegister,
 ];

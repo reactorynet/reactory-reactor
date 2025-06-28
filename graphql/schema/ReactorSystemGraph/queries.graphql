@@ -1,0 +1,14 @@
+# Query types for system graph
+
+extend type Query {
+  ReactorCatalogNodes(paging: PagingRequest): ReactorPagedNodes
+  ReactorNodeCategories(filter: ReactorNodeCategoryFilter): [ReactorNodeCategory!]
+  ReactorNodeCategory(id: Int!): ReactorNodeCategory
+  ReactorNodeByCategory(ids: [Int!]): [ReactorNode!]
+  ReactorNode(id: Int!, key: String): ReactorNode
+  ReactorNodesForType(type: [ReactorNodeType]): [ReactorNode!]
+  ReactorNodesByTerm(term: String!): [ReactorNode!]
+  ReactorNodesByNameAndNameSpace(name: String!, nameSpace: String!, term: String, paging: PagingRequest): ReactorPagedNodes
+  ReactorProjects(filter: ReactorProjectFilter): ReactorPagedProjects
+  ReactorProject(id: Int!): ReactorProject
+}

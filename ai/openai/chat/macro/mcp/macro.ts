@@ -9,6 +9,7 @@ import { ChatState, Macro, MacroComponentDefinition } from "../../../types/chat"
 import Reactory from "@reactory/reactory-core";
 import { URL } from "url";
 import uuid from "uuid";
+import { McpCliProps } from './types';
 
 // Command handler functions
 const getCapabilities = async (params: string[], state: ChatState): Promise<unknown> => {
@@ -309,7 +310,9 @@ const disconnectClient = async (params: string[], state: ChatState): Promise<unk
 
 const listConnections = async (params: string[], state: ChatState): Promise<unknown> => {
   try {
-    const { mcpClients } = state;
+    const { 
+      mcpClients = []
+    } = state;
     
     const connections = mcpClients.map((client) => ({
       id: client.id,
@@ -343,32 +346,59 @@ const commandHandlers: Record<string, (params: string[], state: ChatState) => Pr
   'connections': listConnections,
 };
 
-export const McpCli: Macro<unknown> = async (
-  args: string[],
+export const McpCli: Macro<unknown, McpCliProps> = async (
+  props: McpCliProps,
   state: ChatState
 ): Promise<unknown> => {
   try {
-    const [command = 'connections', ...params] = args;
-    const { mcpClients } = state;
+    const { 
+      command = 'connections', 
+      id, 
+      url, 
+      transport = 'sse', 
+      toolName, 
+      toolParams = [], 
+      format = 'text' 
+    } = props;
 
-    if (!mcpClients) {
-      return JSON.stringify({ error: 'No MCP Clients found' });
+    // Map command to appropriate handler
+    switch (command) {
+      case 'capabilities':
+        return getCapabilities(id ? [id] : [], state);
+      case 'prompts':
+        return getPrompts(id ? [id] : [], state);
+      case 'tools':
+        return getTools(id ? [id, format] : [format], state);
+      case 'resources':
+        return getResources(id ? [id] : [], state);
+      case 'add-connection':
+        if (!id || !url) {
+          return "Missing required parameters. Usage requires id and url";
+        }
+        return addConnection([id, url, transport], state);
+      case 'connect':
+        if (!id) {
+          return "Missing required parameter: id";
+        }
+        return connectClient([id], state);
+      case 'disconnect':
+        if (!id) {
+          return "Missing required parameter: id";
+        }
+        return disconnectClient([id], state);
+      case 'call-tool':
+        if (!id || !toolName) {
+          return "Missing required parameters: id and toolName";
+        }
+        return callTool([id, toolName, ...toolParams], state);
+      case 'connections':
+      default:
+        return listConnections([], state);
     }
-
-    const handler = commandHandlers[command];
-    
-    if (!handler) {
-      return JSON.stringify({ 
-        error: `Unknown command: ${command}`, 
-        availableCommands: Object.keys(commandHandlers).join(', ')
-      });
-    }
-
-    return await handler(params, state);
   } catch (error) {
-    console.error(`Error in MCP CLI: ${error.message}`, error);
+    console.error(`Error in MCP CLI: ${error instanceof Error ? error.message : 'Unknown error'}`, error);
     return JSON.stringify({ 
-      error: `An error occurred while executing the command: ${error.message}` 
+      error: `An error occurred while executing the command: ${error instanceof Error ? error.message : 'Unknown error'}` 
     });
   }
 };
@@ -403,33 +433,44 @@ export const McpClientMacroRegistry: MacroComponentDefinition<typeof McpCli> = {
     type: "function",
     function: {
       name: "mcp",
-      description: `MCP Client Macro that allows you to interact with the Model Context Protocol Clients
-        usage:
-        - mcp(capabilities, id) - returns a json object with the capabilities of the MCP Client        
-        - mcp(prompts, id) - returns a json object with the prompts of the MCP Client
-        - mcp(tools, id) - returns a json object with the tools of the MCP Client
-        - mcp(resources, id) - returns a json object with the resources of the MCP Client
-        - mcp(connect, url) - returns a json object with the connection status of the MCP Client
-        - mcp(add-connection, id, url, [transport]) - returns a json object with the connection status of the MCP Client
-        - mcp(disconnect, id) - returns a json object with the disconnection status of the MCP Client
-        - mcp(connections) - returns a json object with the connections of the MCP Client
-        - mcp(exec, toolName, args, id) - returns a json object with the result of the tool execution
-      `,
+      description: `MCP Client Macro that allows you to interact with the Model Context Protocol Clients`,
       parameters: {
         type: "object",
         properties: {
-          args: {
+          command: {
+            type: "string",
+            enum: ["capabilities", "prompts", "tools", "resources", "add-connection", "connect", "disconnect", "connections", "call-tool"],
+            description: "The MCP command to execute"
+          },
+          id: {
+            type: "string",
+            description: "Client ID for operations that require it"
+          },
+          url: {
+            type: "string",
+            description: "URL for connection operations"
+          },
+          transport: {
+            type: "string",
+            enum: ["sse", "stdio", "websocket"],
+            description: "Transport type for connections"
+          },
+          toolName: {
+            type: "string",
+            description: "Tool name for tool execution"
+          },
+          toolParams: {
             type: "array",
-            description: `Arguments for the macro:
-            - command - capabilities, prompts, tools, resources, connect, disconnect, connections
-            - params - additional parameters for the command
-          `,
-            items: {
-              type: "string"
-            }
+            items: { type: "string" },
+            description: "Additional parameters for tool execution"
+          },
+          format: {
+            type: "string",
+            enum: ["json", "text"],
+            description: "Response format"
           }
         },
-        required: ['args']
+        required: ["command"]
       }
     }
   }]

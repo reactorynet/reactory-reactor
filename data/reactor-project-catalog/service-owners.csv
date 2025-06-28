@@ -1,0 +1,165 @@
+Cluster,Service,Status,Domain,Squad,Comment,Public Facing,Github URL
+WorldRemit Cluster03 Production,adyen-service,Live,Payments,PayIn,,,https://github.com/Zepz-Engineering/adyen-service
+WorldRemit Cluster03 Production,backoffice-customer-replication-service,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/backoffice-customer-replication-service
+WorldRemit Cluster02 Production,bff-authentication,Live,Identity,Authentication,,,https://github.com/Zepz-Engineering/bff-authentication
+WorldRemit Cluster03 Production,bff-graphql-gateway,Live,Identity,Authentication,,,https://github.com/Zepz-Engineering/bff-graphql-gateway
+WorldRemit Cluster03 Production,braze-service,Live,Identity,KYC,,,https://github.com/Zepz-Engineering/braze-service
+WorldRemit Cluster02 Production,calculation-service,Live,Quote,,,,https://github.com/Zepz-Engineering/calculation-service
+WorldRemit Cluster03 Production,calculation-service,Live,Quote,,,,https://github.com/Zepz-Engineering/calculation-service
+Zepz Production Cluster,compliance-collector,Live,Identity,KYC,plan: rename to kyc-collector,,https://github.com/Zepz-Engineering/compliance-collector
+Zepz Production Cluster,compliance-fco-integrator,Live,Identity,KYC,plan: rename to kyc-fco-integrator,,https://github.com/Zepz-Engineering/compliance-fco-integrator
+Zepz Production Cluster,compliance-gateway,Live,Identity,KYC,plan: rename to kyc-gateway,,https://github.com/Zepz-Engineering/compliance-gateway
+Zepz Production Cluster,compliance-trulioo-check,Live,Identity,KYC,plan: rename to kyc-trulioo-check,,https://github.com/Zepz-Engineering/compliance-trulioo-check
+Zepz Production Cluster,compliance-zbo-integrator,Live,Identity,KYC,plan: rename to kyc-zbo-integrator,,https://github.com/Zepz-Engineering/compliance-zbo-integrator
+WorldRemit Cluster03 Production,content-ingestion,Live,Fincrime,Screening,,,https://github.com/Zepz-Engineering/content-ingestion
+WorldRemit Cluster03 Production,content-service,Live,Fincrime,Screening,,,https://github.com/Zepz-Engineering/content-service
+WorldRemit Cluster03 Production,country-service,Live,Quote,,,,https://github.com/Zepz-Engineering/country-service
+WorldRemit Cluster03 Production,coupon-api,Live,Quote,,,,https://github.com/Zepz-Engineering/coupon-api
+WorldRemit Cluster03 Production,coupon-service-workers,Live,Quote,,,,https://github.com/Zepz-Engineering/coupon-service-workers
+WorldRemit Cluster02 Production,customer-api,Live,Identity,KYC,,,https://github.com/Zepz-Engineering/customer-api
+WorldRemit Cluster02 Production,customer-api-proxy,Live,Identity,KYC,,,https://github.com/Zepz-Engineering/customer-api-proxy
+WorldRemit Cluster02 Production,customer-openid-provider,Live,Identity,Authentication,,,https://github.com/Zepz-Engineering/customer-openid-provider
+WorldRemit Cluster02 Production,customer-pricing-service,Live,Quote,,,,https://github.com/Zepz-Engineering/customer-pricing-service
+WorldRemit Cluster03 Production,customer-pricing-service,Live,Quote,,,,https://github.com/Zepz-Engineering/customer-pricing-service
+WorldRemit Cluster03 Production,customer-verification-images,Live,Identity,KYC,,,https://github.com/Zepz-Engineering/customer-verification-images
+WorldRemit Cluster03 Production,customercare-oauth2-proxy,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/customercare-oauth2-proxy
+WorldRemit Cluster03 Production,customerops-backoffice-ui,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/customerops-backoffice-ui
+WorldRemit Cluster03 Production,customerops-bff-service,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/customerops-bff-service
+WorldRemit Cluster03 Production,customerops-dictionary-service,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/customerops-dictionary-service
+WorldRemit Cluster03 Production,customerops-processapi-service,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/customerops-processapi-service
+WorldRemit Cluster03 Production,customerops-taskengine-service,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/customerops-taskengine-service
+WorldRemit Cluster03 Production,cybersource-service,Live,Payments,,,,https://github.com/Zepz-Engineering/cybersource-service
+WorldRemit Cluster02 Production,dynamic-form-manager,Live,Identity,KYC,,,https://github.com/Zepz-Engineering/dynamic-form-manager
+WorldRemit Cluster03 Production,dynamic-form-manager-modules,Live,Identity,KYC,,,https://github.com/Zepz-Engineering/dynamic-form-manager-modules
+WorldRemit Cluster03 Production,dynamic-form-manager-validation-api,Live,Identity,KYC,,,https://github.com/Zepz-Engineering/dynamic-form-manager-validation-api
+WorldRemit Cluster03 Production,email-logic,Live,Identity,Authentication,actually Identity/Authentication,,https://github.com/Zepz-Engineering/template-logic
+WorldRemit Cluster03 Production,feature-qualification,Live,,,,,https://github.com/Zepz-Engineering/feature-qualification
+WorldRemit Cluster03 Production,fx-rates-service,Live,Quote,,,,https://github.com/Zepz-Engineering/fx-rates-service
+WorldRemit Cluster02 Production,graphql-authentication,Live,Identity,Authentication,,,https://github.com/Zepz-Engineering/graphql-authentication
+WorldRemit Cluster03 Production,graphql-customer-support,Live,Fincrime,Screening,,,https://github.com/Zepz-Engineering/graphql-customer-support
+WorldRemit Cluster03 Production,graphql-dynamic-form-manager,Live,Identity,KYC,,,https://github.com/Zepz-Engineering/graphql-dynamic-form-manager
+WorldRemit Cluster03 Production,graphql-fx-rate-alerts,Live,Quote,,,,https://github.com/Zepz-Engineering/graphql-fx-rate-alerts
+WorldRemit Cluster03 Production,hercules,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/hercules
+WorldRemit Cluster03 Production,kyverno,Live,Infrastructure,,,,
+WorldRemit Cluster03 Production,logging,Live,,,,,https://github.com/Zepz-Engineering/npm-logging
+WorldRemit Cluster03 Production,loqate-proxy,Live,Identity,KYC,,,https://github.com/Zepz-Engineering/loqate-proxy
+WorldRemit Cluster03 Production,loyalty-admin,Live,Quote,,,,https://github.com/Zepz-Engineering/loyalty-admin
+WorldRemit Cluster03 Production,loyalty-api,Live,Quote,,,,https://github.com/Zepz-Engineering/loyalty-api
+WorldRemit Cluster03 Production,manual-bank-transfer-service,Live,Payments,,,,https://github.com/Zepz-Engineering/manual-bank-transfer-service
+WorldRemit Cluster03 Production,marketing-api,Live,Quote,,,,https://github.com/Zepz-Engineering/marketing-api
+WorldRemit Cluster03 Production,mega-graphql-bff,Live,Fincrime,Screening,,,https://github.com/Zepz-Engineering/mega-graphql-bff
+WorldRemit Cluster02 Production,nh-braze-email-service,Decom,Customer Ops,,,,https://github.com/Zepz-Engineering/nh-braze-email-service
+WorldRemit Cluster03 Production,nh-email-service,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/nh-email-service
+WorldRemit Cluster03 Production,nh-notification-service,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/nh-notification-service
+WorldRemit Cluster03 Production,nh-push-service,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/nh-push-service
+WorldRemit Cluster03 Production,nh-sms-service,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/nh-sms-service
+WorldRemit Cluster03 Production,nh-storage-service,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/nh-storage-service
+WorldRemit Cluster03 Production,nh-template-service,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/nh-template-service
+WorldRemit Cluster03 Production,nh-template-ui,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/nh-template-ui
+WorldRemit Cluster02 Production,onboarding-process-orchestrator,Live,Identity,KYC,,,https://github.com/Zepz-Engineering/onboarding-process-orchestrator
+WorldRemit Cluster03 Production,onboarding-process-orchestrator-camunda-console,Live,Identity,KYC,,,https://github.com/Zepz-Engineering/onboarding-process-orchestrator-camunda-console
+Zepz Production Cluster,onfido-check,Live,Identity,KYC,plan: rename to kyc-onfido-check,,https://github.com/Zepz-Engineering/compliance-onfido-check
+WorldRemit Cluster02 Production,onfido-integration-logic,Decom,Identity,KYC,decommissioned,,https://github.com/Zepz-Engineering/openid-registration-service
+WorldRemit Cluster02 Production,onfido-service,Decom,Identity,KYC,decommissioned,,https://github.com/Zepz-Engineering/country-service
+WorldRemit Cluster02 Production,openid-registration-service,Live,Identity,Authentication,,,https://github.com/Zepz-Engineering/openid-registration-service
+WorldRemit Cluster03 Production,operations-management-api,Live,Quote,,,,https://github.com/Zepz-Engineering/operations-management-api
+WorldRemit Cluster03 Production,operations-management-oauth2-proxy,Live,Quote,,,,https://github.com/Zepz-Engineering/operations-management-oauth2-proxy
+WorldRemit Cluster03 Production,operations-management-ui,Live,Quote,,,,https://github.com/Zepz-Engineering/operations-management-ui
+WorldRemit Cluster03 Production,otp-logic,Live,Identity,Authentication,,,https://github.com/Zepz-Engineering/otp-logic
+WorldRemit Cluster02 Production,passfort-integration-logic,Decom,Identity,KYC,decommissioned,,https://github.com/Zepz-Engineering/braze-integration
+WorldRemit Cluster03 Production,pay-in-graphql,Live,Payments,PayIn,,,https://github.com/Zepz-Engineering/pay-in-graphql
+WorldRemit Cluster03 Production,payment-methods-config-provider,Live,Payments,PayIn,"Tied to pricing, but PayIn will treat as owner",,https://github.com/Zepz-Engineering/payment-methods-config-provider
+WorldRemit Cluster03 Production,payments-integrations-webapp,Live,Payments,ZBO,Should be decommed once PayIn confirms is no longer used,,https://github.com/Zepz-Engineering/payments-integrations-webapp
+Zepz Production Cluster,payout-partner-integrator,Live,Payments,Payout,seems like a duplicate of zepz-payout-partner-integrator?,,https://github.com/Zepz-Engineering/payout-partner-integrator
+WorldRemit Cluster02 Production,policy-enforcement-point,Decom,Payments,Treasury,,,https://github.com/Zepz-Engineering/policy-enforcement-point
+Zepz Production Cluster,prd-payout-update-certs,Live,Infrastructure,Shared Infrastructure,,,
+WorldRemit Cluster02 Production,pre-submission-orchestrator,Live,Quote,Pricing,,,https://github.com/Zepz-Engineering/pre-submission-orchestrator
+WorldRemit Cluster03 Production,pre-submission-orchestrator,Live,Quote,Pricing,,,https://github.com/Zepz-Engineering/pre-submission-orchestrator
+WorldRemit Cluster02 Production,pre-submission-validation-service,Live,Quote,Pricing,,,https://github.com/Zepz-Engineering/pre-submission-validation-service
+WorldRemit Cluster03 Production,pre-submission-validation-service,Live,Quote,Pricing,,,https://github.com/Zepz-Engineering/pre-submission-validation-service
+WorldRemit Cluster02 Production,price-components-service,Live,Quote,,,,https://github.com/Zepz-Engineering/pricing-components-service
+WorldRemit Cluster03 Production,pricing-components-service,Live,Quote,,,,https://github.com/Zepz-Engineering/pricing-components-service
+WorldRemit Cluster03 Production,pricing-graphql,Live,Quote,,,,https://github.com/Zepz-Engineering/pricing-graphql
+WorldRemit Cluster03 Production,iam-dev-proxy,Live,Identity,Authentication,,,https://github.com/Zepz-Engineering/iam-dev-proxy
+WorldRemit Cluster02 Production,pricing-loyalty-adapter,Live,Quote,,,,https://github.com/Zepz-Engineering/pricing-loyalty-adapter
+Zepz Production Cluster,prod-payin-update-certs,Live,Payments,,,,
+WorldRemit Cluster02 Production,product-catalogue-service,Live,Quote,,,,https://github.com/Zepz-Engineering/product-catalogue-service
+WorldRemit Cluster03 Production,refer-a-friend-workers,Live,Quote,,,,https://github.com/Zepz-Engineering/refer-a-friend-workers
+WorldRemit Cluster02 Production,rewrite-transfer-manager,Live,Payments,PayEx,,,https://github.com/Zepz-Engineering/rewrite-transfer-manager
+WorldRemit Cluster02 Production,smartling-proxy,Live,Identity,Authentication,Transslations,,https://github.com/Zepz-Engineering/smartling-proxy
+WorldRemit Cluster03 Production,sms-logic,Live,Identity,Authentication,,,https://github.com/Zepz-Engineering/sms-logic
+WorldRemit Cluster03 Production,sms-verification-service,Live,Identity,Authentication,,,https://github.com/Zepz-Engineering/sms-verification-service
+Zepz Production Cluster,software-capitalisation,Live,Corp IT,,,,https://github.com/Zepz-Engineering/software-capitalisation-reporting
+WorldRemit Cluster03 Production,template-logic,Live,Customer Ops,,actually Identity/Authentication,,https://github.com/Zepz-Engineering/template-logic
+WorldRemit Cluster03 Production,trade-feed-service,Live,Quote,,,,https://github.com/Zepz-Engineering/trade-feed-service
+WorldRemit Cluster03 Production,transfer-compliance,Live,Identity,KYC,,,https://github.com/Zepz-Engineering/pre-transfer-compliance-checker
+WorldRemit Cluster03 Production,transfer-data,Live,Payments,Payments Resilience,TDS,,https://github.com/Zepz-Engineering/transfer-data
+Zepz Production Cluster,trust-data-service,Live,Fincrime,Fraud,,,https://github.com/Zepz-Engineering/trust-platform-data-service
+Zepz Production Cluster,trust-management-ui,Live,Fincrime,Fraud,,,https://github.com/Zepz-Engineering/operations-management-ui
+Zepz Production Cluster,trust-platform-management-bff,Live,Fincrime,Fraud,,,https://github.com/Zepz-Engineering/trust-platform-management-bff
+Zepz Production Cluster,trust-riskified-integration,Live,Fincrime,Fraud,,,https://github.com/Zepz-Engineering/trust-platform-riskified-integration
+Zepz Production Cluster,trust-rule-execution-service,Live,Fincrime,Fraud,,,https://github.com/Zepz-Engineering/trust-platform-rule-execution-service
+Zepz Production Cluster,trust-rule-management-service,Live,Fincrime,Fraud,,,https://github.com/Zepz-Engineering/trust-platform-rule-management-service
+WorldRemit Cluster03 Production,ui-portal,Live,Quote,Pricing,,,https://github.com/Zepz-Engineering/ui-portal
+WorldRemit Cluster02 Production,user-screening,Live,Fincrime,Sanctions,,,https://github.com/Zepz-Engineering/zepz-screening-api
+WorldRemit Cluster03 Production,web-cms,Live,Fincrime,Screening,,,https://github.com/Zepz-Engineering/web
+WorldRemit Cluster03 Production,web-cms-sw,Live,Fincrime,Screening,,,https://github.com/Zepz-Engineering/web
+WorldRemit Cluster03 Production,web-logger,Live,Fincrime,Screening,,,https://github.com/Zepz-Engineering/web
+WorldRemit Cluster03 Production,web-nginx,Live,Fincrime,Screening,,,https://github.com/Zepz-Engineering/web
+WorldRemit Cluster03 Production,wr-order-api,Live,Payments,PayEx,,,https://github.com/Zepz-Engineering/wr-order-api
+WorldRemit Cluster02 Production,wr-zepz-payin-service,Live,Payments,PayIn,,,https://github.com/Zepz-Engineering/wr-zepz-payin-service
+WorldRemit Cluster03 Production,zepz-backoffice-rbac-ui,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/zepz-backoffice-rbac-ui
+WorldRemit Cluster03 Production,zepz-backoffice-ui,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/zepz-backoffice-ui
+Zepz Production Cluster,zepz-corridor-configuration-service,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/zepz-corridor-configuration-service
+Zepz Production Cluster,zepz-crr,Live,Fincrime,CRR,,,https://github.com/Zepz-Engineering/zepz-crr
+Zepz Production Cluster,zepz-feature-flags-java,Live,SRE,,,,https://github.com/Zepz-Engineering/zepz-feature-flags-java
+Zepz Production Cluster,zepz-fincrime-orchestrator,Live,Fincrime,Fraud,,,https://github.com/Zepz-Engineering/zepz-fincrime-orchestrator
+Zepz Production Cluster,zepz-grc-automation,Live,Fincrime,,,,https://github.com/Zepz-Engineering/zepz-grc-automation
+Zepz Production Cluster,zepz-hourly-customer-rate-calculation,Live,Quote,,,,https://github.com/Zepz-Engineering/hourly-customer-rate-calculation
+Zepz Production Cluster,zepz-loyalty,Live,Quote,,,,https://github.com/Zepz-Engineering/loyalty
+Zepz Production Cluster,zepz-payin-bank-transfer,Live,Payments,PayIn,,,https://github.com/Zepz-Engineering/payin-bank-transfer-service
+Zepz Production Cluster,zepz-payin-bin-lookup-service,Live,Payments,PayIn,,,https://github.com/Zepz-Engineering/payin-bin-lookup-service
+Zepz Production Cluster,zepz-payin-cards,Live,Payments,PayIn,,,https://github.com/Zepz-Engineering/zepz-payin-proto
+Zepz Production Cluster,zepz-payin-shared,Live,Payments,PayIn,,,https://github.com/Zepz-Engineering/payin-shared
+Zepz Production Cluster,zepz-payout-partner-integrator,Live,Payments,Payout,,,https://github.com/Zepz-Engineering/payout-partner-integrator
+Zepz Production Cluster,zepz-payout-partner-manager,Live,Payments,Payout,,,https://github.com/Zepz-Engineering/payout-partner-manager
+Zepz Production Cluster,zepz-payout-partner-transactor,Live,Payments,Payout,,,https://github.com/Zepz-Engineering/payout-partner-integrator
+WorldRemit Cluster03 Production,zepz-payoutv1proxy,Live,Payments,Payout,,,https://github.com/Zepz-Engineering/zepz-payoutv1proxy
+Zepz Production Cluster,zepz-portal-api,Live,Payments,Payout,,,https://github.com/Zepz-Engineering/zepz-portal-api
+Zepz Production Cluster,zepz-portal-api-bff,Live,Payments,Payout,,,https://github.com/Zepz-Engineering/zepz-portal-api-bff
+Zepz Production Cluster,zepz-portal-ui,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/zepz-portal-ui
+Zepz Production Cluster,zepz-pricing-engine,Live,Quote,,,,https://github.com/Zepz-Engineering/zepz-pricing-engine
+Zepz Production Cluster,zepz-pricing-portal,Live,Quote,,,,https://github.com/Zepz-Engineering/zepz-pricing-portal
+WorldRemit Cluster03 Production,zepz-rbac-service,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/zepz-rbac-service
+Zepz Production Cluster,zepz-retool,Live,Customer Ops,,,,https://github.com/Zepz-Engineering/zepz-retool-ui
+Zepz Production Cluster,zepz-screening-api,Live,Fincrime,,,,https://github.com/Zepz-Engineering/zepz-screening-api
+Zepz Production Cluster,zepz-screening-manager,Live,Fincrime,,,,https://github.com/Zepz-Engineering/zepz-screening-manager
+Zepz Production Cluster,zepz-shared-payin,Live,Payments,PayIn,,,https://github.com/Zepz-Engineering/zepz-payin-proto
+Zepz Production Cluster,zepz-software-capitalisation,Live,Corp IT,,,,https://github.com/Zepz-Engineering/software-capitalisation-reporting
+Zepz Production Cluster,zepz-treasury-account-ledger,Live,Payments,Payments Resilience,,,https://github.com/Zepz-Engineering/account-ledger
+Zepz Production Cluster,zepz-treasury-correspondent-service,Live,Payments,Payments Resilience,,,https://github.com/Zepz-Engineering/treasury-correspondent-service
+Zepz Production Cluster,zepz-treasury-fund-funding-engine-service,Live,Payments,Payments Resilience,,,https://github.com/Zepz-Engineering/treasury-funding-engine-service
+Zepz Production Cluster,zepz-treasury-funding-payment-service,Live,Payments,Payments Resilience,,,https://github.com/Zepz-Engineering/treasury-funding-payment-service
+Zepz Production Cluster,zepz-treasury-fx-rates-service,Live,Quote,,,,https://github.com/Zepz-Engineering/treasury-fx-rates-service
+Zepz Production Cluster,zepz-treasury-holidays-service,Live,Payments,Payments Resilience,,,https://github.com/Zepz-Engineering/treasury-holidays-service
+Zepz Production Cluster,zepz-treasury-payout-transfer-service,Live,Payments,Payments Resilience,,,https://github.com/Zepz-Engineering/treasury-payout-transfer-service
+Zepz Production Cluster,zepz-treasury-transfer-service,Live,Payments,Payments Resilience,,,https://github.com/Zepz-Engineering/treasury-transfer-service
+Senddwave Production Cluster,darkwing-cpu-worker-prod,Live,Data,,Darkwing,,
+Senddwave Production Cluster,darkwing-io-worker-prod,Live,Data,,Darkwing,,
+Senddwave Production Cluster,darkwing-ui-prod,Live,Data,,Darkwing,,https://github.com/Zepz-Engineering/darkwing
+Senddwave Production Cluster,darkwing-web-prod,Live,Data,,Darkwing,,https://github.com/Zepz-Engineering/darkwing
+Senddwave Production Cluster,http,Live,Remittance+,,remitplus,,https://github.com/Zepz-Engineering/payout-mock-http-server
+Senddwave Production Cluster,internal-http,Live,Remittance+,,remitplus,,
+Senddwave Production Cluster,remitplus-beat,Live,Remittance+,,remitplus,,
+Senddwave Production Cluster,task-worker,Live,Remittance+,,remitplus,,
+Senddwave Production Cluster,internal-http,Live,Pricing,,pricing,,
+Senddwave Production Cluster,beat,Live,ALL,,remitsrv,,
+Senddwave Production Cluster,web,Live,ALL,,remitsrv,,https://github.com/Zepz-Engineering/payments-integrations-webapp
+Senddwave Production Cluster,web-hand-crafted-311,Live,ALL,,remitsrv,,
+Senddwave Production Cluster,worker,Live,ALL,,remitsrv,,https://github.com/Zepz-Engineering/coupon-service-workers
+Senddwave Production Cluster,worker-monitoring,Live,ALL,,remitsrv,,
+Senddwave Production Cluster,worker-notifs,Live,ALL,,remitsrv,,
+Senddwave Production Cluster,worker-pending-transactions,Live,ALL,,remitsrv,,https://github.com/Zepz-Engineering/content-translations
+Senddwave Production Cluster,worker-tool-commands,Live,ALL,,remitsrv,,
+Senddwave Production Cluster,worker-transaction,Live,ALL,,remitsrv,,https://github.com/Zepz-Engineering/content-translations
+Senddwave Production Cluster,sw-bouncer-aws,Live,ALL,,pgbouncer,,

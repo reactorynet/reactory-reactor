@@ -1,0 +1,8 @@
+export { default as CSharpProjectProcessor } from './CSharp/CSharpProjectProcessor';
+export { default as FileProjectProcessor } from './File/FileProjectProcessor';
+export { default as JavaProjectProcessor } from './Java/JavaProjectProcessor';
+export { default as NodeJSProjectProcessor } from './NodeJS/NodeJSProjectProcessor';
+export { default as PythonProjectProcessor } from './Python/PythonProjectProcessor';
+export { default as ReactNativeProjectProcessor } from './ReactNative/ReactNativeProjectProcessor';
+export { default as TSqlProjectProcessor } from './TSql/TSqlProjectProcessor';
+export { default as BackStageProjectProcessor } from './BackStage/BackStageProjectProcessor';

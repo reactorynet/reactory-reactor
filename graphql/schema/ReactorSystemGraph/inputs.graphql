@@ -1,0 +1,37 @@
+# Input types for queries and mutations
+input ReactorNodeCategoryFilter {
+  ids: [Int!]
+  name: String
+}
+
+input ReactorProjectFilter {
+  search: String
+  ids: [Int]
+  paging: PagingRequest
+}
+
+input ReactoryNodeLinkInput {
+  from: Int!
+  to: Int!
+  types: [ReactorLinkType!]
+  title: String
+  description: String
+}
+
+input ReactorNodeLinkInput {
+  id: Int!
+  types: [ReactorLinkType!]
+  title: String
+  description: String
+}
+
+input CatalogCrawlRequest {
+  ids: [Int!]
+}
+
+input ReactorSystemGraphInput {
+  title: String
+  share: Boolean
+  nodes: [Int!]
+  links: [ReactorNodeLinkInput!]
+}

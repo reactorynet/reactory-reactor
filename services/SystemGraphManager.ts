@@ -1,7 +1,7 @@
 import Reactory from "@reactory/reactory-core";
 import ApiError from "@reactory/server-core/exceptions";
 
-import { IReactorProject, IProjectProcessor, ISystemGraphManager, PageReactorProjectResult } from "../types/service.types"
+import { IReactorProject, IProjectProcessor, ISystemGraphManager, PageReactorProjectResult, ReactorProjectService } from "../types/service.types"
 import Hash from "@reactory/server-core/utils/hash";
 import { ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorNodeType } from "../types/model.types";
 import { DefaultReactorNodeCategories } from '../models/ReactorGraphNode';
@@ -9,6 +9,7 @@ import { DefaultReactorNodeCategories } from '../models/ReactorGraphNode';
 import { 
   getReactorProjectCatalogs
 } from '../data'
+import { service } from "@reactory/server-core/application/decorators";
 
 const kvp = {
   "tsql": ReactorNodeType.DATASTORE,
@@ -21,6 +22,20 @@ const kvp = {
   "react-native": ReactorNodeType.CONSUMER,
 }
 
+@service({
+  name: "SystemGraphManager",
+    nameSpace: "reactor",
+    version: "1.0.0",
+    description: "Service for catalogging and creating a graph for a given system",
+    id: "reactor.SystemGraphManager@1.0.0",
+    serviceType: "data",       
+    dependencies: [
+      { id: "core.ReactoryFileService@1.0.0", alias: "fileService" },      
+      { id: "core.FetchService@1.0.0", alias: "fetchService" },
+      { id: "core.ReactorySearchService@1.0.0", alias: "searchService"},
+      { id: "reactor.ReactorProjectService@1.0.0", alias: "projectService" }
+    ],
+})
 class SystemGraphManager implements ISystemGraphManager {
   
   context: Reactory.Server.IReactoryContext;
@@ -29,6 +44,7 @@ class SystemGraphManager implements ISystemGraphManager {
   fileService: Reactory.Service.IReactoryFileService;
   fetchService: Reactory.Service.IFetchService;
   searchService: Reactory.Service.ISearchService;
+  projectService: ReactorProjectService;
   
   constructor(props: Reactory.Service.IReactoryServiceProps, 
     context: Reactory.Server.IReactoryContext) {
@@ -210,7 +226,7 @@ class SystemGraphManager implements ISystemGraphManager {
         version: project.version,
         nameSpace: project.nameSpace,
         providerId: project.providerId,
-        source: project.source,
+        source: project.repoPath,
         type: ReactorNodeType.SYSTEM,
         categories: [],
         description: project.description,
@@ -228,10 +244,17 @@ class SystemGraphManager implements ISystemGraphManager {
 
   async getCatalogNodes(): Promise<ReactorNode[]> {
     const that = this;
-    const projects = await getReactorProjectCatalogs(this.context);
+    const pagedProjects = await this.projectService.getProjects({
+      paging: {
+        page: 1,
+        pageSize: 1000
+      },
+      filter: {},
+      search: ''
+    });
     const nodes: ReactorNode[] = [];
 
-    const promises: Promise<ReactorNode>[] = projects.map(async (project) => { 
+    const promises: Promise<ReactorNode>[] = pagedProjects.projects.map(async (project) => { 
       const node = await that.getProjectNode(project);
       nodes.push(node);
       return node;

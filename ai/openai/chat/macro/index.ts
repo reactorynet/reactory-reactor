@@ -24,16 +24,15 @@ import { QueryGQL, MutationGQL } from './graphql/macro';
 import { ServiceRegister } from './workflow/macro';
 import { CreateUser, GetUser } from './user/macro';
 
-
 import { 
-  review,
-  reviewFile,
-} from './develop';
-
+  CodeReview,
+  CodeReviewFile,
+} from './develop/review/macro';
 
 import OpenAI from 'openai';
 import Hash from '@reactory/server-core/utils/hash';
-import __index from 'modules/__index';
+
+import ReactoryModules from '@reactory/server-core/modules';
 
 export const REACTOR_MACRO_MD = require.resolve('./macros.md');
 
@@ -56,8 +55,8 @@ const inputMacros: MacroFunctions = {
   user: GetUser,
   getUser: GetUser,
   GetUser,
-  review,
-  reviewFile,
+  review: CodeReview,
+  reviewFile: CodeReviewFile,
 };
 
 const outputMacros: MacroFunctions = {
@@ -84,7 +83,7 @@ export const MacroRegistry: MacroComponentDefinition<unknown>[] = [
   ...WebMacros,
   ...WorkflowMacros,
   ...ChatsMacros,
-  ...MCPMacros,
+  ...MCPMacros,  
 ];
 
 export const getMacrosMD = (): string => {
@@ -96,7 +95,7 @@ export const getMacrosMD = (): string => {
 }
 
 export const getMacro = <T>(name: string): Macro<T> | undefined => { 
-  return MacroRegistry.find((macro) => macro.name === name)?.component as unknown as Macro<T>;
+  return MacroRegistry.find((macro) => macro.name === name)?.component as Macro<T>;
 }
 
 export type MacroExecutionResult<T> = {
@@ -115,28 +114,58 @@ export interface MacroInstructionSetResult {
 }
 
 /**
- * Execuertes
+ * Executes a macro with proper parameter handling for both old and new macro signatures
  */
 export async function executeMacro<T>(macro: string, state: ChatState): Promise<MacroExecutionResult<T>> {
   if(!macro) throw new Error(`Macro expression null or undefined`);
-  if(!state) throw new Error(`Chatstate is null or undefind`);
+  if(!state) throw new Error(`Chatstate is null or undefined`);
   const id = Hash(macro);
   const regex = /@(\w+)\((.*?)\)/g;
   const match = regex.exec(macro);
   let nextState: ChatState = { ...state };
   let value: T = null;
   let error: string = null;
+  
   try {    
     const [_macro, ...params] = match.slice(1);
-    const splitParams = params[0].split(',');
+    const splitParams = params[0] ? params[0].split(',').map(p => p.trim()) : [];
+    
+    // Find the macro component definition to understand its parameter structure
+    const macroDefinition = MacroRegistry.find(m => m.name === _macro || m.alias === _macro);
     const macroToExecute = getMacro<T>(_macro);
+    
     if (macroToExecute && typeof macroToExecute === "function") {
-      value = await macroToExecute([...splitParams], nextState) as T;      
+      if (macroDefinition?.tools?.[0]?.function?.parameters?.properties) {
+        // New macro signature - convert array params to object
+        const parameterProperties = macroDefinition.tools[0].function.parameters.properties;
+        const parameterNames = Object.keys(parameterProperties);
+        
+        // Map array parameters to object properties based on the tool definition
+        const props: any = {};
+        
+        // Handle different parameter mapping strategies
+        if (parameterNames.length === 1 && parameterNames[0] === 'args') {
+          // Legacy array-based parameter structure
+          props.args = splitParams;
+        } else {
+          // New named parameter structure - map positional args to named props
+          parameterNames.forEach((paramName, index) => {
+            if (index < splitParams.length) {
+              props[paramName] = splitParams[index];
+            }
+          });
+        }
+        
+        value = await macroToExecute(props, nextState) as T;
+      } else {
+        // Fallback to old signature for macros that haven't been refactored yet
+        value = await macroToExecute(splitParams, nextState) as T;
+      }
     } else {
       error = `Macro ${_macro} not found`;
     }
   } catch (macroError) {
-    error = macroError?.message || `Unknown error executing macro: ${macro}}`;
+    error = macroError?.message ?? `Unknown error executing macro: ${macro}`;
   }
 
   return { 
@@ -173,7 +202,7 @@ export async function processMacroInstructionSet(macros: string[], state: ChatSt
           results.push(result);
         }
       } catch (err) {
-        results.push({ id: Hash(macro), state: nextState, macro, error: err.message || 'Unknown error', value: undefined });
+        results.push({ id: Hash(macro), state: nextState, macro, error: err.message ?? 'Unknown error', value: undefined });
       }
     }
   }
@@ -232,19 +261,38 @@ export async function handleUserResponse(userResponse: string, state: ChatState)
   // Process matches in reverse order to avoid offset issues
   for (let i = matches.length - 1; i >= 0; i--) {
     const { fullMatch, macro, params } = matches[i];
-    const splitParams = params.split(',');
+    const splitParams = params.split(',').map(p => p.trim());
     
     // Check if there is a function for this macro
     if (inputMacros[macro]) {
       try {
+        // Find the macro definition to understand parameter structure
+        const macroDefinition = MacroRegistry.find(m => m.name === macro || m.alias === macro);
+        let macroArgs = splitParams;
+        
+        if (macroDefinition?.tools?.[0]?.function?.parameters?.properties) {
+          // New macro signature - convert array params to object
+          const parameterProperties = macroDefinition.tools[0].function.parameters.properties;
+          const parameterNames = Object.keys(parameterProperties);
+          
+          if (parameterNames.length > 0 && parameterNames[0] !== 'args') {
+            // New named parameter structure - create props object
+            const props: any = {};
+            parameterNames.forEach((paramName, index) => {
+              if (index < splitParams.length) {
+                props[paramName] = splitParams[index];
+              }
+            });
+            macroArgs = props;
+          }
+        }
+        
         // Replace the macro with the result of its function
-        const replacement: string = await inputMacros[macro](splitParams, state) as string;
+        const replacement: string = await inputMacros[macro](macroArgs, state) as string;
         result = result.replace(fullMatch, replacement);
       } catch (error) {
         console.error(`Error executing macro ${macro}:`, error);
       }
-    } else {
-      // console.warn(`No function found for macro @${macro}`);
     }
   }
 
@@ -255,12 +303,12 @@ export async function handleUserResponse(userResponse: string, state: ChatState)
 /**
  * 
  */
-export async function makeSelectionFromChoices(choices: OpenAI.ChatCompletionChoice[], state: ChatState): Promise<number> {
+export async function makeSelectionFromChoices(choices: OpenAI.Chat.Completions.ChatCompletion.Choice[], state: ChatState): Promise<number> {
   const { rl } = state;
   let choice_index = 0;  
   choices.forEach((choice) => {
     choice_index++;            
-    const text = choice.message?.content || '';
+    const text = choice.message?.content ?? '';
     const lines = text.split('\n');      
     rl.write(`${choice_index}. ${lines[0]}\n`);      
   });
@@ -272,7 +320,7 @@ export async function makeSelectionFromChoices(choices: OpenAI.ChatCompletionCho
         choice_index = parseInt(answer);
         resolve(choice_index);
       } catch (e) {
-        reject(e);
+        reject(new Error(e instanceof Error ? e.message : String(e)));
       }
     })
   })
@@ -320,26 +368,30 @@ export async function handleChatCompletionResponse(
 
 function generateContentFromResult(result: MacroExecutionResult<unknown>, debug: boolean = false): string {
   const resultType = typeof result.value;
-  if(debug === true) return `
+  if(debug === true) {
+    const valueStr = JSON.stringify(result.value);
+    return `
   macro: ${result.macro}
-  value: ${result.value}
+  value: ${valueStr}
   type: ${resultType}
-  `
-  else {
-    let _type = typeof result.value;
-    switch(_type) {
-      case 'object': {
-        if (result?.value?.toString && 
-          typeof result.value.toString === 'function') return result.value.toString();
-        else return `
-        \`\`\`json
-        ${JSON.stringify(result.value, null, 2)}
-        \`\`\`
-        `
-      }
-      default: {
-        return `${result.value}`;
-      }
+  `;
+  } else {
+    const _type = typeof result.value;
+    if (_type === 'object' && result.value !== null) {
+      const jsonStr = JSON.stringify(result.value, null, 2);
+      return `
+      \`\`\`json
+      ${jsonStr}
+      \`\`\`
+      `;
+    } else if (_type === 'string') {
+      return result.value as string;
+    } else if (_type === 'number') {
+      return (result.value as number).toString();
+    } else if (_type === 'boolean') {
+      return (result.value as boolean).toString();
+    } else {
+      return JSON.stringify(result.value);
     }
   }
 }

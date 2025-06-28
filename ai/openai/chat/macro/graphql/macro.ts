@@ -1,6 +1,7 @@
 import { ChatState, Macro, MacroComponentDefinition } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import { queryGraph as execql, mutateGraph as execml } from "@reactory/server-core/graph/ReactoryApolloClient";
 import Reactory from "@reactory/reactory-core";
+import { QueryGQLProps, MutationGQLProps } from './types';
 const DEFAULT_GQL = `
   query ApiStatus { 
     apiStatus {
@@ -11,20 +12,20 @@ const DEFAULT_GQL = `
 `;
 /**
  * Executes a GraphQL query and returns the result
- * @param args - string[] - [ query, variables, options, format ] 
- * @param context - Reactory.Server.IReactoryContext
+ * @param props - QueryGQLProps - { query, variables, options, format, outmap } 
+ * @param state - ChatState
  * @returns 
  */
-export const QueryGQL: Macro<string | string[] | object | object[]> = async (
-  args: any[], 
+export const QueryGQL: Macro<string | string[] | object | object[], QueryGQLProps> = async (
+  props: QueryGQLProps, 
   state: ChatState) => {
-  const [ 
+  const { 
     query = DEFAULT_GQL, 
     variables = [], 
     options = [], 
     format = 'string',
     outmap = null
-  ] = args;
+  } = props;
   const { user, partner } = state.context;
 
   if(!user) { 
@@ -35,12 +36,15 @@ export const QueryGQL: Macro<string | string[] | object | object[]> = async (
     return 'No partner found';
   }
 
-  const toObject = (str: string[]) => { 
-    try {
-      return JSON.parse(str.join(' '));
-    } catch (err) {
-      return {};
+  const toObject = (input: string[] | object) => { 
+    if (Array.isArray(input)) {
+      try {
+        return JSON.parse(input.join(' '));
+      } catch (err) {
+        return {};
+      }
     }
+    return input || {};
   }
 
   try {
@@ -81,31 +85,45 @@ export const QueryMacroComponentRegister: MacroComponentDefinition<Macro<string 
       parameters: {
         type: "object",
         properties: {
-          args: {
-            type: "array",
-            description: "Arguments for executing a GraphQL query: [query, variables, options, format, outmap]. query is required, variables and options can be JSON strings, format can be 'string' or 'json', outmap is for mapping output fields.",
-            items: {
-              type: "string"
-            }
+          query: {
+            type: "string",
+            description: "The GraphQL query string"
           },
+          variables: {
+            type: "object",
+            description: "Variables for the query as JSON object"
+          },
+          options: {
+            type: "object",
+            description: "Options for the query as JSON object"
+          },
+          format: {
+            type: "string",
+            enum: ["string", "json"],
+            description: "Return format: 'string' or 'json'"
+          },
+          outmap: {
+            type: "object",
+            description: "Output mapping configuration"
+          }
         },
-        required: ["args"]
+        required: []
       }
     }
   }]
 };
 
-export const MutationGQL: Macro<string | string[] | object | object[]> = async (
-  args: any[], 
+export const MutationGQL: Macro<string | string[] | object | object[], MutationGQLProps> = async (
+  props: MutationGQLProps, 
   state: ChatState
   ) => {
-  const [ 
+  const { 
     query = DEFAULT_GQL, 
     variables = [], 
     options = [], 
     format = 'string',
     outmap = null
-  ] = args;
+  } = props;
   const { user, partner } = state.context;
 
   if(!user) { 
@@ -116,12 +134,15 @@ export const MutationGQL: Macro<string | string[] | object | object[]> = async (
     return 'No partner found';
   }
 
-  const toObject = (str: string[]) => { 
-    try {
-      return JSON.parse(str.join(' '));
-    } catch (err) {
-      return {};
+  const toObject = (input: string[] | object) => { 
+    if (Array.isArray(input)) {
+      try {
+        return JSON.parse(input.join(' '));
+      } catch (err) {
+        return {};
+      }
     }
+    return input || {};
   }
 
   try {
@@ -160,15 +181,29 @@ export const MutationMacroComponentRegister: MacroComponentDefinition<Macro<stri
       parameters: {
         type: "object",
         properties: {
-          args: {
-            type: "array",
-            description: "Arguments for executing a GraphQL mutation: [query, variables, options, format, outmap]. query is required, variables and options can be JSON strings, format can be 'string' or 'json', outmap is for mapping output fields.",
-            items: {
-              type: "string"
-            }
+          query: {
+            type: "string",
+            description: "The GraphQL mutation string"
           },
+          variables: {
+            type: "object",
+            description: "Variables for the mutation as JSON object"
+          },
+          options: {
+            type: "object",
+            description: "Options for the mutation as JSON object"
+          },
+          format: {
+            type: "string",
+            enum: ["string", "json"],
+            description: "Return format: 'string' or 'json'"
+          },
+          outmap: {
+            type: "object",
+            description: "Output mapping configuration"
+          }
         },
-        required: ["args"]
+        required: []
       }
     }
   }]

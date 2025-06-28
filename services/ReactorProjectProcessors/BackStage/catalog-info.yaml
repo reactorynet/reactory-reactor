@@ -1,0 +1,23 @@
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: adyen-service
+  annotations:
+    github.com/project-slug: Zepz-Engineering/adyen-service
+  title: Adyen Service
+  description: |
+    Adyen Provider
+  links:
+    - title: Confluence Space
+      url: https://worldremit.atlassian.net/wiki/spaces/ARCH360/overview
+    - title: Slack Chat
+      url: https://zepz.enterprise.slack.com/archives/C02HTGUHMJQ
+    - title: Documentation
+      url: https://worldremit.atlassian.net/wiki/spaces/ARCH360/pages/4188143894/Adyen
+  tags:
+    - adyen-service
+spec:
+  owner: group:zepz-engineering/zepz-engineering-pi-platform
+  system: pi-platform
+  type: service
+  lifecycle: production

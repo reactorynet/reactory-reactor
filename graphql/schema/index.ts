@@ -2,11 +2,20 @@ import { loadGraphQLTypeDefinitions } from '@reactory/server-core/graph/graphql-
 
 const ReactorTypeDefinitions = loadGraphQLTypeDefinitions(
   [
+    'ReactorPersona',
     'ReactorChat',
     'ReactorProviders',
     'ReactorCapabilities',
     'ReactorMessageProcessing',
-    'ReactorSystemGraph'
+    // Instead of a single file, load all files in the new ReactorSystemGraph directory
+    'ReactorSystemGraph/types',
+    'ReactorSystemGraph/project',
+    'ReactorSystemGraph/platform',
+    'ReactorSystemGraph/ui',
+    'ReactorSystemGraph/links',
+    'ReactorSystemGraph/inputs',
+    'ReactorSystemGraph/mutations',
+    'ReactorSystemGraph/queries',
   ],
   __dirname,
   'REACTOR'

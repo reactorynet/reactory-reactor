@@ -1,10 +1,11 @@
 import { ChatState, Macro, MacroComponentDefinition, MacroToolDefinition } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import Reactory from "@reactory/reactory-core";
+import { GetUserProps, CreateUserProps } from './types';
 
-export const GetUser: Macro<string> = async (
-  args: string[],
+export const GetUser: Macro<string, GetUserProps> = async (
+  props: GetUserProps,
   state: ChatState) => {
-  const [ email ] = args;
+  const { email } = props;
   const userService = state.context?.getService<Reactory.Service.IReactoryUserService>('core.UserService@1.0.0');
 
   if (!userService) {
@@ -40,6 +41,7 @@ export const GetUserRegistry: MacroComponentDefinition<typeof GetUser> = {
       stem: 'find'
     }
   ],
+  roles: ['ADMIN', 'USER'],
   stem: 'user',
   tags: ['user', 'find', 'email', 'lookup'],
   tools: [{
@@ -63,15 +65,16 @@ export const GetUserRegistry: MacroComponentDefinition<typeof GetUser> = {
 
 /**
  * Creates a new user with the given email, first name, and last name
- * @param args - string[] - [ email, firstName, lastName ]
- * @param context 
+ * @param props - CreateUserProps - { email, firstName, lastName }
+ * @param state - ChatState
  * @returns 
  */
-export const CreateUser: Macro<string> = async (
-  args: string[], 
-  state: ChatState) => {
-  const [ email, firstName, lastName ] = args;  
-  const userService = state.context?.getService<Reactory.Service.IReactoryUserService>('core.UserService@1.0.0');
+export const CreateUser: Macro<string, CreateUserProps> = async (
+  props: CreateUserProps, 
+  state: ChatState,
+  context: Reactory.Server.IReactoryContext) => {
+  const { email, firstName, lastName } = props;
+  const userService = context?.getService<Reactory.Service.IReactoryUserService>('core.UserService@1.0.0');
 
   if (!userService) {
     return 'No user service found';
@@ -132,15 +135,20 @@ export const CreateUserRegistry: MacroComponentDefinition<typeof CreateUser> = {
       parameters: {
         type: "object",
         properties: {
-          args: {
-            type: "array",
-            description: "Arguments for creating the user follows the pattern [ email, firstName, lastName ]",
-            items: {
-              type: "string"
-            }
-          },          
+          email: {
+            type: "string",
+            description: "The email address of the new user"
+          },
+          firstName: {
+            type: "string",
+            description: "The first name of the new user"
+          },
+          lastName: {
+            type: "string",
+            description: "The last name of the new user"
+          }
         },
-        required: ["args"]
+        required: ["email", "firstName", "lastName"]
       }
     }
   }]

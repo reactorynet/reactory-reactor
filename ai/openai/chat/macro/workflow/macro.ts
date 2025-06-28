@@ -1,16 +1,16 @@
 import Reactory from "@reactory/reactory-core";
 import { readFileSync } from "fs";
 import { ChatState, Macro } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
+import { ServiceRegisterProps } from './types';
 
 /**
  * A macro that lists all services registered in the system or
  * returns the service with the given name / fqn.
- * @param args - a list of arguments for the service register macro
+ * @param props - ServiceRegisterProps - { action, name, nameSpace, version, props, func, funcParams, format }
  * @param state - the current chat state
- * @param context - the current reactory context
  * @returns 
  */
-export const ServiceRegister: Macro<string | object | object[]> = async (args: any[], state: ChatState) => {
+export const ServiceRegister: Macro<string | object | object[], ServiceRegisterProps> = async (props: ServiceRegisterProps, state: ChatState) => {
   
   const list = (format: string = 'string'): string | object => {
     const { services } = state.context;
@@ -25,20 +25,23 @@ export const ServiceRegister: Macro<string | object | object[]> = async (args: a
     }
   }
 
-  if(args && args.length > 0) {
-    switch(args[0]) {
+  const { action, name, nameSpace, version, props: serviceProps = null, func = null, funcParams, format = 'string' } = props;
+
+  if(action) {
+    switch(action) {
       case 'list': {
-        return list(args[1] || 'string');
+        return list(format);
       }
       case 'get': { 
-        const [ , name, nameSpace, version, props = null, func = null, funcParams ] = args;
-        const service = state.context?.getService<any>(`${nameSpace}.${name}@${version}`, props);
-        if(service) {
-          if(func && funcParams) { 
-            const result = await service[func](...funcParams);
-            return result;
-          } else {
-            return service;
+        if (name && nameSpace && version) {
+          const service = state.context?.getService<any>(`${nameSpace}.${name}@${version}`, serviceProps);
+          if(service) {
+            if(func && funcParams) { 
+              const result = await service[func](...funcParams);
+              return result;
+            } else {
+              return service;
+            }
           }
         }
         break;

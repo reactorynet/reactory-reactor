@@ -1,6 +1,15 @@
 import yaml from 'js-yaml';
 import { ChatState, Macro, MacroComponentDefinition } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import { URL } from 'url';
+import { 
+  HttpMacroProps, 
+  GetMacroProps, 
+  PostMacroProps, 
+  PutMacroProps, 
+  DeleteMacroProps, 
+  PatchMacroProps, 
+  FetchMacroProps 
+} from './types';
 
 /**
  * Utility function to parse string options in format "key=value,key2=value2" or YAML format
@@ -40,11 +49,11 @@ const parseStringOptions = (optionsString: string): Record<string, string> => {
 /**
  * Base HTTP macro that handles all HTTP requests
  */
-export const HttpMacro: Macro<string> = async (
-  args: any[],
+export const HttpMacro: Macro<string, HttpMacroProps> = async (
+  props: HttpMacroProps,
   state: ChatState
 ) => {
-  const [url, method, options, returnFormat = 'text'] = args;
+  const { url, method, options, returnFormat = 'text' } = props;
   
   try {
     if (!url) {
@@ -124,39 +133,39 @@ export const HttpMacro: Macro<string> = async (
 /**
  * HTTP verb-specific macros
  */
-export const GetMacro: Macro<string> = async (args: any[], state: ChatState) => {
-  const [url, format = 'text', options] = args;
-  return HttpMacro([url, 'GET', options, format], state);
+export const GetMacro: Macro<string, GetMacroProps> = async (props: GetMacroProps, state: ChatState) => {
+  const { url, format = 'text', options } = props;
+  return HttpMacro({ url, method: 'GET', options, returnFormat: format }, state);
 };
 
-export const PostMacro: Macro<string> = async (args: any[], state: ChatState) => {
-  const [url, format = 'text', options] = args;
-  return HttpMacro([url, 'POST', options, format], state);
+export const PostMacro: Macro<string, PostMacroProps> = async (props: PostMacroProps, state: ChatState) => {
+  const { url, format = 'text', options } = props;
+  return HttpMacro({ url, method: 'POST', options, returnFormat: format }, state);
 };
 
-export const PutMacro: Macro<string> = async (args: any[], state: ChatState) => {
-  const [url, format = 'text', options] = args;
-  return HttpMacro([url, 'PUT', options, format], state);
+export const PutMacro: Macro<string, PutMacroProps> = async (props: PutMacroProps, state: ChatState) => {
+  const { url, format = 'text', options } = props;
+  return HttpMacro({ url, method: 'PUT', options, returnFormat: format }, state);
 };
 
-export const DeleteMacro: Macro<string> = async (args: any[], state: ChatState) => {
-  const [url, format = 'text', options] = args;
-  return HttpMacro([url, 'DELETE', options, format], state);
+export const DeleteMacro: Macro<string, DeleteMacroProps> = async (props: DeleteMacroProps, state: ChatState) => {
+  const { url, format = 'text', options } = props;
+  return HttpMacro({ url, method: 'DELETE', options, returnFormat: format }, state);
 };
 
-export const PatchMacro: Macro<string> = async (args: any[], state: ChatState) => {
-  const [url, format = 'text', options] = args;
-  return HttpMacro([url, 'PATCH', options, format], state);
+export const PatchMacro: Macro<string, PatchMacroProps> = async (props: PatchMacroProps, state: ChatState) => {
+  const { url, format = 'text', options } = props;
+  return HttpMacro({ url, method: 'PATCH', options, returnFormat: format }, state);
 };
 
 /**
  * Legacy FetchMacro for backward compatibility
  */
-export const FetchMacro: Macro<string> = async (
-  args: any[], 
+export const FetchMacro: Macro<string, FetchMacroProps> = async (
+  props: FetchMacroProps, 
   state: ChatState) => { 
-  const [ url, requestInit, returnFormat = 'text' ] = args;
-  return HttpMacro([url, requestInit?.method || 'GET', requestInit, returnFormat], state);
+  const { url, requestInit, returnFormat = 'text' } = props;
+  return HttpMacro({ url, method: requestInit?.method || 'GET', options: requestInit, returnFormat }, state);
 };
 
 /**
@@ -177,6 +186,7 @@ export const HttpMacroRegistry: MacroComponentDefinition<typeof HttpMacro> = {
     function: {
       name: "http",
       description: "Make an HTTP request",
+      icon: "http",
       parameters: {
         type: "object",
         properties: {

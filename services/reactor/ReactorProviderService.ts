@@ -90,6 +90,13 @@ class ReactorProviderService implements IReactorProviderService {
           };
         }
 
+        if (response.role && response.content) {
+          return {
+            __typename: "ReactorChatMessage",
+            ...response,
+          }
+        }
+
         if (response.choices && response.choices.length > 0) {
           const message = response.choices[0].message;
           return {
@@ -172,7 +179,7 @@ class ReactorProviderService implements IReactorProviderService {
           return {
             __typename: "ReactorErrorResponse",
             code: "PROVIDER_ERROR",
-            message: "No response from provider",
+            message: "No response from xAI",
             timestamp: new Date(),
             recoverable: false,
           };
@@ -182,10 +189,17 @@ class ReactorProviderService implements IReactorProviderService {
           return {
             __typename: "ReactorErrorResponse",
             code: response.error.code || "PROVIDER_ERROR",
-            message: response.error.message || "Unknown X AI error",
+            message: response.error.message || "Unknown xAI error",
             timestamp: new Date(),
             recoverable: false,
           };
+        }
+
+        if (response.role && response.content) {
+          return {
+            __typename: "ReactorChatMessage",
+            ...response,
+          }
         }
 
         if (response.choices && response.choices.length > 0) {
@@ -265,27 +279,43 @@ class ReactorProviderService implements IReactorProviderService {
     // Create adapter for Google
     const googleAdapter = {
       adaptResponse: (response: any): any => {
-        if (response.error) {
+        if (response === null) { 
           return {
             __typename: "ReactorErrorResponse",
-            code: response.error.code || "PROVIDER_ERROR",
-            message: response.error.message || "Unknown Google error",
+            code: "PROVIDER_ERROR",
+            message: "No response from xAI",
             timestamp: new Date(),
             recoverable: false,
           };
         }
 
-        if (response.candidates && response.candidates.length > 0) {
-          const candidate = response.candidates[0];
-          const content = candidate.content?.parts?.[0]?.text || "";
-          
+        if (response.error) {
+          return {
+            __typename: "ReactorErrorResponse",
+            code: response.error.code || "PROVIDER_ERROR",
+            message: response.error.message || "Unknown xAI error",
+            timestamp: new Date(),
+            recoverable: false,
+          };
+        }
+
+        if (response.role && response.content) {
           return {
             __typename: "ReactorChatMessage",
-            id: response.responseId || Math.random().toString(36).substring(2, 15),
-            role: "assistant",
-            content: content,
+            ...response,
+          }
+        }
+
+        if (response.choices && response.choices.length > 0) {
+          const message = response.choices[0].message;
+          return {
+            __typename: "ReactorChatMessage",
+            sessionId: response.sessionId, 
+            id: response.id,
+            role: message.role,
+            content: message.content,
             timestamp: new Date(),
-            tool_calls: candidate.content?.parts?.find((p: any) => p.functionCall)?.functionCall || null
+            tool_calls: message.tool_calls || null
           };
         }
 

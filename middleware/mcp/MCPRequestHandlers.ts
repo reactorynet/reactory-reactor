@@ -1,9 +1,9 @@
 import { Request, Response } from "express";
 import { v4 as uuid } from "uuid";
 import SDKServer from './SDKServer';
-import SimpleServer from './SimpleServer';
+import ReactorServer from './ReactorServer';
 
-const sseServer = SimpleServer();
+const sseServer = ReactorServer();
 const sdkServer = SDKServer();
 const serverUsesSDK = false;
 

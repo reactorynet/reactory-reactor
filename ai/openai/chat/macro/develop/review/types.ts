@@ -1,3 +1,36 @@
+
+/**
+ * Properties for the CodeReviewFile macro
+ */
+export interface CodeReviewFileProps {
+  /** Path to the file to review */
+  path: string;
+  /** Path to specification file (optional) */
+  specs?: string;
+  /** Target output type - 'inline' or 'file' */
+  target?: 'inline' | 'file';
+  /** Target file path when target is 'file' */
+  targetPath?: string;
+}
+
+/**
+ * Properties for the CodeReview macro (directory review)
+ */
+export interface CodeReviewProps {
+  /** Path to the directory to review */
+  path: string;
+  /** Path to specification file (optional) */
+  specs?: string;
+  /** Target output type - 'inline' or 'file' */
+  target?: 'inline' | 'file';
+  /** Target file path when target is 'file' */
+  targetPath?: string;
+  /** Throttle delay between reviews in milliseconds */
+  throttle?: string;
+  /** Enable verbose output */
+  verbose?: string;
+}
+
 /**
  * The programming language to use for the code review
  * @example

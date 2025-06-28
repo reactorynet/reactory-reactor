@@ -16,44 +16,97 @@ export enum ToolApprovalMode {
   SAFE_AUTO = "safe_auto" // Auto-approve safe tools, prompt for potentially dangerous ones
 }
 
-export type Macro<TResult> = (params: any[], state: ChatState) => Promise<TResult>
+export type Macro<TResult, TParams = any> = (params: TParams, state: ChatState, context?: Reactory.Server.IReactoryContext) => Promise<TResult>
 
 export type MacroFunctions = {
   [macro: string]: Macro<unknown>
 };
 
+/** Optional. The type of the data. */
+export declare enum Type {
+    TYPE_UNSPECIFIED = "TYPE_UNSPECIFIED",
+    STRING = "STRING",
+    NUMBER = "NUMBER",
+    INTEGER = "INTEGER",
+    BOOLEAN = "BOOLEAN",
+    ARRAY = "ARRAY",
+    OBJECT = "OBJECT"
+}
+
+/** Schema is used to define the format of input/output data. Represents a select subset of an [OpenAPI 3.0 schema object](https://spec.openapis.org/oas/v3.0.3#schema-object). More fields may be added in the future as needed. */
+export declare interface Schema {
+    /** Optional. The value should be validated against any (one or more) of the subschemas in the list. */
+    anyOf?: Schema[];
+    /** Optional. Default value of the data. */
+    default?: unknown;
+    /** Optional. The description of the data. */
+    description?: string;
+    /** Optional. Possible values of the element of primitive type with enum format. Examples: 1. We can define direction as : {type:STRING, format:enum, enum:["EAST", NORTH", "SOUTH", "WEST"]} 2. We can define apartment number as : {type:INTEGER, format:enum, enum:["101", "201", "301"]} */
+    enum?: string[];
+    /** Optional. Example of the object. Will only populated when the object is the root. */
+    example?: unknown;
+    /** Optional. The format of the data. Supported formats: for NUMBER type: "float", "double" for INTEGER type: "int32", "int64" for STRING type: "email", "byte", etc */
+    format?: string;
+    /** Optional. SCHEMA FIELDS FOR TYPE ARRAY Schema of the elements of Type.ARRAY. */
+    items?: Schema;
+    /** Optional. Maximum number of the elements for Type.ARRAY. */
+    maxItems?: string;
+    /** Optional. Maximum length of the Type.STRING */
+    maxLength?: string;
+    /** Optional. Maximum number of the properties for Type.OBJECT. */
+    maxProperties?: string;
+    /** Optional. Maximum value of the Type.INTEGER and Type.NUMBER */
+    maximum?: number;
+    /** Optional. Minimum number of the elements for Type.ARRAY. */
+    minItems?: string;
+    /** Optional. SCHEMA FIELDS FOR TYPE STRING Minimum length of the Type.STRING */
+    minLength?: string;
+    /** Optional. Minimum number of the properties for Type.OBJECT. */
+    minProperties?: string;
+    /** Optional. SCHEMA FIELDS FOR TYPE INTEGER and NUMBER Minimum value of the Type.INTEGER and Type.NUMBER */
+    minimum?: number;
+    /** Optional. Indicates if the value may be null. */
+    nullable?: boolean;
+    /** Optional. Pattern of the Type.STRING to restrict a string to a regular expression. */
+    pattern?: string;
+    /** Optional. SCHEMA FIELDS FOR TYPE OBJECT Properties of Type.OBJECT. */
+    properties?: Record<string, Schema>;
+    /** Optional. The order of the properties. Not a standard field in open api spec. Only used to support the order of the properties. */
+    propertyOrdering?: string[];
+    /** Optional. Required properties of Type.OBJECT. */
+    required?: string[];
+    /** Optional. The title of the Schema. */
+    title?: string;
+    /** Optional. The type of the data. */
+    type?: Type | string; // Type can be a string for custom types
+}
+
 export type MacroToolDefinition = {
   type: "function",
   propsMap?: Record<string, string>,
   runat?: "server" | "client",
+  enabled?: boolean,
+  roles?: string[],
   function: {
+    icon?: string;
     name: string;
     description?: string;
-    parameters: {
-      type: "object";
-      properties: Record<string, {
-        type: string;
-        description?: string;
-        enum?: string[];
-        items?: {
-          type: string;
-          properties?: Record<string, unknown>;
-        };
-      }>;
-      required?: string[];
-    };
+    parameters: Schema
   }
 };
 
 export type MacroComponentDefinition<TMacro> = Reactory.IReactoryComponentDefinition<TMacro> & {
   mcp?: any
+  icon?: string
   runat?: "server" | "client"
   tools?: MacroToolDefinition[]
+  parameters?: Schema
   /**
    * An alias for a macro. The name of the macro and the alias won't always match.
    * We use this to provide a more human readable name for the macro.
    */
-  alias?: string
+  alias?: string,
+  enabled?: boolean
 };
 
 export type KnownCannedMessages = 
@@ -148,7 +201,7 @@ export type ChatState = {
   /**
    * The user that is associated with the chat session
    */
-  user?: Reactory.Models.IUserDocument
+  user?: Partial<Reactory.Models.IUser> | Reactory.Models.IUserDocument
   /**
    * The context for the chat session.
    */
@@ -165,7 +218,13 @@ export type ChatState = {
    * 
    * The macros that are available for the chat session.
    * */
-  macros: MacroComponentDefinition<unknown>[]
+  macros: Partial<MacroComponentDefinition<unknown>>[]
+  /**
+   * The tools that are available for the chat session.
+   * 
+   * Tools are defined as macros that can be executed in the chat session.
+   * */
+  tools: Partial<MacroToolDefinition>[]
   /**
    * The readline interface for the chat session.
    * -- only used when running in the CLI
@@ -230,4 +289,13 @@ export interface IToolCallResponse {
   role: "tool"
   content: string
   tool_call_id: string
+}
+
+export interface IReactorModule extends Reactory.Server.IReactoryModule {
+  reactor: {
+    macros?: MacroComponentDefinition<unknown>[]
+    tools?: MacroToolDefinition[]
+    providers?: any[],
+    personas?: IAIPersona[]
+  }
 }

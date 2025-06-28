@@ -5,6 +5,7 @@ import OpenAI from "openai"
 import { MetaSchema } from '@reactory/server-modules/reactory-core/models/shared';
 import { id } from 'schema/reflection';
 import { MacroComponentDefinition, MacroToolDefinition, ToolApprovalMode } from '../ai/openai/types/chat';
+import { McpSession } from '../types/model.types';
 // Removed incorrect import as 'ChatCompletionResponseMessage' is not exported by 'openai'
 
 export interface ConversationMeta { 
@@ -12,10 +13,14 @@ export interface ConversationMeta {
   title: string
 }
 
-// Add more specific types for other providers if needed
-export type ValidProviderResponseTypes = OpenAI.Chat.Completions.ChatCompletion | unknown
+export type ChatHistoryItem = OpenAI.Chat.Completions.ChatCompletionMessage |
+  OpenAI.Chat.ChatCompletionMessageParam;
 
-export interface ChatCompletionResponseMessageStore extends OpenAI.Chat.ChatCompletionMessage {
+// Add more specific types for other providers if needed
+export type ValidProviderResponseTypes = OpenAI.Chat.Completions.ChatCompletion;
+
+
+export type ReactorConversationHistoryItem = ChatHistoryItem & {
   id: string | ObjectId
   // Original content of the message by the provider
   response?: ValidProviderResponseTypes;
@@ -25,7 +30,7 @@ export interface ChatCompletionResponseMessageStore extends OpenAI.Chat.ChatComp
   tool_results: any[]
 }
 
-export type ReactorConversationHistory = ChatCompletionResponseMessageStore[]
+export type ReactorConversationHistory = ReactorConversationHistoryItem[];
 
 export interface ReactorConversationDocument {
   //unique id for the conversation
@@ -58,6 +63,8 @@ export interface ReactorConversationDocument {
   macros?: Partial<MacroComponentDefinition<any>>[]
   // The tools used in the conversation
   tools?: Partial<MacroToolDefinition>[]
+  // The MCP sessions associated with the conversation
+  mcpSessions?: McpSession[]
 }
 
 
@@ -67,7 +74,7 @@ export type ReactorConversationDocumentStatics = {
 }
 export type ReactorConversation = ReactorConversationDocument & ReactorConversationDocumentStatics;
 
-const ReactorConversationHistorySchema: Schema<ChatCompletionResponseMessageStore> = new Schema<ChatCompletionResponseMessageStore>({
+const ReactorConversationHistorySchema: Schema<ReactorConversationHistory> = new Schema<ReactorConversationHistory>({
   id: ObjectId,
   response: {},
   content: String,
@@ -122,6 +129,10 @@ const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<Reacto
     type: [Object],
     default: [],
   },
+  mcpSessions: {
+    type: [Object],
+    default: [],
+  },
   created: {
     type: Date,
     default: () => { return new Date() }
@@ -138,8 +149,8 @@ const ReactorConversationSchema: Schema<ReactorConversation> = new Schema<Reacto
 });
 
 const ReactorConversationModelName = 'ReactorConversation';
-const ReactorConversationModel = mongoose.model<Schema<ReactorConversation>>(ReactorConversationModelName, ReactorConversationSchema, 'reactor_conversations');
-export type TReactorConversationDocument = mongoose.Document<ReactorConversation> & ReactorConversation;
+const ReactorConversationModel = mongoose.model<ReactorConversationDocument>(ReactorConversationModelName, ReactorConversationSchema, 'reactor_conversations');
+export type TReactorConversationDocument = mongoose.Document & ReactorConversationDocument;
 export type TReactorConversationModel = typeof ReactorConversationModel;
 export const ReactorConversationModelComponentRegistryEntry: Reactory.IReactoryComponentDefinition<typeof ReactorConversationModel> = { 
   name: 'ReactorConversationModel',

@@ -6,6 +6,7 @@ import path from 'path';
 import Reactory from "@reactory/reactory-core";
 import { ComponentDomain, FeatureType } from "@reactory/reactory-core";
 import { ShellCommandArgs, ShellCommandMacroOutput } from "@reactory/server-modules/reactory-reactor/types/macro.types";
+import { ShellCommandProps } from './types';
 import logger from "@reactory/server-core/logging";
 
 const DEFAULT_SHELL_TEMPLATE = `
@@ -160,23 +161,21 @@ const getShellCommandText = async (templateId: string, command: string, state: C
 
 /**
  * A macro that writes a shell command to a temporary .sh file and executes it.
- * @param args - a list of arguments for the shell command
+ * @param props - ShellCommandProps - { command, workingDir, templateId, timeoutInSeconds, sudo, format, shell }
  * @param state - the current chat state
- * @param context - the current reactory context
  * @returns the result of the shell command
  */
-export const ShellCommand: Macro<ShellCommandMacroOutput> = async (args: ShellCommandArgs, state: ChatState): Promise<ShellCommandMacroOutput> => {
+export const ShellCommand: Macro<ShellCommandMacroOutput, ShellCommandProps> = async (props: ShellCommandProps, state: ChatState): Promise<ShellCommandMacroOutput> => {
 
-  const [
-    shellCommand,
+  const {
+    command: shellCommand,
     workingDir = process.cwd(),
     templateId = 'default',
     timeoutInSeconds = '60',
     sudo = 'false',
     format = 'string',
     shell = '/bin/bash'
-
-  ] = args;
+  } = props;
 
   try {
     // Check if command is potentially dangerous
@@ -334,26 +333,44 @@ const ShellCommandComponentRegister: MacroComponentDefinition<typeof ShellComman
     type: "function",
     function: {
       name: "shell",
+      icon: "handyman",
       description: "Executes a shell command",
       parameters: {
         type: "object",
         properties: {
-          args: {
-            type: "array",
-            description: `The arguments for the shell command:
-            1. command: The shell command to execute
-            2. workingDir: The working directory for the shell command
-            3. templateId: The template id to use for the shell command
-            4. timeoutInSeconds: The timeout in seconds for the shell command
-            5. sudo: Use sudo to execute the shell command
-            6. format: The format of the output (string or object)
-            7. shell: The shell to use for the command`,
-            items: {
-              type: "string",            
-            }
-          },          
+          command: {
+            type: "string",
+            description: "The shell command to execute"
+          },
+          workingDir: {
+            type: "string",
+            description: "The working directory for the shell command"
+          },
+          templateId: {
+            type: "string",
+            description: "The template id to use for the shell command"
+          },
+          timeoutInSeconds: {
+            type: "string",
+            description: "The timeout in seconds for the shell command"
+          },
+          sudo: {
+            type: "string",
+            enum: ["true", "false"],
+            description: "Use sudo to execute the shell command"
+          },
+          format: {
+            type: "string",
+            enum: ["string", "object"],
+            description: "The format of the output (string or object)"
+          },
+          shell: {
+            type: "string",
+            enum: ["/bin/bash", "/bin/zsh"],
+            description: "The shell to use for the command"
+          }
         },
-        required: ["args"],
+        required: ["command"]
       }
     }
   }]

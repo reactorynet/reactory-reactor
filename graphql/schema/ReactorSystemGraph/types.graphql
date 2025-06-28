@@ -1,0 +1,79 @@
+# Node and Node-related types
+enum ReactorNodeType {
+  INPUT
+  OUTPUT
+  PROCESS
+  SYSTEM
+  DATASTORE
+  CHILD
+  CONNECTION
+  DEPENDENCY
+  CONTAINER
+  CLOUD
+  CONSUMER
+  CONFIG
+  FOLDER
+  FILE
+  FUNCTION
+  ENDPOINT
+}
+
+enum ReactorLinkType {
+  INPUT
+  OUTPUT
+  DEPENDENCY
+  CONNECTION
+  INFERRED
+  DIRECT
+}
+
+type ReactorNodeCategory {
+  id: ID!
+  name: String!
+  description: String
+  parent: ReactorNodeCategory
+  children: [ReactorNodeCategory!]
+  nodes: [ReactorNode!]
+}
+
+type ReactorNodeMetricType {
+  id: Int!
+  name: String!
+  description: String
+  units: String
+}
+
+type ReactorNodeMetric {
+  id: Int!
+  type: ReactorNodeMetricType!
+  value: String
+}
+
+type ReactorNodeAttributes {
+  id: Int!
+  key: String!
+  value: Any
+}
+
+type ReactorNode {
+  id: Int!
+  index: Int!
+  type: ReactorNodeType!
+  key: String!
+  categories: [ReactorNodeCategory!]
+  nameSpace: String!
+  name: String!
+  version: String!
+  description: String
+  providerId: String!
+  attributes: [ReactorNodeAttributes!]
+  metrics: [ReactorNodeMetric!]
+  children(paging: PagingRequest, filter: String): [ReactorNode!]
+  inputs: [ReactorNode!]
+  outputs: [ReactorNode!]
+  dependents: [ReactorNode!]
+  dependencies: [ReactorNode!]
+  parent: ReactorNode
+  source: String
+  data: Any
+}
