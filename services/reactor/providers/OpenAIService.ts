@@ -22,7 +22,7 @@ import {
   handleChatCompletionResponse,
   MacroRegistry,
   handleCommandAction,
-} from "../../../ai/openai/chat/macro";
+} from "@reactory/server-modules/reactory-reactor/ai/macro";
 import ReactorMacroService from "./ReactorMacroService";
 
 

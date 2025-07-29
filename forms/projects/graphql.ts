@@ -2,7 +2,7 @@ import Reactory from '@reactory/reactory-core';
 
 const graphql: Reactory.Forms.IFormGraphDefinition = {
   queries: {
-    projects: {
+    openProjects: {
       name: 'ReactorProjects',
       text: `query ReactorProjects($filter: ReactorProjectFilter) {
         ReactorProjects(filter: $filter) {
@@ -17,7 +17,18 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
             name
             nameSpace
             version
-            description
+            ownerTeam {
+              id
+              name
+              avatar
+            }
+            system {
+              id
+              nameSpace
+              name
+              version
+              description
+            }
             owner {
               id
               firstName
@@ -28,10 +39,7 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
               id
               name
             }
-            incidentActive
-            tags
-            created
-            updated
+            incidentActive            
           }
         }
       }`,
@@ -40,6 +48,19 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
         'paging': 'paging',
         'projects': 'data',
       },
+    },          
+  },
+};
+
+const metricsGraphql: Reactory.Forms.IFormGraphDefinition = { 
+  queries: {
+    metrics: {
+      name: 'ReactorMetrics',
+      text: `query ReactorMetrics($filter: ReactorProjectFilter) {
+        ReactorMetrics(filter: $filter) {
+          metrics
+        }
+      }`,
     },
   },
 };

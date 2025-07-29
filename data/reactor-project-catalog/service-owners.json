@@ -2,9 +2,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "adyen-service",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "PayIn"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/adyen-service"
@@ -12,17 +14,21 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "backoffice-customer-replication-service",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/backoffice-customer-replication-service"
   },
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "bff-authentication",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Authentication"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/bff-authentication"
@@ -30,9 +36,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "bff-graphql-gateway",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Authentication"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/bff-graphql-gateway"
@@ -40,9 +48,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "braze-service",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/braze-service"
@@ -50,90 +60,96 @@
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "calculation-service",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/calculation-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "calculation-service",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/calculation-service"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "compliance-collector",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
-    "notes": [
-      "plan: rename to kyc-collector"
-    ],
+    "description": "plan: rename to kyc-collector",
     "repoUrl": "https://github.com/Zepz-Engineering/compliance-collector"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "compliance-fco-integrator",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
-    "notes": [
-      "plan: rename to kyc-fco-integrator"
-    ],
+    "description": "plan: rename to kyc-fco-integrator",
     "repoUrl": "https://github.com/Zepz-Engineering/compliance-fco-integrator"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "compliance-gateway",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
-    "notes": [
-      "plan: rename to kyc-gateway"
-    ],
+    "description": "plan: rename to kyc-gateway",
     "repoUrl": "https://github.com/Zepz-Engineering/compliance-gateway"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "compliance-trulioo-check",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
-    "notes": [
-      "plan: rename to kyc-trulioo-check"
-    ],
+    "description": "plan: rename to kyc-trulioo-check",
     "repoUrl": "https://github.com/Zepz-Engineering/compliance-trulioo-check"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "compliance-zbo-integrator",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
-    "notes": [
-      "plan: rename to kyc-zbo-integrator"
-    ],
+    "description": "plan: rename to kyc-zbo-integrator",
     "repoUrl": "https://github.com/Zepz-Engineering/compliance-zbo-integrator"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "content-ingestion",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Screening"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/content-ingestion"
@@ -141,9 +157,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "content-service",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Screening"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/content-service"
@@ -151,43 +169,66 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "country-service",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/country-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "coupon-api",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/coupon-api"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "coupon-service-workers",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/coupon-service-workers"
   },
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "customer-api",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/customer-api"
   },
   {
+    "cluster": "Zepz Production Cluster",
+    "name": "customer-directory",
+    "businessUnit": {
+      "name": "Remitplus"
+    },
+    "status": "Live",
+    "ownerTeam": {
+      "name": "Skunkworks"
+    },
+    "description": "Gordy and Werner assisting Remittance plus",
+    "repoUrl": "https://github.com/Zepz-Engineering/customer-directory"
+  },
+  {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "customer-api-proxy",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/customer-api-proxy"
@@ -195,9 +236,11 @@
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "customer-openid-provider",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Authentication"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/customer-openid-provider"
@@ -205,25 +248,31 @@
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "customer-pricing-service",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/customer-pricing-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "customer-pricing-service",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/customer-pricing-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "customer-verification-images",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/customer-verification-images"
@@ -231,65 +280,81 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "customercare-oauth2-proxy",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/customercare-oauth2-proxy"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "customerops-backoffice-ui",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/customerops-backoffice-ui"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "customerops-bff-service",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/customerops-bff-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "customerops-dictionary-service",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/customerops-dictionary-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "customerops-processapi-service",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/customerops-processapi-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "customerops-taskengine-service",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/customerops-taskengine-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "cybersource-service",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/cybersource-service"
   },
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "dynamic-form-manager",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/dynamic-form-manager"
@@ -297,9 +362,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "dynamic-form-manager-modules",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/dynamic-form-manager-modules"
@@ -307,9 +374,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "dynamic-form-manager-validation-api",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/dynamic-form-manager-validation-api"
@@ -317,37 +386,42 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "email-logic",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Authentication"
     },
-    "notes": [
-      "actually Identity/Authentication"
-    ],
+    "description": "actually Identity/Authentication",
     "repoUrl": "https://github.com/Zepz-Engineering/template-logic"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "feature-qualification",
+    "businessUnit": {},
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/feature-qualification"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "fx-rates-service",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/fx-rates-service"
   },
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "graphql-authentication",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Authentication"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/graphql-authentication"
@@ -355,9 +429,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "graphql-customer-support",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Screening"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/graphql-customer-support"
@@ -365,9 +441,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "graphql-dynamic-form-manager",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/graphql-dynamic-form-manager"
@@ -375,39 +453,48 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "graphql-fx-rate-alerts",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/graphql-fx-rate-alerts"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "hercules",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/hercules"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "kyverno",
-    "domain": "Infrastructure",
+    "businessUnit": {
+      "name": "Infrastructure"
+    },
     "status": "Live",
-    "team": {}
+    "ownerTeam": {}
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "logging",
+    "businessUnit": {},
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/npm-logging"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "loqate-proxy",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/loqate-proxy"
@@ -415,41 +502,51 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "loyalty-admin",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/loyalty-admin"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "loyalty-api",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/loyalty-api"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "manual-bank-transfer-service",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/manual-bank-transfer-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "marketing-api",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/marketing-api"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "mega-graphql-bff",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Screening"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/mega-graphql-bff"
@@ -457,73 +554,91 @@
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "nh-braze-email-service",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Decom",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/nh-braze-email-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "nh-email-service",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/nh-email-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "nh-notification-service",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/nh-notification-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "nh-push-service",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/nh-push-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "nh-sms-service",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/nh-sms-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "nh-storage-service",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/nh-storage-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "nh-template-service",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/nh-template-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "nh-template-ui",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/nh-template-ui"
   },
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "onboarding-process-orchestrator",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/onboarding-process-orchestrator"
@@ -531,9 +646,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "onboarding-process-orchestrator-camunda-console",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/onboarding-process-orchestrator-camunda-console"
@@ -541,48 +658,50 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "onfido-check",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
-    "notes": [
-      "plan: rename to kyc-onfido-check"
-    ],
+    "description": "plan: rename to kyc-onfido-check",
     "repoUrl": "https://github.com/Zepz-Engineering/compliance-onfido-check"
   },
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "onfido-integration-logic",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Decom",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
-    "notes": [
-      "decommissioned"
-    ],
+    "description": "decommissioned",
     "repoUrl": "https://github.com/Zepz-Engineering/openid-registration-service"
   },
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "onfido-service",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Decom",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
-    "notes": [
-      "decommissioned"
-    ],
+    "description": "decommissioned",
     "repoUrl": "https://github.com/Zepz-Engineering/country-service"
   },
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "openid-registration-service",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Authentication"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/openid-registration-service"
@@ -590,33 +709,41 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "operations-management-api",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/operations-management-api"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "operations-management-oauth2-proxy",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/operations-management-oauth2-proxy"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "operations-management-ui",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/operations-management-ui"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "otp-logic",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Authentication"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/otp-logic"
@@ -624,22 +751,24 @@
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "passfort-integration-logic",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Decom",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
-    "notes": [
-      "decommissioned"
-    ],
+    "description": "decommissioned",
     "repoUrl": "https://github.com/Zepz-Engineering/braze-integration"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "pay-in-graphql",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "PayIn"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/pay-in-graphql"
@@ -647,48 +776,50 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "payment-methods-config-provider",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "PayIn"
     },
-    "notes": [
-      "\"Tied to pricing"
-    ],
+    "description": "\"Tied to pricing",
     "publicFacing": "but PayIn will treat as owner\""
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "payments-integrations-webapp",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "ZBO"
     },
-    "notes": [
-      "Should be decommed once PayIn confirms is no longer used"
-    ],
+    "description": "Should be decommed once PayIn confirms is no longer used",
     "repoUrl": "https://github.com/Zepz-Engineering/payments-integrations-webapp"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "payout-partner-integrator",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payout"
     },
-    "notes": [
-      "seems like a duplicate of zepz-payout-partner-integrator?"
-    ],
+    "description": "seems like a duplicate of zepz-payout-partner-integrator?",
     "repoUrl": "https://github.com/Zepz-Engineering/payout-partner-integrator"
   },
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "policy-enforcement-point",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Decom",
-    "team": {
+    "ownerTeam": {
       "name": "Treasury"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/policy-enforcement-point"
@@ -696,18 +827,22 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "prd-payout-update-certs",
-    "domain": "Infrastructure",
+    "businessUnit": {
+      "name": "Infrastructure"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Shared Infrastructure"
     }
   },
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "pre-submission-orchestrator",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Pricing"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/pre-submission-orchestrator"
@@ -715,9 +850,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "pre-submission-orchestrator",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Pricing"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/pre-submission-orchestrator"
@@ -725,9 +862,11 @@
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "pre-submission-validation-service",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Pricing"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/pre-submission-validation-service"
@@ -735,9 +874,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "pre-submission-validation-service",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Pricing"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/pre-submission-validation-service"
@@ -745,33 +886,41 @@
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "price-components-service",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/pricing-components-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "pricing-components-service",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/pricing-components-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "pricing-graphql",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/pricing-graphql"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "iam-dev-proxy",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Authentication"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/iam-dev-proxy"
@@ -779,40 +928,50 @@
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "pricing-loyalty-adapter",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/pricing-loyalty-adapter"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "prod-payin-update-certs",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {}
+    "ownerTeam": {}
   },
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "product-catalogue-service",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/product-catalogue-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "refer-a-friend-workers",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/refer-a-friend-workers"
   },
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "rewrite-transfer-manager",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "PayEx"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/rewrite-transfer-manager"
@@ -820,22 +979,24 @@
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "smartling-proxy",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Authentication"
     },
-    "notes": [
-      "Transslations"
-    ],
+    "description": "Transslations",
     "repoUrl": "https://github.com/Zepz-Engineering/smartling-proxy"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "sms-logic",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Authentication"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/sms-logic"
@@ -843,9 +1004,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "sms-verification-service",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Authentication"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/sms-verification-service"
@@ -853,36 +1016,42 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "software-capitalisation",
-    "domain": "Corp IT",
+    "businessUnit": {
+      "name": "Corp IT"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/software-capitalisation-reporting"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "template-logic",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "actually Identity/Authentication"
-    ],
+    "ownerTeam": {},
+    "description": "actually Identity/Authentication",
     "repoUrl": "https://github.com/Zepz-Engineering/template-logic"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "trade-feed-service",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/trade-feed-service"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "transfer-compliance",
-    "domain": "Identity",
+    "businessUnit": {
+      "name": "Identity"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "KYC"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/pre-transfer-compliance-checker"
@@ -890,22 +1059,24 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "transfer-data",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payments Resilience"
     },
-    "notes": [
-      "TDS"
-    ],
+    "description": "TDS",
     "repoUrl": "https://github.com/Zepz-Engineering/transfer-data"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "trust-data-service",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Fraud"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/trust-platform-data-service"
@@ -913,9 +1084,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "trust-management-ui",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Fraud"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/operations-management-ui"
@@ -923,9 +1096,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "trust-platform-management-bff",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Fraud"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/trust-platform-management-bff"
@@ -933,9 +1108,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "trust-riskified-integration",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Fraud"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/trust-platform-riskified-integration"
@@ -943,9 +1120,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "trust-rule-execution-service",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Fraud"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/trust-platform-rule-execution-service"
@@ -953,9 +1132,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "trust-rule-management-service",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Fraud"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/trust-platform-rule-management-service"
@@ -963,9 +1144,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "ui-portal",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Pricing"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/ui-portal"
@@ -973,9 +1156,11 @@
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "user-screening",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Sanctions"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-screening-api"
@@ -983,9 +1168,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "web-cms",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Screening"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/web"
@@ -993,9 +1180,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "web-cms-sw",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Screening"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/web"
@@ -1003,9 +1192,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "web-logger",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Screening"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/web"
@@ -1013,9 +1204,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "web-nginx",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Screening"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/web"
@@ -1023,9 +1216,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "wr-order-api",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "PayEx"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/wr-order-api"
@@ -1033,9 +1228,11 @@
   {
     "cluster": "WorldRemit Cluster02 Production",
     "name": "wr-zepz-payin-service",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "PayIn"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/wr-zepz-payin-service"
@@ -1043,33 +1240,41 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "zepz-backoffice-rbac-ui",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-backoffice-rbac-ui"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "zepz-backoffice-ui",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-backoffice-ui"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-corridor-configuration-service",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-corridor-configuration-service"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-crr",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "CRR"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-crr"
@@ -1077,17 +1282,21 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-feature-flags-java",
-    "domain": "SRE",
+    "businessUnit": {
+      "name": "SRE"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-feature-flags-java"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-fincrime-orchestrator",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Fraud"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-fincrime-orchestrator"
@@ -1095,33 +1304,41 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-grc-automation",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-grc-automation"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-hourly-customer-rate-calculation",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/hourly-customer-rate-calculation"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-loyalty",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/loyalty"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-payin-bank-transfer",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "PayIn"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/payin-bank-transfer-service"
@@ -1129,9 +1346,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-payin-bin-lookup-service",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "PayIn"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/payin-bin-lookup-service"
@@ -1139,9 +1358,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-payin-cards",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "PayIn"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-payin-proto"
@@ -1149,9 +1370,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-payin-shared",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "PayIn"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/payin-shared"
@@ -1159,9 +1382,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-payout-partner-integrator",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payout"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/payout-partner-integrator"
@@ -1169,9 +1394,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-payout-partner-manager",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payout"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/payout-partner-manager"
@@ -1179,9 +1406,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-payout-partner-transactor",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payout"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/payout-partner-integrator"
@@ -1189,9 +1418,11 @@
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "zepz-payoutv1proxy",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payout"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-payoutv1proxy"
@@ -1199,9 +1430,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-portal-api",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payout"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-portal-api"
@@ -1209,9 +1442,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-portal-api-bff",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payout"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-portal-api-bff"
@@ -1219,65 +1454,81 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-portal-ui",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-portal-ui"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-pricing-engine",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-pricing-engine"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-pricing-portal",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-pricing-portal"
   },
   {
     "cluster": "WorldRemit Cluster03 Production",
     "name": "zepz-rbac-service",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-rbac-service"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-retool",
-    "domain": "Customer Ops",
+    "businessUnit": {
+      "name": "Customer Ops"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-retool-ui"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-screening-api",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-screening-api"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-screening-manager",
-    "domain": "Fincrime",
+    "businessUnit": {
+      "name": "Fincrime"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-screening-manager"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-shared-payin",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "PayIn"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/zepz-payin-proto"
@@ -1285,17 +1536,21 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-software-capitalisation",
-    "domain": "Corp IT",
+    "businessUnit": {
+      "name": "Corp IT"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/software-capitalisation-reporting"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-treasury-account-ledger",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payments Resilience"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/account-ledger"
@@ -1303,9 +1558,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-treasury-correspondent-service",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payments Resilience"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/treasury-correspondent-service"
@@ -1313,9 +1570,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-treasury-fund-funding-engine-service",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payments Resilience"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/treasury-funding-engine-service"
@@ -1323,9 +1582,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-treasury-funding-payment-service",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payments Resilience"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/treasury-funding-payment-service"
@@ -1333,17 +1594,21 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-treasury-fx-rates-service",
-    "domain": "Quote",
+    "businessUnit": {
+      "name": "Quote"
+    },
     "status": "Live",
-    "team": {},
+    "ownerTeam": {},
     "repoUrl": "https://github.com/Zepz-Engineering/treasury-fx-rates-service"
   },
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-treasury-holidays-service",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payments Resilience"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/treasury-holidays-service"
@@ -1351,9 +1616,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-treasury-payout-transfer-service",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payments Resilience"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/treasury-payout-transfer-service"
@@ -1361,9 +1628,11 @@
   {
     "cluster": "Zepz Production Cluster",
     "name": "zepz-treasury-transfer-service",
-    "domain": "Payments",
+    "businessUnit": {
+      "name": "Payments"
+    },
     "status": "Live",
-    "team": {
+    "ownerTeam": {
       "name": "Payments Resilience"
     },
     "repoUrl": "https://github.com/Zepz-Engineering/treasury-transfer-service"
@@ -1371,198 +1640,198 @@
   {
     "cluster": "Senddwave Production Cluster",
     "name": "darkwing-cpu-worker-prod",
-    "domain": "Data",
+    "businessUnit": {
+      "name": "Data"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "Darkwing"
-    ]
+    "ownerTeam": {},
+    "description": "Darkwing"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "darkwing-io-worker-prod",
-    "domain": "Data",
+    "businessUnit": {
+      "name": "Data"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "Darkwing"
-    ]
+    "ownerTeam": {},
+    "description": "Darkwing"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "darkwing-ui-prod",
-    "domain": "Data",
+    "businessUnit": {
+      "name": "Data"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "Darkwing"
-    ],
+    "ownerTeam": {},
+    "description": "Darkwing",
     "repoUrl": "https://github.com/Zepz-Engineering/darkwing"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "darkwing-web-prod",
-    "domain": "Data",
+    "businessUnit": {
+      "name": "Data"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "Darkwing"
-    ],
+    "ownerTeam": {},
+    "description": "Darkwing",
     "repoUrl": "https://github.com/Zepz-Engineering/darkwing"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "http",
-    "domain": "Remittance+",
+    "businessUnit": {
+      "name": "Remittance+"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "remitplus"
-    ],
+    "ownerTeam": {},
+    "description": "remitplus",
     "repoUrl": "https://github.com/Zepz-Engineering/payout-mock-http-server"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "internal-http",
-    "domain": "Remittance+",
+    "businessUnit": {
+      "name": "Remittance+"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "remitplus"
-    ]
+    "ownerTeam": {},
+    "description": "remitplus"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "remitplus-beat",
-    "domain": "Remittance+",
+    "businessUnit": {
+      "name": "Remittance+"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "remitplus"
-    ]
+    "ownerTeam": {},
+    "description": "remitplus"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "task-worker",
-    "domain": "Remittance+",
+    "businessUnit": {
+      "name": "Remittance+"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "remitplus"
-    ]
+    "ownerTeam": {},
+    "description": "remitplus"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "internal-http",
-    "domain": "Pricing",
+    "businessUnit": {
+      "name": "Pricing"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "pricing"
-    ]
+    "ownerTeam": {},
+    "description": "pricing"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "beat",
-    "domain": "ALL",
+    "businessUnit": {
+      "name": "ALL"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "remitsrv"
-    ]
+    "ownerTeam": {},
+    "description": "remitsrv"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "web",
-    "domain": "ALL",
+    "businessUnit": {
+      "name": "ALL"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "remitsrv"
-    ],
+    "ownerTeam": {},
+    "description": "remitsrv",
     "repoUrl": "https://github.com/Zepz-Engineering/payments-integrations-webapp"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "web-hand-crafted-311",
-    "domain": "ALL",
+    "businessUnit": {
+      "name": "ALL"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "remitsrv"
-    ]
+    "ownerTeam": {},
+    "description": "remitsrv"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "worker",
-    "domain": "ALL",
+    "businessUnit": {
+      "name": "ALL"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "remitsrv"
-    ],
+    "ownerTeam": {},
+    "description": "remitsrv",
     "repoUrl": "https://github.com/Zepz-Engineering/coupon-service-workers"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "worker-monitoring",
-    "domain": "ALL",
+    "businessUnit": {
+      "name": "ALL"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "remitsrv"
-    ]
+    "ownerTeam": {},
+    "description": "remitsrv"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "worker-notifs",
-    "domain": "ALL",
+    "businessUnit": {
+      "name": "ALL"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "remitsrv"
-    ]
+    "ownerTeam": {},
+    "description": "remitsrv"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "worker-pending-transactions",
-    "domain": "ALL",
+    "businessUnit": {
+      "name": "ALL"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "remitsrv"
-    ],
+    "ownerTeam": {},
+    "description": "remitsrv",
     "repoUrl": "https://github.com/Zepz-Engineering/content-translations"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "worker-tool-commands",
-    "domain": "ALL",
+    "businessUnit": {
+      "name": "ALL"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "remitsrv"
-    ]
+    "ownerTeam": {},
+    "description": "remitsrv"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "worker-transaction",
-    "domain": "ALL",
+    "businessUnit": {
+      "name": "ALL"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "remitsrv"
-    ],
+    "ownerTeam": {},
+    "description": "remitsrv",
     "repoUrl": "https://github.com/Zepz-Engineering/content-translations"
   },
   {
     "cluster": "Senddwave Production Cluster",
     "name": "sw-bouncer-aws",
-    "domain": "ALL",
+    "businessUnit": {
+      "name": "ALL"
+    },
     "status": "Live",
-    "team": {},
-    "notes": [
-      "pgbouncer"
-    ]
+    "ownerTeam": {},
+    "description": "pgbouncer"
   }
 ]

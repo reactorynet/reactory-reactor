@@ -15,6 +15,7 @@ import {
   NodeJSProjectProcessor,
   ReactNativeProjectProcessor
 } from './SystemGraphProjectProviders';
+import DocumentChunkingService from "./reactor/DocumentChunkingService";
 export default [
   ReactorMacroService,
   ReactorConversationService,
@@ -30,5 +31,6 @@ export default [
   TSqlProjectProcessor,
   CSharpProjectProcessor,
   NodeJSProjectProcessor,
-  ReactNativeProjectProcessor
+  ReactNativeProjectProcessor,
+  DocumentChunkingService
 ];

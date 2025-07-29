@@ -12,7 +12,7 @@ const ServiceCatalogForm: Reactory.Forms.IReactoryForm = {
   nameSpace: 'reactor',
   version: '1.0.0',
   schema: ReactorProjectSchemaResolver,
-  description: `A form for managing the Reactory Service Catalog`,
+  description: `The service catalogue provides a comprehensive list of all projects and services that are available to the user`,
   uiFramework: 'material',
   uiSupport: ['material'],
   uiSchema: ProjectGridUISchema,
@@ -34,7 +34,7 @@ const ServiceCatalogForm: Reactory.Forms.IReactoryForm = {
   }],
   graphql: graphql,
   uiResources: [],
-  helpTopics: [''],
+  helpTopics: ['reactor-service-catalogue'],
   title: "Reactory Service Catalog",
   registerAsComponent: true,
   widgetMap: [    

@@ -47,21 +47,21 @@ class PythonProjectProcessor implements IProjectProcessor, AttributeProvider {
     this.props = props;
     this.context = context;
   }
- setFileSpecs(project: Partial<IReactorProject>, specs: Partial<IReactorProjectFileSpec>[]): Promise<Partial<IReactorProject>> {
-  throw new Error('Method not implemented.');
+ async setFileSpecs(project: Partial<IReactorProject>, specs: Partial<IReactorProjectFileSpec>[]): Promise<Partial<IReactorProject>> {
+  return Promise.resolve(project);
  }
- getProjectData(project: Partial<IReactorProject>): Promise<Partial<IReactorProject>> {
-  throw new Error('Method not implemented.');
+ async getProjectData(project: Partial<IReactorProject>): Promise<Partial<IReactorProject>> {
+  return Promise.resolve(project);
  }
 
   getFileSpecs(project: IReactorProject): Partial<IReactorProjectFileSpec>[] {
-    throw new Error('Method not implemented.');
+    return [];
   }
   sync(project: IReactorProject): Promise<IReactorProject> {
-    throw new Error('Method not implemented.');
+    return Promise.resolve(project);
   }
   index(project: IReactorProject): Promise<IReactorProject> {
-    throw new Error('Method not implemented.');
+    return Promise.resolve(project);
   }
   supportsProject(project: Partial<IReactorProject>): boolean {
     if (!project?.repoPath) return false;
@@ -128,7 +128,7 @@ class PythonProjectProcessor implements IProjectProcessor, AttributeProvider {
     return Promise.resolve(attributes);
   }
 
-  process(project: IReactorProject): Reactory.Models.ISearchable[] {
+  process(project: IReactorProject): Partial<IReactorProject> {
     const searchables: Reactory.Models.ISearchable[] = [];
     const { warn, error } = this.context;
     const { files } = project;
@@ -190,7 +190,7 @@ class PythonProjectProcessor implements IProjectProcessor, AttributeProvider {
         }
       });
     });
-    return searchables;
+    return project;
   }
 
   onStartup(): Promise<void> {

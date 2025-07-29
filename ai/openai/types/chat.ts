@@ -92,6 +92,9 @@ export type MacroToolDefinition = {
     name: string;
     description?: string;
     parameters: Schema
+    // The fully qualified name of the component that is used to 
+    // gather the input parameters for the tool.
+    componentFqn?: string
   }
 };
 
@@ -106,6 +109,11 @@ export type MacroComponentDefinition<TMacro> = Reactory.IReactoryComponentDefini
    * We use this to provide a more human readable name for the macro.
    */
   alias?: string,
+  /**
+   * The fully qualified name of the component that is used to 
+   * gather the input parameters for the macro.
+   */
+  componentFqn?: string,
   enabled?: boolean
 };
 
@@ -249,6 +257,10 @@ export type ChatState = {
    * A placeholder for a SSE session. This is used for the MCP client.
    */
   sseSession?: any;
+
+  tokenCount?: number
+  maxTokens?: number
+  truncatedHistory?: ReactorConversationHistory
 }
 
 export interface QuestionHandlerResponse {

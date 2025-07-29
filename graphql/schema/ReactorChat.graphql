@@ -3,19 +3,69 @@ Represents a single message in a chat conversation between a user and a persona.
 Contains the content and metadata about the message.
 """
 type ReactorChatMessage {
+  """
+  The session ID of the chat session that the message belongs to.
+  """
   sessionId: String!
+  """
+  The ID of the message.
+  """
   id: String
+  """
+  The role of the message. This will be either "user", "assistant", "tool", or "system".
+  """
   role: String
+  """
+  The content of the message.
+  """
   content: String
+  """
+  The component of the message. This will be a Reactory.FQN type that follows the 
+  nameSpace.name@version format.
+  """
+  component: String
+  """
+  The props of the message. This will be a JSON object that contains the props of the component.
+  """
+  props: Any
+  """
+  The props map of the message. This is a ObjectMap that used with ObjectMapper.merge() to convert 
+  the props to the component.
+  """
+  propsMap: Any
+  """
+  The audio of the message. This will be a base64 encoded string of the audio.
+  or a URL to the audio file.
+  """
   audio: Any
+  """
+  The annotations of the message. This will be a JSON object that contains the annotations of the component.  
+  """
   annotations: Any
+  """
+  The images of the message. This will be a JSON object that contains the images of the component.
+  """
   images: Any
+  """
+  The rating of the message. This will be a string that contains the rating of the message.
+  """
   rating: String
+  """
+  The timestamp of the message. This will be a date that contains the timestamp of the message.
+  """
   timestamp: Date
+  """
+  The tool calls of the message. This will be a JSON object that contains the tool calls of the component.
+  """
   tool_calls: Any
+  """
+  The tool results of the message. This will be a JSON object that contains the tool results of the component.
+  """
   tool_results: Any
-  toolApproval: String
-  refusal: String    
+  """
+  The refusal of the message. This will be a string that contains the refusal of the component.
+  """
+  refusal: String
 }
 
 """
@@ -73,6 +123,22 @@ type ReactorChatState {
   updated: Date
   user: User
   history: [ReactorChatMessage]
+  truncatedHistory: [ReactorChatMessage]
+  """
+  The maximum number of tokens allowed for the conversation.
+  """
+  maxTokens: Int
+  """
+  The current token count for the conversation.
+  """
+  tokenCount: Int
+  """
+  The pressure of the token count. This is the ratio of the token count to the max tokens.
+  """
+  tokenPressure: Float
+  """
+  The tools used in the conversation.
+  """
   tools: [ReactorToolDefinition]
   macros: [ReactorMacro]
   vars: Any

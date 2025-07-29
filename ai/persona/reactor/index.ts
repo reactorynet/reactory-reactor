@@ -2,7 +2,7 @@ import { ingest } from "@reactory/server-core/utils/io"
 import appearance from './appearance';
 import { IAIPersona } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { FeatureType } from "@reactory/reactory-core";
-import { MacroRegistry } from "@reactory/server-modules/reactory-reactor/ai/openai/chat/macro";
+import { MacroRegistry } from "@reactory/server-modules/reactory-reactor/ai/macro";
 import { MacroComponentDefinition, MacroToolDefinition } from "../../openai/types/chat";
 
 const REACTOR_PERSONA_TEXT = ingest(require.resolve('./persona.md'));
@@ -34,11 +34,15 @@ MacroRegistry.forEach(m => {
 export const ReactoryPersona: IAIPersona = {
   id: "ReactorAIPersona",
   name: "Reactor",
+  description: "Reactor AI Persona. A full featured general purpose AI assistant focussed on Reactory and Reactor modules.",
   persona: ingest(require.resolve('./persona.md')),
   features: ingest(require.resolve('./features.md')),
   appearance,
-  modelId: process.env.OPENAI_DEFAULT_MODEL_ID ||  "grok-2-latest",
-  providerId: process.env.REACTOR_AI_PERSONA_PROVIDER_ID || "xai",
+  maxTokens: 1000000,
+  modelId: "gemini-2.5-pro",
+  providerId: "google",  
+  // modelId: process.env.OPENAI_DEFAULT_MODEL_ID ||  "grok-2-latest",
+  // providerId: process.env.REACTOR_AI_PERSONA_PROVIDER_ID || "xai",
   defaultGreeting: "Hello, I am Reactor, your general purpose AI assistant. How may I assist you today?",
   prompts: {
     "system": { 
@@ -47,8 +51,11 @@ export const ReactoryPersona: IAIPersona = {
     },
   },
   config: {
-    apiKey: process.env.OPENAI_API_KEY,
-    apiBaseURL: process.env.OPENAI_API_BASE_URL || "https://api.x.ai/v1",
+    // apiKey: process.env.OPENAI_API_KEY,
+    // apiBaseURL: process.env.OPENAI_API_BASE_URL || "https://api.x.ai/v1",
+    apiKey: process.env.GOOGLE_AI_STUDIO_API_KEY,
+    apiBaseURL: process.env.GOOGLE_AI_API_URL, 
+    project: process.env.GOOGLE_AI_STUDIO_PROJECT_ID,
   },
   tools: REACTOR_TOOLS,
   macros: REACTOR_MACROS,

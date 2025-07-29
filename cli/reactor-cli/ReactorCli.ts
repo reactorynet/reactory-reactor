@@ -6,7 +6,7 @@ import {
 import { ask, colors } from '@reactory/server-modules//reactory-reactor/helpers';
 import { ChatState } from "@reactory/server-modules//reactory-reactor/ai/openai/types/chat";
 import readline, { ReadLine } from 'readline';
-import { MacroRegistry } from "@reactory/server-modules//reactory-reactor/ai/openai/chat/macro";
+import { MacroRegistry } from "@reactory/server-modules/reactory-reactor/ai/macro";
 import CANNED_MESSAGES from "@reactory/server-modules//reactory-reactor/cli/reactor-cli/messages";
 import logger from "@reactory/server-core/logging";
 import { ObjectId } from "mongodb";

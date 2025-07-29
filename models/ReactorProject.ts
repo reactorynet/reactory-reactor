@@ -110,6 +110,7 @@ const ReactorProjectSchema: Schema = new Schema({
   id: ObjectId,
   client: { type: ObjectId, ref: 'ReactoryClient' },
   businessUnit: { type: ObjectId, ref: 'BusinessUnit' },
+  organization: { type: ObjectId, ref: 'Organization' },
   fqn: String,
   name: String,
   nameSpace: String,

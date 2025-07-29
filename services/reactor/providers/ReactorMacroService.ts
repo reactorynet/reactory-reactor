@@ -5,7 +5,7 @@ import {
  executeMacro, 
  processMacroInstructionSet, 
  getMacro 
-} from "@reactory/server-modules/reactory-reactor/ai/openai/chat/macro/index";
+} from "@reactory/server-modules/reactory-reactor/ai/macro/index";
 import Reactory from "@reactory/reactory-core";
 import AIPersonaProvider from "../AIPersonaProvider";
 

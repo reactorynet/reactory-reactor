@@ -110,7 +110,7 @@ class NodeJSProjectProcessor implements IProjectProcessor, AttributeProvider {
     return Promise.resolve(attributes);
   }
 
-  process(project: IReactorProject): Reactory.Models.ISearchable[] {
+  process(project: IReactorProject): Partial<IReactorProject> {
     const searchables: Reactory.Models.ISearchable[] = [];
     const { context } = this;
     const { warn, info, error } = context;
@@ -175,7 +175,7 @@ class NodeJSProjectProcessor implements IProjectProcessor, AttributeProvider {
     });
 
 
-    return searchables;
+    return project;
   }
 
   onStartup(): Promise<void> {

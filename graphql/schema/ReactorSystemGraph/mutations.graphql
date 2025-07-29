@@ -70,3 +70,39 @@ type ReactorSystemGraphSaveSuccess {
 }
 
 union ReacorSystemGraphSaveResult = ReactorSysteGraphSaveFailure | ReactorSystemGraphSaveSuccess
+
+type ReactorProjectDocumentationUpdateSuccess {
+  project: ReactorProject!
+  message: String
+}
+
+type ReactorProjectDocumentationUpdateFailure {
+  error: String
+}
+
+type ReactorProjectUpdateSuccess {
+  id: String!
+  project: ReactorProject!
+  message: String
+}
+
+type ReactorProjectUpdateFailure {
+  error: String
+  id: String!
+}
+
+union ReactorProjectUpdateResult = ReactorProjectUpdateSuccess | ReactorProjectUpdateFailure
+
+
+union ReactorProjectDocumentationUpdateResult = ReactorProjectDocumentationUpdateSuccess | ReactorProjectDocumentationUpdateFailure
+
+type Mutation {
+  ReactorCreateNodeLink(input: ReactoryNodeLinkInput!): ReactorNodeLinkCreateResult!
+  ReactorUpdateNodeLink(input: ReactoryNodeLinkInput!): ReactorNodeLinkUpdateResult!
+  ReactorDeleteNodeLink(id: Int!): ReactorNodeLinkDeleteResult!
+  ReactorSyncCatalogNodes(request: CatalogCrawlRequest!): [CatalogNodeSyncResult!]!
+  ReactorIndexNodes(filter: ReactorProjectFilter!): ReactorPagedNodes!
+  ReactorSaveSystemGraph(graph: ReactorSystemGraphInput!): ReacorSystemGraphSaveResult!
+  ReactorUpdateProjectDocumentation(projectId: String!, additionalDocumentation: [ReactorProjectDocumentationInput!]!): ReactorProjectDocumentationUpdateResult!
+  ReactorUpdateProject(projectId: String!, updates: ReactorProjectInput!): ReactorProjectUpdateResult!
+}

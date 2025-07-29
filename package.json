@@ -26,7 +26,6 @@
   "dependencies": {
     "@google/genai":"0.13.0",
     "openai": "4.87.3",
-    "@modelcontextprotocol/sdk": "file:./mcpsdk/modelcontextprotocol-sdk-v1.8.2.tgz",
-    "zod": "3.24.2"
+    "@modelcontextprotocol/sdk": "file:./mcpsdk/modelcontextprotocol-sdk-v1.8.2.tgz"    
   }
 }

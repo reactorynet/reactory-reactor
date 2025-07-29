@@ -42,41 +42,71 @@ abstract class AIProviderBase implements IAIProviderService {
     };
 
     try {
-      let nextStateModel = null;
-      if (this.chatStateModel !== null && this.chatStateModel._id.toString() === id &&
-        this.chatStateModel.user._id.toString() === user._id.toString()) {
-        nextStateModel = this.chatStateModel;
+      // Use findOneAndUpdate with upsert to handle the unique constraint properly
+      // This prevents duplicate key errors when the same conversation is being updated
+      const updateData: any = {
+        personaId,
+        modelId,
+        history,
+        sseSessionId: sseSession,
+        user,
+        vars,
+        updated: new Date(),
+        meta
+      };
+
+      // Only set started and created if this is a new conversation
+      if (!this.chatStateModel || !this.chatStateModel._id) {
+        updateData.started = started;
+        updateData.created = new Date();
+      }
+
+      const nextStateModel = await ReactorConversationModel.findOneAndUpdate(
+        { _id: id },
+        updateData,
+        { 
+          new: true, 
+          upsert: true,
+          setDefaultsOnInsert: true
+        }
+      ).exec();
+
+      // Validate user ownership
+      if (nextStateModel.user && nextStateModel.user._id.toString() !== user._id.toString()) {
+        throw new AIProviderError(`User ${user._id.toString()} does not match chat state user ${nextStateModel.user._id.toString()}`);
+      }
+
+      this.chatStateModel = nextStateModel;
+    } catch (error: any) {
+      // Handle duplicate key errors gracefully
+      if (error.code === 11000) {
+        this.context.warn("Duplicate conversation detected during persist, attempting to find existing", {
+          personaId,
+          userId: user._id,
+          chatId: id,
+          error: error.message
+        });
+        
+        // Try to find the existing conversation
+        const existingConversation = await ReactorConversationModel.findOne({
+          personaId,
+          user: user._id,
+          started: started
+        }).exec();
+        
+        if (existingConversation) {
+          // Update the existing conversation instead
+          existingConversation.history = history;
+          existingConversation.updated = new Date();
+          existingConversation.sseSessionId = sseSession;
+          existingConversation.vars = vars;
+          await existingConversation.save();
+          
+          this.chatStateModel = existingConversation;
+          return;
+        }
       }
       
-      if (!nextStateModel) {
-        nextStateModel = new ReactorConversationModel({
-          _id: id,
-          id,
-          personaId,
-          modelId,
-          started,
-          history,
-          sseSessionId: sseSession,
-          user,
-          vars,
-          created: new Date(),
-          updated: new Date(),
-          meta
-        });
-        await nextStateModel.save();
-      } else {
-        if (nextStateModel.user && nextStateModel.user._id.toString() !== user._id.toString()) {
-          throw new AIProviderError(`User ${user._id.toString()} does not match chat state user ${nextStateModel.user._id.toString()}`);
-        } else {
-          nextStateModel.history = history;
-          nextStateModel.updated = new Date();
-          nextStateModel.sseSessionId = sseSession;
-          await nextStateModel.save();
-        }
-
-        this.chatStateModel = nextStateModel;
-      }
-    } catch (error) {
       this.context.error(
         `Error persisting chat state: ${error.message || error.toString()}`,
         { error },
@@ -123,8 +153,13 @@ abstract class AIProviderBase implements IAIProviderService {
         persona: this.personaProvider?.getPersona(chatSession.personaId),
         vars: chatSession.vars || {},
         sseSession: chatSession.sseSessionId,
-        macros: chatSession.macros || [],        
+        macros: chatSession.macros || [],
+        tools: chatSession.tools || [],
         toolApprovalMode: (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
+        // Add missing required properties
+        apiKey: undefined,
+        apiOrg: undefined,
+        ai: undefined,
       };
       
       return false;

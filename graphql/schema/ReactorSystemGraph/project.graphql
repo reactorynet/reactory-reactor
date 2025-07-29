@@ -33,10 +33,11 @@ enum ReactorProjectDeploymentStatus {
 
 type ReactorProjectDeployment {
   id: Int!
-  environment: String!
   status: ReactorProjectDeploymentStatus!
+  environment: ReactorProjectEnvironment
   name: String
   description: String
+  url: String
   version: String!
   ciProvider: String
   ciPipeline: String
@@ -91,6 +92,20 @@ type ReactorProjectNote {
   created: Date
 }
 
+type ReactorProjectProcessor {
+  id: Int!
+  nameSpace: String!
+  name: String!
+  version: String!
+  description: String
+  type: String  
+  options: Any
+  optionsForm: String
+  createdBy: User
+  created: Date
+  updated: Date
+}
+
 type ReactorProjectSecurity {
   securityContact: User
   complianceTags: [String!]
@@ -125,6 +140,7 @@ type ReactorProjectProcessingEntry {
   id: Int!
   project: ReactorProject!
   status: ReactorProjectProcessingStatus!
+  processor: ReactorProjectProcessor
   started: Date
   completed: Date
   errors: [String!]
@@ -183,10 +199,181 @@ type ReactorProjectTask {
   updated: Date
 }
 
-type ReactorProject {
+type ReactorProjectMetrics {
+  date: Date
+  incidents: Int
+  errors: Int
+  deployments: Int
+  activeDeployments: Int
+  openPullRequests: Int
+  closedPullRequests: Int
+  activeBranches: Int
+  totalBranches: Int
+  activeTasks: Int
+  openedTasks: Int
+  closedTasks: Int
+  totalTeams: Int
+  totalEngineers: Int
+}
+
+type ReactoryProjectResource {
   id: Int!
+  name: String!
+  type: String!
+  url: String
+  projects: [ReactorProject!]
+  description: String
+  createdBy: User
+  created: Date
+  updated: Date
+}
+
+type ReactorProjectProcessingConfig {
+  id: Int!
+  processor: ReactorProjectProcessor!
+  options: Any
+  optionsForm: String
+  status: ReactorProjectProcessingStatus!  
+  lastRun: Date
+  nextRun: Date
+  lastError: String
+  lastRunDuration: Int
+  createdBy: User
+  created: Date
+  updated: Date
+}
+
+enum ReactorProjectApiType {  
+  REST
+  OPENAPI
+  GRAPHQL
+  GRPC
+  WEBSOCKET
+  SSE
+  SOAP
+  OTHER
+}
+
+enum ProjectApiDirection {
+  INBOUND
+  OUTBOUND
+  BIDRECTIONAL
+}
+
+type ReactorProjectApiConnection {
+  id: Int!
+  name: String!
+  description: String
+  type: ReactorProjectApiType!
+  direction: ProjectApiDirection
+  inboudUrl: String
+  outboundUrl: String
+  api: ReactorProjectApi
+  system: ReactorSystem
+  project: ReactorProject
+  environment: ReactorProjectEnvironment
+  createdBy: User
+  created: Date
+  updated: Date
+}
+
+type ReactorProjectApi {
+  id: Int!
+  nameSpace: String!
+  name: String!
+  version: String!
+  type: ReactorProjectApiType!
+  description: String
+  baseUrl: String!
+  direction: ProjectApiDirection
+  connections: [ReactorProjectApiConnection]
+  documentationUrl: String
+  createdBy: User
+  created: Date
+  updated: Date
+  project: ReactorProject
+}
+
+enum ReactorProjectScoreCalculatorType {
+  EXPRESSION
+  COMPONENT
+}
+
+type ReactorProjectScoreCalculator {
+  id: Int!
+  nameSpace: String!
+  name: String!
+  version: String!
+  description: String
+  type: ReactorProjectScoreCalculatorType
+  options: Any
+  optionsForm: String
+  createdBy: User
+  created: Date
+  updated: Date
+}
+
+type ReactorProjectScoreCard {
+  id: Int!
+  project: ReactorProject!
+  score: Float!
+  metrics: [ReactorProjectMetrics]
+  calculators: [ReactorProjectScoreCalculator!]
+  targetScore: Float
+  targetScoreDescription: String
+  scoreColor: String
+  scoreDescription: String
+  createdBy: User
+  created: Date
+  updated: Date  
+}
+
+enum ReactorProjectHistoryItemType {
+  INCIDENT
+  DEPLOYMENT
+  TASK
+  NOTE
+  DOCUMENTATION
+  SECURITY
+  TEAM
+  METRICS
+  INFO
+  WARNING
+  ERROR
+  CRITICAL
+  SUCCESS
+  ROLLBACK
+  ROLLBACK_SUCCESS
+}
+
+enum ReactorProjectHistoryItemStatus {
+  ERROR
+  WARNING
+  INFO
+  SUCCESS
+  NORMAL
+}
+
+type ReactorProjectHistoryItem {
+  id: Int!
+  project: ReactorProject!
+  type: ReactorProjectHistoryItemType!
+  title: String
+  description: String
+  url: String
+  status: ReactorProjectHistoryItemStatus  
+  data: Any
+  createdBy: User
+  created: Date
+  updated: Date
+}
+
+type ReactorProject {
+  id: String!
   client: ReactoryClient
+  organization: Organization
   businessUnit: BusinessUnit
+  system: ReactorSystem
   fqn: String!
   name: String!
   nameSpace: String!
@@ -195,12 +382,16 @@ type ReactorProject {
   icon: String
   repoPath: String
   repoUrl: String
-  projectType: String!
-  subTypes: [String!]
+  projectTypes: [String!]
   lastSync: Date
   description: String
   tasksUrl: String
+  scoreCards: [ReactorProjectScoreCard]
+  environments: [ReactorProjectEnvironment]  
+  apis: [ReactorProjectApi]
+  apiConnections: [ReactorProjectApiConnection]
   tasks: [ReactorProjectTask]
+  projectMetrics: [ReactorProjectMetrics]
   primaryDocumentation: ReactorProjectDocumentation
   additionalDocumentation: [ReactorProjectDocumentation]
   primarySlack: ReactoryProjectSlack
@@ -212,8 +403,8 @@ type ReactorProject {
   deployments: [ReactorProjectDeployment]
   dashboards: [ReactorProjectDashboard]
   alerts: [ReactorProjectAlerts]
-  processor: String
-  processorOptions: Any
+  processorConfigs: [ReactorProjectProcessingConfig]
+  resources: [ReactoryProjectResource]  
   owner: User
   ownerTeam: Team
   teams: [Team]
@@ -231,6 +422,7 @@ type ReactorProject {
   projectStatus: ReactorProjectStatus!
   processingHistory: [ReactorProjectProcessingEntry]
   security: ReactorProjectSecurity
+  history: [ReactorProjectHistoryItem]
 }
 
 type ReactorPagedProjects {

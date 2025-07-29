@@ -17,6 +17,7 @@ WorldRemit Cluster03 Production,country-service,Live,Quote,,,,https://github.com
 WorldRemit Cluster03 Production,coupon-api,Live,Quote,,,,https://github.com/Zepz-Engineering/coupon-api
 WorldRemit Cluster03 Production,coupon-service-workers,Live,Quote,,,,https://github.com/Zepz-Engineering/coupon-service-workers
 WorldRemit Cluster02 Production,customer-api,Live,Identity,KYC,,,https://github.com/Zepz-Engineering/customer-api
+Zepz Production Cluster,customer-directory,Live,Remitplus,Skunkworks,Gordy and Werner assisting Remittance plus,,https://github.com/Zepz-Engineering/customer-directory
 WorldRemit Cluster02 Production,customer-api-proxy,Live,Identity,KYC,,,https://github.com/Zepz-Engineering/customer-api-proxy
 WorldRemit Cluster02 Production,customer-openid-provider,Live,Identity,Authentication,,,https://github.com/Zepz-Engineering/customer-openid-provider
 WorldRemit Cluster02 Production,customer-pricing-service,Live,Quote,,,,https://github.com/Zepz-Engineering/customer-pricing-service

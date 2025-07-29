@@ -140,6 +140,7 @@ type ReactorFunction {
   name: String!
   description: String
   icon: String
+  inputFormId: String
   parameters: Any
 }
 
@@ -157,6 +158,14 @@ type ReactorToolDefinition {
   function: ReactorFunction
   roles: [String]
   runat: String  
+}
+
+type ReactorPersonaResource {
+  id: String
+  name: String
+  description: String
+  type: String
+  url: String
 }
 
 """
@@ -214,6 +223,12 @@ type ReactorPersona {
   mcp client and server utilities.
   """
   tools: [ReactorToolDefinition]
+
+  """
+  A set of resources that can be used by the persona.
+  """
+  resources: [ReactorPersonaResource]
+
   """
   The date the persona was created.
   """
@@ -222,6 +237,11 @@ type ReactorPersona {
   The date the persona was last updated.
   """
   updatedAt: Date
+
+  """
+  The maximum number of tokens allowed for the persona.
+  """
+  maxTokens: Int
 }
 
 input ReactorMacroInput {
