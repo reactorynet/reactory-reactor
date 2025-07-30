@@ -168,7 +168,8 @@ export default class ReactorConversationService
   }
 
   /**
-   * Calculate and update the token count for a conversation
+   * Calculate and update the token count for a conversation using atomic aggregation
+   * This method uses MongoDB's aggregation pipeline to calculate tokens atomically
    */
   private async updateConversationTokenCount(
     conversationId: string
@@ -179,48 +180,99 @@ export default class ReactorConversationService
       timestamp: new Date().toISOString(),
     });
 
-    const conversation = await ReactorConversationModel.findOne({
-      _id: conversationId,
-      user: this.context.user,
-    })
-      .populate("user")
-      .exec();
+    try {
+      // Use aggregation pipeline to calculate token count atomically
+      const result = await ReactorConversationModel.aggregate([
+        {
+          $match: { 
+            _id: new ObjectId(conversationId),
+            user: this.context.user._id
+          }
+        },
+        {
+          $addFields: {
+            // Calculate total tokens for all messages in history
+            calculatedTokenCount: {
+              $reduce: {
+                input: "$history",
+                initialValue: 0,
+                in: {
+                  $cond: {
+                    if: { $and: [
+                      { $ne: ["$$this.content", null] },
+                      { $eq: [{ $type: "$$this.content" }, "string"] }
+                    ]},
+                    then: { 
+                      $add: [
+                        "$$value", 
+                        // Rough token estimation: content.length / 4 (average)
+                        { $divide: [{ $strLenCP: "$$this.content" }, 4] }
+                      ]
+                    },
+                    else: "$$value"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]).exec();
 
-    if (!conversation) {
-      this.context.error("Conversation not found during token count update", {
+      if (!result || result.length === 0) {
+        this.context.error("Conversation not found during token count update", {
+          conversationId,
+          userId: this.context.user?._id,
+        });
+        throw new Error("Conversation not found");
+      }
+
+      const calculatedTokens = Math.ceil(result[0].calculatedTokenCount || 0);
+
+      // Atomically update the conversation with the new token count
+      const updatedConversation = await ReactorConversationModel.findOneAndUpdate(
+        { 
+          _id: conversationId,
+          user: this.context.user._id
+        },
+        {
+          $set: {
+            tokenCount: calculatedTokens,
+            updated: new Date(),
+          }
+        },
+        { 
+          new: true,
+          runValidators: true
+        }
+      ).exec();
+
+      if (!updatedConversation) {
+        throw new Error("Failed to update conversation token count");
+      }
+
+      // Validate the updated conversation
+      this.validateConversationDocument(
+        updatedConversation,
+        "updateConversationTokenCount",
+        "after_update"
+      );
+
+      this.context.debug("Token count updated successfully", {
         conversationId,
+        oldTokenCount: result[0].tokenCount,
+        newTokenCount: calculatedTokens,
         userId: this.context.user?._id,
       });
-      throw new Error("Conversation not found");
+
+      return calculatedTokens;
+    } catch (error: any) {
+      this.context.error("Error updating conversation token count", {
+        conversationId,
+        userId: this.context.user?._id,
+        error: error.message,
+      });
+      throw new Error(`Failed to update token count: ${error.message}`);
     }
-
-    // Validate the conversation before updating token count
-    this.validateConversationDocument(
-      conversation,
-      "updateConversationTokenCount",
-      "before_update"
-    );
-
-    // Calculate total token count from conversation history
-    let totalTokens = 0;
-    conversation.history.forEach((message) => {
-      if (message.content && typeof message.content === "string") {
-        // Use the chunking service's token estimation method
-        totalTokens += this.chunkingService.estimateTokenCount(message.content);
-      }
-    });
-
-    // Update the conversation with the new token count
-    await ReactorConversationModel.findOneAndUpdate(
-      { _id: conversationId },
-      {
-        tokenCount: totalTokens,
-        updated: new Date(),
-      },
-      { new: true }
-    ).exec();
-
-    return totalTokens;
   }
 
   /**
@@ -281,6 +333,120 @@ export default class ReactorConversationService
       maxTokens,
       shouldTruncate,
     };
+  }
+
+  /**
+   * Atomically update token count and check limits in a single operation
+   * This prevents race conditions between token count updates and limit checks
+   */
+  private async updateTokenCountAndCheckLimits(
+    conversationId: string
+  ): Promise<{
+    currentTokens: number;
+    maxTokens: number | null;
+    exceedsLimit: boolean;
+    shouldTruncate: boolean;
+    percentageUsed: number;
+  }> {
+    this.context.debug("Updating token count and checking limits atomically", {
+      conversationId,
+      userId: this.context.user?._id,
+      timestamp: new Date().toISOString(),
+    });
+
+    try {
+      // Use aggregation pipeline to calculate tokens and check limits atomically
+      const result = await ReactorConversationModel.aggregate([
+        {
+          $match: { 
+            _id: new ObjectId(conversationId),
+            user: this.context.user._id
+          }
+        },
+        {
+          $addFields: {
+            // Calculate total tokens for all messages in history
+            calculatedTokenCount: {
+              $reduce: {
+                input: "$history",
+                initialValue: 0,
+                in: {
+                  $cond: {
+                    if: { $and: [
+                      { $ne: ["$$this.content", null] },
+                      { $eq: [{ $type: "$$this.content" }, "string"] }
+                    ]},
+                    then: { 
+                      $add: [
+                        "$$value", 
+                        // Rough token estimation: content.length / 4 (average)
+                        { $divide: [{ $strLenCP: "$$this.content" }, 4] }
+                      ]
+                    },
+                    else: "$$value"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]).exec();
+
+      if (!result || result.length === 0) {
+        throw new Error("Conversation not found");
+      }
+
+      const conversationData = result[0];
+      const calculatedTokens = Math.ceil(conversationData.calculatedTokenCount || 0);
+      const maxTokens = conversationData.maxTokens;
+      const percentageUsed = maxTokens ? (calculatedTokens / maxTokens) * 100 : 0;
+      
+      const exceedsLimit = maxTokens ? calculatedTokens > maxTokens : false;
+      const shouldTruncate = maxTokens ? calculatedTokens > maxTokens * 1.2 : false; // Truncate if 20% over limit
+
+      // Atomically update the conversation with the new token count
+      await ReactorConversationModel.findOneAndUpdate(
+        { 
+          _id: conversationId,
+          user: this.context.user._id
+        },
+        {
+          $set: {
+            tokenCount: calculatedTokens,
+            updated: new Date(),
+          }
+        },
+        { 
+          new: true,
+          runValidators: true
+        }
+      ).exec();
+
+      this.context.debug("Token count and limits updated successfully", {
+        conversationId,
+        calculatedTokens,
+        maxTokens,
+        exceedsLimit,
+        shouldTruncate,
+        percentageUsed,
+        userId: this.context.user?._id,
+      });
+
+      return {
+        currentTokens: calculatedTokens,
+        maxTokens,
+        exceedsLimit,
+        shouldTruncate,
+        percentageUsed,
+      };
+    } catch (error: any) {
+      this.context.error("Error updating token count and checking limits", {
+        conversationId,
+        userId: this.context.user?._id,
+        error: error.message,
+      });
+      throw new Error(`Failed to update token count and check limits: ${error.message}`);
+    }
   }
 
   /**
@@ -801,29 +967,53 @@ export default class ReactorConversationService
       throw new Error("User not found");
     }
 
-    // before we create we check if the last conversionation with this persona is empty
-    // if it is empty we return the last conversation
-    const lastConversation = await ReactorConversationModel.findOne({
-      personaId: persona.id,
-      user: this.context.user,
-    })
+    // Check if there's an existing empty conversation for this persona and user
+    // Use findOneAndUpdate with atomic operation to prevent race conditions
+    const lastConversation = await ReactorConversationModel.findOneAndUpdate(
+      {
+        personaId: persona.id,
+        user: this.context.user._id,
+        $or: [
+          { history: { $size: 0 } }, // Empty history
+          { 
+            history: { $size: 1 },
+            "history.0.role": "system" // Only system message
+          }
+        ]
+      },
+      {
+        $set: { 
+          started: new Date(),
+          updated: new Date()
+        },
+        $setOnInsert: {
+          // These fields will only be set if no document is found and a new one is created
+          sseSessionId: new ObjectId().toString(),
+        }
+      },
+      { 
+        new: true,
+        sort: { started: -1 }, // Get the most recent one
+        populate: "user"
+      }
+    ).exec();
 
-      .sort({ started: -1 })
-      .populate("user")
-      .exec();
-    if (
-      lastConversation &&
-      lastConversation.history.length === 1 &&
-      lastConversation.history[0].role === "system"
-    ) {
+    if (lastConversation) {
+      // Ensure ID fields are properly set
       if (!lastConversation.id) {
         lastConversation.id = lastConversation._id.toString();        
       }
       if (!lastConversation.sseSessionId) {
         lastConversation.sseSessionId = lastConversation._id.toString();
+        await lastConversation.save();
       }
-      lastConversation.started = new Date();
-      await lastConversation.save();
+      
+      this.context.info("Reusing existing empty conversation", {
+        conversationId: lastConversation._id?.toString(),
+        personaId: persona.id,
+        userId: this.context.user._id,
+        historyLength: lastConversation.history?.length || 0,
+      });
       
       return lastConversation;
     }
@@ -848,22 +1038,42 @@ export default class ReactorConversationService
     };
 
     try {
-      const conversation = new ReactorConversationModel(
-        conversationData
-      ) as unknown as TReactorConversationDocument;
+      // Create conversation data with all required fields including sessionId
+      const sessionId = new ObjectId();
+      const conversationData: any = {
+        _id: sessionId, // Set the _id explicitly to avoid multiple saves
+        personaId: persona.id,
+        user: this.context.user,
+        modelId: persona.modelId,
+        providerId: persona.providerId,
+        history: [],
+        vars: {},
+        meta: {
+          summary: "Reactor Chat Session with agent " + persona.name,
+          title: "Chat with " + persona.name,
+        },
+        macros: [],
+        tools: [],
+        started: new Date(),
+        toolApprovalMode: ToolApprovalMode.PROMPT,
+        tokenCount: 0,
+        maxTokens: persona.maxTokens || 8000, // Default to 8k tokens if not specified
+        sseSessionId: sessionId.toString(),
+        id: sessionId.toString(),
+        updated: new Date(),
+      };
 
-      this.context.debug("Saving new conversation", {
-        personaId: conversation.personaId,
-        userId: conversation.user?.toString(),
+      this.context.debug("Creating new conversation with pre-set IDs", {
+        sessionId: sessionId.toString(),
+        personaId: conversationData.personaId,
+        userId: conversationData.user?.toString(),
         timestamp: new Date().toISOString(),
       });
 
-      await conversation.save();
-
-      const sessionId = conversation._id.toString();
-      conversation.sseSessionId = sessionId;
-      conversation.id = sessionId;
-      await conversation.save();
+      // Create and save conversation in single atomic operation
+      const conversation = await ReactorConversationModel.create(
+        conversationData
+      ) as unknown as TReactorConversationDocument;
 
       // Validate the saved conversation
       this.validateConversationDocument(
@@ -871,11 +1081,6 @@ export default class ReactorConversationService
         "getNewConversation",
         "after_save"
       );
-
-      // update the sessionId and sseSessionId to the conversation
-      conversation.sseSessionId = conversation._id.toString();
-      conversation.id = conversation._id.toString();
-      await conversation.save();
 
       this.context.info("Successfully created new conversation", {
         conversationId: conversation._id?.toString(),
@@ -972,20 +1177,20 @@ export default class ReactorConversationService
 
           // Use findOneAndUpdate to atomically find and update the conversation
           // This prevents race conditions that could lead to duplicate creation
+          const messageToAdd = {
+            id: new ObjectId(),
+            role: role as any,
+            content: message,
+            timestamp: new Date(),
+            tool_name,
+            tool_args,
+            tool_call_id,
+          };
+
           conversation = await ReactorConversationModel.findOneAndUpdate(
             { _id: chatSessionId, user: this.context.user },
             {
-              $push: {
-                history: {
-                  id: new ObjectId(),
-                  role: role as any,
-                  content: message,
-                  timestamp: new Date(),
-                  tool_name,
-                  tool_args,
-                  tool_call_id,
-                },
-              },
+              $push: { history: messageToAdd },
               $set: { updated: new Date() },
             },
             { new: true, upsert: false }
@@ -1000,23 +1205,27 @@ export default class ReactorConversationService
             "existing_conversation"
           );
 
-          // Update token count after adding user message
-          await this.updateConversationTokenCount(conversation._id.toString());
-
-          // Check token limits and truncate if necessary
-          const tokenCheck = await this.checkTokenLimit(
-            conversation._id.toString()
-          );
-          if (tokenCheck.shouldTruncate) {
-            await this.truncateConversationHistory(
-              conversation._id.toString(),
-              tokenCheck.maxTokens * 0.8 // Keep at 80% of limit
-            );
-          }
-
           if (!conversation) {
             throw new Error(
               `Chat session with id ${chatSessionId} not found or you do not have permission to access it.`
+            );
+          }
+
+          // Update token count and check limits in single atomic operation
+          const tokenStatus = await this.updateTokenCountAndCheckLimits(conversation._id.toString());
+          
+          // Check if truncation is needed based on updated token count
+          if (tokenStatus.shouldTruncate) {
+            this.context.warn("Token limit exceeded, truncating conversation history", {
+              conversationId: conversation._id.toString(),
+              currentTokens: tokenStatus.currentTokens,
+              maxTokens: tokenStatus.maxTokens,
+              exceedsBy: tokenStatus.currentTokens - (tokenStatus.maxTokens || 0),
+            });
+            
+            await this.truncateConversationHistory(
+              conversation._id.toString(),
+              (tokenStatus.maxTokens || 8000) * 0.8 // Keep at 80% of limit
             );
           }
         } else {
@@ -1592,7 +1801,7 @@ export default class ReactorConversationService
 
       const fileResult = {
         id: new ObjectId(),
-        role: "tool",
+        role: "tool" as const, // Fix TypeScript error by using const assertion
         name: "attachFiles",
         content: `Files attached successfully.`,
         tool_results: files.map((file) => ({
@@ -1608,8 +1817,28 @@ export default class ReactorConversationService
         timestamp: new Date(),
       };
 
-      conversation.history.push(fileResult);
-      await conversation.save();
+      // Use atomic $push operation instead of push + save to avoid race conditions
+      const updatedConversation = await ReactorConversationModel.findOneAndUpdate(
+        { 
+          _id: chatSessionId,
+          user: this.context.user._id
+        },
+        {
+          $push: { history: fileResult },
+          $set: { updated: new Date() }
+        },
+        { 
+          new: true,
+          runValidators: true
+        }
+      ).exec();
+
+      if (!updatedConversation) {
+        throw new Error("Failed to update conversation with file attachment");
+      }
+
+      // Update token count after adding file attachment message
+      await this.updateConversationTokenCount(chatSessionId);
 
       return {
         __typename: "ReactorChatMessage",
