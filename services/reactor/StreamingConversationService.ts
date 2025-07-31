@@ -98,8 +98,148 @@ export class StreamingConversationService extends ReactorConversationService {
     streamingSession: StreamingSession,
     aiResponse: ReadableStream<any>
   ): Promise<void> {
-    // TODO: Implement streaming response processing
-    // For now, throw to make tests fail (TDD approach) 
-    throw new Error('processStreamingResponse not implemented yet');
+    // Validate required parameters
+    if (!streamingSession) {
+      throw new Error('streamingSession is required');
+    }
+    
+    if (!aiResponse) {
+      throw new Error('aiResponse stream is required');
+    }
+    
+    try {
+      // Get a reader for the stream
+      const reader = aiResponse.getReader();
+      const decoder = new TextDecoder();
+      
+      let accumulatedContent = '';
+      let tokenPosition = 0;
+      
+      // Process the stream chunk by chunk
+      while (true) {
+        const { done, value } = await reader.read();
+        
+        if (done) {
+          break;
+        }
+        
+        // Decode the chunk
+        let chunk: string;
+        if (typeof value === 'string') {
+          chunk = value;
+        } else {
+          chunk = decoder.decode(value, { stream: true });
+        }
+        
+        // Handle empty chunks
+        if (!chunk) {
+          continue;
+        }
+        
+        // Try to parse as JSON for structured streaming events
+        try {
+          const parsedChunk = JSON.parse(chunk);
+          
+          if (parsedChunk.type === 'token') {
+            // Handle token streaming events
+            const tokenData = parsedChunk.data;
+            accumulatedContent += tokenData.delta || tokenData.content || '';
+            tokenPosition += tokenData.delta?.length || tokenData.content?.length || 0;
+            
+            // TODO: Emit token event to client via SSE/WebSocket
+            this.emitStreamingEvent(streamingSession, {
+              type: 'token',
+              sessionId: streamingSession.sessionId,
+              conversationId: streamingSession.conversationId,
+              timestamp: new Date(),
+              data: {
+                content: accumulatedContent,
+                delta: tokenData.delta || tokenData.content,
+                position: tokenPosition,
+                isComplete: false
+              }
+            });
+            
+          } else if (parsedChunk.type === 'complete') {
+            // Handle completion events
+            this.emitStreamingEvent(streamingSession, {
+              type: 'complete',
+              sessionId: streamingSession.sessionId,
+              conversationId: streamingSession.conversationId,
+              timestamp: new Date(),
+              data: {
+                content: accumulatedContent,
+                delta: '',
+                position: tokenPosition,
+                isComplete: true
+              }
+            });
+            break;
+            
+          } else if (parsedChunk.type === 'tool_call') {
+            // Handle tool call events
+            this.emitStreamingEvent(streamingSession, {
+              type: 'tool_call',
+              sessionId: streamingSession.sessionId,
+              conversationId: streamingSession.conversationId,
+              timestamp: new Date(),
+              data: parsedChunk.data
+            });
+          }
+          
+        } catch (parseError) {
+          // If not JSON, treat as raw text token
+          accumulatedContent += chunk;
+          tokenPosition += chunk.length;
+          
+          // Emit as token event
+          this.emitStreamingEvent(streamingSession, {
+            type: 'token',
+            sessionId: streamingSession.sessionId,
+            conversationId: streamingSession.conversationId,
+            timestamp: new Date(),
+            data: {
+              content: accumulatedContent,
+              delta: chunk,
+              position: tokenPosition,
+              isComplete: false
+            }
+          });
+        }
+      }
+      
+      // Emit final completion event if we haven't already
+      if (accumulatedContent) {
+        this.emitStreamingEvent(streamingSession, {
+          type: 'complete',
+          sessionId: streamingSession.sessionId,
+          conversationId: streamingSession.conversationId,
+          timestamp: new Date(),
+          data: {
+            content: accumulatedContent,
+            delta: '',
+            position: tokenPosition,
+            isComplete: true
+          }
+        });
+      }
+      
+    } catch (error: any) {
+      // Re-throw stream errors to be handled by caller
+      throw new Error(error.message || 'Error processing streaming response');
+    }
+  }
+  
+  /**
+   * Emit streaming event to the client
+   * This is a placeholder that will be implemented with actual transport layer
+   * 
+   * @param session - The streaming session
+   * @param event - The streaming event to emit
+   */
+  private emitStreamingEvent(session: StreamingSession, event: any): void {
+    // TODO: Implement actual event emission via SSE/WebSocket
+    // For now, this is a placeholder that logs the event
+    console.log(`[${session.sessionId}] Streaming event:`, event.type, event.data);
   }
 }

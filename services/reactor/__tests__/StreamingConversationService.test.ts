@@ -145,18 +145,81 @@ describe('StreamingConversationService', () => {
       expect(typeof streamingService.processStreamingResponse).toBe('function');
     });
 
-    it('should throw error for not implemented (TDD approach)', async () => {
+    it('should process simple token stream successfully', async () => {
+      const mockTokens = ['Hello', ' ', 'world', '!'];
       const mockStream = new ReadableStream({
         start(controller) {
-          controller.enqueue('token1');
-          controller.enqueue('token2');
+          mockTokens.forEach(token => controller.enqueue(token));
+          controller.close();
+        }
+      });
+
+      // Should complete without throwing
+      await expect(
+        streamingService.processStreamingResponse(mockStreamingSession, mockStream)
+      ).resolves.not.toThrow();
+    });
+
+    it('should handle empty stream gracefully', async () => {
+      const mockStream = new ReadableStream({
+        start(controller) {
           controller.close();
         }
       });
 
       await expect(
         streamingService.processStreamingResponse(mockStreamingSession, mockStream)
-      ).rejects.toThrow('processStreamingResponse not implemented yet');
+      ).resolves.not.toThrow();
+    });
+
+    it('should validate streaming session parameter', async () => {
+      const mockStream = new ReadableStream({
+        start(controller) {
+          controller.enqueue('token');
+          controller.close();
+        }
+      });
+
+      await expect(
+        streamingService.processStreamingResponse(null as any, mockStream)
+      ).rejects.toThrow('streamingSession is required');
+    });
+
+    it('should validate stream parameter', async () => {
+      await expect(
+        streamingService.processStreamingResponse(mockStreamingSession, null as any)
+      ).rejects.toThrow('aiResponse stream is required');
+    });
+
+    it('should handle stream errors gracefully', async () => {
+      const mockStream = new ReadableStream({
+        start(controller) {
+          controller.error(new Error('Stream processing error'));
+        }
+      });
+
+      await expect(
+        streamingService.processStreamingResponse(mockStreamingSession, mockStream)
+      ).rejects.toThrow('Stream processing error');
+    });
+
+    it('should process JSON streaming chunks correctly', async () => {
+      const mockChunks = [
+        { type: 'token', data: { content: 'Hello', delta: 'Hello', position: 0 } },
+        { type: 'token', data: { content: ' world', delta: ' world', position: 5 } },
+        { type: 'complete', data: { content: 'Hello world', isComplete: true } }
+      ];
+      
+      const mockStream = new ReadableStream({
+        start(controller) {
+          mockChunks.forEach(chunk => controller.enqueue(JSON.stringify(chunk)));
+          controller.close();
+        }
+      });
+
+      await expect(
+        streamingService.processStreamingResponse(mockStreamingSession, mockStream)
+      ).resolves.not.toThrow();
     });
   });
 });
