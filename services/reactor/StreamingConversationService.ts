@@ -31,9 +31,59 @@ export class StreamingConversationService extends ReactorConversationService {
    * @returns Promise resolving to either direct response or streaming session initiation
    */
   async sendMessageWithStreaming(args: SendMessageWithStreamingArgs): Promise<any> {
-    // TODO: Implement streaming logic
-    // For now, throw to make tests fail (TDD approach)
-    throw new Error('sendMessageWithStreaming not implemented yet');
+    // Validate required parameters
+    if (!args.personaId) {
+      throw new Error('personaId is required');
+    }
+    
+    if (!args.message) {
+      throw new Error('message is required');
+    }
+    
+    // Validate streaming mode
+    const validStreamingModes = ['none', 'sse', 'websocket'];
+    if (!validStreamingModes.includes(args.streamingMode)) {
+      throw new Error('Invalid streaming mode');
+    }
+    
+    // For non-streaming mode, delegate to base service
+    if (args.streamingMode === 'none') {
+      return this.sendMessage({
+        personaId: args.personaId,
+        chatSessionId: args.chatSessionId,
+        message: args.message,
+        role: 'user'
+      });
+    }
+    
+    // For streaming modes, return session initiation response
+    const sessionId = this.generateSessionId();
+    const endpoint = args.streamingMode === 'sse' 
+      ? `/api/reactor/stream/${sessionId}`
+      : `/api/reactor/ws/${sessionId}`;
+    
+    // TODO: Create actual streaming session here
+    // For now, return the initiation response structure
+    return {
+      __typename: 'ReactorInitiateSSE',
+      sessionId,
+      endpoint,
+      status: 'ready',
+      expiry: new Date(Date.now() + 3600000), // 1 hour from now
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive'
+      }
+    };
+  }
+  
+  /**
+   * Generate a unique session ID
+   * @returns String session ID
+   */
+  private generateSessionId(): string {
+    return `session_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
   }
   
   /**

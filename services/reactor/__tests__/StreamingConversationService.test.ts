@@ -56,10 +56,70 @@ describe('StreamingConversationService', () => {
       expect(typeof streamingService.sendMessageWithStreaming).toBe('function');
     });
 
-    it('should throw error for not implemented (TDD approach)', async () => {
+    it('should delegate to base sendMessage for non-streaming mode', async () => {
+      // Mock the base service method
+      const mockResponse = {
+        __typename: 'ReactorChatMessage',
+        id: 'test-message-id',
+        sessionId: 'test-session-id',
+        content: 'Hello back!',
+        role: 'assistant'
+      };
+      
+      // Spy on the base sendMessage method
+      const sendMessageSpy = jest.spyOn(streamingService, 'sendMessage').mockResolvedValue(mockResponse);
+      
+      const result = await streamingService.sendMessageWithStreaming(mockArgs);
+      
+      expect(sendMessageSpy).toHaveBeenCalledWith({
+        personaId: mockArgs.personaId,
+        chatSessionId: mockArgs.chatSessionId,
+        message: mockArgs.message,
+        role: 'user'
+      });
+      expect(result).toEqual(mockResponse);
+      
+      sendMessageSpy.mockRestore();
+    });
+
+    it('should return ReactorInitiateSSE for SSE streaming mode', async () => {
+      const sseArgs = { ...mockArgs, streamingMode: 'sse' as const };
+      
+      const result = await streamingService.sendMessageWithStreaming(sseArgs);
+      
+      expect(result).toHaveProperty('__typename', 'ReactorInitiateSSE');
+      expect(result).toHaveProperty('sessionId');
+      expect(result).toHaveProperty('endpoint');
+      expect(result).toHaveProperty('status', 'ready');
+      expect(result.endpoint).toMatch(/\/api\/reactor\/stream\//);
+    });
+
+    it('should return ReactorInitiateSSE for WebSocket streaming mode', async () => {
+      const wsArgs = { ...mockArgs, streamingMode: 'websocket' as const };
+      
+      const result = await streamingService.sendMessageWithStreaming(wsArgs);
+      
+      expect(result).toHaveProperty('__typename', 'ReactorInitiateSSE');
+      expect(result).toHaveProperty('sessionId');
+      expect(result).toHaveProperty('endpoint');
+      expect(result).toHaveProperty('status', 'ready');
+      expect(result.endpoint).toMatch(/\/api\/reactor\/ws\//);
+    });
+
+    it('should validate required parameters', async () => {
+      const invalidArgs = { ...mockArgs, personaId: '' };
+      
       await expect(
-        streamingService.sendMessageWithStreaming(mockArgs)
-      ).rejects.toThrow('sendMessageWithStreaming not implemented yet');
+        streamingService.sendMessageWithStreaming(invalidArgs)
+      ).rejects.toThrow('personaId is required');
+    });
+
+    it('should validate streaming mode', async () => {
+      const invalidArgs = { ...mockArgs, streamingMode: 'invalid' as any };
+      
+      await expect(
+        streamingService.sendMessageWithStreaming(invalidArgs)
+      ).rejects.toThrow('Invalid streaming mode');
     });
   });
 
