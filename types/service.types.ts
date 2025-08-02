@@ -521,6 +521,14 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
   }>;
 
   /**
+   * Gets a list of conversations for the user.
+   * @param args 
+   */
+  getConversations(args: {
+    filter?: { personaId?: string; userId?: string; modelId?: string };
+  }): Promise<TReactorConversationDocument[]>;
+
+  /**
    * Clear the truncated history for a conversation.
    * This can be used for cleanup or when you want to free up storage.
    * @param chatSessionId 
@@ -1158,6 +1166,123 @@ export interface IAIProviderService extends Reactory.Service.IReactoryService {
   chat(params: AIChatParams): Promise<AIChatCompletion>;
   chatAudio(params: AIAudioChatParams): Promise<AIChatCompletion>;
   speech2Text(audio: string | Buffer[]): Promise<string>;
+}
+
+/**
+ * Extended AI Provider Service interface with streaming capabilities.
+ * Defines streaming methods for real-time AI interactions.
+ */
+export interface IAIStreamingProviderService extends IAIProviderService {
+  // Streaming Chat Methods
+  chatStream(params: AIChatParams): AsyncIterable<AIStreamingEvent>;
+  chatAudioStream(params: AIAudioChatParams): AsyncIterable<AIStreamingEvent>;
+  
+  // Provider-specific streaming capabilities
+  getStreamingCapabilities(): Promise<AIStreamingCapabilities>;
+}
+
+/**
+ * Streaming capabilities supported by an AI provider
+ */
+export interface AIStreamingCapabilities {
+  /** Whether the provider supports token-by-token streaming */
+  supportsTokenStreaming: boolean;
+  /** Whether the provider supports tool execution streaming */
+  supportsToolStreaming: boolean;
+  /** Whether the provider supports function calling during streaming */
+  supportsFunctionStreaming: boolean;
+  /** Maximum concurrent streaming sessions */
+  maxConcurrentStreams?: number;
+  /** Supported streaming formats */
+  supportedFormats: ('json' | 'text' | 'sse')[];
+}
+
+/**
+ * Streaming event types from AI providers
+ */
+export type AIStreamingEventType = 
+  | 'token' 
+  | 'tool_call' 
+  | 'function_call' 
+  | 'error' 
+  | 'complete'
+  | 'metadata';
+
+/**
+ * Base streaming event structure
+ */
+export interface AIStreamingEvent {
+  /** Type of streaming event */
+  type: AIStreamingEventType;
+  /** Event timestamp */
+  timestamp: Date;
+  /** Optional session identifier */
+  sessionId?: string;
+  /** Event data payload */
+  data: any;
+}
+
+/**
+ * Token streaming event data
+ */
+export interface AITokenStreamingData {
+  /** Token content */
+  content: string;
+  /** Token delta (incremental change) */
+  delta: string;
+  /** Position in the response */
+  position: number;
+  /** Whether this is the final token */
+  isComplete: boolean;
+  /** Optional token metadata */
+  metadata?: {
+    logprobs?: number;
+    finish_reason?: string;
+  };
+}
+
+/**
+ * Tool call streaming event data
+ */
+export interface AIToolCallStreamingData {
+  /** Tool call identifier */
+  id: string;
+  /** Tool/function name */
+  name: string;
+  /** Tool arguments (may be partial during streaming) */
+  arguments: string;
+  /** Whether the tool call is complete */
+  isComplete: boolean;
+  /** Tool execution result (if available) */
+  result?: any;
+}
+
+/**
+ * Error streaming event data
+ */
+export interface AIErrorStreamingData {
+  /** Error code */
+  code: string;
+  /** Error message */
+  message: string;
+  /** Optional error details */
+  details?: any;
+}
+
+/**
+ * Completion streaming event data
+ */
+export interface AICompletionStreamingData {
+  /** Complete response content */
+  content: string;
+  /** Completion metadata */
+  metadata: {
+    totalTokens: number;
+    promptTokens: number;
+    completionTokens: number;
+    finishReason: string;
+    model: string;
+  };
 }
 
 export default IOpenAIService;

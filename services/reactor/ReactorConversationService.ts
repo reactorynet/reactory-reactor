@@ -1439,7 +1439,11 @@ export default class ReactorConversationService
       query.user = this.context.user;
     }
 
-    return ReactorConversationModel.find(query).populate("user").exec();
+    // ensure the query doesn't return any 
+    // results that don't have an _id.
+    query._id = { $ne: null };
+
+    return await ReactorConversationModel.find(query).populate("user").exec();    
   }
 
   /**
@@ -1518,6 +1522,7 @@ export default class ReactorConversationService
     // Use findOneAndUpdate with atomic operation to prevent race conditions
     const lastConversation = await ReactorConversationModel.findOneAndUpdate(
       {
+        _id: { $ne: null },
         personaId: persona.id,
         user: this.context.user._id,
         $or: [

@@ -178,6 +178,25 @@ input ReactorSendMessageInput {
   personaId: String!
   chatSessionId: String
   message: String!
+  streamingMode: StreamingMode
+}
+
+"""
+Enum representing different streaming modes for real-time message delivery.
+"""
+enum StreamingMode {
+  """
+  No streaming - traditional request/response mode
+  """
+  NONE
+  """
+  Server-Sent Events streaming for real-time token delivery
+  """
+  SSE
+  """
+  WebSocket streaming for bidirectional real-time communication
+  """
+  WEBSOCKET
 }
 
 """
@@ -247,6 +266,7 @@ extend type Mutation {
   """
   Sends a message to a persona and returns either a direct response
   or SSE connection details for streaming responses.
+  Supports optional streaming mode parameter for real-time delivery.
   """
   ReactorSendMessage(message: ReactorSendMessageInput!): ReactorChatResponse
 
