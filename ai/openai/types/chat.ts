@@ -154,6 +154,8 @@ export interface MCPClient {
  * Represents the state of a chat session.
  */
 export type ChatState = {
+  __typename?: "ReactorChatState" 
+
   /**
    * The unique identifier for the chat session. This will be null
    * until the chat session is persisted to the database.

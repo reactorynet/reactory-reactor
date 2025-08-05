@@ -272,9 +272,17 @@ input ReactorToolDefinitionInput {
   function: ReactorFunctionInput
 }
 
+enum ReactorPromptMergeStrategy {
+  append
+  prepend
+  replace
+}
+
 input ReactorInitSession { 
   personaId: String!
   message: String
+  systemPrompt: String
+  promptMergeStrategy: ReactorPromptMergeStrategy
   macros: [ReactorMacroInput]
   tools: [ReactorToolDefinitionInput]
   toolApprovalMode: ReactorToolApprovalMode

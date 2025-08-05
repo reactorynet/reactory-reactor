@@ -34,6 +34,8 @@ import {
   ChatCompletionToolMessageParam,
   ChatCompletionUserMessageParam,
 } from "openai/resources";
+import path from "path";
+
 @service({
   id: "reactor.GoogleAIService@1.0.0",
   name: "Google AI Service",
@@ -175,28 +177,6 @@ class GoogleAIService extends AIProviderBase {
       };
       functions.push(functionDeclaration);
     });
-    // const macros = this.chatState.macros;
-
-    // macros.forEach((macro: MacroComponentDefinition<unknown>) => {
-    //   if (macro.tools && macro.tools.length > 0) {
-    //     macro.tools.forEach((tool: MacroToolDefinition) => {
-    //       const paramProps = tool.function.parameters.properties ?? {};
-    //       const paramRequired = tool.function.parameters.required ?? [];
-    //       const functionDeclaration: FunctionDeclaration = {
-    //         name: tool.function.name,
-    //         parameters: {
-    //           type: Type.OBJECT,
-    //           description:
-    //             tool.function.description ??
-    //             `Execute the ${tool.function.name} function.`,
-    //           properties: this.toPropertiesRecord(paramProps),
-    //           ...(paramRequired.length > 0 ? { required: paramRequired } : {}),
-    //         },
-    //       };
-    //       functions.push(functionDeclaration);
-    //     });
-    //   }
-    // });
 
     return [
       {
@@ -422,11 +402,21 @@ class GoogleAIService extends AIProviderBase {
 
       // Convert history to Google AI format
       // get the system instruction from the first message if it exists
-      const systemInstruction =
+      let systemInstruction =
         history.find((msg) => msg.role === "system")?.content ?? "";
 
       const googleHistory: any[] = [];
       // add the system instruction to the history as a user message
+
+      // add the user information to the system instruction
+      systemInstruction = `
+      ## User Information
+      name: ${this.chatState.user.name}.
+      email: ${this.chatState.user.email}.
+      id: ${this.chatState.user._id}.
+      homeFolder: ${path.join(process.env.APP_DATA_ROOT || process.cwd(), 'profiles', this.chatState.user._id.toString())}.
+      `;
+
       googleHistory.push({
         role: "user",
         parts: [{ text: systemInstruction }],

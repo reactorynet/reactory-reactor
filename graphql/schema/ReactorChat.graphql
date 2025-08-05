@@ -8,6 +8,15 @@ type ReactorChatMessage {
   """
   sessionId: String!
   """
+  The token pressure for the session.
+  """
+  tokenPressure: Float
+  """
+  The total token count for the message, including both input and output tokens.
+  This is used to track the overall token usage for the conversation.
+  """
+  tokenCount: Int
+  """
   The ID of the message.
   """
   id: String
@@ -145,6 +154,11 @@ type ReactorChatState {
   hasMcpClient: Boolean
   mcpSessions: [ReactorMCPSession]
   toolApprovalMode: ReactorToolApprovalMode
+  """
+  Files that have been attached to the chat session.
+  This includes both regular files and audio files.
+  """
+  files: [ReactoryFile]  
 }
 
 """
@@ -223,6 +237,10 @@ input ReactorToolExecuteInput {
   args: Any
 }
 
+input ReactorConversationLoadOptions {
+  showAllFiles: Boolean
+}
+
 union ReactorChatStateOrError = ReactorChatState | ReactorErrorResponse
 
 
@@ -237,7 +255,7 @@ extend type Query {
   """
   Retrieves a specific chat conversation by its ID.
   """
-  ReactorConversation(id: String!): ReactorChatStateOrError
+  ReactorConversation(id: String!, loadOptions: ReactorConversationLoadOptions): ReactorChatStateOrError
 
   """
   Lists all available AI personas that the current user can access.

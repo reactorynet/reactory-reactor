@@ -45,8 +45,7 @@ export type ReactorConversationHistoryItem = ChatHistoryItem & {
 export type ReactorConversationHistory = ReactorConversationHistoryItem[];
 
 export interface ReactorConversationDocument {
-  //unique id for the conversation
-  id: string | ObjectId
+  _id: ObjectId
   // The bot persona id
   personaId: string
   // The date the conversation was started
@@ -115,7 +114,6 @@ const ReactorConversationHistorySchema = new Schema({
 });
 
 const ReactorConversationSchema = new Schema({
-  id: ObjectId,
   // the bot id is the persona id we are using for the conversation
   personaId: {
     type: String,
@@ -179,6 +177,10 @@ const ReactorConversationSchema = new Schema({
     type: Number,
     default: null,
     min: 0,
+  },
+  files: {
+    type: ObjectId,
+    ref: 'ReactoryFile',
   },
   // The truncated history - messages removed to stay within token limits
   truncatedHistory: {

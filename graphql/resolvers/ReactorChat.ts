@@ -16,6 +16,7 @@ import {
 import ApiError from "exceptions";
 import Reactory from "@reactory/reactory-core";
 import logger from "@reactory/server-core/logging";
+import { ReactorConversation, ReactorConversationDocument } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 
 @resolver
 class ReactorChatResolver {
@@ -56,7 +57,7 @@ class ReactorChatResolver {
         context.getService<IReactorConversationsService>(
           "reactor.ReactorConversationService@1.0.0"
         );
-      const conversation = await conversationService.loadChatSession(args.id);
+      const conversation = await conversationService.getChatSession({ id: args.id });
 
       if (!conversation) {
         throw new ApiError("NotFoundError", {
@@ -164,19 +165,26 @@ class ReactorChatResolver {
 
   @property("ReactorChatState", "id")
   async ReactorChatStateId(
-    chatState: ChatState,
+    chatState: ReactorConversation | ChatState,
     _: any,
     context: Reactory.Server.IReactoryContext
   ) {
-    if ((chatState.id === null || chatState.id === undefined) && (chatState._id === null || chatState._id === undefined)) {
-      throw new ApiError("InvalidInputError", {
-        message: "Chat state ID is required",
-        code: "INVALID_INPUT",
-        timestamp: new Date(),
-        recoverable: true,
-      });
+
+    if ((chatState as ChatState).__typename === "ReactorChatState" && 
+    (chatState as ChatState).id) {
+      return (chatState as ChatState).id;
     }
-    return chatState?.id || chatState?._id?.toString();
+
+    if ((chatState as ReactorConversation)._id) {
+      return (chatState as ReactorConversation)._id.toString();
+    }
+        
+    throw new ApiError("InvalidInputError", {
+      message: "Chat state ID is required",
+      code: "INVALID_INPUT",
+      timestamp: new Date(),
+      recoverable: true,
+    });    
   }
 
   @property("ReactorChatState", "user")
@@ -276,6 +284,35 @@ class ReactorChatResolver {
     // get the presure from the tokenCount and maxTokens
     const tokenPressure = chatState?.tokenCount / chatState?.maxTokens;
     return tokenPressure || 0;
+  }
+
+  @property("ReactorChatState", "files")
+  async ReactorChatStateFiles(
+    chatState: ChatState,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!chatState?.id) {
+      return [];
+    }
+
+    try {
+      const fileService: Reactory.Service.IReactoryFileService = context.getService('core.ReactoryFileService@1.0.0') as Reactory.Service.IReactoryFileService;
+      
+      // Get files using the same uploadContext pattern used in ReactorAttachFile
+      const uploadContext = `reactor_chat_file::${chatState.id}`;
+      
+      // Find files with the specific upload context for this chat session
+      const files = await fileService.getFileModelsForContext(uploadContext);
+
+      return files || [];
+    } catch (error) {
+      logger.error('Error retrieving chat files', { 
+        chatSessionId: chatState.id, 
+        error: error.message 
+      });
+      return [];
+    }
   }
 
   @mutation("ReactorSendMessage")

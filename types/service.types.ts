@@ -475,6 +475,14 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
   loadChatSession(chatSessionId: string): Promise<TReactorConversationDocument | null>;
 
   /**
+   * Gets a chat session by its ID without user authentication.
+   * This method is designed for external access like GraphQL resolvers.
+   */
+  getChatSession(args: { id: string }): Promise<TReactorConversationDocument & {
+    context?: Reactory.Server.IReactoryContext;
+  }>;
+
+  /**
    * Sets the tool approval mode for the chat session.
    * This allows you to control how tools are approved for use in the chat session.
    * @param chatSessionId 
