@@ -11,7 +11,16 @@ import {
   AIAudioChatParams,
   AIChatCompletion,
 } from "../../../types/model.types";
-import { IAIPersona } from "../../../types/service.types";
+import {
+  AICompletionStreamingData,
+  AIErrorStreamingData,
+  AIStreamingCapabilities,
+  AIStreamingEvent,
+  AIStreamingEventType,
+  AITokenStreamingData,
+  AIToolCallStreamingData,
+  IAIPersona,
+} from "../../../types/service.types";
 import AIPersonaProvider from "../AIPersonaProvider";
 import AIProviderBase from "./AIProviderBase";
 import { AIProviderError } from "./AIProviderError";
@@ -23,6 +32,7 @@ import {
 } from "modules/reactory-reactor/ai/openai/types/chat";
 import {
   ChatHistoryItem,
+  ReactorConversationHistory,
   ReactorConversationHistoryItem,
   ReactorToolResult,
   ValidProviderResponseTypes,
@@ -35,6 +45,9 @@ import {
   ChatCompletionUserMessageParam,
 } from "openai/resources";
 import path from "path";
+import { CompletionStreamingEvent, ErrorStreamingEvent, StreamingEvent, StreamingEventType, StreamingMode, TokenStreamingEvent, ToolCallStreamingEvent } from "../types/streaming.types";
+import { StreamingSessionManager } from "../StreamingSessionManager";
+import { StreamingTransportManager } from "../StreamingTransportManager";
 
 @service({
   id: "reactor.GoogleAIService@1.0.0",
@@ -48,6 +61,8 @@ import path from "path";
     { id: "core.FetchService@1.0.0", alias: "fetchService" },
     { id: "reactor.AIPersonaProvider@1.0.0", alias: "personaProvider" },
     { id: "reactor.ReactorMacroService@1.0.0", alias: "macroService" },
+    { id: "reactor.StreamingTransportManager@1.0.0", alias: "streamingTransportManager" },
+    { id: "reactor.StreamingSessionManager@1.0.0", alias: "streamingSessionManager" },
   ],
 })
 class GoogleAIService extends AIProviderBase {
@@ -57,9 +72,26 @@ class GoogleAIService extends AIProviderBase {
   userService: Reactory.Service.IReactoryUserService;
   fetchService: Reactory.Service.IFetchService;
   macroService: ReactorMacroService;
+  streamingMode: StreamingMode = StreamingMode.NONE;
+  streamingSessionManager: StreamingSessionManager;
+  streamingTransportManager: StreamingTransportManager; 
 
   constructor(props: any, context: Reactory.Server.IReactoryContext) {
     super(props, context);
+    this.streamingMode = props.streamingMode || StreamingMode.NONE;
+  }
+
+  /**
+   * Get streaming capabilities for Google AI/Gemini
+   */
+  async getStreamingCapabilities(): Promise<AIStreamingCapabilities> {
+    return {
+      supportsTokenStreaming: true,
+      supportsToolStreaming: true,
+      supportsFunctionStreaming: true,
+      maxConcurrentStreams: 10,
+      supportedFormats: ["json", "text", "sse"],
+    };
   }
 
   protected async initializeClient(persona: IAIPersona): Promise<void> {
@@ -171,9 +203,11 @@ class GoogleAIService extends AIProviderBase {
         parameters: {
           type: Type.OBJECT,
           description: tool.function.description,
-          properties: this.toPropertiesRecord(tool.function.parameters.properties),
+          properties: this.toPropertiesRecord(
+            tool.function.parameters.properties
+          ),
           required: tool.function.parameters.required,
-        }
+        },
       };
       functions.push(functionDeclaration);
     });
@@ -254,18 +288,23 @@ class GoogleAIService extends AIProviderBase {
     ) {
       for (const toolCall of msg.tool_calls) {
         // Google expects functionCall in a specific format
-        let args = toolCall.function?.arguments ?? (toolCall as any).arguments ?? {};
-        
+        let args =
+          toolCall.function?.arguments ?? (toolCall as any).arguments ?? {};
+
         // If args is a string, try to parse it as JSON
         if (typeof args === "string") {
           try {
             args = JSON.parse(args);
           } catch (e) {
             // If parsing fails, use as-is
-            this.context.warn("Failed to parse function arguments as JSON", { args }, "GoogleAIService");
+            this.context.warn(
+              "Failed to parse function arguments as JSON",
+              { args },
+              "GoogleAIService"
+            );
           }
         }
-        
+
         parts.push({
           functionCall: {
             name: toolCall.function?.name || (toolCall as any).name,
@@ -283,17 +322,21 @@ class GoogleAIService extends AIProviderBase {
     ) {
       for (const toolResult of msg.tool_results) {
         let response = toolResult?.content ?? toolResult?.result ?? toolResult;
-        
+
         // If response is a string, try to parse it as JSON
         if (typeof response === "string") {
           try {
             response = JSON.parse(response);
           } catch (e) {
             // If parsing fails, use as-is
-            this.context.warn("Failed to parse tool result response as JSON", { response }, "GoogleAIService");
+            this.context.warn(
+              "Failed to parse tool result response as JSON",
+              { response },
+              "GoogleAIService"
+            );
           }
         }
-        
+
         parts.push({
           functionResponse: {
             name: toolResult.tool_name || toolResult.name,
@@ -410,26 +453,31 @@ class GoogleAIService extends AIProviderBase {
 
       // add the user information to the system instruction
       systemInstruction = `
+      ${systemInstruction}
       ## User Information
-      name: ${this.chatState.user.name}.
+      name: ${this.chatState.user.firstName} ${this.chatState.user.lastName}.
       email: ${this.chatState.user.email}.
       id: ${this.chatState.user._id}.
-      homeFolder: ${path.join(process.env.APP_DATA_ROOT || process.cwd(), 'profiles', this.chatState.user._id.toString())}.
+      homeFolder: ${path.join(
+        process.env.APP_DATA_ROOT || process.cwd(),
+        "profiles",
+        this.chatState.user._id.toString(),
+        "home"
+      )}.
       `;
 
-      googleHistory.push({
-        role: "user",
-        parts: [{ text: systemInstruction }],
-      });
+      // googleHistory.push({
+      //   role: "user",
+      //   parts: [{ text: systemInstruction }],
+      // });
 
-      // add a simulated assistant message to indicate a response to the system instruction
-      googleHistory.push({
-        role: "model",
-        parts: [{ text: "I'm ready to help you with your request." }],
-      });
+      // // add a simulated assistant message to indicate a response to the system instruction
+      // googleHistory.push({
+      //   role: "model",
+      //   parts: [{ text: "I'm ready to help you with your request." }],
+      // });
 
       history.forEach((msg) => {
-        
         let googleRole = "user";
         let parts: any[] = [];
         switch (msg.role) {
@@ -461,17 +509,18 @@ class GoogleAIService extends AIProviderBase {
         model: this.model.name,
         history: googleHistory,
         config: {
+          candidateCount: 1,
           tools: tools,
           toolConfig: {
             functionCallingConfig: {
               mode: FunctionCallingConfigMode.AUTO, // Automatically determine when to call functions
             },
           },
-          // systemInstruction,
+          systemInstruction,
           temperature: 0.7,
           topP: 1.0,
           frequencyPenalty: 0.0,
-          presencePenalty: 0.0,
+          presencePenalty: 0.0,          
         },
       });
     } catch (error) {
@@ -480,18 +529,380 @@ class GoogleAIService extends AIProviderBase {
         { error, historyLength: history.length },
         "GoogleAIService.createChatSession"
       );
-      
+
       // Return null instead of throwing to allow fallback handling
       return null;
     }
   }
 
+  /**
+   * Create a token streaming event
+   */
+  private createTokenEvent(
+    content: string,
+    delta: string,
+    position: number,
+    isComplete: boolean = false,
+    sessionId?: string
+  ): TokenStreamingEvent {
+    const tokenData: AITokenStreamingData = {
+      content,
+      delta,
+      position,
+      isComplete,
+    };
+    return this.createStreamingEvent(StreamingEventType.TOKEN, tokenData, sessionId, sessionId) as TokenStreamingEvent;
+  }
+
+  /**
+   * Create a tool call streaming event
+   */
+  private createToolCallEvent(
+    id: string,
+    name: string,
+    toolArguments: string,
+    isComplete: boolean = false,
+    result?: any,
+    sessionId?: string
+  ): ToolCallStreamingEvent {
+    // Ensure we have a valid ID - if none provided, generate one
+    const toolCallId = id || new ObjectId().toString();
+    
+    const toolData: AIToolCallStreamingData = {
+      id: toolCallId,
+      name,
+      arguments: toolArguments,
+      isComplete,
+      result,
+    };
+    
+    console.log(`🔧 [GoogleAIService] Creating tool call event with data:`, toolData);
+    
+    return this.createStreamingEvent(StreamingEventType.TOOL_CALL, toolData, sessionId, sessionId) as ToolCallStreamingEvent;
+  }
+
+  /**
+   * Create an error streaming event
+   */
+  private createErrorEvent(
+    code: string,
+    message: string,
+    details?: any,
+    sessionId?: string
+  ): ErrorStreamingEvent {
+    const errorData: AIErrorStreamingData = {
+      code,
+      message,
+      details,
+    };
+    return this.createStreamingEvent(StreamingEventType.ERROR, errorData, sessionId) as ErrorStreamingEvent;
+  }
+
+  /**
+   * Create a completion streaming event
+   */
+  private createCompletionEvent(
+    content: string,
+    metadata: {
+      totalTokens: number;
+      promptTokens: number;
+      completionTokens: number;
+      finishReason: string;
+      model: string;
+    },
+    sessionId?: string
+  ): CompletionStreamingEvent {
+    const completionData: AICompletionStreamingData = {
+      content,
+      metadata,
+    };
+    return this.createStreamingEvent(StreamingEventType.COMPLETE, completionData, sessionId, sessionId) as CompletionStreamingEvent;
+  }
+
+  /**
+   * Create streaming event with consistent structure
+   */
+  private createStreamingEvent(
+    type: StreamingEventType,
+    data: any,
+    sessionId?: string,
+    conversationId?: string,
+    messageId?: string
+  ): StreamingEvent {
+    return {
+      type,
+      timestamp: new Date(),
+      sessionId,
+      messageId,
+      data,
+      conversationId,
+    };
+  }
+
+  /**
+   * Process function calls and emit tool call events
+   */
+  private async *processFunctionCalls(
+    functionCalls: any[],
+    sessionId?: string
+  ): AsyncIterable<AIStreamingEvent> {
+    for (const functionCall of functionCalls) {
+      const toolCallId = new ObjectId().toString();
+
+      yield this.createToolCallEvent(
+        toolCallId,
+        functionCall.name,
+        JSON.stringify(functionCall.args || {}),
+        true,
+        undefined,
+        sessionId
+      );
+    }
+  }
+
+  /**ß
+   * Add assistant message to chat history
+   */
+  private addAssistantMessageToHistory(content: string): void {
+    if (content) {
+      this.chatState.history.push({
+        id: new ObjectId(),
+        role: "assistant",
+        content,
+        timestamp: new Date(),
+        tool_calls: [],
+        tool_results: [],
+      } as ReactorConversationHistoryItem);
+    }
+  }
+
+  private async handleStreamingRequest(args: { 
+    sessionId: string; // This is the conversation ID (chatSessionId)
+    message: string; 
+    persona: IAIPersona; 
+    history: ReactorConversationHistory; 
+    chat: GoogleGenAI.Chat;
+    messageId?: string; 
+    }): Promise<GoogleGenAI.GenerateContentResponse> {
+    
+    const { sessionId, message, persona, history, messageId } = args;
+    const chat = args.chat;
+
+    console.log(`🔧 [GoogleAIService] handleStreamingRequest started:`, {
+      sessionId,
+      messageLength: message.length,
+      messageId,
+      historyLength: history.length,
+      hasStreamingTransportManager: !!this.streamingTransportManager
+    });
+
+    let result: GoogleGenAI.GenerateContentResponse = null;
+    let accumulatedText = "";
+    let accumulatedFunctionCalls: any[] = [];
+    let totalTokens = 0;
+    let promptTokens = 0;
+    let completionTokens = 0;
+    let finishReason: GoogleGenAI.FinishReason = GoogleGenAI.FinishReason.STOP;
+    let modelName = "";
+    
+    const response = await chat.sendMessageStream({
+      message,
+      config: persona.messageConfig,
+      
+    });
+
+    console.log(`🔧 [GoogleAIService] Starting to process streaming response for session: ${sessionId}`);
+    
+    for await (const chunk of response) {
+      let event: StreamingEvent;
+      
+      console.log(`🔧 [GoogleAIService] Processing chunk:`, {
+        sessionId,
+        messageId,
+        hasText: !!chunk.text,
+        hasFunctionCalls: !!(chunk.functionCalls && chunk.functionCalls.length > 0),
+        textLength: chunk.text?.length || 0,
+        functionCallsCount: chunk.functionCalls?.length || 0
+      });
+      
+      // Initialize result with the first chunk
+      if (result === null) {
+        result = chunk;        
+      }
+      
+      // Handle text content
+      if (chunk.text) {        
+        accumulatedText += chunk.text;
+        event = this.createTokenEvent(chunk.text, chunk.text, accumulatedText.length, false, sessionId);
+        event.messageId = messageId;
+        event.conversationId = sessionId; // Add conversationId field
+        console.log(`🔧 [GoogleAIService] Sending token event for sessionId: ${sessionId}, text: "${chunk.text}"`);
+        
+        try {
+          await this.streamingTransportManager.sendEventToSession(sessionId, event as TokenStreamingEvent);
+          console.log(`✅ [GoogleAIService] Token event sent successfully`);
+        } catch (error) {
+          console.error(`❌ [GoogleAIService] Failed to send token event:`, error);
+          throw error;
+        }
+      } 
+      
+      // Handle function calls
+      if (chunk.functionCalls && chunk.functionCalls.length > 0) {
+        console.log(`🔧 [GoogleAIService] Processing function calls:`, {
+          sessionId,
+          messageId,
+          functionCallsCount: chunk.functionCalls.length,
+          functionCalls: chunk.functionCalls.map(fc => ({ id: fc.id, name: fc.name }))
+        });
+        
+        for (const functionCall of chunk.functionCalls) {
+          // Generate a unique ID for the function call since Google doesn't provide one
+          const functionCallId = functionCall.id || new ObjectId().toString();
+          
+          // Check if we already have this function call
+          const existingCallIndex = accumulatedFunctionCalls.findIndex(fc => fc.id === functionCallId);
+          if (existingCallIndex >= 0) {
+            // Update existing function call
+            accumulatedFunctionCalls[existingCallIndex] = {
+              ...accumulatedFunctionCalls[existingCallIndex],
+              ...functionCall,
+              id: functionCallId // Ensure the ID is set
+            };
+            console.log(`🔧 [GoogleAIService] Updated existing function call: ${functionCall.name}`);
+          } else {
+            // Add new function call with generated ID
+            accumulatedFunctionCalls.push({
+              ...functionCall,
+              id: functionCallId // Ensure the ID is set
+            });
+            console.log(`🔧 [GoogleAIService] Added new function call: ${functionCall.name} with ID: ${functionCallId}`);
+          }
+          
+          event = this.createToolCallEvent(
+            functionCallId, // Use the generated ID
+            functionCall.name, 
+            JSON.stringify(functionCall.args || {}), 
+            true, 
+            undefined, 
+            sessionId
+          );
+          event.messageId = messageId;
+          event.conversationId = sessionId; // Add conversationId field
+          
+          console.log(`🔧 [GoogleAIService] Created tool call event:`, {
+            sessionId,
+            messageId,
+            eventType: event.type,
+            eventData: event.data,
+            functionCallId: functionCallId,
+            functionName: functionCall.name
+          });
+          
+          try {
+            console.log(`🔧 [GoogleAIService] Sending tool call event for sessionId: ${sessionId}, function: ${functionCall.name}`);
+            await this.streamingTransportManager.sendEventToSession(sessionId, event as ToolCallStreamingEvent);
+            console.log(`✅ [GoogleAIService] Tool call event sent successfully for function: ${functionCall.name}`);
+          } catch (error) {
+            console.error(`❌ [GoogleAIService] Failed to send tool call event:`, error);
+            console.error(`❌ [GoogleAIService] Error details:`, {
+              errorMessage: error.message,
+              errorStack: error.stack,
+              errorName: error.name,
+              sessionId,
+              messageId,
+              functionCallId: functionCallId,
+              functionName: functionCall.name
+            });
+            throw error;
+          }
+        }
+      }
+      
+      // Handle candidates and metadata
+      if (chunk.candidates && chunk.candidates.length > 0) {
+        for (const candidate of chunk.candidates) {
+          // Update finish reason if present
+          if (candidate.finishReason) {
+            finishReason = candidate.finishReason;
+            console.log(`🔧 [GoogleAIService] Updated finish reason: ${finishReason}`);
+          }                  
+        }
+      }
+    }
+
+    console.log(`🔧 [GoogleAIService] Streaming completed, sending completion event for session: ${sessionId}`);
+
+    // Send completion event
+    const completionEvent = this.createCompletionEvent(
+      accumulatedText,
+      {
+        totalTokens,
+        promptTokens,
+        completionTokens,
+        finishReason,
+        model: modelName,
+      },
+      sessionId
+    );
+    completionEvent.messageId = messageId;
+    completionEvent.conversationId = sessionId; // Add conversationId field
+    
+    console.log(`🔧 [GoogleAIService] Sending completion event:`, {
+      sessionId,
+      messageId,
+      eventType: completionEvent.type,
+      eventData: completionEvent.data,
+      textLength: accumulatedText.length
+    });
+    
+    try {
+      await this.streamingTransportManager.sendEventToSession(sessionId, completionEvent);
+      console.log(`✅ [GoogleAIService] Completion event sent successfully`);
+    } catch (error) {
+      console.error(`❌ [GoogleAIService] Failed to send completion event:`, error);
+      throw error;
+    }
+
+    // Update the result with accumulated data
+    if (result && result.candidates && result.candidates.length > 0) {
+      // Update the first candidate with accumulated content
+      const candidate = result.candidates[0];
+      
+      // Update content parts
+      if (candidate.content && candidate.content.parts) {
+        // Clear existing parts and add accumulated text
+        candidate.content.parts = [];
+        if (accumulatedText) {
+          candidate.content.parts.push({ text: accumulatedText });
+        }
+        
+        // Add function calls if any
+        for (const functionCall of accumulatedFunctionCalls) {
+          candidate.content.parts.push({ functionCall });
+        }
+      }
+      
+      // Update finish reason
+      candidate.finishReason = finishReason;
+      
+      console.log(`🔧 [GoogleAIService] Final result updated:`, {
+        sessionId,
+        messageId,
+        hasText: !!accumulatedText,
+        textLength: accumulatedText.length,
+        functionCallsCount: accumulatedFunctionCalls.length,
+        finishReason
+      });
+    }
+
+    return result;
+  }
+
   private async getAIResponse(
     message: string,
     role: "user" | "assistant" | "tool" | "system" = "user",
-    tool_name?: string,
-    tool_args?: any,
-    tool_call_id?: string
+    messageId?: string
   ): Promise<AIChatCompletion> {
     try {
       // get the persona from the chat state
@@ -501,8 +912,6 @@ class GoogleAIService extends AIProviderBase {
 
       // Handle tool results differently - add them to history and get next response
       if (role === "tool") {
-
-   
         // Create a new chat session with updated history
         const chat = await this.createChatSession(this.chatState.history);
         if (!chat) {
@@ -511,7 +920,7 @@ class GoogleAIService extends AIProviderBase {
 
         // Send an empty message to get the next response from the AI
         const result = await chat.sendMessage({
-          config: persona.messageConfig,
+          config: persona.messageConfig,          
           message: "",
         });
 
@@ -584,11 +993,23 @@ class GoogleAIService extends AIProviderBase {
           "GoogleAIService.getAIResponse"
         );
 
-        const result = await chat.sendMessage({
-          config: persona.messageConfig,
-          message,
-        });
-
+        let result: GoogleGenAI.GenerateContentResponse;
+        if (this.streamingMode === StreamingMode.SSE) {
+          result = await this.handleStreamingRequest({
+            sessionId: this.chatState.id,
+            message,
+            persona: this.chatState.persona,
+            history: this.chatState.history,
+            chat: chat,
+            messageId,
+          });                              
+        } else {
+          result = await chat.sendMessage({
+            config: persona.messageConfig,
+            message,
+          });
+        }
+        
         this.context.log(
           `Received response from Google AI`,
           { result: JSON.stringify(result, null, 2) },
@@ -606,8 +1027,11 @@ class GoogleAIService extends AIProviderBase {
             "I received an invalid response from the AI service. Please try again."
           );
         }
-        
-        if (!Array.isArray(result.candidates) || result.candidates.length === 0) {
+
+        if (
+          !Array.isArray(result.candidates) ||
+          result.candidates.length === 0
+        ) {
           this.context.error(
             "No candidates returned from Google AI",
             { result },
@@ -617,12 +1041,13 @@ class GoogleAIService extends AIProviderBase {
             "I didn't receive a proper response from the AI service. Please try again."
           );
         }
-        
+
         const candidate = result.candidates[0];
-        
+
         try {
-          const { responseText, functionCalls } = this.extractGeminiCandidate(candidate);
-          
+          const { responseText, functionCalls } =
+            this.extractGeminiCandidate(candidate);
+
           if (functionCalls.length > 0) {
             this.context.log(
               `Function/tool call detected in Gemini response`,
@@ -630,7 +1055,7 @@ class GoogleAIService extends AIProviderBase {
               "GoogleAIService.getAIResponse"
             );
           }
-          
+
           // we add the user conversation history item after the
           // AI response, because we derive the history from the
           // chat state and we pass the user message to the AI which
@@ -684,7 +1109,7 @@ class GoogleAIService extends AIProviderBase {
             { candidate, error: extractError },
             "GoogleAIService.getAIResponse"
           );
-          
+
           // Return a fallback response instead of throwing
           const userConversationHistoryItem: ReactorConversationHistoryItem = {
             id: new ObjectId(),
@@ -703,7 +1128,8 @@ class GoogleAIService extends AIProviderBase {
               {
                 index: 0,
                 message: {
-                  content: "I encountered an issue processing the response. Let me try to help you in a different way.",
+                  content:
+                    "I encountered an issue processing the response. Let me try to help you in a different way.",
                   role: "assistant",
                   tool_calls: [],
                 },
@@ -752,6 +1178,7 @@ class GoogleAIService extends AIProviderBase {
       throw error;
     }
   }
+  
 
   private extractGeminiCandidate(candidate: any): {
     responseText: string;
@@ -772,7 +1199,7 @@ class GoogleAIService extends AIProviderBase {
           );
           // Throw a retryable error instead of returning fallback
           throw new AIProviderError("UNEXPECTED_TOOL_CALL");
-        
+
         case "MALFORMED_FUNCTION_CALL":
           this.context.warn(
             "Gemini encountered a malformed function call - will retry",
@@ -781,7 +1208,7 @@ class GoogleAIService extends AIProviderBase {
           );
           // Throw a retryable error instead of returning fallback
           throw new AIProviderError("MALFORMED_FUNCTION_CALL");
-        
+
         case "SAFETY":
           this.context.warn(
             "Gemini response blocked by safety filters",
@@ -789,10 +1216,11 @@ class GoogleAIService extends AIProviderBase {
             "GoogleAIService.extractGeminiCandidate"
           );
           return {
-            responseText: "I'm unable to provide a response due to safety considerations. Please try rephrasing your question.",
-            functionCalls: []
+            responseText:
+              "I'm unable to provide a response due to safety considerations. Please try rephrasing your question.",
+            functionCalls: [],
           };
-        
+
         case "RECITATION":
           this.context.warn(
             "Gemini response blocked due to recitation concerns",
@@ -800,10 +1228,11 @@ class GoogleAIService extends AIProviderBase {
             "GoogleAIService.extractGeminiCandidate"
           );
           return {
-            responseText: "I'm unable to provide that specific information. Let me help you with a different approach.",
-            functionCalls: []
+            responseText:
+              "I'm unable to provide that specific information. Let me help you with a different approach.",
+            functionCalls: [],
           };
-        
+
         case "OTHER":
           this.context.warn(
             "Gemini response finished with OTHER reason - will retry",
@@ -840,7 +1269,10 @@ class GoogleAIService extends AIProviderBase {
     let functionCalls: any[] = [];
 
     // Extract content from parts
-    if (Array.isArray(candidate.content.parts) && candidate.content.parts.length > 0) {
+    if (
+      Array.isArray(candidate.content.parts) &&
+      candidate.content.parts.length > 0
+    ) {
       for (const part of candidate.content.parts) {
         if (part.functionCall) {
           functionCalls.push(part.functionCall);
@@ -865,7 +1297,9 @@ class GoogleAIService extends AIProviderBase {
     return { responseText: responseText.trim(), functionCalls };
   }
 
-  async chat(params: AIChatParams & { persistState?: boolean }): Promise<AIChatCompletion> {
+  async chat(
+    params: AIChatParams & { persistState?: boolean }
+  ): Promise<AIChatCompletion> {
     const {
       personaId,
       chatSessionId,
@@ -875,11 +1309,12 @@ class GoogleAIService extends AIProviderBase {
       tool_args,
       tool_call_id,
       persistState = true, // Default to true for backward compatibility
+      streamingMode = StreamingMode.NONE,
     } = params;
 
     const maxRetries = 2;
     let lastError: any;
-
+    this.streamingMode = streamingMode;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         // Initialize if needed
@@ -896,15 +1331,20 @@ class GoogleAIService extends AIProviderBase {
         }
 
         // Modify message on retry to potentially avoid the same error
-        const modifiedMessage = attempt > 1 ? this.modifyMessageForRetry(message, lastError) : message;
-
-        // Get response from AI
-        const response = await this.getAIResponse(modifiedMessage, role);
+        const modifiedMessage =
+          attempt > 1
+            ? this.modifyMessageForRetry(message, lastError)
+            : message;
         
+       
+        const messageId = new ObjectId();
+        // Get response from AI
+        const response = await this.getAIResponse(modifiedMessage, role, messageId.toString());
+
         // Add AI response to history
         if (response.choices && response.choices.length > 0) {
           this.chatState.history.push({
-            id: new ObjectId(),
+            id: messageId,
             timestamp: new Date(),
             // @ts-ignore
             tool_calls: response.choices[0].message.tool_calls ?? [],
@@ -923,17 +1363,17 @@ class GoogleAIService extends AIProviderBase {
         return response;
       } catch (error: any) {
         lastError = error;
-        
+
         // Check if this is a retryable error
         const isRetryable = this.isRetryableError(error);
-        
+
         if (attempt < maxRetries && isRetryable) {
           this.context.warn(
             `Retry attempt ${attempt} for Google AI chat (${error.message})`,
             { error, attempt, maxRetries, isRetryable },
             "GoogleAIService.chat"
           );
-          
+
           // Wait before retry with exponential backoff
           const backoffDelay = Math.pow(2, attempt) * 1000;
           this.context.log(
@@ -941,10 +1381,10 @@ class GoogleAIService extends AIProviderBase {
             { backoffDelay, attempt },
             "GoogleAIService.chat"
           );
-          await new Promise(resolve => setTimeout(resolve, backoffDelay));
+          await new Promise((resolve) => setTimeout(resolve, backoffDelay));
           continue;
         }
-        
+
         // If not retryable or max retries reached, break and throw
         break;
       }
@@ -952,11 +1392,13 @@ class GoogleAIService extends AIProviderBase {
 
     // If we get here, all retries failed
     this.context.error(
-      `Error in chat after ${maxRetries} attempts: ${lastError?.message ?? lastError?.toString()}`,
+      `Error in chat after ${maxRetries} attempts: ${
+        lastError?.message ?? lastError?.toString()
+      }`,
       { error: lastError, params },
       "GoogleAIService.chat"
     );
-    
+
     // Return a graceful error response instead of throwing
     return {
       id: new ObjectId(),
@@ -965,7 +1407,8 @@ class GoogleAIService extends AIProviderBase {
         {
           index: 0,
           message: {
-            content: "I'm experiencing some technical difficulties right now. Please try again in a moment, or rephrase your question.",
+            content:
+              "I'm experiencing some technical difficulties right now. Please try again in a moment, or rephrase your question.",
             role: "assistant",
             tool_calls: [],
           },
@@ -980,20 +1423,23 @@ class GoogleAIService extends AIProviderBase {
    * Modify the message on retry to potentially avoid the same error
    */
   private modifyMessageForRetry(message: string, lastError: any): string {
-    const errorMessage = lastError?.message?.toLowerCase() || '';
-    
+    const errorMessage = lastError?.message?.toLowerCase() || "";
+
     // For tool call related errors, try to simplify the request
-    if (errorMessage.includes('unexpected_tool_call') || errorMessage.includes('malformed_function_call')) {
+    if (
+      errorMessage.includes("unexpected_tool_call") ||
+      errorMessage.includes("malformed_function_call")
+    ) {
       this.context.log(
         "Modifying message for retry to avoid tool call issues",
         { originalMessage: message, error: lastError.message },
         "GoogleAIService.modifyMessageForRetry"
       );
-      
+
       // Add a prefix to encourage a simpler response
       return `Please provide a simple, direct response to: ${message}`;
     }
-    
+
     // For other errors, just return the original message
     return message;
   }
@@ -1003,31 +1449,31 @@ class GoogleAIService extends AIProviderBase {
    */
   private isRetryableError(error: any): boolean {
     if (!error) return false;
-    
-    const errorMessage = error.message?.toLowerCase() || '';
-    const errorCode = error.code?.toLowerCase() || '';
-    
+
+    const errorMessage = error.message?.toLowerCase() || "";
+    const errorCode = error.code?.toLowerCase() || "";
+
     // Retryable errors
     const retryablePatterns = [
-      'unexpected_tool_call',
-      'malformed_function_call',
-      'missing_content_field',
-      'malformed_content',
-      'empty_response',
-      'other_finish_reason',
-      'rate limit',
-      'timeout',
-      'network',
-      'connection',
-      'temporary',
-      'service unavailable',
-      'internal server error',
-      'bad gateway',
-      'gateway timeout'
+      "unexpected_tool_call",
+      "malformed_function_call",
+      "missing_content_field",
+      "malformed_content",
+      "empty_response",
+      "other_finish_reason",
+      "rate limit",
+      "timeout",
+      "network",
+      "connection",
+      "temporary",
+      "service unavailable",
+      "internal server error",
+      "bad gateway",
+      "gateway timeout",
     ];
-    
-    return retryablePatterns.some(pattern => 
-      errorMessage.includes(pattern) || errorCode.includes(pattern)
+
+    return retryablePatterns.some(
+      (pattern) => errorMessage.includes(pattern) || errorCode.includes(pattern)
     );
   }
 
@@ -1061,6 +1507,14 @@ class GoogleAIService extends AIProviderBase {
 
   setMacroService(macroService: ReactorMacroService) {
     this.macroService = macroService;
+  }
+
+  setStreamingSessionManager(streamingSessionManager: StreamingSessionManager) {
+    this.streamingSessionManager = streamingSessionManager;
+  }
+
+  setStreamingTransportManager(streamingTransportManager: StreamingTransportManager) {
+    this.streamingTransportManager = streamingTransportManager;
   }
 
   toString(includeVersion?: boolean): string {

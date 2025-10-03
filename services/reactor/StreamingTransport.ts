@@ -45,6 +45,8 @@ export class SSETransport implements StreamingTransport {
       throw new Error('SSE transport has been closed');
     }
     
+    console.log(`[SSETransport] Initializing SSE transport...`);
+    
     // Set SSE headers
     this.response.setHeader('Content-Type', 'text/event-stream');
     this.response.setHeader('Cache-Control', 'no-cache');
@@ -54,6 +56,7 @@ export class SSETransport implements StreamingTransport {
     
     // Handle client disconnect
     this.response.on('close', () => {
+      console.log(`[SSETransport] Client disconnected, closing transport`);
       this._isConnected = false;
       this._isClosed = true;
     });
@@ -62,6 +65,7 @@ export class SSETransport implements StreamingTransport {
     this.response.write('event: connected\ndata: {}\n\n');
     
     this._isConnected = true;
+    console.log(`[SSETransport] SSE transport initialized successfully`);
   }
   
   /**
@@ -80,8 +84,11 @@ export class SSETransport implements StreamingTransport {
       const eventData = JSON.stringify(event);
       const sseMessage = `event: ${event.type}\ndata: ${eventData}\n\n`;
       
+      console.log(`[SSETransport] Sending SSE event: ${event.type}`, { eventData });
       this.response.write(sseMessage);
+      console.log(`[SSETransport] SSE event sent successfully`);
     } catch (error) {
+      console.error(`[SSETransport] Error sending SSE event:`, error);
       this._isConnected = false;
       throw error;
     }

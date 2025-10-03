@@ -223,11 +223,11 @@ const BaseUISchema: Reactory.Schema.IFormUISchema = {
   'ui:field': 'GridLayout',
   'ui:grid-layout': [
     {
-      headerImage: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 },
-      welcome: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 },
-      metrics: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 },
-      filters: { xs: 12, sm: 12, md: 3, lg: 3, xl: 3 },
-      projects: { xs: 12, sm: 12, md: 9, lg: 9, xl: 9 },
+      headerImage: { size: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 } },
+      welcome: { size: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 } },
+      metrics: { size: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 } },
+      filters: { size: { xs: 12, sm: 12, md: 3, lg: 3, xl: 3 } },
+      projects: { size: { xs: 12, sm: 12, md: 9, lg: 9, xl: 9 } },
     },
   ],
   headerImage: {
@@ -250,12 +250,12 @@ const BaseUISchema: Reactory.Schema.IFormUISchema = {
     "ui:field": "GridLayout",
     "ui:grid-layout": [
       {        
-        system: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 },
-        domain: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 },
-        ownerTeam: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 },
-        owner: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 },
-        incidentsActive: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 },
-        status: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 },
+        system: { size: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 } },
+        domain: { size: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 } },
+        ownerTeam: { size: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 } },
+        owner: { size: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 } },
+        incidentsActive: { size: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 } },
+        status: { size: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 } },
         sx: {
           padding: 2,
           marginTop: 2,
@@ -582,11 +582,11 @@ const uiSchema = {
   },
   "ui:grid-layout": [
     {
-      headerImage: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 },
-      welcome: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 },
-      metrics: { xs: 12, sm: 12, md: 6, lg: 8, xl: 10 },
-      domainInfo: { xs: 12, sm: 12, md: 6, lg: 4, xl: 2 },
-      projects: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 },
+      headerImage: { size: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 } },
+      welcome: { size: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 } },
+      metrics: { size: { xs: 12, sm: 12, md: 6, lg: 8, xl: 10 } },
+      domainInfo: { size: { xs: 12, sm: 12, md: 6, lg: 4, xl: 2 } },
+      projects: { size: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 } },
     },
   ],
   headerImage: {
@@ -642,51 +642,31 @@ const uiSchema = {
     "ui:grid-layout": [
       {
         openPullRequests: {
-          xs: 12,
-          sm: 6,
-          md: 4,
-          lg: 4,
-          xl: 4,
+          size: { xs: 12, sm: 6, md: 4, lg: 4, xl: 4 },
           sx: {
             minHeight: "120px",
           },
         },
         closedPullRequests: {
-          xs: 12,
-          sm: 6,
-          md: 4,
-          lg: 4,
-          xl: 4,
+          size: { xs: 12, sm: 6, md: 4, lg: 4, xl: 4 },
           sx: {
             minHeight: "120px",
           },
         },
         activeProjects: {
-          xs: 12,
-          sm: 6,
-          md: 4,
-          lg: 4,
-          xl: 4,
+          size: { xs: 12, sm: 6, md: 4, lg: 4, xl: 4 },
           sx: {
             minHeight: "120px",
           },
         },
         archivedProjects: {
-          xs: 12,
-          sm: 6,
-          md: 4,
-          lg: 4,
-          xl: 4,
+          size: { xs: 12, sm: 6, md: 4, lg: 4, xl: 4 },
           sx: {
             minHeight: "120px",
           },
         },
         incidentFreeDays: {
-          xs: 12,
-          sm: 6,
-          md: 4,
-          lg: 4,
-          xl: 4,
+          size: { xs: 12, sm: 6, md: 4, lg: 4, xl: 4 },
           sx: {
             minHeight: "120px",
           },

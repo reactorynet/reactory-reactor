@@ -82,6 +82,8 @@ export interface ReactorConversationDocument {
   maxTokens?: number
   // The truncated history - messages removed to stay within token limits
   truncatedHistory?: ReactorConversationHistory
+  // The user files attached to this conversation session
+  files: Reactory.Models.IReactoryFile[]
 }
 
 
@@ -179,8 +181,9 @@ const ReactorConversationSchema = new Schema({
     min: 0,
   },
   files: {
-    type: ObjectId,
+    type: [ObjectId],
     ref: 'ReactoryFile',
+    default: [],
   },
   // The truncated history - messages removed to stay within token limits
   truncatedHistory: {

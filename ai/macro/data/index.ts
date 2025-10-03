@@ -15,6 +15,7 @@ import { MsSqlMacroRegistry } from './mssql/macro';
 import { PostgresMacroRegistry } from './pgsql/macro';
 import { MySqlMacroRegistry } from './mysql/macro';
 import { MongoMacroRegistry } from './mongo/macro';
+import SearchMacroRegistryEntries from './search/macro';
 
 // Export types
 export * from './types';
@@ -39,7 +40,8 @@ export const DatabaseMacros = [
   PostgresMacroRegistry,
   MySqlMacroRegistry, // Uncomment when mysql2 is available
   MsSqlMacroRegistry,
-  MongoMacroRegistry
+  MongoMacroRegistry,
+  ...SearchMacroRegistryEntries
 ];
 
 export default DatabaseMacros;

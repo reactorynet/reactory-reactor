@@ -4,6 +4,7 @@ import {
   StreamingSession, 
   CreateStreamingSessionArgs 
 } from "./types/streaming.types";
+import { service } from "@reactory/server-core/application/decorators/service";
 
 /**
  * Manages streaming sessions with Redis backend
@@ -11,17 +12,50 @@ import {
  * 
  * @class StreamingSessionManager
  */
-export class StreamingSessionManager {
+@service({
+  id: "reactor.StreamingSessionManager@1.0.0",
+  nameSpace: "reactor",
+  name: "StreamingSessionManager",
+  version: "1.0.0",
+  description: "Manages streaming sessions with Redis backend",
+  dependencies: [
+    {
+      id: "core.RedisService@1.0.0",
+      alias: "redisService",      
+    }
+  ],
+  lifeCycle: 'singleton',
+})
+export class StreamingSessionManager implements Reactory.Service.IReactoryService {
   private readonly DEFAULT_EXPIRY_HOURS = 1;
   private readonly SESSION_KEY_PREFIX = 'streaming:session:';
   private readonly SESSION_INDEX_KEY = 'streaming:session:index';
   
+  /**
+   * The Redis service instance
+   */
   private redisService?: RedisService;
 
-  constructor(redisService?: RedisService) {
-    this.redisService = redisService;
-  }
+  /**
+   * The Reactory context instance
+   */
+  private context: Reactory.Server.IReactoryContext;
 
+  private sessionMap: Map<string, string> = new Map();
+
+  /**
+   * The singleton instance of the StreamingSessionManager
+   */
+  private static instance: StreamingSessionManager;
+
+  constructor(props: any, context: Reactory.Server.IReactoryContext) {
+    if (!StreamingSessionManager.instance) {
+      this.context = context;  
+      StreamingSessionManager.instance = this;
+    }
+    return StreamingSessionManager.instance;
+  }
+  
   /**
    * Generate Redis key for session
    */
@@ -73,6 +107,8 @@ export class StreamingSessionManager {
       expiresAt,
       capabilities: args.capabilities
     };
+
+    this.sessionMap.set(args.conversationId, sessionId);
     
     // Store session in Redis with TTL
     if (this.redisService) {
@@ -91,7 +127,11 @@ export class StreamingSessionManager {
     
     return session;
   }
-  
+
+  getSessionId(conversationId: string): string | null {
+    return this.sessionMap.get(conversationId) || null;
+  }
+
   /**
    * Get active streaming session
    * 
@@ -212,5 +252,19 @@ export class StreamingSessionManager {
     }
     
     return cleanedCount;
+  }
+
+  private setRedisService(redisService: RedisService) {
+    this.redisService = redisService;
+  }
+
+  description?: string = "Manages streaming sessions with Redis backend";
+  tags?: string[] = ["reactor", "streaming", "session", "manager"];
+  nameSpace: string = "reactor";
+  name: string = "StreamingSessionManager";
+  version: string = "1.0.0";
+
+  toString?(includeVersion?: boolean): string {
+    return `${this.nameSpace}.${this.name}@${this.version}`;  
   }
 }

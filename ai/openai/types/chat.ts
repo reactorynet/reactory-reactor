@@ -263,8 +263,10 @@ export type ChatState = {
   tokenCount?: number
   maxTokens?: number
   truncatedHistory?: ReactorConversationHistory
-}
 
+  files?: Reactory.Models.IReactoryFile[]
+}
+  
 export interface QuestionHandlerResponse {
   next: IQuestion | null,
   state: ChatState

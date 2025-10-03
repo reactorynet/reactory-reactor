@@ -88,6 +88,17 @@ type ReactorInitiateSSE {
   status: String
   expiry: Date
   headers: Any
+  chatState: ReactorChatState
+}
+
+enum ReactorErrorCategory {
+  VALIDATION
+  PERMISSION
+  RESOURCE_NOT_FOUND
+  EXTERNAL_SERVICE
+  INTERNAL
+  RATE_LIMIT
+  TIMEOUT
 }
 
 """
@@ -101,6 +112,12 @@ type ReactorErrorResponse {
   timestamp: Date
   recoverable: Boolean
   suggestion: String
+  correlationId: String
+  operation: String
+  userId: String
+  conversationId: String
+  retryAfter: Int
+  errorCategory: ReactorErrorCategory
 }
 
 """
@@ -119,6 +136,37 @@ enum ReactorToolApprovalMode {
 type ReactorSessionVar {
   key: String!
   value: Any
+}
+
+enum ReactorChatContextResourceType {
+  """
+  Represents a file resource in the chat context.
+  """
+  file
+  """
+  Represents a folder resource in the chat context.
+  """
+  folder
+  """
+  Represents a URL resource in the chat context.
+  """
+  url
+}
+
+"""
+Represents a resource that can be used in the chat context.
+Includes file, folder, or URL resources with associated metadata.
+"""
+type ReactorChatContextResource {
+  type: ReactorChatContextResourceType!
+  name: String!
+  description: String
+  url: String!
+  """
+  The tool advice for the resource.
+  This is a string that provides guidance on how the resource can be used with tools.
+  """
+  toolAdvice: String
 }
 
 """
@@ -149,16 +197,45 @@ type ReactorChatState {
   The tools used in the conversation.
   """
   tools: [ReactorToolDefinition]
+  """
+  The macros used in the conversation.
+  """
   macros: [ReactorMacro]
+  """
+  The session variables for the chat session.
+  These are key-value pairs that can be used to store state or configuration for the session.
+  """
   vars: Any
+  """
+  Indicates whether the chat session has an active MCP client.
+  This is true if the session has an MCP client that can be used to execute tools.
+  """
   hasMcpClient: Boolean
+  """
+  The MCP sessions associated with the chat session.
+  This includes details about the MCP server, session ID, and available tools.
+  """
   mcpSessions: [ReactorMCPSession]
+  """
+  The current tool approval mode for the chat session.
+  This determines how tools are approved for use by the persona.
+  """
   toolApprovalMode: ReactorToolApprovalMode
   """
   Files that have been attached to the chat session.
   This includes both regular files and audio files.
   """
-  files: [ReactoryFile]  
+  files: [ReactoryFile]
+  """
+  Folders that have been attached to the chat session.
+  This includes both regular folders and folders containing files.
+  """
+  folders: [ReactoryFolder]
+
+  """
+  Represents a resource that can be used in the chat context.
+  """
+  resources: [ReactorChatContextResource]  
 }
 
 """
@@ -237,12 +314,70 @@ input ReactorToolExecuteInput {
   args: Any
 }
 
+"""
+Response type for file attachment operations.
+"""
+union ReactorAttachFileResponse = ReactorChatResponse | ReactorErrorResponse
+
+"""
+Response type for file detachment operations.
+Input type for attaching a user file to a chat session
+"""
+input ReactorAttachUserFileParam {
+  sessionId: String!
+  fileId: String!
+  """
+  Optional description for the file being attached.
+  This can be used to provide context or details about the file to the llm
+  """
+  description: String
+  path: String!
+}
+
+"""
+Input type for detaching a user file from a chat session
+"""
+input ReactorDetachUserFileParam {
+  sessionId: String!
+  fileId: String!
+  delete: Boolean
+  path: String!
+}
+
+"""
+Response type for successful file attachment
+"""
+type ReactorAttachFileResponse {
+  success: Boolean!
+  message: String!
+  sessionId: String!
+  fileId: String!
+  path: String!
+}
+
+"""
+Response type for successful file detachment
+"""
+type ReactorDetachFileResponse {
+  success: Boolean!
+  message: String!
+  sessionId: String!
+  fileId: String!
+  path: String!
+}
+
+"""
+Union types for file operations
+"""
+union ReactorAttachFileResult = ReactorAttachFileResponse | ReactorErrorResponse
+union ReactorDetachFileResult = ReactorDetachFileResponse | ReactorErrorResponse
+
 input ReactorConversationLoadOptions {
   showAllFiles: Boolean
 }
 
 union ReactorChatStateOrError = ReactorChatState | ReactorErrorResponse
-
+union ReactorInitChatResponse = ReactorChatState | ReactorErrorResponse | ReactorInitiateSSE
 
 extend type Query {
 
@@ -270,7 +405,7 @@ extend type Mutation {
   Creates a new chat session with a specified persona and provides
   the initial message to start the conversation using the persona's default greeting.
   """
-  ReactorStartChatSession(initSession: ReactorInitSession!): ReactorChatState
+  ReactorStartChatSession(initSession: ReactorInitSession!): ReactorInitChatResponse
 
   """
   Set the tool approval mode for a chat session.
@@ -302,6 +437,16 @@ extend type Mutation {
   Adds an image to the current chat conversation for analysis by the persona.
   """
   ReactorAttachFile(file: Upload!, chatSessionId: String!): ReactorChatResponse
+
+  """
+  Attaches an existing user file to a chat session.
+  """
+  ReactorAttachUserFileToSession(params: ReactorAttachUserFileParam!): ReactorAttachFileResult
+
+  """
+  Detaches a user file from a chat session.
+  """
+  ReactorDetachUserFileFromSession(params: ReactorDetachUserFileParam!): ReactorDetachFileResult
 
   """
   Permanently removes a chat session and all its messages.

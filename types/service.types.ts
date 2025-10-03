@@ -5,8 +5,9 @@ import { TReactorConversationDocument, TReactorConversationModel, ReactorConvers
 import { AIAudioChatParams, AIChatCompletion, AIChatParams, AIFile, AIFineTuningEvent, AIFineTuningJob, AIImage, AIImageGenerationParams, AIListResponse, AIModel, CreateAIFineTuningJobParams, ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorNodeType } from "./model.types"
 import { PagingRequest, PagingResult } from "@reactory/server-core/database/types"
 import { ObjectId } from "mongodb"
-import { MacroComponentDefinition, MacroToolDefinition, Schema, ToolApprovalMode } from '../ai/openai/types/chat';
+import { ChatState, MacroComponentDefinition, MacroToolDefinition, Schema, ToolApprovalMode } from '../ai/openai/types/chat';
 import { ReactoryFileDocument, ReactoryFileModel } from 'modules/reactory-core/models/CoreFile';
+import { PromptMergeStrategy, StreamingMode } from '../services/reactor/types/streaming.types';
 
 
 export type KnownAIProviders = "openai" | "google" | "azure" | "xai" | "anthropic" | "cohere" | "mistral" | "meta" | "deepmind";
@@ -177,7 +178,8 @@ export interface ImageExtensionParams extends ImageGenerationParams, ImageVarian
 export interface ChatParams { 
   personaId: string
   message: string
-  chatSessionId?: string
+  chatSessionId?: string,
+  streamingMode?: StreamingMode
 }
 
 export interface AudioChatParams extends ChatParams {
@@ -215,6 +217,11 @@ export interface IOpenAIServiceProps extends Reactory.Service.IReactoryServicePr
    * The persona id to use for the service insstance. Defaults to "reactor"
    */
   personaId?: string
+
+  /**
+   * The streaming mode to use for the service instance. Defaults to StreamingMode.NONE
+   */
+  streamingMode?: StreamingMode
 }
 
 
@@ -446,6 +453,34 @@ export interface IAIPersonaProviderService {
     deletePersona(id: string): Promise<IAIPersona>;
 }
 
+export type ReactorInitiateSSEResponse = {
+  __typename: 'ReactorInitiateSSE',
+  sessionId: string,
+  endpoint: string,
+  token: string,
+  status: string,
+  expiry: Date,
+  headers: any
+}
+
+export type ReactorErrorResponse = {
+  __typename: 'ReactorErrorResponse',
+  code: string,
+  message: string,
+  details: any,
+  timestamp: Date,
+  recoverable: boolean,
+  suggestion: string
+}
+
+export type ReactorChatState = ChatState & {
+  __typename: 'ReactorChatState',
+  macros: MacroComponentDefinition<unknown>[],
+  tools: MacroToolDefinition[]
+}
+
+export type ReactorInitChatResponse = ReactorChatState | ReactorErrorResponse | ReactorInitiateSSEResponse;
+  
 /**
  * Service interface for managing AI-powered chat conversations within the Reactor system.
  * 
@@ -465,8 +500,12 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
   startChatSession(args: {
     personaId: string, 
     macros: Partial<MacroComponentDefinition<unknown>>,  
-    tools: Partial<MacroToolDefinition>[]
-  }): Promise<any>;
+    tools: Partial<MacroToolDefinition>[],
+    systemPrompt: string,
+    streamingMode: StreamingMode,
+    promptMergeStrategy: PromptMergeStrategy,
+    toolApprovalMode: ToolApprovalMode
+  }): Promise<ReactorInitChatResponse>;
 
   /**
    * Loads a chat session by its ID.
@@ -595,6 +634,26 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
     files: ReactoryFileDocument[],    
     chatSessionId: string
   }): Promise<any>;
+
+  /**
+   * Attaches a user file to the chat session using the file path and user file ID.
+   * @param sessionId - The chat session ID
+   * @param userFileId - The user file ID
+   * @param path - The file path
+   */
+  attachUserFileToSession(sessionId: string, userFileId: string, path: string): Promise<any>;
+
+  /**
+   * Detaches a user file from the chat session using the file path and user file ID.
+   * @param sessionId - The chat session ID
+   * @param userFileId - The user file ID  
+   * @param path - The file path
+   */
+  detachUserFileFromSession(sessionId: string,
+    userFileId: string, 
+    path: string, 
+    deleteFile?: boolean): Promise<any>;
+
   /**
    * Sends a message to the chat session. If no chat session is found then a new one will be created.
    * @param args 
@@ -603,7 +662,8 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
     message: string, 
     personaId: string, 
     chatSessionId?: string,
-    tool_results?: Record<string, any>
+    tool_results?: Record<string, any>,
+    streamingMode: StreamingMode
   }): Promise<any>;
 }
 

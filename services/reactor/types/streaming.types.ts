@@ -1,7 +1,13 @@
 /**
  * Streaming mode options for conversation service
  */
-export type StreamingMode = 'none' | 'sse' | 'websocket';
+export enum StreamingMode {
+  NONE = 'NONE',
+  SSE = 'SSE',
+  WEBSOCKET = 'WEBSOCKET'
+}
+
+export type PromptMergeStrategy = 'append' | 'prepend' | 'replace';
 
 /**
  * Client capabilities for streaming support
@@ -88,16 +94,24 @@ export interface StreamingToken {
   isFinal?: boolean;
 }
 
+export enum StreamingEventType {
+  TOKEN = 'token',
+  TOOL_CALL = 'tool_call',
+  COMPLETE = 'complete',
+  ERROR = 'error'
+}
 /**
  * Base streaming event interface
  */
-export interface StreamingEvent {
+export interface StreamingEventBase {
   /** Event type discriminator */
-  type: 'token' | 'tool_call' | 'complete' | 'error';
+  type: StreamingEventType;
   /** Session ID this event belongs to */
   sessionId: string;
   /** Conversation ID this event belongs to */
   conversationId: string;
+  /** Message ID this event belongs to */
+  messageId: string;
   /** Event timestamp */
   timestamp: Date;
   /** Event-specific data */
@@ -107,8 +121,8 @@ export interface StreamingEvent {
 /**
  * Token streaming event
  */
-export interface TokenStreamingEvent extends StreamingEvent {
-  type: 'token';
+export interface TokenStreamingEvent extends StreamingEventBase {
+  type: StreamingEventType.TOKEN;
   data: {
     content: string;
     delta: string;
@@ -120,15 +134,33 @@ export interface TokenStreamingEvent extends StreamingEvent {
 /**
  * Tool call streaming event
  */
-export interface ToolCallStreamingEvent extends StreamingEvent {
-  type: 'tool_call';
+export interface ToolCallStreamingEvent extends StreamingEventBase {
+  type: StreamingEventType.TOOL_CALL;
   data: {
-    toolName: string;
+    name: string;           // Changed from toolName to match actual data
     arguments: any;
-    callId: string;
-    status: 'started' | 'progress' | 'completed' | 'error';
+    id: string;             // Changed from callId to match actual data
+    isComplete: boolean;     // Changed from status to match actual data
   };
 }
+
+export interface CompletionStreamingEvent extends StreamingEventBase {
+  type: StreamingEventType.COMPLETE;
+  data: {
+    content: string;
+    finishReason: 'stop' | 'error';
+  };
+}
+
+export interface ErrorStreamingEvent extends StreamingEventBase {
+  type: StreamingEventType.ERROR;
+  data: {
+    message: string;
+    error: Error;
+  };
+}
+
+export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent;
 
 /**
  * Arguments for creating a streaming session

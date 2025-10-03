@@ -157,7 +157,7 @@ type ReactorToolDefinition {
   propsMap: Any
   function: ReactorFunction
   roles: [String]
-  runat: String  
+  runat: ReactorMacroRunAt    
 }
 
 type ReactorPersonaResource {
@@ -282,6 +282,7 @@ input ReactorInitSession {
   personaId: String!
   message: String
   systemPrompt: String
+  streamingMode: StreamingMode
   promptMergeStrategy: ReactorPromptMergeStrategy
   macros: [ReactorMacroInput]
   tools: [ReactorToolDefinitionInput]
