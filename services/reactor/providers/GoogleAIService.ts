@@ -6,6 +6,8 @@ import GoogleGenAI, {
   FunctionResponse,
   Type,
 } from "@google/genai";
+import https from "https";
+import fs from "fs";
 import {
   AIChatParams,
   AIAudioChatParams,
@@ -45,7 +47,15 @@ import {
   ChatCompletionUserMessageParam,
 } from "openai/resources";
 import path from "path";
-import { CompletionStreamingEvent, ErrorStreamingEvent, StreamingEvent, StreamingEventType, StreamingMode, TokenStreamingEvent, ToolCallStreamingEvent } from "../types/streaming.types";
+import {
+  CompletionStreamingEvent,
+  ErrorStreamingEvent,
+  StreamingEvent,
+  StreamingEventType,
+  StreamingMode,
+  TokenStreamingEvent,
+  ToolCallStreamingEvent,
+} from "../types/streaming.types";
 import { StreamingSessionManager } from "../StreamingSessionManager";
 import { StreamingTransportManager } from "../StreamingTransportManager";
 
@@ -61,8 +71,14 @@ import { StreamingTransportManager } from "../StreamingTransportManager";
     { id: "core.FetchService@1.0.0", alias: "fetchService" },
     { id: "reactor.AIPersonaProvider@1.0.0", alias: "personaProvider" },
     { id: "reactor.ReactorMacroService@1.0.0", alias: "macroService" },
-    { id: "reactor.StreamingTransportManager@1.0.0", alias: "streamingTransportManager" },
-    { id: "reactor.StreamingSessionManager@1.0.0", alias: "streamingSessionManager" },
+    {
+      id: "reactor.StreamingTransportManager@1.0.0",
+      alias: "streamingTransportManager",
+    },
+    {
+      id: "reactor.StreamingSessionManager@1.0.0",
+      alias: "streamingSessionManager",
+    },
   ],
 })
 class GoogleAIService extends AIProviderBase {
@@ -74,7 +90,8 @@ class GoogleAIService extends AIProviderBase {
   macroService: ReactorMacroService;
   streamingMode: StreamingMode = StreamingMode.NONE;
   streamingSessionManager: StreamingSessionManager;
-  streamingTransportManager: StreamingTransportManager; 
+  streamingTransportManager: StreamingTransportManager;
+  models: GoogleGenAI.Pager<GoogleGenAI.Model> = null;
 
   constructor(props: any, context: Reactory.Server.IReactoryContext) {
     super(props, context);
@@ -103,13 +120,123 @@ class GoogleAIService extends AIProviderBase {
 
     this.ai = new GoogleGenAI.GoogleGenAI({
       apiKey,
+      vertexai: false,
     });
+
     const modelId =
       persona.modelId || process.env.GOOGLE_AI_MODEL_ID || "gemini-pro";
-    this.model = await this.ai.models.get({
-      model: modelId,
-      config: persona?.modelConfig,
-    });
+
+    try {
+      this.model = await this.ai.models.get({
+        model: modelId,
+      });
+    } catch (getError) {
+      this.context.error(
+        `Model ${modelId} not found in available models and direct get failed`,
+        {
+          error: getError,
+          modelId,
+          availableModelsCount: this.models ? "unknown" : 0,
+        },
+        "GoogleAIService.initializeClient"
+      );
+      throw new AIProviderError(
+        `Model ${modelId} not found. Please check the model ID.`
+      );
+    }
+
+    this.context.log(
+      `Successfully initialized Google AI model: ${this.model.name}`,
+      {
+        modelId,
+        modelName: this.model.name,
+        displayName: this.model.displayName,
+      },
+      "GoogleAIService.initializeClient"
+    );
+  }
+
+  /**
+   * Determine if we should use custom fetch configuration
+   */
+  private shouldUseCustomFetch(): boolean {
+    // Use custom fetch if Google AI SDK SSL bypass is enabled or other SSL/proxy settings
+    return !!(
+      process.env.GOOGLE_AI_BYPASS_SSL === "true" ||
+      process.env.NODE_EXTRA_CA_CERTS ||
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED === "0" ||
+      process.env.HTTPS_PROXY ||
+      process.env.HTTP_PROXY
+    );
+  }
+
+  /**
+   * Create a custom fetch function with proper SSL/TLS configuration
+   */
+  private createCustomFetch() {
+    return (url: string | URL | Request, init?: RequestInit) => {
+      // Clone the init object to avoid modifying the original
+      const fetchInit: RequestInit = { ...init };
+
+      // Configure HTTPS agent for SSL/TLS settings
+      if (typeof url === "string" && url.startsWith("https://")) {
+        const agentOptions: https.AgentOptions = {
+          // Keep connections alive for better performance
+          keepAlive: true,
+
+          // Timeout settings
+          timeout: 30000,
+
+          // Handle SSL bypass for Google AI SDK specifically
+          rejectUnauthorized:
+            process.env.GOOGLE_AI_BYPASS_SSL === "true"
+              ? false
+              : process.env.NODE_TLS_REJECT_UNAUTHORIZED !== "0",
+        };
+
+        // Add extra CA certificates if provided (and not bypassing SSL)
+        if (
+          process.env.NODE_EXTRA_CA_CERTS &&
+          process.env.GOOGLE_AI_BYPASS_SSL !== "true"
+        ) {
+          try {
+            agentOptions.ca = fs.readFileSync(process.env.NODE_EXTRA_CA_CERTS);
+            this.context.debug(
+              "Using custom CA certificate for SSL verification",
+              {
+                certPath: process.env.NODE_EXTRA_CA_CERTS,
+              },
+              "GoogleAIService.createCustomFetch"
+            );
+          } catch (error) {
+            this.context.warn(
+              "Failed to read custom CA certificate, falling back to system defaults",
+              {
+                certPath: process.env.NODE_EXTRA_CA_CERTS,
+                error: error.message,
+              },
+              "GoogleAIService.createCustomFetch"
+            );
+          }
+        }
+
+        const agent = new https.Agent(agentOptions);
+        (fetchInit as any).agent = agent;
+
+        this.context.debug(
+          "Using custom HTTPS agent for Google AI request",
+          {
+            url: typeof url === "string" ? url : "URL or Request object",
+            rejectUnauthorized: agentOptions.rejectUnauthorized,
+            hasCustomCA: !!agentOptions.ca,
+            bypassSSL: process.env.GOOGLE_AI_BYPASS_SSL === "true",
+          },
+          "GoogleAIService.createCustomFetch"
+        );
+      }
+
+      return fetch(url, fetchInit);
+    };
   }
 
   // Always return lowercase type string for Gemini compatibility
@@ -520,7 +647,7 @@ class GoogleAIService extends AIProviderBase {
           temperature: 0.7,
           topP: 1.0,
           frequencyPenalty: 0.0,
-          presencePenalty: 0.0,          
+          presencePenalty: 0.0,
         },
       });
     } catch (error) {
@@ -551,7 +678,12 @@ class GoogleAIService extends AIProviderBase {
       position,
       isComplete,
     };
-    return this.createStreamingEvent(StreamingEventType.TOKEN, tokenData, sessionId, sessionId) as TokenStreamingEvent;
+    return this.createStreamingEvent(
+      StreamingEventType.TOKEN,
+      tokenData,
+      sessionId,
+      sessionId
+    ) as TokenStreamingEvent;
   }
 
   /**
@@ -567,7 +699,7 @@ class GoogleAIService extends AIProviderBase {
   ): ToolCallStreamingEvent {
     // Ensure we have a valid ID - if none provided, generate one
     const toolCallId = id || new ObjectId().toString();
-    
+
     const toolData: AIToolCallStreamingData = {
       id: toolCallId,
       name,
@@ -575,10 +707,18 @@ class GoogleAIService extends AIProviderBase {
       isComplete,
       result,
     };
-    
-    console.log(`🔧 [GoogleAIService] Creating tool call event with data:`, toolData);
-    
-    return this.createStreamingEvent(StreamingEventType.TOOL_CALL, toolData, sessionId, sessionId) as ToolCallStreamingEvent;
+
+    console.log(
+      `🔧 [GoogleAIService] Creating tool call event with data:`,
+      toolData
+    );
+
+    return this.createStreamingEvent(
+      StreamingEventType.TOOL_CALL,
+      toolData,
+      sessionId,
+      sessionId
+    ) as ToolCallStreamingEvent;
   }
 
   /**
@@ -595,7 +735,11 @@ class GoogleAIService extends AIProviderBase {
       message,
       details,
     };
-    return this.createStreamingEvent(StreamingEventType.ERROR, errorData, sessionId) as ErrorStreamingEvent;
+    return this.createStreamingEvent(
+      StreamingEventType.ERROR,
+      errorData,
+      sessionId
+    ) as ErrorStreamingEvent;
   }
 
   /**
@@ -616,7 +760,12 @@ class GoogleAIService extends AIProviderBase {
       content,
       metadata,
     };
-    return this.createStreamingEvent(StreamingEventType.COMPLETE, completionData, sessionId, sessionId) as CompletionStreamingEvent;
+    return this.createStreamingEvent(
+      StreamingEventType.COMPLETE,
+      completionData,
+      sessionId,
+      sessionId
+    ) as CompletionStreamingEvent;
   }
 
   /**
@@ -676,15 +825,14 @@ class GoogleAIService extends AIProviderBase {
     }
   }
 
-  private async handleStreamingRequest(args: { 
+  private async handleStreamingRequest(args: {
     sessionId: string; // This is the conversation ID (chatSessionId)
-    message: string; 
-    persona: IAIPersona; 
-    history: ReactorConversationHistory; 
+    message: string;
+    persona: IAIPersona;
+    history: ReactorConversationHistory;
     chat: GoogleGenAI.Chat;
-    messageId?: string; 
-    }): Promise<GoogleGenAI.GenerateContentResponse> {
-    
+    messageId?: string;
+  }): Promise<GoogleGenAI.GenerateContentResponse> {
     const { sessionId, message, persona, history, messageId } = args;
     const chat = args.chat;
 
@@ -693,7 +841,7 @@ class GoogleAIService extends AIProviderBase {
       messageLength: message.length,
       messageId,
       historyLength: history.length,
-      hasStreamingTransportManager: !!this.streamingTransportManager
+      hasStreamingTransportManager: !!this.streamingTransportManager,
     });
 
     let result: GoogleGenAI.GenerateContentResponse = null;
@@ -704,107 +852,143 @@ class GoogleAIService extends AIProviderBase {
     let completionTokens = 0;
     let finishReason: GoogleGenAI.FinishReason = GoogleGenAI.FinishReason.STOP;
     let modelName = "";
-    
+
     const response = await chat.sendMessageStream({
       message,
       config: persona.messageConfig,
-      
     });
 
-    console.log(`🔧 [GoogleAIService] Starting to process streaming response for session: ${sessionId}`);
-    
+    console.log(
+      `🔧 [GoogleAIService] Starting to process streaming response for session: ${sessionId}`
+    );
+
     for await (const chunk of response) {
       let event: StreamingEvent;
-      
+
       console.log(`🔧 [GoogleAIService] Processing chunk:`, {
         sessionId,
         messageId,
         hasText: !!chunk.text,
-        hasFunctionCalls: !!(chunk.functionCalls && chunk.functionCalls.length > 0),
+        hasFunctionCalls: !!(
+          chunk.functionCalls && chunk.functionCalls.length > 0
+        ),
         textLength: chunk.text?.length || 0,
-        functionCallsCount: chunk.functionCalls?.length || 0
+        functionCallsCount: chunk.functionCalls?.length || 0,
       });
-      
+
       // Initialize result with the first chunk
       if (result === null) {
-        result = chunk;        
+        result = chunk;
       }
-      
+
       // Handle text content
-      if (chunk.text) {        
+      if (chunk.text) {
         accumulatedText += chunk.text;
-        event = this.createTokenEvent(chunk.text, chunk.text, accumulatedText.length, false, sessionId);
+        event = this.createTokenEvent(
+          chunk.text,
+          chunk.text,
+          accumulatedText.length,
+          false,
+          sessionId
+        );
         event.messageId = messageId;
         event.conversationId = sessionId; // Add conversationId field
-        console.log(`🔧 [GoogleAIService] Sending token event for sessionId: ${sessionId}, text: "${chunk.text}"`);
-        
+        console.log(
+          `🔧 [GoogleAIService] Sending token event for sessionId: ${sessionId}, text: "${chunk.text}"`
+        );
+
         try {
-          await this.streamingTransportManager.sendEventToSession(sessionId, event as TokenStreamingEvent);
+          await this.streamingTransportManager.sendEventToSession(
+            sessionId,
+            event as TokenStreamingEvent
+          );
           console.log(`✅ [GoogleAIService] Token event sent successfully`);
         } catch (error) {
-          console.error(`❌ [GoogleAIService] Failed to send token event:`, error);
+          console.error(
+            `❌ [GoogleAIService] Failed to send token event:`,
+            error
+          );
           throw error;
         }
-      } 
-      
+      }
+
       // Handle function calls
       if (chunk.functionCalls && chunk.functionCalls.length > 0) {
         console.log(`🔧 [GoogleAIService] Processing function calls:`, {
           sessionId,
           messageId,
           functionCallsCount: chunk.functionCalls.length,
-          functionCalls: chunk.functionCalls.map(fc => ({ id: fc.id, name: fc.name }))
+          functionCalls: chunk.functionCalls.map((fc) => ({
+            id: fc.id,
+            name: fc.name,
+          })),
         });
-        
+
         for (const functionCall of chunk.functionCalls) {
           // Generate a unique ID for the function call since Google doesn't provide one
           const functionCallId = functionCall.id || new ObjectId().toString();
-          
+
           // Check if we already have this function call
-          const existingCallIndex = accumulatedFunctionCalls.findIndex(fc => fc.id === functionCallId);
+          const existingCallIndex = accumulatedFunctionCalls.findIndex(
+            (fc) => fc.id === functionCallId
+          );
           if (existingCallIndex >= 0) {
             // Update existing function call
             accumulatedFunctionCalls[existingCallIndex] = {
               ...accumulatedFunctionCalls[existingCallIndex],
               ...functionCall,
-              id: functionCallId // Ensure the ID is set
+              id: functionCallId, // Ensure the ID is set
             };
-            console.log(`🔧 [GoogleAIService] Updated existing function call: ${functionCall.name}`);
+            console.log(
+              `🔧 [GoogleAIService] Updated existing function call: ${functionCall.name}`
+            );
           } else {
             // Add new function call with generated ID
             accumulatedFunctionCalls.push({
               ...functionCall,
-              id: functionCallId // Ensure the ID is set
+              id: functionCallId, // Ensure the ID is set
             });
-            console.log(`🔧 [GoogleAIService] Added new function call: ${functionCall.name} with ID: ${functionCallId}`);
+            console.log(
+              `🔧 [GoogleAIService] Added new function call: ${functionCall.name} with ID: ${functionCallId}`
+            );
           }
-          
+
           event = this.createToolCallEvent(
             functionCallId, // Use the generated ID
-            functionCall.name, 
-            JSON.stringify(functionCall.args || {}), 
-            true, 
-            undefined, 
+            functionCall.name,
+            JSON.stringify(functionCall.args || {}),
+            true,
+            undefined,
             sessionId
           );
           event.messageId = messageId;
           event.conversationId = sessionId; // Add conversationId field
-          
+
           console.log(`🔧 [GoogleAIService] Created tool call event:`, {
             sessionId,
             messageId,
             eventType: event.type,
             eventData: event.data,
             functionCallId: functionCallId,
-            functionName: functionCall.name
+            functionName: functionCall.name,
           });
-          
+
           try {
-            console.log(`🔧 [GoogleAIService] Sending tool call event for sessionId: ${sessionId}, function: ${functionCall.name}`);
-            await this.streamingTransportManager.sendEventToSession(sessionId, event as ToolCallStreamingEvent);
-            console.log(`✅ [GoogleAIService] Tool call event sent successfully for function: ${functionCall.name}`);
+            console.log(
+              `🔧 [GoogleAIService] Sending tool call event for sessionId: ${sessionId}, function: ${functionCall.name}`
+            );
+            await this.streamingTransportManager.sendEventToSession(
+              sessionId,
+              event as ToolCallStreamingEvent
+            );
+            console.log(
+              `✅ [GoogleAIService] Tool call event sent successfully for function: ${functionCall.name}`
+            );
           } catch (error) {
-            console.error(`❌ [GoogleAIService] Failed to send tool call event:`, error);
+            console.error(
+              `❌ [GoogleAIService] Failed to send tool call event:`,
+              error
+            );
             console.error(`❌ [GoogleAIService] Error details:`, {
               errorMessage: error.message,
               errorStack: error.stack,
@@ -812,26 +996,30 @@ class GoogleAIService extends AIProviderBase {
               sessionId,
               messageId,
               functionCallId: functionCallId,
-              functionName: functionCall.name
+              functionName: functionCall.name,
             });
             throw error;
           }
         }
       }
-      
+
       // Handle candidates and metadata
       if (chunk.candidates && chunk.candidates.length > 0) {
         for (const candidate of chunk.candidates) {
           // Update finish reason if present
           if (candidate.finishReason) {
             finishReason = candidate.finishReason;
-            console.log(`🔧 [GoogleAIService] Updated finish reason: ${finishReason}`);
-          }                  
+            console.log(
+              `🔧 [GoogleAIService] Updated finish reason: ${finishReason}`
+            );
+          }
         }
       }
     }
 
-    console.log(`🔧 [GoogleAIService] Streaming completed, sending completion event for session: ${sessionId}`);
+    console.log(
+      `🔧 [GoogleAIService] Streaming completed, sending completion event for session: ${sessionId}`
+    );
 
     // Send completion event
     const completionEvent = this.createCompletionEvent(
@@ -847,20 +1035,26 @@ class GoogleAIService extends AIProviderBase {
     );
     completionEvent.messageId = messageId;
     completionEvent.conversationId = sessionId; // Add conversationId field
-    
+
     console.log(`🔧 [GoogleAIService] Sending completion event:`, {
       sessionId,
       messageId,
       eventType: completionEvent.type,
       eventData: completionEvent.data,
-      textLength: accumulatedText.length
+      textLength: accumulatedText.length,
     });
-    
+
     try {
-      await this.streamingTransportManager.sendEventToSession(sessionId, completionEvent);
+      await this.streamingTransportManager.sendEventToSession(
+        sessionId,
+        completionEvent
+      );
       console.log(`✅ [GoogleAIService] Completion event sent successfully`);
     } catch (error) {
-      console.error(`❌ [GoogleAIService] Failed to send completion event:`, error);
+      console.error(
+        `❌ [GoogleAIService] Failed to send completion event:`,
+        error
+      );
       throw error;
     }
 
@@ -868,7 +1062,7 @@ class GoogleAIService extends AIProviderBase {
     if (result && result.candidates && result.candidates.length > 0) {
       // Update the first candidate with accumulated content
       const candidate = result.candidates[0];
-      
+
       // Update content parts
       if (candidate.content && candidate.content.parts) {
         // Clear existing parts and add accumulated text
@@ -876,23 +1070,23 @@ class GoogleAIService extends AIProviderBase {
         if (accumulatedText) {
           candidate.content.parts.push({ text: accumulatedText });
         }
-        
+
         // Add function calls if any
         for (const functionCall of accumulatedFunctionCalls) {
           candidate.content.parts.push({ functionCall });
         }
       }
-      
+
       // Update finish reason
       candidate.finishReason = finishReason;
-      
+
       console.log(`🔧 [GoogleAIService] Final result updated:`, {
         sessionId,
         messageId,
         hasText: !!accumulatedText,
         textLength: accumulatedText.length,
         functionCallsCount: accumulatedFunctionCalls.length,
-        finishReason
+        finishReason,
       });
     }
 
@@ -920,7 +1114,7 @@ class GoogleAIService extends AIProviderBase {
 
         // Send an empty message to get the next response from the AI
         const result = await chat.sendMessage({
-          config: persona.messageConfig,          
+          config: persona.messageConfig,
           message: "",
         });
 
@@ -1002,14 +1196,14 @@ class GoogleAIService extends AIProviderBase {
             history: this.chatState.history,
             chat: chat,
             messageId,
-          });                              
+          });
         } else {
           result = await chat.sendMessage({
             config: persona.messageConfig,
             message,
           });
         }
-        
+
         this.context.log(
           `Received response from Google AI`,
           { result: JSON.stringify(result, null, 2) },
@@ -1178,7 +1372,6 @@ class GoogleAIService extends AIProviderBase {
       throw error;
     }
   }
-  
 
   private extractGeminiCandidate(candidate: any): {
     responseText: string;
@@ -1335,11 +1528,14 @@ class GoogleAIService extends AIProviderBase {
           attempt > 1
             ? this.modifyMessageForRetry(message, lastError)
             : message;
-        
-       
+
         const messageId = new ObjectId();
         // Get response from AI
-        const response = await this.getAIResponse(modifiedMessage, role, messageId.toString());
+        const response = await this.getAIResponse(
+          modifiedMessage,
+          role,
+          messageId.toString()
+        );
 
         // Add AI response to history
         if (response.choices && response.choices.length > 0) {
@@ -1513,7 +1709,9 @@ class GoogleAIService extends AIProviderBase {
     this.streamingSessionManager = streamingSessionManager;
   }
 
-  setStreamingTransportManager(streamingTransportManager: StreamingTransportManager) {
+  setStreamingTransportManager(
+    streamingTransportManager: StreamingTransportManager
+  ) {
     this.streamingTransportManager = streamingTransportManager;
   }
 

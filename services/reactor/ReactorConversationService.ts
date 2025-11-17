@@ -2058,7 +2058,7 @@ export default class ReactorConversationService
         // Get provider adapter
         const adapter = await this.providerService.getAdapter(provider);
 
-        if (streamingMode === StreamingMode.SSE) {
+        if (streamingMode === 'SSE') {
           // check if the sse is connected
           let sessionId = this.streamingSessionManager.getSessionId(chatSessionId);
           if (!sessionId) {

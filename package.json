@@ -24,7 +24,7 @@
     "url": "https://github.com/reactorynet/reactory-reactor.git"
   },
   "dependencies": {
-    "@google/genai":"0.13.0",
+    "@google/genai":"1.24.0",
     "openai": "4.87.3",
     "@aws-sdk/client-bedrock": "3.864.0",
     "@anthropic-ai/sdk": "0.59.0",
