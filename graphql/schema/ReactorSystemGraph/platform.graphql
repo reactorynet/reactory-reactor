@@ -1,7 +1,172 @@
 # Platform, Cluster, Resource, Pod, and Environment types
 
+"""
+Input for creating or updating a ReactorSystem.
+"""
+input ReactorSystemInput {
+  name: String!
+  description: String
+  version: String
+  status: String
+}
+
+"""
+Input for filtering ReactorSystem results.
+"""
+input ReactorSystemFilter {
+  name: String
+  status: String
+  version: String
+}
+
+"""
+Input for creating or updating a ReactorCluster.
+"""
+input ReactorClusterInput {
+  name: String!
+  type: String!
+  description: String
+  status: String
+  region: String
+  provider: String
+  nodeCount: Int
+  cpuCapacity: Float
+  memoryCapacity: Float
+}
+
+"""
+Input for filtering ReactorCluster results.
+"""
+input ReactorClusterFilter {
+  name: String
+  status: String
+  region: String
+  provider: String
+}
+
+"""
+Input for creating or updating a ReactorResource.
+"""
+input ReactorResourceInput {
+  name: String!
+  type: String!
+  description: String
+  status: String
+  owner: String
+}
+
+"""
+Input for filtering ReactorResource results.
+"""
+input ReactorResourceFilter {
+  name: String
+  type: String
+  status: String
+  owner: String
+}
+
+"""
+Input for creating or updating a ReactorPod.
+"""
+input ReactorPodInput {
+  name: String!
+  namespace: String
+  clusterId: Int
+  status: ReactorPodStatus
+  nodeName: String
+  containers: [String]
+  logs: [String]
+  cpuUsage: Float
+  memoryUsage: Float
+  restarts: Int
+}
+
+"""
+Input for filtering ReactorPod results.
+"""
+input ReactorPodFilter {
+  name: String
+  status: ReactorPodStatus
+  namespace: String
+  nodeName: String
+}
+
+"""
+Input for creating or updating a ReactorProjectEnvironment.
+"""
+input ReactorProjectEnvironmentInput {
+  name: String!
+  description: String
+  status: String
+}
+
+"""
+Input for filtering ReactorProjectEnvironment results.
+"""
+input ReactorProjectEnvironmentFilter {
+  name: String
+  status: String
+}
+
+"""
+Input for creating or updating a ReactorUniverse.
+"""
+input ReactorUniverseInput {
+  name: String!
+  description: String
+  version: String
+  status: String
+}
+
+"""
+Input for filtering ReactorUniverse results.
+"""
+input ReactorUniverseFilter {
+  name: String
+  status: String
+  version: String
+}
+
+"""
+Input for creating or updating a ReactorGalaxy.
+"""
+input ReactorGalaxyInput {
+  name: String!
+  description: String
+  version: String
+  status: String
+}
+
+"""
+Input for filtering ReactorGalaxy results.
+"""
+input ReactorGalaxyFilter {
+  name: String
+  status: String
+  version: String
+}
+
+"""
+Input for creating or updating a ReactorProjectDeployment.
+"""
+input ReactorProjectDeploymentInput {
+  name: String!
+  description: String
+  status: String
+}
+
+"""
+Input for filtering ReactorProjectDeployment results.
+"""
+input ReactorProjectDeploymentFilter {
+  name: String
+  status: String
+}
+
+
+
 type ReactorCluster {
-  id: Int!
+  id: String!
   name: String!
   type: String!
   description: String
@@ -18,7 +183,7 @@ type ReactorCluster {
 }
 
 type ReactorResource {
-  id: Int!
+  id: String!
   name: String!
   type: String!
   description: String
@@ -28,14 +193,26 @@ type ReactorResource {
   updated: Date
 }
 
+enum ReactorPodStatus {
+  RUNNING
+  PENDING
+  FAILED
+  SUCCEEDED
+  UNKNOWN
+}
+
+"""
+The ReactorPod type represents a pod in the Reactory architecture, including its status, node name, containers, and resource usage.
+"""
 type ReactorPod {
-  id: Int!
+  id: String!
   name: String!
   namespace: String
   cluster: ReactorCluster
-  status: String
+  status: ReactorPodStatus
   nodeName: String
   containers: [String]
+  logs: [String]
   cpuUsage: Float
   memoryUsage: Float
   restarts: Int
@@ -43,14 +220,210 @@ type ReactorPod {
   updated: Date
 }
 
+enum ReactorProjectEnvironmentStatus {
+  STABLE
+  UNSTABLE
+  DEPRECATED
+  ARCHIVED
+}
+
+"""
+Reactory Project Environment represents a specific environment within a project, including deployments, clusters, resources, and pods.
+"""
 type ReactorProjectEnvironment {
-  id: Int!
+  id: String!
   name: String!
   description: String
+  status: ReactorProjectEnvironmentStatus
   deployments: [ReactorProjectDeployment]
   projects: [ReactorProject]
-  clusters: [String]
-  resources: [String]
+  clusters: [ReactorCluster]
+  resources: [ReactorResource]
+  pods: [ReactorPod]
   created: Date
   updated: Date
+}
+
+
+"""
+Reactory System represents the entire system architecture including clusters, resources, pods, and environments.
+"""
+type ReactorSystem {
+  id: String!
+  nameSpace: String!
+  name: String!
+  description: String
+  version: String
+  status: String
+  projects: [ReactorProject]
+  deployments: [ReactorProjectDeployment]
+  environments: [ReactorProjectEnvironment]
+  clusters: [ReactorCluster]
+  resources: [ReactorResource]
+  pods: [ReactorPod]
+  created: Date
+  updated: Date
+}
+
+"""
+Reactory Galaxy represents a collection of systems within a larger universe, providing a higher-level view of the architecture.
+"""
+type ReactorGalaxy { 
+  id: String!
+  nameSpace: String!
+  name: String!
+  description: String
+  version: String
+  status: String
+  systems: [ReactorSystem]
+  created: Date
+  updated: Date
+}
+
+"""
+Reactory Universe represents the highest level of organization in the Reactory architecture, containing multiple galaxies.
+"""
+type ReactorUniverse {
+  id: String!
+  nameSpace: String!
+  name: String!
+  description: String
+  version: String
+  status: String
+  galaxies: [ReactorGalaxy]
+  created: Date
+  updated: Date
+} 
+
+type ReactorPagedProjectDeployments { 
+  projectDeployments: [ReactorProjectDeployment!]!
+  paging: PagingResult
+}
+
+type ReactorPagedGalaxies {
+  galaxies: [ReactorGalaxy!]!
+  paging: PagingResult
+}
+
+type ReactorPagedUniverses {
+  universes: [ReactorUniverse!]!
+  paging: PagingResult
+}
+
+type ReactorPagedProjectEnvironments {
+  projectEnvironments: [ReactorProjectEnvironment!]!
+  paging: PagingResult
+}
+
+type ReactorPagedPods {
+  pods: [ReactorPod!]!
+  paging: PagingResult
+}
+
+type ReactorPagedResources {
+  resources: [ReactorResource!]!
+  paging: PagingResult
+}
+
+type ReactorPagedClusters {
+  clusters: [ReactorCluster!]!
+  paging: PagingResult
+}
+
+type ReactorPagedSystems {
+  systems: [ReactorSystem!]!
+  paging: PagingResult
+}
+
+type Query {
+  ReactorSystems(paging: PagingRequest, filter: ReactorSystemFilter): ReactorPagedSystems
+  ReactorSystem(id: String!): ReactorSystem
+  ReactorClusters(paging: PagingRequest, filter: ReactorClusterFilter): ReactorPagedClusters
+  ReactorCluster(id: String!): ReactorCluster
+  ReactorResources(paging: PagingRequest, filter: ReactorResourceFilter): ReactorPagedResources
+  ReactorResource(id: String!): ReactorResource
+  ReactorPods(paging: PagingRequest, filter: ReactorPodFilter): ReactorPagedPods
+  ReactorPod(id: String!): ReactorPod
+  ReactorProjectEnvironments(paging: PagingRequest, filter: ReactorProjectEnvironmentFilter): ReactorPagedProjectEnvironments
+  ReactorProjectEnvironment(id: String!): ReactorProjectEnvironment
+  ReactorUniverses(paging: PagingRequest, filter: ReactorUniverseFilter): ReactorPagedUniverses
+  ReactorUniverse(id: String!): ReactorUniverse
+  ReactorGalaxies(paging: PagingRequest, filter: ReactorGalaxyFilter): ReactorPagedGalaxies
+  ReactorGalaxy(id: String!): ReactorGalaxy
+  ReactorProjectDeployments(paging: PagingRequest, filter: ReactorProjectDeploymentFilter): ReactorPagedProjectDeployments
+  ReactorProjectDeployment(id: String!): ReactorProjectDeployment
+}
+
+type Mutation {
+  """
+  Create a new ReactorSystem.
+  """
+  ReactorSystemCreate(input: ReactorSystemInput!): ReactorSystem!
+  """
+  Update an existing ReactorSystem.
+  """
+  ReactorSystemUpdate(id: Int!, input: ReactorSystemInput!): ReactorSystem!
+
+  """
+  Create a new ReactorCluster.
+  """
+  ReactorClusterCreate(input: ReactorClusterInput!): ReactorCluster!
+  """
+  Update an existing ReactorCluster.
+  """
+  ReactorClusterUpdate(id: Int!, input: ReactorClusterInput!): ReactorCluster!
+
+  """
+  Create a new ReactorResource.
+  """
+  ReactorResourceCreate(input: ReactorResourceInput!): ReactorResource!
+  """
+  Update an existing ReactorResource.
+  """
+  ReactorResourceUpdate(id: Int!, input: ReactorResourceInput!): ReactorResource!
+
+  """
+  Create a new ReactorPod.
+  """
+  ReactorPodCreate(input: ReactorPodInput!): ReactorPod!
+  """
+  Update an existing ReactorPod.
+  """
+  ReactorPodUpdate(id: Int!, input: ReactorPodInput!): ReactorPod!
+
+  """
+  Create a new ReactorProjectEnvironment.
+  """
+  ReactorProjectEnvironmentCreate(input: ReactorProjectEnvironmentInput!): ReactorProjectEnvironment!
+  """
+  Update an existing ReactorProjectEnvironment.
+  """
+  ReactorProjectEnvironmentUpdate(id: Int!, input: ReactorProjectEnvironmentInput!): ReactorProjectEnvironment!
+
+  """
+  Create a new ReactorUniverse.
+  """
+  ReactorUniverseCreate(input: ReactorUniverseInput!): ReactorUniverse!
+  """
+  Update an existing ReactorUniverse.
+  """
+  ReactorUniverseUpdate(id: Int!, input: ReactorUniverseInput!): ReactorUniverse!
+
+  """
+  Create a new ReactorGalaxy.
+  """
+  ReactorGalaxyCreate(input: ReactorGalaxyInput!): ReactorGalaxy!
+  """
+  Update an existing ReactorGalaxy.
+  """
+  ReactorGalaxyUpdate(id: Int!, input: ReactorGalaxyInput!): ReactorGalaxy!
+
+  """
+  Create a new ReactorProjectDeployment.
+  """
+  ReactorProjectDeploymentCreate(input: ReactorProjectDeploymentInput!): ReactorProjectDeployment!
+  """
+  Update an existing ReactorProjectDeployment.
+  """
+  ReactorProjectDeploymentUpdate(id: Int!, input: ReactorProjectDeploymentInput!): ReactorProjectDeployment!
 }

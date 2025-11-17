@@ -56,7 +56,8 @@ type ReactorNodeAttributes {
 }
 
 type ReactorNode {
-  id: Int!
+  id: ID!
+  nodeId: Int!
   index: Int!
   type: ReactorNodeType!
   key: String!

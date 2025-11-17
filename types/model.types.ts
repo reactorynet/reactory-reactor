@@ -210,6 +210,7 @@ export interface AIChatParams {
   personaId: string;
   message: string;
   chatSessionId?: string;
+  role?: "user" | "assistant" | "tool" | "system";
   [key: string]: any;
 }
 
@@ -334,4 +335,23 @@ export interface ResourceYaml {
     [key: string]: any;
   }>;
   [key: string]: any;
+}
+
+export interface ReactorChatMessage {
+  __typename: "ReactorChatMessage";
+  sessionId: string;
+  id: string;
+  role: string | "user" | "assistant" | "tool" | "system";
+  content: string | any;
+  component: string;
+  props: any;
+  propsMap: any;
+  tool_calls: any[];
+  tool_results: any[];
+  refusal: string;
+  rating: number;
+  timestamp: Date;
+  audio: string;
+  images: any[];
+  annotations: any[];
 }

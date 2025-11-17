@@ -6,6 +6,11 @@ input ReactorNodeCategoryFilter {
 
 input ReactorProjectFilter {
   search: String
+  businessUnit: String
+  ownerTeam: String
+  owner: String
+  system: String
+  status: String
   ids: [Int]
   paging: PagingRequest
 }
@@ -34,4 +39,62 @@ input ReactorSystemGraphInput {
   share: Boolean
   nodes: [Int!]
   links: [ReactorNodeLinkInput!]
+}
+
+"""
+# Input type for ReactorProjectMetrics query
+# This input type is used to query project metrics for a specific project within a date range.
+"""
+input ReactorProjectMetricsQueryInput {
+  """
+  # The project ids to query metrics for
+  """
+  projectIds: [Int!]
+  """
+  # The team ids to query metrics for
+  """
+  teamIds: [String!]
+  """
+  # The business unit ids to query metrics for
+  """
+  businessUnitIds: [String!]
+  """
+  # The start date of the date range to query metrics for
+  """
+  startDate: Date
+  """
+  # The end date of the date range to query metrics for
+  """
+  endDate: Date
+  """
+  # The metrics to query for
+  """
+  metrics: [String!]
+}
+
+"""
+# Input type for ReactorProjectDocumentation
+# This input type is used for creating and updating project documentation
+"""
+input ReactorProjectDocumentationInput {
+  id: Int
+  title: String!
+  url: String
+  path: String
+  content: String
+  format: String
+  createdBy: String
+  created: Date
+  updated: Date
+}
+
+input ReactorProjectInput {
+  id: String
+  name: String
+  description: String
+  projectStatus: String
+  ownerTeam: String
+  owner: String
+  businessUnit: String
+  projectTypes: [String!]
 }

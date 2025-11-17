@@ -9,11 +9,14 @@ import {
   AttributeProvider,
   IProjectProcessor,
   IReactorProject,
+  IReactorProjectMetrics,
   IReactorProjectPathSpec,
   ISystemGraphManager,
   PageReactorProjectResult,
   ReactorNodeAttributes,
+  ReactorProjectDocumentation,
   ReactorProjectService,
+  ReactorProjectStatus,
 } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { ObjectId } from "mongodb";
 import {
@@ -40,6 +43,11 @@ interface PagedCategoryNodes {
 
 interface ReactorProjectFilterArgs {
   search: string;
+  ownerTeam: string;
+  owner: string;
+  system: string;
+  businessUnit: string;
+  status: string;
   ids: string[];
   paging: PagingRequest;
 }
@@ -106,7 +114,7 @@ class ReactorSystemGraph {
     );
     searchResults.results.forEach((r) => {
       nodes.push({
-        id: new ObjectId(r.id),
+        id: context.utils.hash(r.id),
         index: r.id,
         name: r.name,
         version: r.version,
@@ -177,9 +185,84 @@ class ReactorSystemGraph {
     return graphSvc.getCategoryNodes();
   }
 
+  @property("ReactorProject", "id")
+  getProjectId(project: IReactorProject) {
+    return project._id.toString();
+  }
+
   @property("ReactorProject", "fqn")
   getProjectFQN(project: IReactorProject) {
     return `${project.nameSpace}.${project.name}@${project.version || "1.0.0"}`;
+  }
+
+  @property("ReactorProject", "repoUrl")
+  getProjectRepoUrl(project: IReactorProject, args: any, context: Reactory.Server.IReactoryContext): string {
+    if (project.repoUrl) {
+      return project.repoUrl;
+    }
+    const DEFAULT_URL = `https://github.com/${project.nameSpace}/${project.name}.git`
+    const projectSvc = context.getService<ReactorProjectService>(
+      "reactor.ReactorProjectService@1.0.0"
+    );
+    
+    return projectSvc?.getRepoUrl(project) || DEFAULT_URL;    
+  }
+
+  @property("ReactorProject", "tasksUrl")
+  getProjectTasksUrl(project: IReactorProject, args: any, context: Reactory.Server.IReactoryContext): string {
+    if (project.tasksUrl) {
+      return project.tasksUrl;
+    }
+    return process.env.DEFAULT_TASKS_URL || `/reactor/service/${project.name}?tab=tasks&action=setUrl`;
+  }
+
+  @property("ReactorProject", "primaryDocumentation")
+  async getProjectPrimaryDocument(project: Partial<IReactorProject>, args: any, context: Reactory.Server.IReactoryContext): Promise<ReactorProjectDocumentation> {    
+    // we check if the project has a repoPath if it does, we search the folder for the first readme.md 
+    if (project.repoPath) {
+      const projectSvc = context.getService<ReactorProjectService>(
+        "reactor.ReactorProjectService@1.0.0"
+      );
+      return projectSvc.getPrimaryDocumentation(project);
+    } else {
+      return {
+        id: 0,
+        title: "No Documentation",
+        content: "This project does not have any documentation available.",
+        format: "text",
+        created: new Date(),
+        createdBy: context.user
+      };
+    }
+  }
+
+  @property("ReactorProject", "additionalDocumentation")
+  async getProjectAdditionalDocuments(
+    project: Partial<IReactorProject>,
+    args: any,
+    context: Reactory.Server.IReactoryContext
+  ): Promise<ReactorProjectDocumentation[]> {
+    // we check if the project has a repoPath if it does, we search the folder for the first readme.md 
+    if (project.repoPath) {
+      const projectSvc = context.getService<ReactorProjectService>(
+        "reactor.ReactorProjectService@1.0.0"
+      );
+      return projectSvc.getAdditionalDocumentation(project);
+    } else {
+      return [];
+    }
+  }
+
+  @property("ReactorProject", "projectMetrics")
+  async getProjectMetrics(
+    project: Partial<IReactorProject>,
+    args: { startDate?: Date; endDate?: Date; metrics?: string[] },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<IReactorProjectMetrics[]> {
+    const projectSvc = context.getService<ReactorProjectService>(
+      "reactor.ReactorProjectService@1.0.0"
+    );
+    return projectSvc.getProjectMetrics(project, args.startDate, args.endDate);
   }
 
   @query("ReactorCatalogNodes")
@@ -217,7 +300,7 @@ class ReactorSystemGraph {
 
   @property("ReactorProjectPathSpec", "id")
   getProjectPathSpecId({ id, path, filter, type }: IReactorProjectPathSpec) {
-    if (id && id instanceof ObjectId) return id;
+    if (id && typeof id === 'object' && id.constructor?.name === 'ObjectId') return id;
     if (id) return new ObjectId(id);
 
     return OBJID.deterministicObjectId(
@@ -262,10 +345,22 @@ class ReactorSystemGraph {
     return [];
   }
 
+  @property("ReactorProject", "projectStatus")
+  getProjectStatus(
+    project: IReactorProject,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ): ReactorProjectStatus {
+   
+   return project?.projectStatus || ReactorProjectStatus.ACTIVE;
+  }
+
+
+
   @mutation("ReactorSyncCatalogNode")
   async syncCatalogNode(
     _: any,
-    args: { id: ObjectId },
+    args: { id: number },
     context: Reactory.Server.IReactoryContext
   ): Promise<CatalogNodeSyncResult> {
     const graphSvc = context.getService<ISystemGraphManager>(
@@ -513,6 +608,107 @@ class ReactorSystemGraph {
   ): Promise<any> {
     // Not implemented in SystemGraphManager
     throw new Error("saveSystemGraph not implemented");
+  }
+
+  @query("ReactorProjectByName")
+  async ReactorProjectByName(
+    _: any,
+    args: { name: string; nameSpace?: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<IReactorProject> | undefined> {
+    const projectSvc = context.getService<ReactorProjectService>(
+      "reactor.ReactorProjectService@1.0.0"
+    );
+    const pagedProjects = await projectSvc.getProjects({
+      comparitor: {
+        name: args.name
+      }
+    });
+
+    if (pagedProjects.paging.total >= 1) {
+      return pagedProjects.projects[0];
+    }
+  }
+
+  @mutation("ReactorUpdateProject")
+  async ReactorUpdateProject(
+    _: any,
+    args: { projectId: string; updates: any },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<any> {
+    try {
+    const projectSvc = context.getService<ReactorProjectService>(
+      "reactor.ReactorProjectService@1.0.0"
+    );
+    const result = await projectSvc.updateProject(args.projectId, args.updates);
+    if(result) {
+      return {
+        __typename: "ReactorProjectUpdateSuccess",
+        id: result._id.toString(),
+        project: result,
+        message: "Project updated successfully"
+      };
+    } else {
+      return {
+        __typename: "ReactorProjectUpdateFailure",
+          id: args.projectId,
+          error: "Failed to update project"
+        };
+      }
+    } catch (error) {
+      context.error("Error updating project", { error, projectId: args.projectId });
+      return {
+        __typename: "ReactorProjectUpdateFailure",
+        error: error.message || "An error occurred while updating project",
+        id: args.projectId
+      };
+    }
+  }
+
+  @mutation("ReactorUpdateProjectDocumentation")
+  async ReactorUpdateProjectDocumentation(
+    _: any,
+    args: { projectId: string; additionalDocumentation: any[] },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<any> {
+    try {
+      const projectSvc = context.getService<ReactorProjectService>(
+        "reactor.ReactorProjectService@1.0.0"
+      );
+      
+      // Get the current project
+      const project = await projectSvc.getProject(args.projectId);
+      if (!project) {
+        return {
+          __typename: "ReactorProjectDocumentationUpdateFailure",
+          error: "Project not found"
+        };
+      }
+
+      // Update the project with new additional documentation
+      const updatedProject = await projectSvc.updateProject(args.projectId, {
+        secondaryDocumentation: args.additionalDocumentation
+      });
+
+      if (updatedProject) {
+        return {
+          __typename: "ReactorProjectDocumentationUpdateSuccess",
+          project: updatedProject,
+          message: "Project documentation updated successfully"
+        };
+      } else {
+        return {
+          __typename: "ReactorProjectDocumentationUpdateFailure",
+          error: "Failed to update project documentation"
+        };
+      }
+    } catch (error) {
+      context.error("Error updating project documentation", { error, projectId: args.projectId });
+      return {
+        __typename: "ReactorProjectDocumentationUpdateFailure",
+        error: error.message || "An error occurred while updating project documentation"
+      };
+    }
   }
 }
 

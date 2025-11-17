@@ -11,4 +11,6 @@ extend type Query {
   ReactorNodesByNameAndNameSpace(name: String!, nameSpace: String!, term: String, paging: PagingRequest): ReactorPagedNodes
   ReactorProjects(filter: ReactorProjectFilter): ReactorPagedProjects
   ReactorProject(id: Int!): ReactorProject
+  ReactorProjectByName(name: String!): ReactorProject
+  ReactorProjectMetrics(projectMetricsQuery: ReactorProjectMetricsQueryInput!): [ReactorProjectMetrics]      
 }

@@ -1,0 +1,10 @@
+{
+ "Cluster": "cluster",
+ "Service": "name",
+ "Domain": "domain.name",
+ "Status": "status",
+ "Squad": "ownerTeam.name",
+ "Comment": "notes[0]",
+ "Public Facing": "publicFacing",
+ "Github URL": "repoUrl"
+}

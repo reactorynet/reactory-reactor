@@ -15,6 +15,9 @@ import {
 } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import ApiError from "exceptions";
 import Reactory from "@reactory/reactory-core";
+import logger from "@reactory/server-core/logging";
+import { ReactorConversation, ReactorConversationDocument } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
+import { PromptMergeStrategy, StreamingMode } from "modules/reactory-reactor/services/reactor/types/streaming.types";
 
 @resolver
 class ReactorChatResolver {
@@ -55,7 +58,7 @@ class ReactorChatResolver {
         context.getService<IReactorConversationsService>(
           "reactor.ReactorConversationService@1.0.0"
         );
-      const conversation = await conversationService.loadChatSession(args.id);
+      const conversation = await conversationService.getChatSession({ id: args.id });
 
       if (!conversation) {
         throw new ApiError("NotFoundError", {
@@ -73,7 +76,9 @@ class ReactorChatResolver {
         personaId: conversation.personaId,
         modelId: conversation.modelId,
         user: {
-          id: conversation.user?.id,
+          __typename: "User",
+          _id: conversation.user?._id?.toString(),
+          id: conversation.user?.id || conversation.user?._id?.toString(),
           firstName: conversation.user?.firstName || "Unknown User",
           lastName: conversation.user?.lastName,
         },
@@ -85,6 +90,9 @@ class ReactorChatResolver {
           conversation.toolApprovalMode || ToolApprovalMode.PROMPT,
         tools: conversation?.tools || [],
         macros: conversation?.macros || [],
+        tokenCount: conversation.tokenCount,
+        maxTokens: conversation.maxTokens,  
+        files: conversation.files || [],      
       };
 
       return chatState;
@@ -108,6 +116,10 @@ class ReactorChatResolver {
       initSession: {
         personaId: string;
         message: string;
+        systemPrompt: string;
+        streamingMode: StreamingMode;
+        promptMergeStrategy: PromptMergeStrategy;
+        toolApprovalMode: ToolApprovalMode;
         macros: Partial<MacroComponentDefinition<unknown>>;
         tools: Partial<MacroToolDefinition>[];
       };
@@ -157,6 +169,51 @@ class ReactorChatResolver {
     }
   }
 
+  @property("ReactorChatState", "id")
+  async ReactorChatStateId(
+    chatState: ReactorConversation | ChatState,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ) {
+
+    if ((chatState as ChatState).__typename === "ReactorChatState" && 
+    (chatState as ChatState).id) {
+      return (chatState as ChatState).id;
+    }
+
+    if ((chatState as ReactorConversation)._id) {
+      return (chatState as ReactorConversation)._id.toString();
+    }
+        
+    throw new ApiError("InvalidInputError", {
+      message: "Chat state ID is required",
+      code: "INVALID_INPUT",
+      timestamp: new Date(),
+      recoverable: true,
+    });    
+  }
+
+  @property("ReactorChatState", "user")
+  async ReactorChatStateUser(
+    chatState: ChatState,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!chatState?.user) {
+      return null;
+    }
+
+    if (typeof chatState?.user === "string" && ObjectId.isValid(chatState?.user)) {
+      return await context.getService<Reactory.Service.IReactoryUserService>("user.UserService@1.0.0").findUserById(chatState?.user);      
+    }
+
+    if (typeof chatState?.user === "object" && chatState?.user instanceof ObjectId) {
+      return await context.getService<Reactory.Service.IReactoryUserService>("user.UserService@1.0.0").findUserById(chatState?.user.toString());
+    }
+
+    return chatState?.user;
+  }
+
   @property("ReactorChatState", "tools")
   async ReactorChatStateTools(
     chatState: ChatState,
@@ -202,6 +259,54 @@ class ReactorChatResolver {
     return macroDefinitions;
   }
 
+  @property("ReactorChatState", "tokenCount")
+  async ReactorChatStateTokenCount(
+    chatState: ChatState,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ) {
+    return chatState?.tokenCount || 0;
+  }
+
+  @property("ReactorChatState", "maxTokens")
+  async ReactorChatStateMaxTokens(
+    chatState: ChatState,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ) {
+    return chatState?.maxTokens || 8000;
+  }
+
+  @property("ReactorChatState", "tokenPressure")
+  async ReactorChatStateTokenPressure(
+    chatState: ChatState,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ) {
+
+    if (!chatState?.tokenCount || !chatState?.maxTokens) {
+      return 0;
+    }
+    // get the presure from the tokenCount and maxTokens
+    const tokenPressure = chatState?.tokenCount / chatState?.maxTokens;
+    return tokenPressure || 0;
+  }
+
+  @property("ReactorChatState", "files")
+  async ReactorChatStateFiles(
+    chatState: ChatState,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!chatState?.id) {
+      return [];    
+    }
+    
+    if (chatState?.files && chatState?.files.length > 0) {
+      return chatState.files;
+    }
+  }
+
   @mutation("ReactorSendMessage")
   async ReactorSendMessage(
     _: any,
@@ -210,6 +315,7 @@ class ReactorChatResolver {
         message: string;
         personaId: string;
         chatSessionId?: string;
+        streamingMode: StreamingMode;
       };
     },
     context: Reactory.Server.IReactoryContext
@@ -239,6 +345,7 @@ class ReactorChatResolver {
         personaId: args.message.personaId,
         chatSessionId: args.message.chatSessionId,
         message: args.message.message,
+        streamingMode: args.message.streamingMode,
       });
     } catch (error) {
       return {
@@ -253,6 +360,81 @@ class ReactorChatResolver {
     }
   }
 
+  @mutation("ReactorAttachFile") 
+  async ReactorAttachFile(
+    _: any,
+    args: { file: Reactory.Service.IFile; chatSessionId: string },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!args || !args.file) {
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "INVALID_INPUT",
+        message: "Missing required file parameters",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion: "Ensure you provide a file",
+      };
+    }
+
+    const params = {
+      file: args.file,      
+      chatSessionId: args.chatSessionId,
+    };
+
+    const conversationService =
+      context.getService<IReactorConversationsService>(
+        "reactor.ReactorConversationService@1.0.0"
+      );
+
+    const conversation = await conversationService.getChatSession({ id: args.chatSessionId });
+    
+    const fileService: Reactory.Service.IReactoryFileService = context.getService('core.ReactoryFileService@1.0.0') as Reactory.Service.IReactoryFileService;
+            //upload the file and associate with the workload package
+    logger.debug(`Uploading File using Reactory File Service`, { filename: params.file.filename });
+
+    let fileModel = await fileService.uploadFile({
+      file: params.file,
+      filename: params.file.filename,
+      uploadContext: `reactor_chat_file::${params.chatSessionId}`,
+      isUserSpecific: true,
+      rename: false,
+      catalog: true,
+      virtualPath: `chats/${conversation.personaId}/${params.chatSessionId}`
+    });
+
+    
+    
+    if (!fileModel) {
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "FILE_UPLOAD_ERROR",
+        message: "Failed to upload file",
+        timestamp: new Date(),
+        recoverable: false,
+        suggestion: "Check the file format and size, or try again later",
+      };
+    }
+
+    try {
+      return await conversationService.attachFiles({
+        files: [fileModel],        
+        chatSessionId: params.chatSessionId,
+      });
+    } catch (error) {
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "FILE_ATTACHMENT_ERROR",
+        message: error.message || "Error attaching file to chat session",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion:
+          "Ensure the chat session exists and you have permission to attach files",
+      };
+    }
+    
+  }
+  
   @mutation("ReactorAttachImage")
   async ReactorAttachImage(
     _: any,
@@ -309,6 +491,70 @@ class ReactorChatResolver {
         recoverable: true,
         suggestion:
           "Try a clearer audio recording or type your message instead",
+      };
+    }
+  }
+
+  @mutation("ReactorAttachUserFileToSession")
+  async ReactorAttachUserFileToSession(
+    _: any,
+    args: { params: { sessionId: string; fileId: string; path: string } },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    try {
+      const conversationService =
+        context.getService<IReactorConversationsService>(
+          "reactor.ReactorConversationService@1.0.0"
+        );
+      
+      return await conversationService.attachUserFileToSession(
+        args.params.sessionId,
+        args.params.fileId,
+        args.params.path
+      );
+    } catch (error) {
+      logger.error("Error attaching user file to session", error);
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "FILE_ATTACH_ERROR",
+        message: error.message || "Error attaching file to session",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion: "Please try again or contact support",
+      };
+    }
+  }
+
+  @mutation("ReactorDetachUserFileFromSession")
+  async ReactorDetachUserFileFromSession(
+    _: any,
+    args: { params: { 
+      sessionId: string; 
+      fileId: string; 
+      delete?: boolean; // Optional, if true, delete the file after detaching
+      path: string } },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    try {
+      const conversationService =
+        context.getService<IReactorConversationsService>(
+          "reactor.ReactorConversationService@1.0.0"
+        );
+      
+      return await conversationService.detachUserFileFromSession(
+        args.params.sessionId,
+        args.params.fileId,
+        args.params.path
+      );
+    } catch (error) {
+      logger.error("Error detaching user file from session", error);
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "FILE_DETACH_ERROR",
+        message: error.message || "Error detaching file from session",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion: "Please try again or contact support",
       };
     }
   }

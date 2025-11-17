@@ -1,17 +1,180 @@
 import Reactory from "@reactory/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
-import { IReactorConversationsService, IOpenAIService, IReactorProviderService, IAIPersona, IAIProviderService, KnownAIProviders } from "../../types/service.types";
-import ReactorConversationModel, { ReactorConversationDocument, TReactorConversationDocument, TReactorConversationModel, ValidProviderResponseTypes } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
+import {
+  IReactorConversationsService,
+  IOpenAIService,
+  IReactorProviderService,
+  IAIPersona,
+  IAIProviderService,
+  KnownAIProviders,
+  ReactorInitChatResponse,
+  ReactorInitiateSSEResponse,
+  ReactorChatState,
+} from "../../types/service.types";
+import ReactorConversationModel, {
+  ReactorConversationDocument,
+  TReactorConversationDocument,
+  TReactorConversationModel,
+  ValidProviderResponseTypes,
+} from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import AIPersonaProvider from "./AIPersonaProvider";
 import ReactorMessageProcessingService from "./ReactorMessageProcessingService";
 import { v4 } from "uuid";
 import { ObjectId } from "mongodb";
+
+/**
+ * Enhanced error response interface with correlation tracking
+ */
+interface ReactorErrorResponse {
+  __typename: "ReactorErrorResponse";
+  code: string;
+  message: string;
+  details?: any;
+  timestamp: Date;
+  recoverable: boolean;
+  suggestion?: string;
+  correlationId: string;
+  operation?: string;
+  userId?: string;
+  conversationId?: string;
+  retryAfter?: number; // For rate limiting errors
+  errorCategory:
+    | "VALIDATION"
+    | "PERMISSION"
+    | "RESOURCE_NOT_FOUND"
+    | "EXTERNAL_SERVICE"
+    | "INTERNAL"
+    | "RATE_LIMIT"
+    | "TIMEOUT";
+}
+
+/**
+ * Error classification enum for better error handling
+ */
+enum ErrorCategory {
+  VALIDATION = "VALIDATION", // Input validation errors
+  PERMISSION = "PERMISSION", // Authorization/permission errors
+  RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND", // Resource not found errors
+  EXTERNAL_SERVICE = "EXTERNAL_SERVICE", // External API/service errors
+  INTERNAL = "INTERNAL", // Internal service errors
+  RATE_LIMIT = "RATE_LIMIT", // Rate limiting errors
+  TIMEOUT = "TIMEOUT", // Timeout errors
+}
+
+/**
+ * Error codes for consistent error identification
+ */
+enum ReactorErrorCode {
+  // Validation errors
+  INVALID_INPUT = "INVALID_INPUT",
+  MISSING_REQUIRED_FIELD = "MISSING_REQUIRED_FIELD",
+  INVALID_FORMAT = "INVALID_FORMAT",
+
+  // Permission errors
+  UNAUTHORIZED = "UNAUTHORIZED",
+  FORBIDDEN = "FORBIDDEN",
+  INSUFFICIENT_PERMISSIONS = "INSUFFICIENT_PERMISSIONS",
+
+  // Resource errors
+  CONVERSATION_NOT_FOUND = "CONVERSATION_NOT_FOUND",
+  PERSONA_NOT_FOUND = "PERSONA_NOT_FOUND",
+  USER_NOT_FOUND = "USER_NOT_FOUND",
+  MACRO_NOT_FOUND = "MACRO_NOT_FOUND",
+
+  // External service errors
+  AI_PROVIDER_ERROR = "AI_PROVIDER_ERROR",
+  AI_PROVIDER_TIMEOUT = "AI_PROVIDER_TIMEOUT",
+  AI_PROVIDER_RATE_LIMIT = "AI_PROVIDER_RATE_LIMIT",
+
+  // Internal errors
+  DATABASE_ERROR = "DATABASE_ERROR",
+  TOKEN_CALCULATION_ERROR = "TOKEN_CALCULATION_ERROR",
+  CONVERSATION_UPDATE_ERROR = "CONVERSATION_UPDATE_ERROR",
+
+  // Message processing errors
+  MESSAGE_ERROR = "MESSAGE_ERROR",
+  MACRO_ERROR = "MACRO_ERROR",
+  IMAGE_ERROR = "IMAGE_ERROR",
+  FILE_ERROR = "FILE_ERROR",
+
+  // System errors
+  INTERNAL_ERROR = "INTERNAL_ERROR",
+  CONFIGURATION_ERROR = "CONFIGURATION_ERROR",
+}
 import OpenAI from "openai";
-import { MacroComponentDefinition, MacroToolDefinition, ToolApprovalMode } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
-import { MacroRegistry } from "@reactory/server-modules/reactory-reactor/ai/openai/chat/macro";
+import {
+  ChatState,
+  MacroComponentDefinition,
+  MacroToolDefinition,
+  ToolApprovalMode,
+} from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
+// import { MacroRegistry } from "@reactory/server-modules/reactory-reactor/ai/openai/chat/macro";
 import GoogleAIService from "./providers/GoogleAIService";
 import { ChatCompletion, ChatCompletionMessage } from "openai/resources";
 import ReactorMacroService from "./providers/ReactorMacroService";
+import DocumentChunkingService from "./DocumentChunkingService";
+import { ReactorConversationHistoryItem } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
+import {
+  ReactoryFileDocument,
+  ReactoryFileModel,
+} from "modules/reactory-core/models/CoreFile";
+import { id } from "schema/reflection";
+import { PromptMergeStrategy, StreamingMode } from "./types/streaming.types";
+import Helpers from "authentication/strategies/helpers";
+import { StreamingSessionManager } from "./StreamingSessionManager";
+import { StreamingTransportManager } from "./StreamingTransportManager";
+
+/**
+ * ReactorConversationService - Core AI Conversation Management Service
+ *
+ * This service orchestrates AI-powered conversations in the Reactory platform, providing
+ * comprehensive conversation lifecycle management, multi-provider AI integration, and
+ * advanced features like token management, tool execution, and error recovery.
+ *
+ * Key Features:
+ * - Multi-provider AI support (OpenAI, xAI, Google AI)
+ * - Atomic token counting and conversation truncation
+ * - Race condition prevention through MongoDB aggregation pipelines
+ * - Comprehensive error handling with correlation tracking
+ * - Tool and macro execution with parallel/sequential modes
+ * - File attachment and image processing capabilities
+ *
+ * @service reactor.ReactorConversationService@1.0.0
+ * @author Reactory Development Team
+ * @version 1.0.0
+ * @since 2024
+ */
+
+// Business Logic Constants
+const TOKEN_LIMITS = {
+  /** Default maximum tokens for new conversations when persona doesn't specify */
+  DEFAULT_MAX_TOKENS: 8000,
+
+  /** Percentage over limit that triggers automatic truncation (120% of limit) */
+  TRUNCATION_THRESHOLD_MULTIPLIER: 1.2,
+
+  /** Target percentage of tokens to keep after truncation (80% of limit) */
+  TRUNCATION_TARGET_MULTIPLIER: 0.8,
+
+  /** Average characters per token used for rough estimation */
+  CHARS_PER_TOKEN_ESTIMATE: 4,
+} as const;
+
+const RETRY_SETTINGS = {
+  /** Maximum number of retry attempts for recoverable errors */
+  MAX_RETRIES: 3,
+
+  /** Base delay for exponential backoff in milliseconds */
+  RETRY_BASE_DELAY_MS: 1000,
+
+  /** Suggested retry delay for rate limit errors in seconds */
+  RATE_LIMIT_RETRY_DELAY_SECONDS: 60,
+} as const;
+
+const DATABASE_CONSTANTS = {
+  /** MongoDB duplicate key error code */
+  DUPLICATE_KEY_ERROR_CODE: 11000,
+} as const;
 
 @service({
   id: "reactor.ReactorConversationService@1.0.0",
@@ -21,30 +184,1068 @@ import ReactorMacroService from "./providers/ReactorMacroService";
   description: "Service for managing reactor chat conversations",
   serviceType: "ai",
   dependencies: [
+    { id: "core.ReactoryFileService@1.0.0", alias: "fileService" },
     { id: "reactor.OpenAIService@1.0.0", alias: "openaiService" },
     { id: "reactor.GoogleAIService@1.0.0", alias: "googleAIService" },
     { id: "reactor.ReactorProviderService@1.0.0", alias: "providerService" },
-    { id: "reactor.ReactorMessageProcessingService@1.0.0", alias: "messageProcessingService" },
+    {
+      id: "reactor.ReactorMessageProcessingService@1.0.0",
+      alias: "messageProcessingService",
+    },
     { id: "reactor.AIPersonaProvider@1.0.0", alias: "personaProvider" },
-    { id: "reactor.ReactorMacroService@1.0.0", alias: "macroService" }
+    { id: "reactor.ReactorMacroService@1.0.0", alias: "macroService" },
+    { id: "reactor.DocumentChunkingService@1.0.0", alias: "chunkingService" },
+    { id: "reactor.StreamingSessionManager@1.0.0", alias: "streamingSessionManager" },
+    { id: "reactor.StreamingTransportManager@1.0.0", alias: "streamingTransportManager" },
   ],
 })
-export default class ReactorConversationService implements IReactorConversationsService {
+export default class ReactorConversationService
+  implements IReactorConversationsService
+{
+  /** Core Reactory context providing user, logging, and service access */
   private context: Reactory.Server.IReactoryContext;
+
+  /** OpenAI service for OpenAI and xAI provider interactions */
   private openaiService: IOpenAIService;
+
+  /** Google AI service for Google Gemini interactions */
   private googleAIService: GoogleAIService;
+
+  /** Provider service for managing multiple AI providers and adapters */
   private providerService: IReactorProviderService;
+
+  /** AI persona provider for persona definitions and configurations */
   private personaProvider: AIPersonaProvider;
+
+  /** Message processing service for advanced message handling */
   private messageProcessingService: ReactorMessageProcessingService;
+
+  /** Macro service for executing custom macros and tools */
   private macroService: ReactorMacroService;
-  
-  constructor(props: Reactory.Service.IReactoryServiceProps, 
-    context: Reactory.Server.IReactoryContext) {
+
+  /** Document chunking service for token estimation and text processing */
+  private chunkingService: DocumentChunkingService;
+
+  /** File service for handling file uploads and attachments */
+  private fileService: Reactory.Service.IReactoryFileService;
+
+  /** Streaming session manager for managing streaming sessions */
+  private streamingSessionManager: StreamingSessionManager;
+
+  /** Streaming transport manager for managing streaming transports */
+  private streamingTransportManager: StreamingTransportManager;
+
+  /**
+   * Initialize the ReactorConversationService with dependencies
+   *
+   * @param props - Service properties containing dependency injections
+   * @param context - Reactory context with user session and logging capabilities
+   */
+  constructor(
+    props: Reactory.Service.IReactoryServiceProps,
+    context: Reactory.Server.IReactoryContext
+  ) {
     this.context = context;
+    this.chunkingService = (props.dependencies as any)
+      ?.chunkingService as DocumentChunkingService;  
+    this.streamingSessionManager = (props.dependencies as any)
+      ?.streamingSessionManager as StreamingSessionManager;
+    this.streamingTransportManager = (props.dependencies as any)
+      ?.streamingTransportManager as StreamingTransportManager;
   }
 
+  /**
+   * Create a standardized error response with correlation tracking
+   *
+   * @param code - Error code from ReactorErrorCode enum
+   * @param message - Human-readable error message
+   * @param options - Additional error context and options
+   * @returns Standardized ReactorErrorResponse object
+   */
+  private createErrorResponse(
+    code: ReactorErrorCode,
+    message: string,
+    options: {
+      details?: any;
+      recoverable?: boolean;
+      suggestion?: string;
+      operation?: string;
+      conversationId?: string;
+      retryAfter?: number;
+      errorCategory?: ErrorCategory;
+      correlationId?: string;
+    } = {}
+  ): ReactorErrorResponse {
+    const correlationId = options.correlationId || v4();
+    const errorCategory = options.errorCategory || this.categorizeError(code);
 
-  async setChatToolApprovalMode(chatSessionId: string, toolApprovalMode: ToolApprovalMode): Promise<any> {
+    // Log error with correlation ID for debugging
+    this.context.error(`[${correlationId}] ${message}`, {
+      code,
+      operation: options.operation,
+      conversationId: options.conversationId,
+      userId: this.context.user?._id,
+      details: options.details,
+      errorCategory,
+      timestamp: new Date().toISOString(),
+    });
+
+    return {
+      __typename: "ReactorErrorResponse",
+      code,
+      message,
+      details: options.details,
+      timestamp: new Date(),
+      recoverable: options.recoverable ?? this.isRecoverableError(code),
+      suggestion: options.suggestion || this.getErrorSuggestion(code),
+      correlationId,
+      operation: options.operation,
+      userId: this.context.user?._id?.toString(),
+      conversationId: options.conversationId,
+      retryAfter: options.retryAfter,
+      errorCategory,
+    };
+  }
+
+  /**
+   * Categorize error codes into error categories
+   */
+  private categorizeError(code: ReactorErrorCode): ErrorCategory {
+    const validationErrors = [
+      ReactorErrorCode.INVALID_INPUT,
+      ReactorErrorCode.MISSING_REQUIRED_FIELD,
+      ReactorErrorCode.INVALID_FORMAT,
+    ];
+
+    const permissionErrors = [
+      ReactorErrorCode.UNAUTHORIZED,
+      ReactorErrorCode.FORBIDDEN,
+      ReactorErrorCode.INSUFFICIENT_PERMISSIONS,
+    ];
+
+    const resourceErrors = [
+      ReactorErrorCode.CONVERSATION_NOT_FOUND,
+      ReactorErrorCode.PERSONA_NOT_FOUND,
+      ReactorErrorCode.USER_NOT_FOUND,
+      ReactorErrorCode.MACRO_NOT_FOUND,
+    ];
+
+    const externalServiceErrors = [
+      ReactorErrorCode.AI_PROVIDER_ERROR,
+      ReactorErrorCode.AI_PROVIDER_TIMEOUT,
+    ];
+
+    const rateLimitErrors = [ReactorErrorCode.AI_PROVIDER_RATE_LIMIT];
+
+    if (validationErrors.includes(code)) return ErrorCategory.VALIDATION;
+    if (permissionErrors.includes(code)) return ErrorCategory.PERMISSION;
+    if (resourceErrors.includes(code)) return ErrorCategory.RESOURCE_NOT_FOUND;
+    if (externalServiceErrors.includes(code))
+      return ErrorCategory.EXTERNAL_SERVICE;
+    if (rateLimitErrors.includes(code)) return ErrorCategory.RATE_LIMIT;
+
+    return ErrorCategory.INTERNAL;
+  }
+
+  /**
+   * Determine if an error is recoverable based on error code
+   */
+  private isRecoverableError(code: ReactorErrorCode): boolean {
+    const recoverableErrors = [
+      ReactorErrorCode.AI_PROVIDER_ERROR,
+      ReactorErrorCode.AI_PROVIDER_TIMEOUT,
+      ReactorErrorCode.AI_PROVIDER_RATE_LIMIT,
+      ReactorErrorCode.DATABASE_ERROR,
+      ReactorErrorCode.MESSAGE_ERROR,
+      ReactorErrorCode.INTERNAL_ERROR,
+    ];
+
+    return recoverableErrors.includes(code);
+  }
+
+  /**
+   * Get appropriate suggestion based on error code
+   */
+  private getErrorSuggestion(code: ReactorErrorCode): string {
+    const suggestions: Record<ReactorErrorCode, string> = {
+      [ReactorErrorCode.INVALID_INPUT]:
+        "Please check your input parameters and try again",
+      [ReactorErrorCode.MISSING_REQUIRED_FIELD]:
+        "Please provide all required fields",
+      [ReactorErrorCode.INVALID_FORMAT]:
+        "Please check the format of your input",
+      [ReactorErrorCode.UNAUTHORIZED]: "Please log in and try again",
+      [ReactorErrorCode.FORBIDDEN]:
+        "You don't have permission to perform this action",
+      [ReactorErrorCode.INSUFFICIENT_PERMISSIONS]:
+        "Contact an administrator for the required permissions",
+      [ReactorErrorCode.CONVERSATION_NOT_FOUND]:
+        "Please check the conversation ID and try again",
+      [ReactorErrorCode.PERSONA_NOT_FOUND]: "Please select a valid AI persona",
+      [ReactorErrorCode.USER_NOT_FOUND]:
+        "User session may have expired, please log in again",
+      [ReactorErrorCode.MACRO_NOT_FOUND]:
+        "Please check if the macro exists and you have access to it",
+      [ReactorErrorCode.AI_PROVIDER_ERROR]: "Please try again in a few moments",
+      [ReactorErrorCode.AI_PROVIDER_TIMEOUT]:
+        "The AI service is taking longer than expected, please try again",
+      [ReactorErrorCode.AI_PROVIDER_RATE_LIMIT]:
+        "Too many requests, please wait before trying again",
+      [ReactorErrorCode.DATABASE_ERROR]:
+        "Database operation failed, please try again",
+      [ReactorErrorCode.TOKEN_CALCULATION_ERROR]:
+        "Error calculating tokens, please try again",
+      [ReactorErrorCode.CONVERSATION_UPDATE_ERROR]:
+        "Failed to update conversation, please try again",
+      [ReactorErrorCode.MESSAGE_ERROR]:
+        "Failed to send message, please try again",
+      [ReactorErrorCode.MACRO_ERROR]:
+        "Macro execution failed, please check the macro and try again",
+      [ReactorErrorCode.IMAGE_ERROR]:
+        "Image processing failed, please check the image format and size",
+      [ReactorErrorCode.FILE_ERROR]:
+        "File processing failed, please check the file formats and sizes",
+      [ReactorErrorCode.INTERNAL_ERROR]:
+        "An internal error occurred, please try again",
+      [ReactorErrorCode.CONFIGURATION_ERROR]:
+        "Service configuration error, please contact support",
+    };
+
+    return (
+      suggestions[code] ||
+      "Please try again or contact support if the problem persists"
+    );
+  }
+
+  /**
+   * Enhanced method to handle and wrap errors consistently
+   */
+  private handleError(
+    error: any,
+    operation: string,
+    conversationId?: string,
+    defaultCode: ReactorErrorCode = ReactorErrorCode.INTERNAL_ERROR
+  ): ReactorErrorResponse {
+    const correlationId = v4();
+
+    // Extract error information
+    let code = defaultCode;
+    let message = error?.message || "An unexpected error occurred";
+    let category = ErrorCategory.INTERNAL;
+    let recoverable = true;
+    let retryAfter: number | undefined;
+
+    // Map common error patterns to specific error codes
+    if (error?.message?.toLowerCase().includes("not found")) {
+      if (error.message.includes("conversation")) {
+        code = ReactorErrorCode.CONVERSATION_NOT_FOUND;
+        category = ErrorCategory.RESOURCE_NOT_FOUND;
+        recoverable = false;
+      } else if (error.message.includes("persona")) {
+        code = ReactorErrorCode.PERSONA_NOT_FOUND;
+        category = ErrorCategory.RESOURCE_NOT_FOUND;
+        recoverable = false;
+      } else if (error.message.includes("user")) {
+        code = ReactorErrorCode.USER_NOT_FOUND;
+        category = ErrorCategory.PERMISSION;
+        recoverable = false;
+      }
+    } else if (error?.message?.toLowerCase().includes("permission")) {
+      code = ReactorErrorCode.INSUFFICIENT_PERMISSIONS;
+      category = ErrorCategory.PERMISSION;
+      recoverable = false;
+    } else if (error?.message?.toLowerCase().includes("rate limit")) {
+      code = ReactorErrorCode.AI_PROVIDER_RATE_LIMIT;
+      category = ErrorCategory.RATE_LIMIT;
+      retryAfter = RETRY_SETTINGS.RATE_LIMIT_RETRY_DELAY_SECONDS;
+    } else if (error?.message?.toLowerCase().includes("timeout")) {
+      code = ReactorErrorCode.AI_PROVIDER_TIMEOUT;
+      category = ErrorCategory.EXTERNAL_SERVICE;
+    } else if (error?.code === DATABASE_CONSTANTS.DUPLICATE_KEY_ERROR_CODE) {
+      code = ReactorErrorCode.DATABASE_ERROR;
+      message = "Duplicate entry detected";
+      recoverable = false;
+    }
+
+    return this.createErrorResponse(code, message, {
+      details: {
+        originalError: error?.message,
+        stack: error?.stack,
+        errorCode: error?.code,
+      },
+      operation,
+      conversationId,
+      errorCategory: category,
+      recoverable,
+      retryAfter,
+      correlationId,
+    });
+  }
+
+  /**
+   * Validate conversation document for common issues and inconsistencies
+   *
+   * This method performs comprehensive validation of conversation documents,
+   * checking for missing required fields, inconsistent state, and potential
+   * data corruption issues. It logs detailed information for debugging.
+   *
+   * @param conversation - The conversation document to validate
+   * @param operation - The operation context (for logging)
+   * @param context - Additional context information (for logging)
+   *
+   * @remarks
+   * This method is called at critical points in conversation lifecycle:
+   * - After creating new conversations
+   * - Before and after database updates
+   * - During token count operations
+   * - When loading conversations for processing
+   *
+   * @since 1.0.0
+   */
+  private validateConversationDocument(
+    conversation: any,
+    operation: string,
+    context: string = ""
+  ): void {
+    if (!conversation) {
+      this.context.error(
+        `Conversation document is null/undefined during ${operation}`,
+        {
+          operation,
+          context,
+          user: this.context.user?._id,
+          timestamp: new Date().toISOString(),
+        }
+      );
+      return;
+    }
+
+    const issues: string[] = [];
+    const metadata: any = {
+      operation,
+      context,
+      timestamp: new Date().toISOString(),
+      user: this.context.user?._id,
+    };
+
+    // Critical: Check for missing MongoDB _id field
+    // This can cause cascading failures in database operations
+    if (!conversation._id) {
+      issues.push("Missing _id field");
+      metadata.missingId = true;
+      // Enhanced logging for null _id cases - these are critical issues
+      this.context.error("CRITICAL: Conversation document has null _id", {
+        operation,
+        context,
+        conversationKeys: Object.keys(conversation),
+        conversationType: typeof conversation,
+        isDocument: conversation instanceof Object,
+        timestamp: new Date().toISOString(),
+      });
+    } else {
+      metadata.conversationId = conversation._id.toString();
+    }
+
+    // Validate user assignment - conversations must be associated with a user
+    // This is critical for security and data isolation
+    if (!conversation.user) {
+      issues.push("Missing user assignment");
+      metadata.missingUser = true;
+    } else {
+      metadata.conversationUser = conversation.user.toString();
+    }
+
+    // Check for required business fields
+    if (!conversation.personaId) {
+      issues.push("Missing personaId");
+      metadata.missingPersonaId = true;
+    }
+
+    // Validate conversation lifecycle timestamps
+    if (!conversation.started) {
+      issues.push("Missing started timestamp");
+      metadata.missingStarted = true;
+    }
+
+    // Log validation results for monitoring and debugging
+    if (issues.length > 0) {
+      this.context.error(`Conversation validation failed during ${operation}`, {
+        ...metadata,
+        issues,
+        conversationKeys: Object.keys(conversation),
+        conversationType: typeof conversation,
+        isDocument: conversation instanceof Object,
+      });
+    } else {
+      this.context.debug(
+        `Conversation validation passed during ${operation}`,
+        metadata
+      );
+    }
+  }
+
+  /**
+   * Calculate and update the token count for a conversation using atomic aggregation
+   * This method uses MongoDB's aggregation pipeline to calculate tokens atomically
+   */
+  private async updateConversationTokenCount(
+    conversationId: string
+  ): Promise<number> {
+    this.context.debug("Updating conversation token count", {
+      conversationId,
+      userId: this.context.user?._id,
+      timestamp: new Date().toISOString(),
+    });
+
+    if (
+      conversationId === null ||
+      conversationId === undefined ||
+      conversationId === ""
+    ) {
+      throw new Error(
+        "Conversation ID is required for updateConversationTokenCount"
+      );
+    }
+
+    try {
+      // Use aggregation pipeline to calculate token count atomically
+      const result = await ReactorConversationModel.aggregate([
+        {
+          $match: {
+            _id: new ObjectId(conversationId),
+            user: this.context.user._id,
+          },
+        },
+        {
+          $addFields: {
+            // Calculate total tokens for all messages in history
+            calculatedTokenCount: {
+              $reduce: {
+                input: "$history",
+                initialValue: 0,
+                in: {
+                  $cond: {
+                    if: {
+                      $and: [
+                        { $ne: ["$$this.content", null] },
+                        { $eq: [{ $type: "$$this.content" }, "string"] },
+                      ],
+                    },
+                    then: {
+                      $add: [
+                        "$$value",
+                        // Rough token estimation: content.length / 4 (average)
+                        { $divide: [{ $strLenCP: "$$this.content" }, 4] },
+                      ],
+                    },
+                    else: "$$value",
+                  },
+                },
+              },
+            },
+          },
+        },
+      ]).exec();
+
+      if (!result || result.length === 0) {
+        this.context.error("Conversation not found during token count update", {
+          conversationId,
+          userId: this.context.user?._id,
+        });
+        throw new Error("Conversation not found");
+      }
+
+      const calculatedTokens = Math.ceil(result[0].calculatedTokenCount || 0);
+
+      // Atomically update the conversation with the new token count
+      const updatedConversation =
+        await ReactorConversationModel.findOneAndUpdate(
+          {
+            _id: conversationId,
+            user: this.context.user._id,
+          },
+          {
+            $set: {
+              tokenCount: calculatedTokens,
+              updated: new Date(),
+            },
+          },
+          {
+            new: true,
+            runValidators: true,
+          }
+        ).exec();
+
+      if (!updatedConversation) {
+        const errorResponse = this.createErrorResponse(
+          ReactorErrorCode.CONVERSATION_UPDATE_ERROR,
+          "Failed to update conversation token count",
+          {
+            operation: "updateConversationTokenCount",
+            conversationId,
+            recoverable: true,
+          }
+        );
+        throw new Error(errorResponse.message);
+      }
+
+      // Validate the updated conversation
+      this.validateConversationDocument(
+        updatedConversation,
+        "updateConversationTokenCount",
+        "after_update"
+      );
+
+      this.context.debug("Token count updated successfully", {
+        conversationId,
+        oldTokenCount: result[0].tokenCount,
+        newTokenCount: calculatedTokens,
+        userId: this.context.user?._id,
+      });
+
+      return calculatedTokens;
+    } catch (error: any) {
+      this.context.error("Error updating conversation token count", {
+        conversationId,
+        userId: this.context.user?._id,
+        error: error.message,
+      });
+      throw new Error(`Failed to update token count: ${error.message}`);
+    }
+  }
+
+  /**
+   * Check if conversation exceeds max tokens and handle accordingly
+   */
+  private async checkTokenLimit(conversationId: string): Promise<{
+    exceedsLimit: boolean;
+    currentTokens: number;
+    maxTokens: number;
+    shouldTruncate: boolean;
+  }> {
+    this.context.debug("Checking token limit", {
+      conversationId,
+      userId: this.context.user?._id,
+      timestamp: new Date().toISOString(),
+    });
+
+    const conversation = await ReactorConversationModel.findOne({
+      _id: conversationId,
+      user: this.context.user,
+    })
+      .populate("user")
+      .exec();
+
+    if (!conversation) {
+      this.context.error("Conversation not found during token limit check", {
+        conversationId,
+        userId: this.context.user?._id,
+      });
+      throw new Error("Conversation not found");
+    }
+
+    // Validate the conversation before checking token limits
+    this.validateConversationDocument(
+      conversation,
+      "checkTokenLimit",
+      "before_check"
+    );
+
+    const currentTokens = conversation.tokenCount || 0;
+    const maxTokens = conversation.maxTokens;
+
+    if (!maxTokens) {
+      return {
+        exceedsLimit: false,
+        currentTokens,
+        maxTokens: 0,
+        shouldTruncate: false,
+      };
+    }
+
+    const exceedsLimit = currentTokens > maxTokens;
+    const shouldTruncate =
+      exceedsLimit &&
+      currentTokens > maxTokens * TOKEN_LIMITS.TRUNCATION_THRESHOLD_MULTIPLIER;
+
+    return {
+      exceedsLimit,
+      currentTokens,
+      maxTokens,
+      shouldTruncate,
+    };
+  }
+
+  /**
+   * Atomically update token count and check limits in a single operation
+   * This prevents race conditions between token count updates and limit checks
+   */
+  private async updateTokenCountAndCheckLimits(
+    conversationId: string
+  ): Promise<{
+    currentTokens: number;
+    maxTokens: number | null;
+    exceedsLimit: boolean;
+    shouldTruncate: boolean;
+    percentageUsed: number;
+  }> {
+    this.context.debug("Updating token count and checking limits atomically", {
+      conversationId,
+      userId: this.context.user?._id,
+      timestamp: new Date().toISOString(),
+    });
+
+    try {
+      // Use aggregation pipeline to calculate tokens and check limits atomically
+      const result = await ReactorConversationModel.aggregate([
+        {
+          $match: {
+            _id: new ObjectId(conversationId),
+            user: this.context.user._id,
+          },
+        },
+        {
+          $addFields: {
+            // Calculate total tokens for all messages in history
+            calculatedTokenCount: {
+              $reduce: {
+                input: "$history",
+                initialValue: 0,
+                in: {
+                  $cond: {
+                    if: {
+                      $and: [
+                        { $ne: ["$$this.content", null] },
+                        { $eq: [{ $type: "$$this.content" }, "string"] },
+                      ],
+                    },
+                    then: {
+                      $add: [
+                        "$$value",
+                        // Rough token estimation: content.length / 4 (average)
+                        { $divide: [{ $strLenCP: "$$this.content" }, 4] },
+                      ],
+                    },
+                    else: "$$value",
+                  },
+                },
+              },
+            },
+          },
+        },
+      ]).exec();
+
+      if (!result || result.length === 0) {
+        throw new Error("Conversation not found");
+      }
+
+      const conversationData = result[0];
+      const calculatedTokens = Math.ceil(
+        conversationData.calculatedTokenCount || 0
+      );
+      const maxTokens = conversationData.maxTokens;
+      const percentageUsed = maxTokens
+        ? (calculatedTokens / maxTokens) * 100
+        : 0;
+
+      const exceedsLimit = maxTokens ? calculatedTokens > maxTokens : false;
+      const shouldTruncate = maxTokens
+        ? calculatedTokens >
+          maxTokens * TOKEN_LIMITS.TRUNCATION_THRESHOLD_MULTIPLIER
+        : false;
+
+      // Atomically update the conversation with the new token count
+      await ReactorConversationModel.findOneAndUpdate(
+        {
+          _id: conversationId,
+          user: this.context.user._id,
+        },
+        {
+          $set: {
+            tokenCount: calculatedTokens,
+            updated: new Date(),
+          },
+        },
+        {
+          new: true,
+          runValidators: true,
+        }
+      ).exec();
+
+      this.context.debug("Token count and limits updated successfully", {
+        conversationId,
+        calculatedTokens,
+        maxTokens,
+        exceedsLimit,
+        shouldTruncate,
+        percentageUsed,
+        userId: this.context.user?._id,
+      });
+
+      return {
+        currentTokens: calculatedTokens,
+        maxTokens,
+        exceedsLimit,
+        shouldTruncate,
+        percentageUsed,
+      };
+    } catch (error: any) {
+      this.context.error("Error updating token count and checking limits", {
+        conversationId,
+        userId: this.context.user?._id,
+        error: error.message,
+      });
+      throw new Error(
+        `Failed to update token count and check limits: ${error.message}`
+      );
+    }
+  }
+
+  /**
+   * Truncate conversation history to stay within token limits
+   * This method removes older messages while preserving system messages and recent context
+   * Removed messages are stored in truncatedHistory for analysis
+   */
+  private async truncateConversationHistory(
+    conversationId: string,
+    targetTokens: number
+  ): Promise<{
+    removedMessages: number;
+    remainingTokens: number;
+    movedToTruncated: number;
+  }> {
+    this.context.debug("Truncating conversation history", {
+      conversationId,
+      targetTokens,
+      userId: this.context.user?._id,
+      timestamp: new Date().toISOString(),
+    });
+
+    const conversation = await ReactorConversationModel.findOne({
+      _id: conversationId,
+      user: this.context.user,
+    })
+      .populate("user")
+      .exec();
+
+    if (!conversation) {
+      this.context.error("Conversation not found during history truncation", {
+        conversationId,
+        userId: this.context.user?._id,
+      });
+      throw new Error("Conversation not found");
+    }
+
+    // Validate the conversation before truncation
+    this.validateConversationDocument(
+      conversation,
+      "truncateConversationHistory",
+      "before_truncation"
+    );
+
+    const history = [...conversation.history];
+    const existingTruncatedHistory = conversation.truncatedHistory || [];
+    let currentTokens = conversation.tokenCount || 0;
+    let removedMessages = 0;
+    let movedToTruncated = 0;
+
+    // Keep system messages and recent messages, remove older user/assistant messages
+    const systemMessages = history.filter((msg) => msg.role === "system");
+    const nonSystemMessages = history.filter((msg) => msg.role !== "system");
+
+    // Calculate tokens for system messages
+    let systemTokens = 0;
+    systemMessages.forEach((msg) => {
+      if (msg.content && typeof msg.content === "string") {
+        systemTokens += this.chunkingService.estimateTokenCount(msg.content);
+      }
+    });
+
+    // If system messages alone exceed the limit, we have a problem
+    if (systemTokens > targetTokens) {
+      this.context.warn(
+        `System messages exceed token limit for conversation ${conversationId}`,
+        { systemTokens, targetTokens }
+      );
+      return {
+        removedMessages: 0,
+        remainingTokens: systemTokens,
+        movedToTruncated: 0,
+      };
+    }
+
+    // Remove messages from the beginning (oldest) until we're under the limit
+    const messagesToKeep = [];
+    const messagesToMove = [];
+    let tokensUsed = systemTokens;
+
+    // Add system messages first
+    messagesToKeep.push(...systemMessages);
+
+    // Add recent messages, working backwards
+    for (let i = nonSystemMessages.length - 1; i >= 0; i--) {
+      const message = nonSystemMessages[i];
+      const messageTokens =
+        message.content && typeof message.content === "string"
+          ? this.chunkingService.estimateTokenCount(message.content)
+          : 0;
+
+      if (tokensUsed + messageTokens <= targetTokens) {
+        messagesToKeep.unshift(message); // Add to beginning to maintain order
+        tokensUsed += messageTokens;
+      } else {
+        // Move message to truncated history instead of discarding
+        messagesToMove.unshift(message);
+        removedMessages++;
+        movedToTruncated++;
+      }
+    }
+
+    // Combine existing truncated history with new messages to move
+    const updatedTruncatedHistory = [
+      ...existingTruncatedHistory,
+      ...messagesToMove,
+    ];
+
+    // Update the conversation with truncated history and moved messages
+    await ReactorConversationModel.findOneAndUpdate(
+      { _id: conversationId },
+      {
+        history: messagesToKeep,
+        truncatedHistory: updatedTruncatedHistory,
+        tokenCount: tokensUsed,
+        updated: new Date(),
+      },
+      { new: true }
+    ).exec();
+
+    this.context.info(`Truncated conversation ${conversationId}`, {
+      originalTokens: currentTokens,
+      remainingTokens: tokensUsed,
+      removedMessages,
+      movedToTruncated,
+      totalTruncatedMessages: updatedTruncatedHistory.length,
+      targetTokens,
+    });
+
+    return {
+      removedMessages,
+      remainingTokens: tokensUsed,
+      movedToTruncated,
+    };
+  }
+
+  /**
+   * Get the complete conversation history including truncated messages
+   *
+   * This method retrieves both active and truncated conversation history,
+   * providing comprehensive statistics and chronologically ordered messages.
+   * Useful for analysis, debugging, or displaying full conversation context.
+   *
+   * @param chatSessionId - The conversation ID to retrieve history for
+   *
+   * @returns Promise resolving to comprehensive history data
+   * @returns returns.fullHistory - All messages sorted chronologically
+   * @returns returns.activeHistory - Currently active messages in conversation
+   * @returns returns.truncatedHistory - Messages that were truncated due to token limits
+   * @returns returns.statistics - Detailed statistics about message and token counts
+   *
+   * @throws {Error} When conversation not found or permission denied
+   *
+   * @example
+   * ```typescript
+   * const history = await service.getFullConversationHistory("session123");
+   *
+   * console.log(`Total messages: ${history.statistics.totalMessages}`);
+   * console.log(`Active: ${history.statistics.activeMessages}`);
+   * console.log(`Truncated: ${history.statistics.truncatedMessages}`);
+   *
+   * // Display all messages in chronological order
+   * history.fullHistory.forEach(msg => {
+   *   console.log(`${msg.role}: ${msg.content}`);
+   * });
+   * ```
+   *
+   * @remarks
+   * - Messages are sorted chronologically across both active and truncated history
+   * - Token counts are calculated for both active and truncated portions
+   * - Useful for conversation analysis and debugging token management
+   *
+   * @since 1.0.0
+   */
+  async getFullConversationHistory(chatSessionId: string): Promise<{
+    fullHistory: ReactorConversationHistoryItem[];
+    activeHistory: ReactorConversationHistoryItem[];
+    truncatedHistory: ReactorConversationHistoryItem[];
+    statistics: {
+      totalMessages: number;
+      activeMessages: number;
+      truncatedMessages: number;
+      totalTokens: number;
+      activeTokens: number;
+      truncatedTokens: number;
+    };
+  }> {
+    // Validate chatSessionId
+    this.validateChatSessionId(chatSessionId, "getFullConversationHistory");
+
+    this.context.debug("Getting full conversation history", {
+      chatSessionId,
+      userId: this.context.user?._id,
+      timestamp: new Date().toISOString(),
+    });
+
+    const conversation = await ReactorConversationModel.findOne({
+      _id: chatSessionId,
+      user: this.context.user,
+    })
+      .populate("user")
+      .exec();
+
+    if (!conversation) {
+      this.context.error(
+        "Conversation not found during getFullConversationHistory",
+        {
+          chatSessionId,
+          userId: this.context.user?._id,
+        }
+      );
+      throw new Error(
+        `Chat session with id ${chatSessionId} not found or you do not have permission to access it.`
+      );
+    }
+
+    // Validate the conversation before retrieving full history
+    this.validateConversationDocument(
+      conversation,
+      "getFullConversationHistory",
+      "before_retrieval"
+    );
+
+    const activeHistory = conversation.history || [];
+    const truncatedHistory = conversation.truncatedHistory || [];
+
+    // Combine histories in chronological order based on timestamp
+    const allMessages = [...activeHistory, ...truncatedHistory];
+    const sortedHistory = allMessages.sort((a, b) => {
+      const timeA = new Date(a.timestamp).getTime();
+      const timeB = new Date(b.timestamp).getTime();
+      return timeA - timeB;
+    });
+
+    // Calculate token statistics
+    const calculateTokens = (
+      messages: ReactorConversationHistoryItem[]
+    ): number => {
+      return messages.reduce((total, msg) => {
+        if (msg.content && typeof msg.content === "string") {
+          return total + this.chunkingService.estimateTokenCount(msg.content);
+        }
+        return total;
+      }, 0);
+    };
+
+    const activeTokens = calculateTokens(activeHistory);
+    const truncatedTokens = calculateTokens(truncatedHistory);
+    const totalTokens = activeTokens + truncatedTokens;
+
+    return {
+      fullHistory: sortedHistory,
+      activeHistory,
+      truncatedHistory,
+      statistics: {
+        totalMessages: allMessages.length,
+        activeMessages: activeHistory.length,
+        truncatedMessages: truncatedHistory.length,
+        totalTokens,
+        activeTokens,
+        truncatedTokens,
+      },
+    };
+  }
+
+  /**
+   * Clear the truncated history for a conversation
+   * This can be used for cleanup or when you want to free up storage
+   */
+  async clearTruncatedHistory(chatSessionId: string): Promise<{
+    clearedMessages: number;
+    clearedTokens: number;
+  }> {
+    // Validate chatSessionId
+    this.validateChatSessionId(chatSessionId, "clearTruncatedHistory");
+
+    this.context.debug("Clearing truncated history", {
+      chatSessionId,
+      userId: this.context.user?._id,
+      timestamp: new Date().toISOString(),
+    });
+
+    const conversation = await ReactorConversationModel.findOne({
+      _id: chatSessionId,
+      user: this.context.user,
+    })
+      .populate("user")
+      .exec();
+
+    if (!conversation) {
+      this.context.error(
+        "Conversation not found during clearTruncatedHistory",
+        {
+          chatSessionId,
+          userId: this.context.user?._id,
+        }
+      );
+      throw new Error(
+        `Chat session with id ${chatSessionId} not found or you do not have permission to access it.`
+      );
+    }
+
+    // Validate the conversation before clearing truncated history
+    this.validateConversationDocument(
+      conversation,
+      "clearTruncatedHistory",
+      "before_clear"
+    );
+
+    const truncatedHistory = conversation.truncatedHistory || [];
+    const clearedTokens = truncatedHistory.reduce((total, msg) => {
+      if (msg.content && typeof msg.content === "string") {
+        return total + this.chunkingService.estimateTokenCount(msg.content);
+      }
+      return total;
+    }, 0);
+
+    await ReactorConversationModel.findOneAndUpdate(
+      { _id: chatSessionId },
+      {
+        truncatedHistory: [],
+        updated: new Date(),
+      },
+      { new: true }
+    ).exec();
+
+    this.context.info(
+      `Cleared truncated history for conversation ${chatSessionId}`,
+      {
+        clearedMessages: truncatedHistory.length,
+        clearedTokens,
+      }
+    );
+
+    return {
+      clearedMessages: truncatedHistory.length,
+      clearedTokens,
+    };
+  }
+
+  async setChatToolApprovalMode(
+    chatSessionId: string,
+    toolApprovalMode: ToolApprovalMode
+  ): Promise<any> {
+    // Validate chatSessionId
+    this.validateChatSessionId(chatSessionId, "setChatToolApprovalMode");
+
     // load the chat session
     const chatState = await ReactorConversationModel.findOneAndUpdate(
       { _id: chatSessionId, user: this.context.user },
@@ -53,10 +1254,203 @@ export default class ReactorConversationService implements IReactorConversations
     ).exec();
 
     if (!chatState) {
-      throw new Error(`Chat session with id ${chatSessionId} not found or you do not have permission to modify it.`);
+      throw new Error(
+        `Chat session with id ${chatSessionId} not found or you do not have permission to modify it.`
+      );
     }
 
     return chatState;
+  }
+
+  /**
+   * Set the maximum token limit for a conversation
+   *
+   * This method updates the token limit for a conversation and validates the input.
+   * It also checks if the current conversation exceeds the new limit and logs
+   * warnings accordingly.
+   *
+   * @param chatSessionId - The conversation ID to update
+   * @param maxTokens - The new maximum token limit (must be > 0)
+   *
+   * @returns Promise resolving to updated conversation document
+   *
+   * @throws {ReactorErrorResponse} When session not found, invalid input, or permission denied
+   *
+   * @example
+   * ```typescript
+   * // Set token limit to 4000 tokens
+   * const updatedSession = await service.setChatMaxTokens("session123", 4000);
+   * console.log(updatedSession.maxTokens); // 4000
+   * ```
+   *
+   * @remarks
+   * - Validates that maxTokens is greater than 0
+   * - Checks user permissions for the conversation
+   * - Logs warnings if current conversation exceeds new limit
+   * - Does not automatically truncate when limit is lowered
+   *
+   * @since 1.0.0
+   */
+  async setChatMaxTokens(
+    chatSessionId: string,
+    maxTokens: number
+  ): Promise<any> {
+    this.context.debug("Setting chat max tokens", {
+      chatSessionId,
+      maxTokens,
+      userId: this.context.user?._id,
+      timestamp: new Date().toISOString(),
+    });
+
+    // Validate input parameters
+    if (!chatSessionId) {
+      const errorResponse = this.createErrorResponse(
+        ReactorErrorCode.MISSING_REQUIRED_FIELD,
+        "Chat session ID is required",
+        {
+          operation: "setChatMaxTokens",
+          recoverable: false,
+        }
+      );
+      throw new Error(errorResponse.message);
+    }
+
+    if (maxTokens <= 0) {
+      const errorResponse = this.createErrorResponse(
+        ReactorErrorCode.INVALID_INPUT,
+        "Max tokens must be greater than 0",
+        {
+          operation: "setChatMaxTokens",
+          conversationId: chatSessionId,
+          recoverable: false,
+          details: { providedValue: maxTokens },
+        }
+      );
+      throw new Error(errorResponse.message);
+    }
+
+    // load the chat session
+    const chatState = await ReactorConversationModel.findOneAndUpdate(
+      { _id: chatSessionId, user: this.context.user },
+      { maxTokens },
+      { new: true }
+    ).exec();
+
+    if (!chatState) {
+      const errorResponse = this.createErrorResponse(
+        ReactorErrorCode.CONVERSATION_NOT_FOUND,
+        `Chat session with id ${chatSessionId} not found or you do not have permission to modify it.`,
+        {
+          operation: "setChatMaxTokens",
+          conversationId: chatSessionId,
+          recoverable: false,
+        }
+      );
+      throw new Error(errorResponse.message);
+    }
+
+    // Validate the updated conversation
+    this.validateConversationDocument(
+      chatState,
+      "setChatMaxTokens",
+      "after_update"
+    );
+
+    // Check if current conversation exceeds the new limit
+    const tokenCheck = await this.checkTokenLimit(chatSessionId);
+    if (tokenCheck.exceedsLimit) {
+      this.context.warn(
+        `Conversation ${chatSessionId} exceeds new max token limit`,
+        {
+          currentTokens: tokenCheck.currentTokens,
+          maxTokens: tokenCheck.maxTokens,
+          exceedsBy: tokenCheck.currentTokens - tokenCheck.maxTokens,
+        }
+      );
+    }
+
+    return chatState;
+  }
+
+  /**
+   * Get comprehensive token count information for a conversation
+   *
+   * This method provides detailed token usage statistics including current count,
+   * maximum limit, whether the limit is exceeded, and percentage used.
+   *
+   * @param chatSessionId - The conversation ID to analyze
+   *
+   * @returns Promise resolving to token count statistics
+   * @returns returns.currentTokens - Current token count in conversation
+   * @returns returns.maxTokens - Maximum token limit (null if no limit set)
+   * @returns returns.exceedsLimit - Whether current count exceeds the limit
+   * @returns returns.percentageUsed - Percentage of limit used (0 if no limit)
+   *
+   * @throws {Error} When conversation not found or permission denied
+   *
+   * @example
+   * ```typescript
+   * const tokenInfo = await service.getChatTokenCount("session123");
+   * console.log(`Used ${tokenInfo.currentTokens}/${tokenInfo.maxTokens} tokens`);
+   * console.log(`Usage: ${tokenInfo.percentageUsed.toFixed(1)}%`);
+   *
+   * if (tokenInfo.exceedsLimit) {
+   *   console.warn("Token limit exceeded!");
+   * }
+   * ```
+   *
+   * @since 1.0.0
+   */
+  async getChatTokenCount(chatSessionId: string): Promise<{
+    currentTokens: number;
+    maxTokens: number | null;
+    exceedsLimit: boolean;
+    percentageUsed: number;
+  }> {
+    // Validate chatSessionId
+    this.validateChatSessionId(chatSessionId, "getChatTokenCount");
+
+    this.context.debug("Getting chat token count", {
+      chatSessionId,
+      userId: this.context.user?._id,
+      timestamp: new Date().toISOString(),
+    });
+
+    const conversation = await ReactorConversationModel.findOne({
+      _id: chatSessionId,
+      user: this.context.user,
+    })
+      .populate("user")
+      .exec();
+
+    if (!conversation) {
+      this.context.error("Conversation not found during getChatTokenCount", {
+        chatSessionId,
+        userId: this.context.user?._id,
+      });
+      throw new Error(
+        `Chat session with id ${chatSessionId} not found or you do not have permission to access it.`
+      );
+    }
+
+    // Validate the conversation before getting token count
+    this.validateConversationDocument(
+      conversation,
+      "getChatTokenCount",
+      "before_count"
+    );
+
+    const currentTokens = conversation.tokenCount || 0;
+    const maxTokens = conversation.maxTokens;
+    const exceedsLimit = maxTokens ? currentTokens > maxTokens : false;
+    const percentageUsed = maxTokens ? (currentTokens / maxTokens) * 100 : 0;
+
+    return {
+      currentTokens,
+      maxTokens,
+      exceedsLimit,
+      percentageUsed,
+    };
   }
 
   setOpenAIService(service: IOpenAIService) {
@@ -75,10 +1469,46 @@ export default class ReactorConversationService implements IReactorConversations
     this.macroService = service;
   }
 
-  async getConversations(filter: any): Promise<TReactorConversationModel[]> {
+  setStreamingSessionManager(service: StreamingSessionManager) {
+    this.streamingSessionManager = service;
+  }
+
+  setFileService(service: Reactory.Service.IReactoryFileService) {
+    this.fileService = service;
+  } 
+
+  /**
+   * Retrieve conversations based on filter criteria
+   *
+   * This method allows querying conversations with various filters while ensuring
+   * proper user access control. Anonymous users are automatically excluded.
+   *
+   * @param filter - Filter criteria for conversation search
+   * @param filter.personaId - Optional persona ID to filter conversations
+   * @param filter.userId - Optional user ID to filter conversations
+   * @param filter.modelId - Optional model ID to filter conversations
+   *
+   * @returns Promise resolving to array of conversation documents
+   *
+   * @throws {Error} When database query fails
+   *
+   * @example
+   * ```typescript
+   * // Get all conversations for current user
+   * const conversations = await service.getConversations({});
+   *
+   * // Get conversations for specific persona
+   * const personaConversations = await service.getConversations({
+   *   personaId: "persona123"
+   * });
+   * ```
+   *
+   * @since 1.0.0
+   */
+  async getConversations(filter: any): Promise<TReactorConversationDocument[]> {
     const { personaId, userId, modelId } = filter || {};
     const query: any = {};
-    
+
     // check if the user is logged in or an anoymous user.
     if (this.context.user) {
       if (this.context.user.anon) return [];
@@ -89,42 +1519,149 @@ export default class ReactorConversationService implements IReactorConversations
     if (personaId) query.personaId = personaId;
     if (userId) query.userId = userId;
     if (modelId) query.modelId = modelId;
-    
+
     // If no filter specified, get all conversations for current user
     if (!filter || Object.keys(filter).length === 0) {
       query.user = this.context.user;
     }
-    
-    return ReactorConversationModel.find(query).exec();
+
+    // ensure the query doesn't return any
+    // results that don't have an _id.
+    query._id = { $ne: null };
+
+    return await ReactorConversationModel.find(query)
+      .populate("user")      
+      .exec();
   }
 
-  async getChatSession(args: { id: string }): Promise<TReactorConversationDocument> {
-    const { id } = args;
-    const session = await ReactorConversationModel.findOne({ _id: id }).exec();
-    
-    if (!session) {
-      throw new Error('Chat session not found');
+  /**
+   * Retrieve a specific chat session by ID
+   *
+   * This method loads a conversation document and injects the current context
+   * for use in other operations. The conversation is populated with user data.
+   *
+   * @param args - Arguments containing the session ID
+   * @param args.id - The conversation/session ID to retrieve
+   *
+   * @returns Promise resolving to conversation document with injected context
+   *
+   * @throws {Error} When chat session is not found
+   *
+   * @example
+   * ```typescript
+   * const session = await service.getChatSession({ id: "session123" });
+   * console.log(session.personaId); // Access persona ID
+   * console.log(session.history.length); // Check message count
+   * ```
+   *
+   * @since 1.0.0
+   */
+  async getChatSession(args: { id: string }): Promise<
+    TReactorConversationDocument & {
+      context?: Reactory.Server.IReactoryContext;
     }
-    
+  > {
+    const { id } = args;
+
+    // Validate that the ID is a valid ObjectId
+    if (!ObjectId.isValid(id)) {
+      throw new Error(`Invalid conversation ID format: ${id}`);
+    }
+
+    const session: any = await ReactorConversationModel.findOne({
+      _id: new ObjectId(id),
+    })
+      .populate("user")
+      .populate("files")
+      .exec();
+
+    if (!session) {
+      throw new Error("Chat session not found");
+    }
+
+    session.context = this.context;
+
     return session;
   }
 
   // Create a new conversation
-  private async getNewConversation(persona: IAIPersona): Promise<TReactorConversationDocument> {
+  private async getNewConversation(
+    persona: IAIPersona
+  ): Promise<TReactorConversationDocument> {
+    this.context.debug("Creating new conversation", {
+      personaId: persona?.id,
+      userId: this.context.user?._id,
+      timestamp: new Date().toISOString(),
+    });
+
     // Check if the persona is valid
     if (!persona || !persona.id) {
-      throw new Error('Invalid persona');
+      this.context.error("Invalid persona provided for new conversation", {
+        persona: persona,
+        personaId: persona?.id,
+        userId: this.context.user?._id,
+      });
+      throw new Error("Invalid persona");
     }
 
     // Check if the user is valid
     if (!this.context.user) {
-      throw new Error('User not found');
+      this.context.error("No user context found for new conversation", {
+        personaId: persona.id,
+      });
+      throw new Error("User not found");
     }
 
-    const sessionId = new ObjectId();
-    const conversation  = new ReactorConversationModel({
-      _id: sessionId,
-      id: sessionId,
+    // Check if there's an existing empty conversation for this persona and user
+    // Use findOneAndUpdate with atomic operation to prevent race conditions
+    const lastConversation = await ReactorConversationModel.findOneAndUpdate(
+      {
+        _id: { $ne: null },
+        personaId: persona.id,
+        user: this.context.user._id,
+        $or: [
+          { history: { $size: 0 } }, // Empty history
+          {
+            history: { $size: 1 },
+            "history.0.role": "system", // Only system message
+          },
+        ],
+      },
+      {
+        $set: {
+          started: new Date(),
+          updated: new Date(),
+        },
+        $setOnInsert: {
+          // These fields will only be set if no document is found and a new one is created
+          sseSessionId: new ObjectId().toString(),
+        },
+      },
+      {
+        new: true,
+        sort: { started: -1 }, // Get the most recent one
+        populate: "user",
+      }
+    ).exec();
+
+    if (lastConversation) {
+      // Ensure SSE session ID is properly set
+      if (!lastConversation.sseSessionId) {
+        lastConversation.sseSessionId = lastConversation._id.toString();
+        await lastConversation.save();
+      }
+
+      this.context.info("Reusing existing empty conversation", {
+        conversationId: lastConversation._id?.toString(),
+        personaId: persona.id,
+        userId: this.context.user._id,
+        historyLength: lastConversation.history?.length || 0,
+      });
+
+      return lastConversation;
+    }
+
+    const conversationData: any = {
       personaId: persona.id,
       user: this.context.user,
       modelId: persona.modelId,
@@ -132,398 +1669,881 @@ export default class ReactorConversationService implements IReactorConversations
       history: [],
       vars: {},
       meta: {
-        summary: 'Reactor Chat Session with agent ' + persona.name,
-        title: 'Chat with ' + persona.name,
+        summary: "Reactor Chat Session with agent " + persona.name,
+        title: "Chat with " + persona.name,
       },
       macros: [],
       tools: [],
       started: new Date(),
-      sseSessionId: sessionId,
       toolApprovalMode: ToolApprovalMode.PROMPT,
-    }) as unknown as TReactorConversationDocument;
-    
-    await conversation.save();
-  
-    return conversation;
-  }
+      tokenCount: 0,
+      maxTokens: persona.maxTokens || TOKEN_LIMITS.DEFAULT_MAX_TOKENS,
+    };
 
-  async sendMessage(args: { personaId: string, chatSessionId?: string, message: string }): Promise<any> {
-    const { personaId, chatSessionId, message } = args;
-    const { user } = this.context;
-    
     try {
-      // Get the persona's provider
-      const persona = await this.context.getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0", {
-        chatSessionId
-      }).getPersona(personaId);
-      const provider = persona.providerId || "xai";
-      
-      // Save message to conversation history
-      let conversation;
-      if (chatSessionId) {
-        conversation = await ReactorConversationModel.findOne({ _id: chatSessionId }).exec();       
-      }
-      
-      if (!conversation) {
-        // Create new conversation
-        const sessionId = new ObjectId();
-        conversation = new ReactorConversationModel({
-          _id: sessionId,
-          id: sessionId,
-          personaId,
-          user,
-          modelId: persona.modelId,
-          providerId: provider,
-          history: [],
-          vars: {},
-          meta: {
-            summary: 'Reactor Chat Session with agent ' + persona.name,
-            title: 'Chat with ' + persona.name,
-          },
-          macros: persona.macros || [],
-          tools: persona.tools || [],
-          started: new Date(),
-          sseSessionId: sessionId, 
-          toolApprovalMode: ToolApprovalMode.PROMPT,
-        }); 
-      }
-      
-      // Add user message
-      // @ts-ignore
-      conversation.history.push({
-        id: new ObjectId(),
-        role: "user",
-        content: message,
-        timestamp: new Date()
+      // Create conversation data with all required fields including sessionId
+      const sessionId = new ObjectId();
+      const conversationData: any = {
+        _id: sessionId, // Set the _id explicitly to avoid multiple saves
+        personaId: persona.id,
+        user: this.context.user,
+        modelId: persona.modelId,
+        providerId: persona.providerId,
+        history: [],
+        vars: {},
+        meta: {
+          summary: "Reactor Chat Session with agent " + persona.name,
+          title: "Chat with " + persona.name,
+        },
+        macros: [],
+        tools: [],
+        started: new Date(),
+        toolApprovalMode: ToolApprovalMode.PROMPT,
+        tokenCount: 0,
+        maxTokens: persona.maxTokens || TOKEN_LIMITS.DEFAULT_MAX_TOKENS,
+        sseSessionId: sessionId.toString(),
+        updated: new Date(),
+      };
+
+      this.context.debug("Creating new conversation with pre-set IDs", {
+        sessionId: sessionId.toString(),
+        personaId: conversationData.personaId,
+        userId: conversationData.user?.toString(),
+        timestamp: new Date().toISOString(),
       });
 
-      // Get provider adapter
-      const adapter = await this.providerService.getAdapter(provider);
-      
-      let response: ChatCompletion;
+      // Create and save conversation in single atomic operation
+      const conversation = (await ReactorConversationModel.create(
+        conversationData
+      )) as unknown as TReactorConversationDocument;
 
-      switch (provider) { 
-        case "xai":
-        case "openai":
-          // x-ai and openai use the same service
-          // first we need to initialize the openai service 
-          // to use the correct model and connection parameters.
-          await this.openaiService.initialize(chatSessionId, persona);
-          response = await this.openaiService.chat({
-            personaId,
-            chatSessionId,
-            message
-          });
+      // Validate the saved conversation
+      this.validateConversationDocument(
+        conversation,
+        "getNewConversation",
+        "after_save"
+      );
 
-          // Add AI response if available
-          if (response?.choices && response?.choices?.length > 0) {
-            const aiMessage = response.choices[0].message;
-            conversation.history.push({
-              id: new ObjectId(),
-              response, // add the original response for debugging
-              role: aiMessage.role,
-              content: aiMessage.content,
-              timestamp: new Date(),
-              tool_calls: aiMessage.tool_calls,
-              tool_results: []
-            });
-          } else {
-            this.context.warn(`No AI response received for message: ${message}`, { response });            
-            conversation.history.push({
-              id: new ObjectId(),
-              role: "system",
-              content: "No AI response received",
-              timestamp: new Date(),
-              tool_results: []
-            });
+      this.context.info("Successfully created new conversation", {
+        conversationId: conversation._id?.toString(),
+        sessionId: conversation._id?.toString(),
+        personaId: conversation.personaId,
+        userId: conversation.user?.toString(),
+        tokenCount: conversation.tokenCount,
+        maxTokens: conversation.maxTokens,
+      });
+
+      return conversation;
+    } catch (error: any) {
+      // Handle duplicate key errors gracefully
+      if (error.code === 11000) {
+        this.context.warn(
+          "Duplicate conversation detected, attempting to find existing conversation",
+          {
+            personaId: persona.id,
+            userId: this.context.user._id,
+            error: error.message,
           }
-          // Add session ID to response
-          // @ts-ignore
-          response.sessionId = conversation._id.toString();
-          // @ts-ignore
-          await conversation.save();
+        );
 
-          // process the tool calls if any exist.
-          // tool calls will be called from the client
-          // as it may require the user to approve the tool call.
-          return adapter.adaptResponse(response);
-        case "google":
-          // Google AI service implementation
-          await this.googleAIService.initialize(chatSessionId, persona);
-          response = await this.googleAIService.chat({
-            personaId,
-            chatSessionId,
-            message
-          });
+        // Try to find the existing conversation that was just created
+        const existingConversation = await ReactorConversationModel.findOne({
+          personaId: persona.id,
+          user: this.context.user,
+          started: conversationData.started,
+        })
+          .populate("user")
+          .exec();
 
-          // Add AI response if available
-          if (response?.choices && response?.choices?.length > 0) {
-            const aiMessage = response.choices[0].message;            
-            conversation.history.push({
-              id: new ObjectId(),
-              response, // add the original response for debugging
-              role: aiMessage.role,
-              content: aiMessage.content,
-              timestamp: new Date(),
-              tool_calls: aiMessage.tool_calls,
-              tool_results: aiMessage.tool_results || []
-            });
-          } else {
-            this.context.warn(`No AI response received for message: ${message}`, { response });            
-            conversation.history.push({
-              id: new ObjectId(),
-              role: "system",
-              content: "No AI response received",
-              timestamp: new Date(),
-              tool_results: []
-            });
-          }
-          // Add session ID to response
-          // @ts-ignore
-          response.sessionId = conversation._id.toString();
-
-          return adapter.adaptResponse(response);
-
-        default: {
-          this.context.error(`Provider ${provider} not implemented`, { provider });
-          throw new Error(`Provider ${provider} not implemented`);
+        if (existingConversation) {
+          return existingConversation;
         }
       }
-    } catch (error) {
-      this.context.error(`Error sending message: ${error.message}`, { error });
-      return {
-        __typename: "ReactorErrorResponse",
-        code: "MESSAGE_ERROR",
-        message: error.message || "Error sending message",
-        details: error,
-        timestamp: new Date(),
-        recoverable: true,
-        suggestion: "Please try again or check your connection"
-      };
+
+      // Re-throw the error if it's not a duplicate key error or if we can't find the existing conversation
+      throw error;
     }
   }
 
+  /**
+   * Execute chat with the specified provider
+   *
+   * @param provider - The AI provider to use
+   * @param chatSessionId - The chat session ID
+   * @param persona - The AI persona configuration
+   * @param chatArgs - The chat arguments
+   * @returns The AI provider response
+   */
+  private async executeProviderChat(
+    provider: string,
+    chatSessionId: string | undefined,
+    persona: IAIPersona,
+    chatArgs: {
+      personaId: string;
+      chatSessionId?: string;
+      message: string | any;
+      role?: "user" | "assistant" | "tool" | "system";
+      tool_name?: string;
+      tool_args?: any;
+      tool_call_id?: string;
+      streamingMode?: StreamingMode;
+    }
+  ): Promise<any> {
+    switch (provider) {
+      case "xai":
+      case "openai":
+        // x-ai and openai use the same service
+        // first we need to initialize the openai service
+        // to use the correct model and connection parameters.
+        await this.openaiService.initialize(chatSessionId, persona);
+        return await this.openaiService.chat(chatArgs);
 
-  async executeMacro(args: { 
-    macro: string, 
-    personaId: string, 
-    chatSessionId: string,
-    calledBy?: string,
-    callId?: string,
-    args?: any 
+      case "google":
+        // Google AI service implementation
+        await this.googleAIService.initialize(chatSessionId, persona);
+        return await this.googleAIService.chat({
+          ...chatArgs,
+          persistState: false, // Don't persist here since we handle it in ReactorConversationService
+        });
+
+      default:
+        this.context.error(`Provider ${provider} not implemented`, {
+          provider,
+        });
+        throw new Error(`Provider ${provider} not implemented`);
+    }
+  }
+
+  /**
+   * Send a message to an AI persona and get a response
+   *
+   * This is the core method for AI conversation handling. It supports creating new
+   * conversations or continuing existing ones, with comprehensive error handling,
+   * token management, and retry logic.
+   *
+   * Key Features:
+   * - Atomic message history updates to prevent race conditions
+   * - Automatic token counting and conversation truncation
+   * - Multi-provider AI support (OpenAI, xAI, Google AI)
+   * - Tool call processing and response adaptation
+   * - Comprehensive error handling with retry logic
+   *
+   * @param args - Message sending arguments
+   * @param args.personaId - ID of the AI persona to interact with
+   * @param args.chatSessionId - Optional existing session ID, creates new if not provided
+   * @param args.message - The message content (string or structured object)
+   * @param args.role - Message role: "user", "assistant", "system", or "tool" (default: "user")
+   * @param args.tool_name - Optional tool name for tool response messages
+   * @param args.tool_args - Optional tool arguments for tool response messages
+   * @param args.tool_call_id - Optional tool call ID for linking tool responses
+   *
+   * @returns Promise resolving to AI response with session information
+   *
+   * @throws {ReactorErrorResponse} When validation fails, conversation not found, or provider errors
+   *
+   * @example
+   * ```typescript
+   * // Send a simple user message
+   * const response = await service.sendMessage({
+   *   personaId: "assistant-v1",
+   *   message: "Hello, how are you?",
+   *   role: "user"
+   * });
+   *
+   * // Continue existing conversation
+   * const followUp = await service.sendMessage({
+   *   personaId: "assistant-v1",
+   *   chatSessionId: response.sessionId,
+   *   message: "Tell me a joke",
+   *   role: "user"
+   * });
+   *
+   * // Send tool response
+   * const toolResponse = await service.sendMessage({
+   *   personaId: "assistant-v1",
+   *   chatSessionId: "session123",
+   *   message: "Tool executed successfully",
+   *   role: "tool",
+   *   tool_name: "search_database",
+   *   tool_call_id: "call_abc123"
+   * });
+   * ```
+   *
+   * @remarks
+   * - The method automatically handles token counting and conversation truncation
+   * - Retries up to 3 times for retryable errors (network issues, rate limits)
+   * - Creates new conversations when chatSessionId is not provided
+   * - Validates user permissions for existing conversations
+   * - Supports all configured AI providers with unified response format
+   *
+   * @since 1.0.0
+   */
+  async sendMessage(args: {
+    personaId: string;
+    chatSessionId?: string;
+    message: string | any;
+    role?: string;
+    tool_name?: string;
+    tool_args?: any;
+    tool_call_id?: string;  
+    streamingMode?: StreamingMode;
   }): Promise<any> {
-    const { macro, personaId, chatSessionId, calledBy = 'assistant', callId = v4() } = args;
-    
+    const {
+      personaId,
+      chatSessionId,
+      message,
+      // the message could be user or tool.
+      role = "user",
+      tool_name,
+      tool_args,
+      tool_call_id,
+      streamingMode = StreamingMode.NONE,
+    } = args;
+    const { user } = this.context;
+
+    // Validate chatSessionId if provided
+    if (chatSessionId) {
+      this.validateChatSessionId(chatSessionId, "sendMessage");
+    }
+
+    this.context.debug("Sending message", {
+      personaId,
+      chatSessionId,
+      messageLength: typeof message === "string" ? message.length : "object",
+      role,
+      userId: user?._id,
+      timestamp: new Date().toISOString(),
+    });
+
+    const maxRetries = 3;
+    let lastError: any;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // Get the persona's provider
+        const persona = await this.context
+          .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0", {
+            chatSessionId,
+          })
+          .getPersona(personaId);
+        const provider = persona.providerId || "xai";
+
+        // Save message to conversation history
+        let conversation;
+        if (chatSessionId) {
+          this.context.debug("Finding existing conversation", {
+            chatSessionId,
+            userId: this.context.user?._id,
+            timestamp: new Date().toISOString(),
+          });
+
+          // Use findOneAndUpdate to atomically find and update the conversation
+          // This prevents race conditions that could lead to duplicate creation
+          const messageToAdd = {
+            id: new ObjectId(),
+            role: role as any,
+            content: message,
+            timestamp: new Date(),
+            tool_name,
+            tool_args,
+            tool_call_id,
+          };
+
+          conversation = await ReactorConversationModel.findOneAndUpdate(
+            { _id: chatSessionId, user: this.context.user },
+            {
+              $push: { history: messageToAdd },
+              $set: { updated: new Date() },
+            },
+            { new: true, upsert: false }
+          )
+            .populate("user")
+            .exec();
+
+          // Validate the found/updated conversation
+          this.validateConversationDocument(
+            conversation,
+            "sendMessage",
+            "existing_conversation"
+          );
+
+          if (!conversation) {
+            const errorResponse = this.createErrorResponse(
+              ReactorErrorCode.CONVERSATION_NOT_FOUND,
+              `Chat session with id ${chatSessionId} not found or you do not have permission to access it.`,
+              {
+                operation: "sendMessage",
+                conversationId: chatSessionId,
+                recoverable: false,
+              }
+            );
+            throw new Error(errorResponse.message);
+          }
+
+          // Update token count and check limits in single atomic operation
+          const tokenStatus = await this.updateTokenCountAndCheckLimits(
+            conversation._id.toString()
+          );
+
+          // Check if truncation is needed based on updated token count
+          if (tokenStatus.shouldTruncate) {
+            this.context.warn(
+              "Token limit exceeded, truncating conversation history",
+              {
+                conversationId: conversation._id.toString(),
+                currentTokens: tokenStatus.currentTokens,
+                maxTokens: tokenStatus.maxTokens,
+                exceedsBy:
+                  tokenStatus.currentTokens - (tokenStatus.maxTokens || 0),
+              }
+            );
+
+            await this.truncateConversationHistory(
+              conversation._id.toString(),
+              (tokenStatus.maxTokens || TOKEN_LIMITS.DEFAULT_MAX_TOKENS) *
+                TOKEN_LIMITS.TRUNCATION_TARGET_MULTIPLIER
+            );
+          }
+        } else {
+          // Create new conversation only when no chatSessionId is provided
+          const sessionId = new ObjectId();
+          conversation = new ReactorConversationModel({
+            personaId,
+            user,
+            modelId: persona.modelId,
+            providerId: provider,
+            history: [
+              {
+                id: new ObjectId(),
+                role: role as any,
+                content: message,
+                timestamp: new Date(),
+                tool_name,
+                tool_args,
+                tool_call_id,
+              },
+            ],
+            vars: {},
+            meta: {
+              summary: "Reactor Chat Session with agent " + persona.name,
+              title: "Chat with " + persona.name,
+            },
+            macros: persona.macros || [],
+            tools: persona.tools || [],
+            started: new Date(),
+            sseSessionId: sessionId,
+            toolApprovalMode: ToolApprovalMode.PROMPT,
+          });
+
+          this.context.debug("Saving new conversation in sendMessage", {
+            sessionId: sessionId.toString(),
+            personaId: conversation.personaId,
+            userId: conversation.user?.toString(),
+            timestamp: new Date().toISOString(),
+          });
+
+          await conversation.save();
+
+          // Validate the newly created conversation
+          this.validateConversationDocument(
+            conversation,
+            "sendMessage",
+            "new_conversation"
+          );
+
+          // Update token count for new conversation
+          await this.updateConversationTokenCount(conversation._id.toString());
+        }
+
+        // Get provider adapter
+        const adapter = await this.providerService.getAdapter(provider);
+
+        if (streamingMode === 'SSE') {
+          // check if the sse is connected
+          let sessionId = this.streamingSessionManager.getSessionId(chatSessionId);
+          if (!sessionId) {
+            // return initiate sse response
+            return this.createInitiateSSEResponse(chatSessionId, conversation as unknown as ReactorConversationDocument);
+          }
+
+          let chatSession = await this.streamingSessionManager.getSession(sessionId);
+          if (!chatSession) {
+            // return initiate sse response
+            return this.createInitiateSSEResponse(chatSessionId, conversation as unknown as ReactorConversationDocument);
+          }
+
+          // next we check if the transport is connected
+          let hasTransport = await this.streamingTransportManager.hasTransport(sessionId);
+          if (!hasTransport) {
+            // return initiate sse response
+            return this.createInitiateSSEResponse(chatSessionId, conversation as unknown as ReactorConversationDocument);
+          }
+        }
+
+        // Execute chat with the specified provider
+        let response = await this.executeProviderChat(
+          provider,
+          chatSessionId,
+          persona,
+          {
+            personaId,
+            chatSessionId,
+            message,
+            role: role as "user" | "assistant" | "tool" | "system",
+            tool_name,
+            tool_args,
+            tool_call_id,
+            streamingMode,
+          }
+        );
+
+        // Process AI response and update conversation history
+        response = await this.processAIResponse(
+          response,
+          conversation,
+          message,
+          streamingMode
+        );
+
+        // Return adapted response
+        return adapter.adaptResponse(response);        
+      } catch (error: any) {
+        lastError = error;
+
+        // Check if this is a retryable error
+        const isRetryable = this.isRetryableError(error);
+
+        this.context.warn(
+          `SendMessage attempt ${attempt} failed: ${error.message}`,
+          {
+            error: error.message,
+            attempt,
+            maxRetries,
+            isRetryable,
+            personaId,
+            chatSessionId,
+          }
+        );
+
+        if (attempt < maxRetries && isRetryable) {
+          // Wait before retry with exponential backoff
+          const backoffDelay = Math.pow(2, attempt) * 1000;
+          this.context.log(
+            `Waiting ${backoffDelay}ms before retry attempt ${attempt + 1}`,
+            { backoffDelay, attempt }
+          );
+          await new Promise((resolve) => setTimeout(resolve, backoffDelay));
+          continue;
+        }
+
+        // If not retryable or max retries reached, break and throw
+        break;
+      }
+    }
+
+    // If we get here, all retries failed
+    this.context.error(
+      `Error sending message after ${maxRetries} attempts: ${
+        lastError?.message ?? lastError?.toString()
+      }`,
+      { error: lastError, args }
+    );
+
+    return this.createErrorResponse(
+      ReactorErrorCode.MESSAGE_ERROR,
+      lastError?.message || "Error sending message after multiple attempts",
+      {
+        details: lastError,
+        operation: "sendMessage",
+        conversationId: chatSessionId,
+        recoverable: true,
+      }
+    );
+  }
+
+  /**
+   * Process AI response and update conversation history
+   *
+   * @param response - The AI provider response
+   * @param conversation - The conversation document
+   * @param message - The original user message for context
+   * @returns The processed response with sessionId added
+   */
+  private async processAIResponse(
+    response: any,
+    conversation: any,
+    message: string | any,
+    streamingMode: StreamingMode = StreamingMode.NONE
+  ): Promise<any> {
+    // Add AI response if available
+    if (response?.choices && response?.choices?.length > 0) {
+      const aiMessage = response.choices[0].message;
+
+      // Use findOneAndUpdate for atomic update
+      await ReactorConversationModel.findOneAndUpdate(
+        { _id: conversation._id },
+        {
+          $push: {
+            history: {
+              id: new ObjectId(),
+              response, // add the original response for debugging
+              role: aiMessage.role,
+              content: aiMessage.content,
+              timestamp: new Date(),
+              tool_calls: aiMessage.tool_calls,
+              tool_results: [],
+            },
+          },
+          $set: { updated: new Date() },
+        },
+        { new: true }
+      ).exec();
+
+      // Update token count after adding AI response
+      await this.updateConversationTokenCount(conversation._id.toString());
+    } else {
+      this.context.warn(`No AI response received for message: ${message}`, {
+        response,
+      });
+
+      await ReactorConversationModel.findOneAndUpdate(
+        { _id: conversation._id },
+        {
+          $push: {
+            history: {
+              id: new ObjectId(),
+              role: "system",
+              content: "No AI response received",
+              timestamp: new Date(),
+              tool_results: [],
+            },
+          },
+          $set: { updated: new Date() },
+        },
+        { new: true }
+      ).exec();
+
+      // Update token count after adding system message
+      await this.updateConversationTokenCount(conversation._id.toString());
+    }
+
+    // Add session ID to response
+    // @ts-ignore
+    response.sessionId = conversation._id.toString();
+
+    return response;
+  }
+
+  /**
+   * Execute a macro/tool within a conversation context
+   *
+   * This method executes macros (custom tools) that are available to the AI persona
+   * within the context of a conversation. It handles permission checking, execution,
+   * and result processing with proper error handling.
+   *
+   * @param args - Macro execution arguments
+   * @param args.macro - Name or alias of the macro to execute
+   * @param args.personaId - ID of the persona context for execution
+   * @param args.chatSessionId - ID of the conversation session
+   * @param args.calledBy - Who initiated the macro call (default: "assistant")
+   * @param args.callId - Unique identifier for this macro call (auto-generated if not provided)
+   * @param args.args - Arguments to pass to the macro function
+   *
+   * @returns Promise resolving to adapted macro execution result
+   *
+   * @throws {ReactorErrorResponse} When macro not found, permission denied, or execution fails
+   *
+   * @example
+   * ```typescript
+   * // Execute a database search macro
+   * const result = await service.executeMacro({
+   *   macro: "search_database",
+   *   personaId: "assistant-v1",
+   *   chatSessionId: "session123",
+   *   args: { query: "users", limit: 10 }
+   * });
+   *
+   * // Execute with custom call tracking
+   * const trackedResult = await service.executeMacro({
+   *   macro: "send_email",
+   *   personaId: "assistant-v1",
+   *   chatSessionId: "session123",
+   *   callId: "email_call_001",
+   *   calledBy: "user",
+   *   args: { to: "user@example.com", subject: "Test" }
+   * });
+   * ```
+   *
+   * @remarks
+   * - Validates macro availability in conversation context
+   * - Checks user role permissions if macro has role restrictions
+   * - Automatically calculates token count for results
+   * - Handles token limit exceeded scenarios with chunking
+   * - Updates conversation history with tool execution results
+   * - Returns provider-adapted responses for consistency
+   *
+   * @since 1.0.0
+   */
+  async executeMacro(args: {
+    macro: string;
+    personaId: string;
+    chatSessionId: string;
+    calledBy?: string;
+    callId?: string;
+    args?: any;
+  }): Promise<any> {
+    const {
+      macro,
+      personaId,
+      chatSessionId,
+      calledBy = "assistant",
+      callId = v4(),
+    } = args;
+
+    // Validate chatSessionId
+    this.validateChatSessionId(chatSessionId, "executeMacro");
+
     try {
       // Get the persona's provider
-      const persona = await this.context.getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0").getPersona(personaId);
+      const persona = await this.context
+        .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0")
+        .getPersona(personaId);
       const provider = persona.providerId || "openai";
-      
+
       // Get provider adapter
       const adapter = await this.providerService.getAdapter(provider);
-      
-      // Update conversation
-      const conversation = await this.getChatSession({ id: chatSessionId });
+
+      // Get conversation without modifying it
+      const conversation = await ReactorConversationModel.findOne({
+        _id: chatSessionId,
+        user: this.context.user,
+      }).exec();
+
       if (!conversation) {
-        throw new Error('Conversation not found');
+        throw new Error("Conversation not found");
       }
-           
+
+      // @ts-ignore
+      conversation.context = this.context;
+
       // check if the macro is available on the chat session
-      let macroDef = conversation.macros.find((m) => m.name === macro);      
+      let macroDef = conversation.macros.find((m) => m.name === macro);
       if (macroDef === undefined || macroDef === null) {
         // check using the alias
-        macroDef ??= (conversation as TReactorConversationDocument).macros.find((m: { alias: string }) => m.alias === macro);
+        macroDef ??= (conversation as TReactorConversationDocument).macros.find(
+          (m: { alias: string }) => m.alias === macro
+        );
 
         if (!macroDef) {
-          // check the macro registry for the macro         
+          // check the macro registry for the macro
           if (!macroDef) {
             throw new Error(`Macro ${macro} not found in chat session`);
           }
         }
       }
-      
+
       // check if the macro has roles and if the user has permission to execute
       // in theory this should not be needed as only macros that the user has access to should be available
       // to the user in the first place.
       if (macroDef.roles && macroDef.roles.length > 0) {
         const allowed = this.context.hasAnyRole(macroDef.roles);
         if (!allowed) {
-          throw new Error(`User does not have permission to execute macro ${macro}`);
+          throw new Error(
+            `User does not have permission to execute macro ${macro}`
+          );
         }
       }
 
-     
-     
-      // Execute the macro 
+      // Execute the macro
       const macroFunction = this.macroService.getMacro(macroDef.name);
       if (!macroFunction) {
         throw new Error(`Macro ${macro} not found in macro registry`);
-      } 
-      // @ts-ignore      
-      let result = await macroFunction(args.args, conversation, this.context);
+      }
+      // @ts-ignore
+      let result: any = await macroFunction(
+        args.args,
+        conversation as any,
+        this.context
+      );
       if (!result) {
         throw new Error(`Macro ${macro} returned no result`);
       }
-      
-      // check if the results is plain string or an object
-      if (typeof result === "string") {
-        // return the string as a message
-        result = {
-          __typename: "ReactorChatMessage",
-          role: calledBy,
-          content: result,
-          id: v4(),
-          timestamp: new Date(),
-          tool_calls: [],
-          tool_results: [
-            {
-              id: callId,
-              name: macro,
-              type: "macro",
-              content: result,
-              timestamp: new Date(),
-              props: args.args || {}
-            }
-          ]
-        };
-      } else if (typeof result !== "object") {
-        throw new Error(`Macro ${macro} returned invalid result type`);
+
+      // we need to calculate token count of the result, and add it to the conversation
+      let resultString = JSON.stringify(result);
+      const tokenCount = await this.chunkingService.estimateTokenCount(
+        resultString
+      );
+
+      if (tokenCount > conversation.maxTokens) {
+        throw new Error(
+          `Macro ${macro} result is too large. Max tokens: ${conversation.maxTokens}, Token count: ${tokenCount}`
+        );
       }
 
-      // Add macro result to conversation history
-      conversation.history.push({
-        role: calledBy,
-        content: result.content,
+      if (tokenCount + conversation.tokenCount > conversation.maxTokens) {
+        // create a copy of the original history, in the event that
+        // the truncation is not enough to fit the result.
+        // first check what size the new history would be if we truncate it.
+        throw new Error(
+          `Macro ${macro} result is too large. Max tokens: ${
+            conversation.maxTokens
+          }, Token count: ${tokenCount + conversation.tokenCount}`
+        );
+      }
+
+      const toolResult = {
+        __typename: "ReactorChatMessage",
+        role: "tool",
+        content: `Tool ${macro} (${
+          callId || "no call id"
+        }) executed successfully.`,
+        tool_results: [
+          {
+            id: callId,
+            name: macro,
+            result: result,
+          },
+        ],
+        tool_call_id: callId,
+        tool_name: macro,
+        tool_args: args.args,
+        id: new ObjectId(),
         timestamp: new Date(),
-        props: result.props,
-        tool_calls: result?.tool_calls ?? []
-      });
-      
-    
-      await conversation.save();
-      
-      // Return adapted response
-      return adapter.adaptResponse(result);
-    } catch (error) {
-      this.context.error(`Error executing macro: ${error.message}`, { error });
-      return {
-        __typename: "ReactorErrorResponse",
-        code: "MACRO_ERROR",
-        message: error.message || "Error executing macro",
-        details: error,
-        timestamp: new Date(),
-        recoverable: true,
-        suggestion: "Check if the macro exists and you have permission to execute it"
       };
+
+      // Use atomic update to add macro result to conversation history
+      await ReactorConversationModel.findOneAndUpdate(
+        { _id: chatSessionId },
+        {
+          $push: { history: toolResult },
+          $set: { updated: new Date() },
+        },
+        { new: true }
+      ).exec();
+
+      return adapter.adaptResponse(toolResult);
+    } catch (error: any) {
+      this.context.error(`Error executing macro: ${error.message}`, {
+        error,
+        macro,
+        personaId,
+        chatSessionId,
+        correlationId: v4(),
+      });
+
+      return this.createErrorResponse(
+        ReactorErrorCode.MACRO_ERROR,
+        error.message || "Error executing macro",
+        {
+          details: error,
+          operation: "executeMacro",
+          conversationId: chatSessionId,
+          recoverable: true,
+        }
+      );
     }
   }
 
-  async executeTool(args: { 
-    tool: string,
-    toolArgs?: any, 
-    personaId: string, 
-    chatSessionId: string 
+  async executeTool(args: {
+    tool: string;
+    toolArgs?: any;
+    personaId: string;
+    chatSessionId: string;
   }): Promise<any> {
     const { tool, personaId, chatSessionId } = args;
-    
-    try {
-      // Similar implementation to executeMacro but for tools
-      const persona = await this.context.getService("reactor.AIPersonaProvider@1.0.0").getPersona(personaId);
-      const provider = persona.provider || "openai";
-      const adapter = await this.providerService.getAdapter(provider);
-      
-     
-      
-      // Update conversation with tool execution
-      const conversation = await this.getChatSession({ id: chatSessionId });
-      if (!conversation) {
-        throw new Error('Conversation not found');
-      }
-      
-      // check if the is available on the chat session
-      const toolDef = conversation.tools.find((t) => t.function.name === tool);
-      if (!toolDef) {
-        throw new Error(`Tool ${tool} not found in chat session`);
-      }
 
-      conversation.history.push({
-        role: "system",
-        content: `Executed tool: ${tool}`,
-        timestamp: new Date()
-      });
-      
-      if (response.choices && response.choices.length > 0) {
-        const aiMessage = response.choices[0].message;
-        conversation.history.push({
-          role: aiMessage.role,
-          content: aiMessage.content,
-          timestamp: new Date(),
-          tool_calls: aiMessage.tool_calls
-        });
-      }
-      
-      await conversation.save();
-      
-      return adapter.adaptResponse(response);
-    } catch (error) {
-      this.context.error(`Error executing tool: ${error.message}`, { error });
-      return {
-        __typename: "ReactorErrorResponse",
-        code: "TOOL_ERROR",
-        message: error.message || "Error executing tool",
-        details: error,
-        timestamp: new Date(),
-        recoverable: true,
-        suggestion: "Check if the tool exists and is properly configured"
-      };
-    }
+    // Validate chatSessionId
+    this.validateChatSessionId(chatSessionId, "executeTool");
+
+    return this.executeMacro({
+      macro: tool,
+      personaId,
+      chatSessionId,
+      args: args.toolArgs,
+    });
   }
 
-  async attachImage(args: { image: string, personaId: string, chatSessionId: string }): Promise<any> {
+  async attachImage(args: {
+    image: string;
+    personaId: string;
+    chatSessionId: string;
+  }): Promise<any> {
     const { image, personaId, chatSessionId } = args;
-    
+
+    // Validate chatSessionId
+    this.validateChatSessionId(chatSessionId, "attachImage");
+
     try {
-      const persona = await this.context.getService("reactor.AIPersonaProvider@1.0.0").getPersona(personaId);
-      const provider = persona.provider || "openai";
+      const persona = await this.context
+        .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0")
+        .getPersona(personaId);
+      const provider = persona.providerId || "openai";
       const adapter = await this.providerService.getAdapter(provider);
-      
-      // Add image to conversation
-      const conversation = await ReactorConversationModel.findOne({ _id: chatSessionId }).exec();
+
+      // Validate conversation exists and user has access
+      const conversation = await ReactorConversationModel.findOne({
+        _id: chatSessionId,
+        user: this.context.user,
+      }).exec();
+
       if (!conversation) {
-        throw new Error('Conversation not found');
+        throw new Error(
+          "Conversation not found or you do not have permission to access it"
+        );
       }
-      
-      // Add image message to history
-      conversation.history.push({
-        role: "user",
-        content: "[Image attached]",
-        timestamp: new Date(),
-        imageData: image
-      });
-      
+
+      // Use atomic update to add image message to history
+      await ReactorConversationModel.findOneAndUpdate(
+        { _id: chatSessionId },
+        {
+          $push: {
+            history: {
+              id: new ObjectId(),
+              role: "user",
+              content: "[Image attached]",
+              timestamp: new Date(),
+              // @ts-ignore
+              imageData: image,
+            },
+          },
+          $set: { updated: new Date() },
+        },
+        { new: true }
+      ).exec();
+
       // Process image with AI if supported
       let response;
       if (provider === "openai" && persona.modelId === "gpt-4-vision-preview") {
+        // @ts-ignore
         response = await this.openaiService.chat({
           personaId,
           chatSessionId,
           message: "What do you see in this image?",
-          image: image
         });
-        
+
         if (response.choices && response.choices.length > 0) {
           const aiMessage = response.choices[0].message;
-          conversation.history.push({
-            role: aiMessage.role,
-            content: aiMessage.content,
-            timestamp: new Date(),
-            tool_calls: aiMessage.tool_calls
-          });
+          // Use atomic update to add AI response
+          await ReactorConversationModel.findOneAndUpdate(
+            { _id: chatSessionId },
+            {
+              $push: {
+                history: {
+                  id: new ObjectId(),
+                  role: aiMessage.role,
+                  content: aiMessage.content,
+                  timestamp: new Date(),
+                  tool_calls: aiMessage.tool_calls,
+                },
+              },
+              $set: { updated: new Date() },
+            },
+            { new: true }
+          ).exec();
         }
       }
-      
-      await conversation.save();
-      
+
       if (response) {
         return adapter.adaptResponse(response);
       } else {
@@ -532,68 +2552,456 @@ export default class ReactorConversationService implements IReactorConversations
           id: Math.random().toString(36).substring(2, 15),
           role: "system",
           content: "Image attached successfully",
-          timestamp: new Date()
+          timestamp: new Date(),
         };
       }
-    } catch (error) {
-      this.context.error(`Error attaching image: ${error.message}`, { error });
-      return {
-        __typename: "ReactorErrorResponse",
-        code: "IMAGE_ERROR",
-        message: error.message || "Error attaching image",
-        details: error,
+    } catch (error: any) {
+      this.context.error(`Error attaching image: ${error.message}`, {
+        error,
+        personaId,
+        chatSessionId,
+        correlationId: v4(),
+      });
+
+      return this.createErrorResponse(
+        ReactorErrorCode.IMAGE_ERROR,
+        error.message || "Error attaching image",
+        {
+          details: error,
+          operation: "attachImage",
+          conversationId: chatSessionId,
+          recoverable: true,
+        }
+      );
+    }
+  }
+
+  async attachFiles(args: {
+    files: ReactoryFileDocument[];
+    chatSessionId: string;
+  }): Promise<any> {
+    const { files, chatSessionId } = args;
+
+    try {
+      // Validate chatSessionId
+      this.validateChatSessionId(chatSessionId, "attachFiles");
+
+      if (files === null || files === undefined || files.length === 0) {
+        throw new Error("Files are required for attachFiles");
+      }
+
+      // Validate conversation exists and user has access
+      const conversation = await ReactorConversationModel.findOne({
+        _id: chatSessionId,
+        user: this.context.user,
+      }).exec();
+
+      if (!conversation) {
+        throw new Error(
+          "Conversation not found or you do not have permission to access it"
+        );
+      }
+
+      // Create a user message indicating files were attached
+      const fileMessage = {
+        id: new ObjectId(),
+        role: "user" as const,
+        content: `I have uploaded ${files.length} file(s): ${files
+          .map((f) => f.filename || f.alias || "Unknown file")
+          .join(", ")} to my user profile home folder.`,
         timestamp: new Date(),
-        recoverable: true,
-        suggestion: "Check image format and size"
       };
+
+      // extract all the file ids from the files array
+      const fileIds = files.map((file) => {
+        if (file._id) {
+          return file._id;
+        } else if (file.id) {
+          return file.id;
+        } else {
+          // skip files that do not have an id
+          this.context.warn("File does not have an ID, skipping", {
+            file,
+            chatSessionId,
+          });
+          return null;
+        }
+      }).filter((id) => id !== null);
+
+      // Use atomic $push operation instead of push + save to avoid race conditions
+      const updatedConversation =
+        await ReactorConversationModel.findOneAndUpdate(
+          {
+            _id: chatSessionId,
+            user: this.context.user._id,
+          },
+          {
+            $push: { history: fileMessage, files: { $each: fileIds } },
+            $set: { updated: new Date() },
+          },
+          {
+            new: true,
+            runValidators: true,
+          }
+        ).exec();
+
+      if (!updatedConversation) {
+        throw new Error("Failed to update conversation with file attachment");
+      }
+
+      // Update token count after adding file attachment message
+      await this.updateConversationTokenCount(chatSessionId);
+
+      return {
+        __typename: "ReactorChatMessage",
+        sessionId: chatSessionId,
+        ...fileMessage,
+      };
+    } catch (error: any) {
+      this.context.error(`Error attaching files: ${error.message}`, {
+        error,
+        chatSessionId,
+        filesCount: files?.length || 0,
+        correlationId: v4(),
+      });
+
+      return this.createErrorResponse(
+        ReactorErrorCode.FILE_ERROR,
+        error.message || "Error attaching files",
+        {
+          details: error,
+          operation: "attachFiles",
+          conversationId: chatSessionId,
+          recoverable: true,
+        }
+      );
+    }
+  }
+
+  async attachUserFileToSession(sessionId: string, userFileId: string, path: string): Promise<any> {
+    try {
+      // Validate inputs
+      this.validateChatSessionId(sessionId, "attachUserFileToSession");
+      
+      if (!userFileId) {
+        throw new Error("User file ID is required");
+      }
+      
+      if (!path) {
+        throw new Error("File path is required");
+      }
+
+      // Validate conversation exists and user has access
+      const conversation = await ReactorConversationModel.findOne({
+        _id: sessionId,
+        user: this.context.user,
+      }).exec();
+
+      if (!conversation) {
+        throw new Error(
+          "Conversation not found or you do not have permission to access it"
+        );
+      }
+
+      // use the file service to check if the file exists as a file for the user.
+      let fileModel = await this.fileService.getFileModel(userFileId);
+      if (!fileModel) {
+        // check if the file exists if we load by path
+        fileModel = await this.fileService.getUserFileByPath(path);
+        if (fileModel === null || fileModel === undefined) {
+          throw new Error(`File not found: ${userFileId} or ${path}`);
+        }
+        if(fileModel.isNew === true) {
+          fileModel._id = ObjectId.createFromHexString(userFileId);
+          fileModel.id = ObjectId.createFromHexString(userFileId);
+          // let's save the file object.
+          await fileModel.save();
+        }
+        // this means the file exists but not catalogged and attached to the user.
+        // so we can fix that here.
+
+        fileModel = await this.fileService.catalogFile(fileModel.filename, fileModel.mimetype, fileModel.alias, `chat::${sessionId}`, this.context.partner, this.context.user);
+
+      }
+
+      // Check if file is already attached to avoid duplicates
+      const existingAttachment = conversation.files?.find(
+        f => f._id.equals(ObjectId.createFromHexString(userFileId)) || f.path === path
+      );
+     
+      if (existingAttachment) {
+        return {
+          __typename: "ReactorAttachFileResponse",
+          success: true,
+          message: "File is already attached to this session",
+          sessionId,
+          userFileId,
+          path
+        };
+      }
+           
+
+      // Use atomic update to add the file attachment
+      const updatedConversation = await ReactorConversationModel.findOneAndUpdate(
+        {
+          _id: sessionId,
+          user: this.context.user._id,
+        },
+        {
+          $push: { files: ObjectId.createFromHexString(userFileId) },
+          $set: { updated: new Date() },
+        },
+        {
+          new: true,
+          runValidators: true,
+        }
+      ).exec();
+
+      if (!updatedConversation) {
+        throw new Error("Failed to attach user file to session");
+      }
+
+      this.context.info("User file attached to session", {
+        sessionId,
+        userFileId,
+        path,
+        userId: this.context.user._id
+      });
+
+      return {
+        __typename: "ReactorAttachFileResponse",
+        success: true,
+        message: "File successfully attached to session",
+        sessionId,
+        userFileId,
+        path
+      };
+
+    } catch (error: any) {
+      this.context.error(`Error attaching user file to session: ${error.message}`, {
+        error,
+        sessionId,
+        userFileId,
+        path,
+        correlationId: v4(),
+      });
+
+      return this.createErrorResponse(
+        ReactorErrorCode.FILE_ERROR,
+        error.message || "Error attaching user file to session",
+        {
+          details: error,
+          operation: "attachUserFileToSession",
+          conversationId: sessionId,
+          recoverable: true,
+        }
+      );
+    }
+  }
+
+  async detachUserFileFromSession(sessionId: string, 
+    userFileId: string, 
+    path: string, 
+    deleteFile?: boolean): Promise<any> {
+    try {
+      // Validate inputs
+      this.validateChatSessionId(sessionId, "detachUserFileFromSession");
+      
+      if (!userFileId) {
+        throw new Error("User file ID is required");
+      }
+      
+      if (!path) {
+        throw new Error("File path is required");
+      }
+
+      // Validate conversation exists and user has access
+      const conversation = await ReactorConversationModel.findOne({
+        _id: sessionId,
+        user: this.context.user,
+      }).exec();
+
+      if (!conversation) {
+        throw new Error(
+          "Conversation not found or you do not have permission to access it"
+        );
+      }
+
+      // Use atomic update to remove the file attachment
+      const updatedConversation = await ReactorConversationModel.findOneAndUpdate(
+        {
+          _id: sessionId,
+          user: this.context.user._id,
+        },
+        {
+          $pull: { 
+            files: new ObjectId(userFileId)
+          },
+          $set: { updated: new Date() },
+        },
+        {
+          new: true,
+          runValidators: true,
+        }
+      ).exec();
+
+      if (!updatedConversation) {
+        throw new Error("Failed to detach user file from session");
+      }
+
+      if (deleteFile) {
+        // If deleteFile is true, delete the file from the user's profile
+        const fileModel = await this.fileService.getFileModel(userFileId);
+        if (!fileModel) {
+          this.context.warn(`File model not found for ID ${userFileId}`, {
+            userId: this.context.user._id,
+            sessionId,
+            path,
+          });
+
+          return {
+            __typename: "ReactorDetachFileResponse",
+            success: true,
+            message: "File successfully detached from session, but file model not found",
+            sessionId,
+            userFileId,
+            path
+          };
+        }
+
+        // Proceed to delete the file
+        await this.fileService.deleteFile(fileModel);
+      }
+
+      this.context.info("User file detached from session", {
+        sessionId,
+        userFileId,
+        path,
+        userId: this.context.user._id
+      });
+
+      return {
+        __typename: "ReactorDetachFileResponse",
+        success: true,
+        message: "File successfully detached from session",
+        sessionId,
+        userFileId,
+        path
+      };
+
+    } catch (error: any) {
+      this.context.error(`Error detaching user file from session: ${error.message}`, {
+        error,
+        sessionId,
+        userFileId,
+        path,
+        correlationId: v4(),
+      });
+
+      return this.createErrorResponse(
+        ReactorErrorCode.FILE_ERROR,
+        error.message || "Error detaching user file from session",
+        {
+          details: error,
+          operation: "detachUserFileFromSession",
+          conversationId: sessionId,
+          recoverable: true,
+        }
+      );
     }
   }
 
   async deleteChatSession(args: { id: string }): Promise<boolean> {
     const { id } = args;
-    
+
     try {
-      const result = await ReactorConversationModel.deleteOne({ _id: id, user: this.context.user }).exec();
+      const result = await ReactorConversationModel.deleteOne({
+        _id: id,
+        user: this.context.user,
+      }).exec();
       return result.deletedCount > 0;
     } catch (error) {
-      this.context.error(`Error deleting chat session: ${error.message}`, { error });
+      this.context.error(`Error deleting chat session: ${error.message}`, {
+        error,
+      });
       return false;
     }
   }
 
-  async loadChatSession(chatSessionId: string): Promise<TReactorConversationDocument | null> {
+  async loadChatSession(
+    chatSessionId: string
+  ): Promise<TReactorConversationDocument | null> {
+    this.context.debug("Loading chat session", {
+      chatSessionId,
+      userId: this.context.user?._id,
+      timestamp: new Date().toISOString(),
+    });
+
     if (!chatSessionId) {
-      throw new Error('Chat session ID is required');
+      const errorResponse = this.createErrorResponse(
+        ReactorErrorCode.MISSING_REQUIRED_FIELD,
+        "Chat session ID is required for loadChatSession",
+        {
+          operation: "loadChatSession",
+          recoverable: false,
+        }
+      );
+      throw new Error(errorResponse.message);
     }
 
     // Load the chat session by ID
-    const chatSession = await ReactorConversationModel.findOne({ _id: chatSessionId, user: this.context.user }).exec();
-    
+    const chatSession = await ReactorConversationModel.findOne({
+      _id: chatSessionId,
+      user: this.context.user,
+    })
+      .populate("user")
+      .exec();
+
     if (!chatSession) {
-      throw new Error(`Chat session with ID ${chatSessionId} not found or you do not have permission to access it.`);
+      this.context.error("Chat session not found during loadChatSession", {
+        chatSessionId,
+        userId: this.context.user?._id,
+      });
+      throw new Error(
+        `Chat session with ID ${chatSessionId} not found or you do not have permission to access it.`
+      );
     }
+
+    // Validate the loaded conversation
+    this.validateConversationDocument(
+      chatSession,
+      "loadChatSession",
+      "loaded_session"
+    );
+
+    this.context.info("Successfully loaded chat session", {
+      chatSessionId: chatSession._id?.toString(),
+      personaId: chatSession.personaId,
+      userId: chatSession.user?.toString(),
+      historyLength: chatSession.history?.length || 0,
+      tokenCount: chatSession.tokenCount,
+      maxTokens: chatSession.maxTokens,
+    });
 
     return chatSession;
   }
 
+  private collectMacrosAndTools(args: {
+    macros: Partial<MacroComponentDefinition<unknown>>[];
+    tools: Partial<MacroToolDefinition>[];
+    persona: IAIPersona;
+  }): {
+    macros: MacroComponentDefinition<unknown>[];
+    tools: MacroToolDefinition[];    
+  } {
 
-  async startChatSession(args: { 
-    personaId: string; 
-    macros: Partial<MacroComponentDefinition<unknown>>[]; 
-    tools: Partial<MacroToolDefinition>[]; }): Promise<TReactorConversationDocument> {
-    const persona = await this.personaProvider.getPersona(args.personaId);
-    if (!persona) {
-      throw new Error(`Persona with id ${args.personaId} not found`);
-    }
+    let macros: MacroComponentDefinition<unknown>[] = [];
+    let tools: MacroToolDefinition[] = [];
 
-    const conversation = await this.getNewConversation(persona);
-    if (!conversation) {
-      throw new Error('Failed to create new conversation');
-    }
-    // add the macros and tools to the conversation
-    if (args.macros) { 
-      args.macros.forEach((macro) => { 
-        conversation.macros.push({
+     // add the macros and tools to the conversation
+     if (args.macros) {
+      args.macros.forEach((macro) => {
+        macros.push({
           name: macro.name,
           nameSpace: macro.nameSpace,
           description: macro.description,
@@ -601,18 +3009,18 @@ export default class ReactorConversationService implements IReactorConversations
           component: macro.component,
           runat: "client", // these are client side macros
           roles: macro?.roles ?? [],
-          alias: macro.alias 
+          alias: macro.alias,
         });
-      })
+      });
     }
 
     // only add the macros defined on the persona.
-    persona.macros?.forEach((macro) => { 
-      conversation.macros.push({        
+    args.persona.macros?.forEach((macro) => {
+      macros.push({
         name: macro.name,
         nameSpace: macro.nameSpace,
         description: macro.description,
-        version: macro.version,        
+        version: macro.version,
         runat: "server", // these are server side macros
         roles: macro.roles ?? [],
         alias: macro.alias || macro.name,
@@ -621,21 +3029,21 @@ export default class ReactorConversationService implements IReactorConversations
     });
 
     // add the client side tools to the conversation
-    if (args.tools) { 
-      args.tools.forEach((tool) => { 
-        conversation.tools.push({
+    if (args.tools) {
+      args.tools.forEach((tool) => {
+        tools.push({
           type: tool.type ?? "function",
           runat: tool.runat ?? "client",
           enabled: tool.enabled ?? true,
           roles: tool.roles ?? [],
           function: tool.function,
         });
-      })
+      });
     }
 
     // only add the tools defined on the persona.
-    persona.tools?.forEach((tool) => { 
-      conversation.tools.push({ 
+    args.persona.tools?.forEach((tool) => {
+      tools.push({
         type: tool.type ?? "function",
         runat: tool.runat ?? "server", // these are server side tools
         enabled: tool.enabled ?? true,
@@ -644,36 +3052,583 @@ export default class ReactorConversationService implements IReactorConversations
       });
     });
 
-    // Get the system prompt from the persona.
-    const systemPromptTemplate = persona.prompts["system"];
+    return { macros, tools };
+  }
 
-    if (systemPromptTemplate) {
-      // Add system prompt to conversation history
-      const promptText = this.context.utils.lodash.template(systemPromptTemplate.content)({
-        user: this.context.user,
-        persona: persona,
-        macros: conversation.macros,
-        tools: conversation.tools,
-        chatSessionId: conversation._id.toString(),
-      });
+  private async createInitiateSSEResponse(chatSessionId: string, conversation: ReactorConversationDocument): Promise<ReactorInitiateSSEResponse> {
+    console.log(`🔌 [ReactorConversationService] createInitiateSSEResponse called:`, {
+      chatSessionId,
+      conversationId: conversation._id?.toString(),
+      hasStreamingSessionManager: !!this.streamingSessionManager,
+      hasStreamingTransportManager: !!this.streamingTransportManager
+    });
 
-      conversation.history.push({
-        id: new ObjectId(),
-        role: "system",
-        content: promptText,
-        timestamp: new Date(),
-        tool_results: [],
-      });
-    }
+    const session = await this.streamingSessionManager.createSession({
+      conversationId: chatSessionId,
+      userId: this.context.user._id.toString(),          
+      transport: "sse",
+      capabilities: {
+        supportsTokenStreaming: true,
+        supportsToolStreaming: true,
+        bufferSize: 1024,
+        timeoutMs: 10000,
+      }
+    });
     
-    // @ts-ignore
-    await conversation.save();
+    console.log(`🔌 [ReactorConversationService] Streaming session created:`, {
+      sessionId: session.sessionId,
+      conversationId: session.conversationId,
+      status: session.status,
+      userId: session.userId,
+      transport: session.transport,
+      capabilities: session.capabilities
+    });
+    
+    const sseUrl = new URL(`${process.env.API_URI_ROOT || "http://localhost:4000/"}reactor-chat/streaming/sse/${session.sessionId} `);
+    const clientKeyString = `${this.context.partner.key.toUpperCase().replace(/-/g, "_")}_APPLICATION_USERNAME`;
+    const clientPasswordString = `${this.context.partner.key.toUpperCase().replace(/-/g, "_")}_APPLICATION_PASSWORD`;
+    sseUrl.searchParams.set('transport', 'sse');
+    sseUrl.searchParams.set('no-upgrade', 'true');
+    sseUrl.searchParams.set('jwt', Helpers.getJwtTokenForUser(this.context.user));
+    sseUrl.searchParams.set('expiry', new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString());
+    sseUrl.searchParams.set('x-client-key', process.env[clientKeyString] as string || "");
+    sseUrl.searchParams.set('x-client-pwd', process.env[clientPasswordString] as string || "");
+    
+    console.log(`🔌 [ReactorConversationService] SSE URL constructed:`, {
+      baseUrl: sseUrl.toString(),
+      sessionId: session.sessionId,
+      conversationId: chatSessionId,
+      hasJWT: !!sseUrl.searchParams.get('jwt'),
+      hasClientKey: !!sseUrl.searchParams.get('x-client-key')
+    });
+    
+    const response = {
+      __typename: "ReactorInitiateSSE",
+      sessionId: chatSessionId,
+      endpoint: sseUrl.toString(),
+      token: Helpers.getJwtTokenForUser(this.context.user),
+      status: "active",
+      expiry: new Date(Date.now() + 1000 * 60 * 60 * 24), // 24 hours          
+      chatState: {
+        __typename: "ReactorChatState",
+        ...conversation,
+      } as unknown as ReactorChatState,
+    } as unknown as ReactorInitiateSSEResponse;
+    
+    console.log(`✅ [ReactorConversationService] SSE response created successfully:`, {
+      sessionId: chatSessionId,
+      endpoint: sseUrl.toString(),
+      hasToken: !!response.token
+    });
+    
+    return response;
+  }
 
-    return conversation;
+  async startChatSession(args: {
+    personaId: string;
+    macros: Partial<MacroComponentDefinition<unknown>>[];
+    tools: Partial<MacroToolDefinition>[];
+    systemPrompt: string;
+    streamingMode: StreamingMode;
+    promptMergeStrategy: PromptMergeStrategy;
+    toolApprovalMode: ToolApprovalMode;
+  }): Promise<ReactorInitChatResponse> {
+    this.context.debug("Starting chat session", {
+      personaId: args.personaId,
+      userId: this.context.user?._id,
+      macrosCount: args.macros?.length || 0,
+      toolsCount: args.tools?.length || 0,
+      timestamp: new Date().toISOString(),
+    });
+
+    try {
+      //
+      const persona = await this.personaProvider.getPersona(args.personaId);
+      if (!persona) {
+        this.context.error("Persona not found during startChatSession", {
+          personaId: args.personaId,
+          userId: this.context.user?._id,
+        });
+        throw new Error(`Persona with id ${args.personaId} not found`);
+      }
+
+      const conversation = await this.getNewConversation(persona);
+      if (!conversation || !conversation._id) {
+        this.context.error(
+          "Failed to create new conversation in startChatSession",
+          {
+            personaId: args.personaId,
+            userId: this.context.user?._id,
+            conversation: conversation,
+          }
+        );
+        throw new Error("Failed to create new conversation");
+      }
+
+      const { macros, tools } = this.collectMacrosAndTools({
+        macros: args.macros,
+        tools: args.tools,
+        persona,
+      });
+
+      conversation.macros = macros;
+      conversation.tools = tools;
+
+      // Get the system prompt from the persona.
+      const systemPromptTemplate = persona.prompts["system"];
+
+      if (systemPromptTemplate) {
+        // Add system prompt to conversation history
+        const promptText = this.context.utils.lodash.template(
+          systemPromptTemplate.content
+        )({
+          user: {
+            _id: this.context.user._id,
+            name:
+              this.context.user.firstName + " " + this.context.user.lastName,
+            email: this.context.user.email,
+            avatar: this.context.user.avatar,
+            createdAt: this.context.user.createdAt,
+          },
+          persona: persona,
+          macros: macros,
+          tools: tools,
+        });
+
+        conversation.history.push({
+          id: new ObjectId(),
+          role: "system",
+          content: promptText,
+          timestamp: new Date(),
+          tool_results: [],
+        });
+      }
+
+      // @ts-ignore
+      await conversation.save();
+
+      // Validate the final conversation after all modifications
+      this.validateConversationDocument(
+        conversation,
+        "startChatSession",
+        "final_conversation"
+      );
+
+      this.context.info("Successfully started chat session", {
+        conversationId: conversation._id?.toString(),
+        personaId: conversation.personaId,
+        userId: conversation.user?.toString(),
+        macrosCount: conversation.macros?.length || 0,
+        toolsCount: conversation.tools?.length || 0,
+        historyLength: conversation.history?.length || 0,
+        tokenCount: conversation.tokenCount,
+        maxTokens: conversation.maxTokens,
+      });
+
+      // Fix: StreamingMode is a type, not a value. Use the string literal instead.
+      if (args.streamingMode === StreamingMode.SSE) {
+        return this.createInitiateSSEResponse(conversation._id.toString(), conversation as unknown as ReactorConversationDocument);
+      }
+
+      (conversation as unknown as ReactorChatState).__typename = "ReactorChatState";
+
+      return conversation as unknown as ReactorInitChatResponse;
+    } catch (error) {
+      this.context.error("Error starting chat session", {
+        error,
+      });
+      
+      return {
+        __typename: "ReactorErrorResponse",
+        code: ReactorErrorCode.INTERNAL_ERROR,
+        message: "Error starting chat session",
+        details: error,
+        timestamp: new Date(),
+        recoverable: false,
+        suggestion: "Please try again later.",
+      } as unknown as ReactorInitChatResponse;
+    }
+  }
+
+  /**
+   * Process multiple tool calls with proper orchestration
+   * This method handles the execution of multiple tools in sequence or parallel
+   */
+  async processToolCalls(args: {
+    toolCalls: any[];
+    personaId: string;
+    chatSessionId: string;
+    executionMode?: "sequential" | "parallel";
+    maxRetries?: number;
+  }): Promise<any> {
+    const {
+      toolCalls,
+      personaId,
+      chatSessionId,
+      executionMode = "sequential",
+      maxRetries = 3,
+    } = args;
+
+    // Validate chatSessionId
+    this.validateChatSessionId(chatSessionId, "processToolCalls");
+
+    if (!toolCalls || toolCalls.length === 0) {
+      return { results: [], errors: [] };
+    }
+
+    const results = [];
+    const errors = [];
+
+    // Get conversation once to validate it exists
+    const conversation = await ReactorConversationModel.findOne({
+      _id: chatSessionId,
+      user: this.context.user,
+    })
+      .populate("user")
+      .exec();
+
+    if (!conversation) {
+      throw new Error(
+        `Chat session with id ${chatSessionId} not found or you do not have permission to access it.`
+      );
+    }
+
+    try {
+      if (executionMode === "parallel") {
+        // Execute tools in parallel for better performance
+        const toolPromises = toolCalls.map(async (toolCall, index) => {
+          return this.executeSingleToolCall(
+            toolCall,
+            conversation,
+            index,
+            maxRetries
+          );
+        });
+
+        const toolResults = await Promise.allSettled(toolPromises);
+
+        toolResults.forEach((result, index) => {
+          if (result.status === "fulfilled") {
+            results.push(result.value);
+          } else {
+            errors.push({
+              toolCall: toolCalls[index],
+              error: result.reason,
+              index,
+            });
+          }
+        });
+      } else {
+        // Execute tools sequentially for dependency management
+        for (let i = 0; i < toolCalls.length; i++) {
+          try {
+            const result = await this.executeSingleToolCall(
+              toolCalls[i],
+              conversation,
+              i,
+              maxRetries
+            );
+            results.push(result);
+
+            // Use atomic update to add tool result to conversation history
+            await ReactorConversationModel.findOneAndUpdate(
+              { _id: chatSessionId },
+              {
+                $push: {
+                  history: {
+                    id: new ObjectId(),
+                    role: "tool",
+                    content: `Tool ${toolCalls[i].function?.name} executed successfully`,
+                    timestamp: new Date(),
+                    tool_results: [result],
+                    tool_call_id: toolCalls[i].id,
+                  },
+                },
+                $set: { updated: new Date() },
+              },
+              { new: true }
+            ).exec();
+          } catch (error) {
+            errors.push({
+              toolCall: toolCalls[i],
+              error: error.message,
+              index: i,
+            });
+
+            // Use atomic update to add error message to conversation history
+            await ReactorConversationModel.findOneAndUpdate(
+              { _id: chatSessionId },
+              {
+                $push: {
+                  history: {
+                    id: new ObjectId(),
+                    role: "tool",
+                    content: `Tool ${toolCalls[i].function?.name} failed: ${error.message}`,
+                    timestamp: new Date(),
+                    tool_errors: [
+                      {
+                        name: toolCalls[i].function?.name,
+                        error: error.message,
+                      },
+                    ],
+                    tool_call_id: toolCalls[i].id,
+                  },
+                },
+                $set: { updated: new Date() },
+              },
+              { new: true }
+            ).exec();
+
+            // Continue with next tool even if one fails
+            this.context.warn(
+              `Tool execution failed: ${toolCalls[i].function?.name}`,
+              { error }
+            );
+          }
+        }
+      }
+
+      // Send consolidated results back to AI provider
+      if (results.length > 0) {
+        const consolidatedResults = this.consolidateToolResults(results);
+        const response = await this.sendMessage({
+          personaId,
+          chatSessionId,
+          message: consolidatedResults,
+          role: "tool",
+          tool_name: "consolidated_results",
+          tool_args: { results, errors },
+          tool_call_id: `consolidated_${Date.now()}`,
+        });
+
+        return {
+          results,
+          errors,
+          consolidatedResponse: response,
+        };
+      }
+
+      return { results, errors };
+    } catch (error) {
+      this.context.error(`Error processing tool calls: ${error.message}`, {
+        error,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Execute a single tool call with retry logic
+   */
+  private async executeSingleToolCall(
+    toolCall: any,
+    conversation: any,
+    index: number,
+    maxRetries: number
+  ): Promise<any> {
+    let lastError;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const { function: func } = toolCall;
+        if (!func || !func.name) {
+          throw new Error("Invalid tool call: missing function name");
+        }
+
+        // Check if tool exists in conversation
+        const toolDef = conversation.tools.find(
+          (t: any) => t.function?.name === func.name
+        );
+        if (!toolDef) {
+          throw new Error(`Tool ${func.name} not found in conversation`);
+        }
+
+        // Execute the tool
+        const result = await this.executeMacro({
+          macro: func.name,
+          personaId: conversation.personaId,
+          chatSessionId: conversation._id.toString(),
+          args: func.arguments || {},
+          calledBy: "assistant",
+          callId: toolCall.id,
+        });
+
+        return {
+          id: toolCall.id,
+          name: func.name,
+          result,
+          index,
+          attempt,
+          timestamp: new Date(),
+        };
+      } catch (error) {
+        lastError = error;
+        this.context.warn(
+          `Tool execution attempt ${attempt} failed: ${toolCall.function?.name}`,
+          { error }
+        );
+
+        if (attempt < maxRetries) {
+          // Wait before retry with exponential backoff
+          await new Promise((resolve) =>
+            setTimeout(resolve, Math.pow(2, attempt) * 1000)
+          );
+        }
+      }
+    }
+
+    throw new Error(
+      `Tool ${toolCall.function?.name} failed after ${maxRetries} attempts: ${lastError?.message}`
+    );
+  }
+
+  /**
+   * Check if an AI response is actually an error response
+   */
+  private isErrorResponse(response: any): boolean {
+    if (!response) return true;
+
+    // Check if it's a ReactorErrorResponse
+    if (response.__typename === "ReactorErrorResponse") {
+      return true;
+    }
+
+    // Check if it's an error response from AI providers
+    if (response.choices && response.choices.length > 0) {
+      const choice = response.choices[0];
+      const content = choice.message?.content || "";
+
+      // Check for error indicators in content
+      const errorIndicators = [
+        "i'm experiencing some technical difficulties",
+        "i'm unable to provide",
+        "error occurred",
+        "something went wrong",
+        "please try again",
+        "technical difficulties",
+      ];
+
+      return errorIndicators.some((indicator) =>
+        content.toLowerCase().includes(indicator)
+      );
+    }
+
+    return false;
+  }
+
+  /**
+   * Determine if an error is retryable
+   */
+  private isRetryableError(error: any): boolean {
+    if (!error) return false;
+
+    const errorMessage = error.message?.toLowerCase() || "";
+    const errorCode = error.code?.toLowerCase() || "";
+
+    // Retryable errors
+    const retryablePatterns = [
+      "unexpected_tool_call",
+      "malformed_function_call",
+      "missing_content_field",
+      "malformed_content",
+      "empty_response",
+      "other_finish_reason",
+      "rate limit",
+      "timeout",
+      "network",
+      "connection",
+      "temporary",
+      "service unavailable",
+      "internal server error",
+      "bad gateway",
+      "gateway timeout",
+      "ai provider error",
+      "retryable",
+    ];
+
+    return retryablePatterns.some(
+      (pattern) => errorMessage.includes(pattern) || errorCode.includes(pattern)
+    );
+  }
+
+  /**
+   * Consolidate multiple tool results into a single response
+   */
+  private consolidateToolResults(results: any[]): string {
+    if (results.length === 1) {
+      return results[0].result?.content || JSON.stringify(results[0].result);
+    }
+
+    const consolidated = results
+      .map((result, index) => {
+        const content = result.result?.content || JSON.stringify(result.result);
+        return `Tool ${index + 1} (${result.name}): ${content}`;
+      })
+      .join("\n\n");
+
+    return `Multiple tools executed successfully:\n\n${consolidated}`;
+  }
+
+  /**
+   * Process large documents with chunking and summarization
+   */
+  async processLargeDocument(args: {
+    content: string;
+    personaId: string;
+    chatSessionId: string;
+    options?: {
+      maxChunkSize?: number;
+      overlapSize?: number;
+      chunkBy?: "tokens" | "sentences";
+      preserveStructure?: boolean;
+      includeSummary?: boolean;
+      summaryStrategy?: "individual" | "hierarchical" | "final";
+    };
+  }): Promise<{
+    results: any[];
+    summary: {
+      totalChunks: number;
+      processedChunks: number;
+      failedChunks: number;
+      totalTokens: number;
+      originalSize: number;
+      processingTime: number;
+      finalSummary?: string;
+    };
+  }> {
+    const { content, personaId, chatSessionId, options = {} } = args;
+
+    // Validate chatSessionId
+    this.validateChatSessionId(chatSessionId, "processLargeDocument");
+
+    if (!this.chunkingService) {
+      throw new Error("DocumentChunkingService not available");
+    }
+
+    // Monitor document size first
+    const sizeInfo = this.chunkingService.monitorDocumentSize(content);
+    if (sizeInfo.warnings.length > 0) {
+      this.context.warn(
+        "Large document detected",
+        {
+          warnings: sizeInfo.warnings,
+          recommendations: sizeInfo.recommendations,
+        },
+        "ReactorConversationService.processLargeDocument"
+      );
+    }
+
+    // Process the document using the chunking service
+    return await this.chunkingService.processLargeDocumentWithAI(
+      content,
+      this.sendMessage.bind(this),
+      { personaId, _id: chatSessionId },
+      options
+    );
   }
 
   toString?(includeVersion?: boolean): string {
-    return `ReactorConversationService${includeVersion ? '@1.0.0' : ''}`;
+    return `ReactorConversationService${includeVersion ? "@1.0.0" : ""}`;
   }
 
   description?: string = "Service for managing reactor chat conversations";
@@ -681,4 +3636,43 @@ export default class ReactorConversationService implements IReactorConversations
   nameSpace: string = "reactor";
   name: string = "Reactor Conversation Service";
   version: string = "1.0.0";
+
+  /**
+   * Validate chatSessionId parameter
+   *
+   * @param chatSessionId - The chat session ID to validate
+   * @param operation - The operation name for error context
+   * @throws {Error} When chatSessionId is invalid
+   */
+  private validateChatSessionId(
+    chatSessionId: string | undefined,
+    operation: string
+  ): void {
+    if (!chatSessionId || chatSessionId.trim() === "") {
+      const errorResponse = this.createErrorResponse(
+        ReactorErrorCode.MISSING_REQUIRED_FIELD,
+        "Chat session ID is required",
+        {
+          operation,
+          recoverable: false,
+        }
+      );
+      throw new Error(errorResponse.message);
+    }
+
+    // Validate ObjectId format if it's not a new conversation
+    if (chatSessionId !== "new" && !ObjectId.isValid(chatSessionId)) {
+      const errorResponse = this.createErrorResponse(
+        ReactorErrorCode.INVALID_FORMAT,
+        "Invalid chat session ID format",
+        {
+          operation,
+          conversationId: chatSessionId,
+          recoverable: false,
+          details: { providedValue: chatSessionId },
+        }
+      );
+      throw new Error(errorResponse.message);
+    }
+  }
 }

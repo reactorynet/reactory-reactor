@@ -3,6 +3,7 @@ import fs from 'fs';
 import { ask, colors } from '@reactory/server-modules/reactory-reactor/helpers';
 import { IReactorProject, ISystemGraphManager, ReactorProjectProcessingStatus, ReactorProjectService, ReactorProjectStatus } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { patch } from "superagent";
+import Reactory from "@reactory/reactory-core";
 
 type ReactoryCliApp = (vargs: string[], context: Reactory.Server.IReactoryContext) => Promise<void>
 /**
@@ -49,6 +50,7 @@ const GraphManagerCli: ReactoryCliApp = async (kwargs: string[], context: Reacto
   let createCatalog: boolean = false;
   let catalogPath: string = '';
   let patchData: any = null;
+  let organization: string = null;
   let doSearch: boolean = false;
   let searchTerm: string = '';
   let output: string = '';
@@ -105,6 +107,10 @@ const GraphManagerCli: ReactoryCliApp = async (kwargs: string[], context: Reacto
         graphId = argv as string;
         indexKey = `reactor_graph_${systemId}_${graphId}`;
         break;
+      case '-org':
+      case '--organization':
+        organization = argv as string;
+        break;
       case '-i':
       case '--index':
         // doIndex = true; // Removed useless assignment
@@ -153,6 +159,7 @@ const GraphManagerCli: ReactoryCliApp = async (kwargs: string[], context: Reacto
     --search=<term> eg. -s "search term"
     --output=<filepath> eg. -o ./path/to/file
     --format=<format> eg. -fmt json
+    --organization=<organization-name> eg. --organization=Acme
     --help
     --silent
     `));
@@ -232,34 +239,49 @@ const GraphManagerCli: ReactoryCliApp = async (kwargs: string[], context: Reacto
           }
         }
 
+        const partialOrganization: Partial<Reactory.Models.TOrganization> = {
+          name: patchItem?.organization?.name || organization || null,
+          description: patchItem?.organization?.description,
+          created: new Date(),
+          updated: new Date(),
+        };
+
+        const businessUnit: Partial<Reactory.Models.TBusinessUnit> = {
+          name: patchItem?.businessUnit?.name || null,
+          description: patchItem?.businessUnitDescription || null,
+          created: new Date(),
+          updated: new Date(),
+        }
+
         const project: Partial<IReactorProject> = { 
           nameSpace: systemId,
           name: folder,
           version: 'unknown',
           repoPath: folderPath,
-          repoUrl: patchItem?.repoUrl || '',
+          repoUrl: patchItem?.repoUrl || `https://github.com/${organization}/${folder}.git`,
+          organization: partialOrganization?.name ? partialOrganization : null,
+          businessUnit: businessUnit?.name ? businessUnit : null,
           files: [], 
           pathSpecs: [],
-          description: `Cataloged project from folder ${folder}`,
+          description: null,
           fqn: `${systemId}.${folder}@unknown`,
           created: new Date(),
           updated: new Date(),
           dependencies: [],
           tasksUrl: '',
-          docsUrl: '',
-          docsPath: '',
-          slackChannel: '',
-          slackChannelId: '',
-          owner: context?.user || null,
-          ownerTeam: null,
+          primaryDocumentation: null,
+          secondaryDocumentation: [],
+          primarySlackChannel: null,
+          secondarySlackChannels: [],
+          owner: patchItem?.owner || context?.user || null,
+          ownerTeam: patchItem?.ownerTeam || null,
           teams: [],
           engineers: [],
           activeBranch: 'main',
           mainBranch: 'main',
           branches: ['main'],
           tags: [],
-          processor: processor,
-          processorOptions: {},
+          processors: [],
           client: context?.partner || null,
           projectStatus: ReactorProjectStatus.ACTIVE,
           processingHistory: [],
@@ -275,7 +297,7 @@ const GraphManagerCli: ReactoryCliApp = async (kwargs: string[], context: Reacto
         };
 
         await projectSvc.catalogProject(project);
-        context.info(`Cataloged: ${folderPath}`);
+        context.info(`Cataloged: ${folderPath}`, {}, 'GraphManagerCli');
       } catch (err) {
         context.error(`Failed to catalog ${folderPath}: ${err.message}`);
       }

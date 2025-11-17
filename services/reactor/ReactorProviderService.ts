@@ -283,7 +283,7 @@ class ReactorProviderService implements IReactorProviderService {
           return {
             __typename: "ReactorErrorResponse",
             code: "PROVIDER_ERROR",
-            message: "No response from xAI",
+            message: "No response from Google",
             timestamp: new Date(),
             recoverable: false,
           };
@@ -293,10 +293,14 @@ class ReactorProviderService implements IReactorProviderService {
           return {
             __typename: "ReactorErrorResponse",
             code: response.error.code || "PROVIDER_ERROR",
-            message: response.error.message || "Unknown xAI error",
+            message: response.error.message || "Unknown Google error",
             timestamp: new Date(),
             recoverable: false,
           };
+        }
+
+        if (response.__typename === "ReactorChatMessage") {
+          return response;
         }
 
         if (response.role && response.content) {
@@ -319,7 +323,15 @@ class ReactorProviderService implements IReactorProviderService {
           };
         }
 
-        return null;
+        return {
+          __typename: "ReactorChatMessage",
+          id: response?.id || Math.random().toString(36).substring(2, 15),
+          role: "assistant",
+          content: response?.text || response?.content,
+          timestamp: new Date(),
+          tool_calls: response?.tool_calls || null,
+          tool_results: response?.tool_results || null
+        };
       },
       adaptStreamingResponse: (stream: any): any => {
         return {

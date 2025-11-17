@@ -72,7 +72,10 @@ class SystemGraphManager implements ISystemGraphManager {
     this.setExecutionContext = this.setExecutionContext.bind(this);
 
   }
-  
+  setProjectService(service: ReactorProjectService) {
+    this.projectService = service;
+  }
+
   setSearchService(service: Reactory.Service.ISearchService) {
     this.searchService = service;
   }
@@ -214,7 +217,7 @@ class SystemGraphManager implements ISystemGraphManager {
 
 
   async getProjectNode(project: Partial<IReactorProject>): Promise<ReactorDataNode<Partial<IReactorProject>>> {
-    const provider = this.context.getService<IProjectProcessor>(project.providerId);
+    const provider = this.context.getService<IProjectProcessor>(project?.processors?.[0]?.processor);
     if(provider && provider.getProjectNode) {
       return await provider.getProjectNode(project);      
     } else {
@@ -225,7 +228,7 @@ class SystemGraphManager implements ISystemGraphManager {
         name: project.name,
         version: project.version,
         nameSpace: project.nameSpace,
-        providerId: project.providerId,
+        providerId: project.processors?.[0].processor || 'reactor.SimpleProjectProvider@1.0.0',
         source: project.repoPath,
         type: ReactorNodeType.SYSTEM,
         categories: [],
@@ -342,7 +345,7 @@ class SystemGraphManager implements ISystemGraphManager {
   }
   
   toString?(includeVersion?: boolean): string {
-    return `${SystemGraphManager.reactory.nameSpace}.${SystemGraphManager.reactory.name}${includeVersion ? `@${SystemGraphManager.reactory.version}` : ''}`
+    return `${this.nameSpace}.${this.name}${includeVersion ? `@${this.version}` : ''}`
   }
 
   description?: string;
@@ -350,24 +353,7 @@ class SystemGraphManager implements ISystemGraphManager {
   nameSpace: string;
   name: string;
   version: string;
-
-  static reactory: Reactory.Service.IReactoryServiceDefinition<SystemGraphManager> = {
-    name: "SystemGraphManager",
-    nameSpace: "reactor",
-    version: "1.0.0",
-    description: "Service for catalogging and creating a graph for a given system",
-    id: "reactor.SystemGraphManager@1.0.0",
-    serviceType: "data",
-    service(props: Reactory.Service.IReactoryServiceProps, context: Reactory.Server.IReactoryContext) {
-      return new SystemGraphManager(props, context);
-    },    
-    dependencies: [
-      { id: "core.ReactoryFileService@1.0.0", alias: "fileService" },      
-      { id: "core.FetchService@1.0.0", alias: "fetchService" },
-      { id: "core.ReactorySearchService@1.0.0", alias: "searchService"}
-    ],
-  };
   
 }
 
-export default SystemGraphManager.reactory;
+export default SystemGraphManager;

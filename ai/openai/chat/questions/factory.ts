@@ -15,7 +15,7 @@ import {
   handleChatCompletionResponse,
   MacroRegistry,
   handleCommandAction,
-} from "../macro";
+} from "@reactory/server-modules/reactory-reactor/ai/macro";
 import { colors } from "../../../../helpers";
 import ReactorConversationModel from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
@@ -25,7 +25,7 @@ import { ChatCompletionMessage } from "openai/resources/chat/completions/complet
 import { v4 } from "uuid";
 export const SYSTEM_INITIALIZER_MESSAGE: any = {
   role: "system",
-  content: fs.readFileSync(require.resolve('../macro/macros.md'), 'utf-8').toString(),
+  content: fs.readFileSync(require.resolve('@reactory/server-modules/reactory-reactor/ai/macro/macros.md'), 'utf-8').toString(),
 };
 
 export const getInitializerMessage = async (

@@ -5,7 +5,7 @@ import Reactory from "@reactory/reactory-core";
 export async function notificationsClose(
   req: Reactory.Server.ReactoryExpressRequest & { body: { id?: string; params?: { sessionId?: string } } }, 
   res: Response, 
-  sessions: Map<string, { intialized: boolean, sseRes: Response }>) {
+  sessions: Map<string, { initialized: boolean, sseRes: Response }>) {
   req.context.log("[MCP] Closing connection...");
   const sessionId = req.body.params?.sessionId;
   if (!sessionId) {
@@ -23,7 +23,16 @@ export async function notificationsClose(
       req.body.id ?? null
     );
   }
+  
+  // Properly close the SSE connection
+  try {
+    sessionData.sseRes.end();
+  } catch (error) {
+    req.context.warn("[MCP] Error closing SSE connection", { sessionId, error }, "notificationsClose");
+  }
+  
   sessions.delete(sessionId);
+  req.context.log("[MCP] Session closed successfully", { sessionId }, "notificationsClose");
   return RPCResponse({ closed: true }, req.body.id ?? null);
 }
 

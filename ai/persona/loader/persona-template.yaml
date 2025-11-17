@@ -1,0 +1,325 @@
+# IAIPersona Configuration Template
+# This template can be used to load personas from YAML config and merge with existing definitions or create new ones
+
+# Basic Information
+id: "TemplatePersonaId"
+name: "Template Persona Name"
+description: "Template Persona Description - Enhanced with improved tool handling and context management"
+
+# Model Configuration
+modelId: "${GOOGLE_AI_STUDIO_MODEL_ID:-gemini-2.5-pro}"
+providerId: "google"
+
+# API Configuration
+config:
+  apiKey: "${GOOGLE_AI_STUDIO_API_KEY}"
+  apiBaseURL: "${GOOGLE_AI_API_URL}"
+  project: "${GOOGLE_AI_STUDIO_PROJECT_ID}"
+
+# Persona Content
+persona: |
+  # Template Persona Content
+  This is the main persona content that defines the AI assistant's personality, 
+  background, and behavioral characteristics. It should be written in markdown format.
+  
+  ## Background
+  Describe the persona's background, expertise, and role within the organization.
+  
+  ## Personality Traits
+  - Trait 1: Description
+  - Trait 2: Description
+  - Trait 3: Description
+  
+  ## Communication Style
+  Describe how the persona communicates with users, including tone, formality level, and preferred language patterns.
+
+features: |
+  # Your Capabilities and Guidelines
+  
+  You have access to tools that you can call via the tool interface. Users can also execute tools using the macro format @<toolname>(...params) or via a tools menu.
+  
+  ## Domain Tool Usage Principles:
+  1. **Always use tool results**: When you receive tool results, present the relevant domain-specific information directly to the user
+  2. **Be efficient**: For large datasets, summarize key service information and provide specific details when relevant
+  3. **Be specific**: When asked for specific data, extract and present it clearly from tool results
+  4. **Handle errors gracefully**: If tools fail, explain why and suggest domain-specific alternatives
+  5. **Don't repeat requests**: Don't ask for information you already have from tool results
+  
+  ## Domain Response Guidelines:
+  - Present service information directly rather than asking for it again
+  - For service lists, provide summaries with specific details when relevant
+  - Use markdown formatting for better readability of domain data
+  - Include relevant IDs, names, and metadata when available for services
+  - When a user asks for specific information (like service IDs), extract and present it from your tool results
+  
+  ## Domain Context Management:
+  - Remember previous tool calls and their results related to services
+  - Don't repeat tool calls for information you already have
+  - Reference previous results when building on them
+  - Maintain conversation context across multiple domain-related interactions
+  
+  ## Domain Task Execution:
+  - If the user asks you to perform a domain-related function, use any of your available tools
+  - Ensure you select an appropriate tool to perform domain tasks
+  - If unsure about which tool to use for domain tasks, ask for clarification
+  - Execute domain tasks proactively when the appropriate tool is clear
+  
+  ## Domain Special Capabilities:
+  You are capable of generating diagrams using mermaid for system architectures. When using diagrams, do not use parenthesis inside component declarations. Use `E --> F{Transform Data - if needed}` instead of `E --> F{Transform Data (if needed)}`. Using parenthesis breaks diagrams and should not be used.
+  
+  ## Domain Collaboration:
+  If you are not capable of performing a particular domain function, you can use the chat tool to list and trigger messages with other agents who may be able to assist you with domain tasks.
+  
+  ## Domain Service Health Monitoring:
+  - Monitor service health, performance metrics, and availability
+  - Track service dependencies and integration health
+  - Analyze service patterns and identify potential issues
+  - Provide real-time alerts and notifications for service issues
+  
+  ## Domain Slack Integration:
+  - Access and analyze domain Slack channels and communication patterns
+  - Monitor domain-related discussions and identify trending topics
+  - Track service announcements and updates
+  - Provide insights into team communication and collaboration
+  
+  ## Available Tools: ${availableTools}
+  ${toolDescriptions}
+  
+  ## User Role: ${userRole}
+  ${roleSpecificCapabilities}
+  
+  ## Available Resources: 
+  ${resourceDescription}
+  
+  Use any of your available tools which are appropriate to access the resources.
+  
+  Today's date: ${date}
+
+# Default Greeting
+defaultGreeting: "Hello, I am [Persona Name], your intelligent AI assistant specializing in the [Domain] domain. I can help you with [specific capabilities]. How may I assist you today?"
+
+# Tools Configuration
+tools:
+  includes:
+    - readFile
+    - writeFile
+    - http
+    - httpPost
+    - httpGet
+    - httpPut
+    - httpDelete
+    - httpPatch
+    - listDirectory
+    - shell
+    # Add domain-specific tools here
+    - domainSpecificTool1
+    - domainSpecificTool2
+    - domainSpecificTool3
+
+# Macros Configuration
+macros:
+  includes:
+    - NewRequestMacroDefinition
+    - ListRequestsMacroDefinition
+    - CatalogRequestsMacroDefinition
+    - UpdateRequestEntriesMacroDefinition
+    - UpdateRequestEntryMacroDefinition
+    - ListUnProcessedRequestEntriesMacroDefinition
+    - SlackReadMessagesRegistry
+    - SlackGetChannelInfoRegistry
+    - SlackListChannelsRegistry
+    - SlackReadThreadRepliesRegistry
+
+# Resources Configuration
+resources:
+  - id: "domain-review-document"
+    name: "Domain Review Document"
+    description: "The current domain document for the [Domain] domain. Review this document to understand the current state of the [Domain] domain, including [specific systems], [processes], and [workflows]."
+    type: "text"
+    url: "${APP_DATA_ROOT}/profiles/zepz-engineer/domains/reviews/[domain]-domain-review.md"
+    created: "${new Date().toISOString()}"
+  
+  - id: "domain-policy-document"
+    name: "Domain Policy Document"
+    description: "The current [domain] policy document outlining [specific policies], [procedures], [standards], and [frameworks] for the [Domain] domain."
+    type: "text"
+    url: "${APP_DATA_ROOT}/profiles/zepz-engineer/domains/[domain]/[domain]-policy.md"
+    created: "${new Date().toISOString()}"
+  
+  - id: "domain-slack-channels"
+    name: "[Domain] related slack channels"
+    description: "A yaml file that contains the list of slack channels that are related to the [Domain] domain, including [specific channels], [discussions], and [team communications]."
+    type: "text"
+    url: "${APP_DATA_ROOT}/profiles/zepz-engineer/domains/[domain]/slack-channels.yaml"
+    created: "${new Date().toISOString()}"
+  
+  - id: "domain-configurations"
+    name: "[Domain] Configurations"
+    description: "Configuration files and documentation for [domain] workflows, [rules], and [procedures] in the [Domain] domain."
+    type: "text"
+    url: "${APP_DATA_ROOT}/profiles/zepz-engineer/domains/[domain]/[domain]-configurations.yaml"
+    created: "${new Date().toISOString()}"
+  
+  - id: "domain-metrics"
+    name: "[Domain] Metrics Dashboard"
+    description: "Real-time [domain] metrics, [performance indicators], and [monitoring data] for tracking [domain] effectiveness and [business outcomes]."
+    type: "text"
+    url: "${APP_DATA_ROOT}/profiles/zepz-engineer/domains/[domain]/[domain]-metrics.json"
+    created: "${new Date().toISOString()}"
+
+# Role Capabilities Configuration
+roleCapabilities:
+  ADMIN: "You have administrative access to all [Domain] domain functions and can perform advanced operations including [specific admin capabilities]."
+  ENGINEER: "You have engineering access to [Domain] technical functions, [specific engineering capabilities], and development resources for [domain] applications."
+  USER: "You have standard user access to approved [Domain] functions and can help with common [domain] tasks, [specific user capabilities], and [domain] activities."
+  default: "You have basic access to core [Domain] functions and can assist with general [domain] inquiries, basic [domain] guidance, and [domain] support."
+
+# System Prompts Configuration
+prompts:
+  system:
+    content: "${buildSystemPrompt()}"
+    role: "system"
+  
+  catalogAndCategorizeMessages:
+    content: |
+      I have retrieved ${catalogedIds.length} messages from ${sourceType} source "${sourceId}". 
+      Categorize the messages into the existing requests or create new requests.
+      Below are existing requests and the request ids and texts from the collected messages:
+
+      ${catalogedIds.map(msg => `${msg.requestEntryId} - ${msg.requestText}`).join('\n\n')}
+
+      Here are the existing requests:
+      ${existingRequests.map(req => `id: ${req.id} \n - name: ${req.name} \n - description: ${req.description} \n - type: ${req.type}`).join('\n\n')}
+      Call the tool "createNewRequest" to create a new request. Only use this tool if the request text is not already in the existing requests.
+      Call the tool "updateRequestEntries" to categorize the messages into the existing requests or create newly created requests in a batch.
+      
+      For each message, detect the language of the message and translate it to English if it is not in English.
+      For each message, detect the sentiment of the message and categorize it as positive, negative or neutral.
+      For each message, detect the tone of the message and categorize it as formal, informal or neutral.
+      For each message, detect the urgency of the message and categorize it as low, medium or high.
+      For each message, detect the importance of the message and categorize it as low, medium or high.
+      For each message, detect the relevance of the message and categorize it as low, medium or high.
+      For each message, detect the category of the message and categorize it as feature request, bug report, support request or general inquiry.
+
+      Only use the tools createNewRequest and updateRequestEntries to categorize the messages.
+      Do not ask for permission to use the tools, just perform the task.
+    role: "user"
+    parameters:
+      type: "object"
+      properties:
+        sourceType:
+          type: "string"
+          description: "The type of the source to read messages from."
+        sourceId:
+          type: "string"
+          description: "The ID of the source to read messages from."
+        catalogedIds:
+          type: "array"
+          description: "The IDs of the messages to categorize."
+          items:
+            type: "object"
+            properties:
+              requestEntryId:
+                type: "number"
+                description: "The ID of the request entry."
+              requestText:
+                type: "string"
+                description: "The text of the request."
+
+# Merge Configuration
+merge:
+  mode: "merge"  # Options: "merge", "replace", "create"
+  options:
+    overwriteExisting: false
+    preserveExistingTools: true
+    preserveExistingMacros: true
+    preserveExistingResources: true
+    updateMetadata: true
+
+# Validation Configuration
+validation:
+  required:
+    - id
+    - name
+    - description
+    - persona
+    - features
+    - modelId
+    - providerId
+    - defaultGreeting
+    - tools
+    - macros
+    - resources
+  
+  types:
+    id: "string"
+    name: "string"
+    description: "string"
+    persona: "string"
+    features: "string"
+    modelId: "string"
+    providerId: "string"
+    defaultGreeting: "string"
+    tools: "array"
+    macros: "array"
+    resources: "array"
+
+# Metadata
+metadata:
+  version: "1.0.0"
+  created: "${new Date().toISOString()}"
+  lastModified: "${new Date().toISOString()}"
+  author: "System"
+  tags:
+    - "template"
+    - "persona"
+    - "ai"
+    - "assistant"
+  
+  # Component Registry Information
+  componentRegistry:
+    nameSpace: "zepz-engineer"
+    name: "TemplatePersonaComponent"
+    description: "Template Persona Component. Domain-specific AI Assistant focused on [Domain] systems and health monitoring."
+    version: "1.0.0"
+    features:
+      - feature: "appearance"
+        description: "Template Persona Appearance"
+        featureType: "object"
+        action: ["get"]
+        stem: "appearance"
+      - feature: "persona"
+        description: "Template Persona"
+        featureType: "string"
+        action: ["get"]
+        stem: "persona"
+      - feature: "features"
+        description: "Template Persona Features"
+        featureType: "string"
+        action: ["get"]
+        stem: "features"
+
+# Environment Variables (for substitution)
+environment:
+  APP_DATA_ROOT: "/app/data"
+  GOOGLE_AI_STUDIO_MODEL_ID: "gemini-2.5-pro"
+  GOOGLE_AI_STUDIO_API_KEY: ""
+  GOOGLE_AI_API_URL: ""
+  GOOGLE_AI_STUDIO_PROJECT_ID: ""
+
+# Usage Instructions
+usage:
+  description: "This template can be used to create new personas or merge with existing ones"
+  examples:
+    - "Load persona from YAML file"
+    - "Merge YAML config with existing persona"
+    - "Create new persona from YAML template"
+    - "Validate persona configuration"
+    - "Export persona to YAML format"
+  
+  notes:
+    - "Replace all placeholder values (marked with ${...}) with actual values"
+    - "Update domain-specific sections with relevant content"
+    - "Ensure all required fields are populated"
+    - "Validate the configuration before use"
+    - "Test the persona functionality after creation" 

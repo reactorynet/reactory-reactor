@@ -1,6 +1,6 @@
 import Reactory from "@reactory/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
-import IOpenAIService, { AudioChatParams, ChatParams, CreateFineTuningJobParams, FineTuningEvent, FineTuningObjectJob, IAIPersona, IAIPersonaPromptTemplate, ImageExtensionParams, ImageGenerationParams, IOpenAIServiceProps, ListFineTuningJobParams, OpenAIFile, OpenAIImage, OpenAIListResponse, OpenAIModel } from "../../../types/service.types";
+import IOpenAIService, { AIStreamingCapabilities, AIStreamingEvent, AudioChatParams, ChatParams, CreateFineTuningJobParams, FineTuningEvent, FineTuningObjectJob, IAIPersona, IAIPersonaPromptTemplate, ImageExtensionParams, ImageGenerationParams, IOpenAIServiceProps, ListFineTuningJobParams, OpenAIFile, OpenAIImage, OpenAIListResponse, OpenAIModel } from "../../../types/service.types";
 import OpenAI, { ClientOptions } from "openai";
 import AIPersonaProvider from "../AIPersonaProvider";
 import { 
@@ -22,8 +22,9 @@ import {
   handleChatCompletionResponse,
   MacroRegistry,
   handleCommandAction,
-} from "../../../ai/openai/chat/macro";
+} from "@reactory/server-modules/reactory-reactor/ai/macro";
 import ReactorMacroService from "./ReactorMacroService";
+import { StreamingMode } from "../types/streaming.types";
 
 
 @service({
@@ -58,12 +59,30 @@ class OpenAIService implements IOpenAIService {
   // chat state object used by the service during the
   // lifecycle of the service
   chatState: ChatState;
+  // the streaming mode for the service
+  // if streamingMode is NONE then the service will not stream
+  // if streamingMode is SSE then the service will stream using SSE as the transport
+  streamingMode: StreamingMode = StreamingMode.NONE;
 
   constructor(props: IOpenAIServiceProps, 
     context: Reactory.Server.IReactoryContext) {
     this.context = context;
     this.props = props;
+    this.streamingMode = props.streamingMode || StreamingMode.NONE;
   }
+
+    /**
+   * Get streaming capabilities for this provider
+   */
+    async getStreamingCapabilities(): Promise<AIStreamingCapabilities> {
+      return {
+        supportsTokenStreaming: true,
+        supportsToolStreaming: true,
+        supportsFunctionStreaming: true,
+        maxConcurrentStreams: 10,
+        supportedFormats: ['json', 'text', 'sse']
+      };
+    }
 
   /**
    * Persists the chat state to the database
@@ -479,6 +498,97 @@ class OpenAIService implements IOpenAIService {
     }
   }
 
+    /**
+   * Create a streaming event with proper structure
+   */
+    private createStreamingEvent(type: AIStreamingEvent['type'], data: any): AIStreamingEvent {
+      return {
+        type,
+        data,
+        timestamp: new Date(),
+        sessionId: this.chatState?.sseSession || 'unknown'
+      };
+    }
+
+  private async* getStreamingAIResponse(prompt: OpenAI.Chat.ChatCompletionCreateParams) {
+    const { ai } = this;
+    const stream = await ai.chat.completions.create({...prompt, stream: true});
+    
+    let assistantMessage = '';
+    let toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+    let currentToolCall: { id?: string; name?: string; arguments?: string } | null = null;
+
+    for await (const chunk of stream) {
+      const delta = chunk.choices[0]?.delta;
+        
+        if (!delta) continue;
+
+        // Handle content tokens
+        if (delta.content) {
+          assistantMessage += delta.content;
+          yield this.createStreamingEvent('token', {
+            token: delta.content,
+            timestamp: new Date()
+          });
+        }
+
+        // Handle tool calls
+        if (delta.tool_calls) {
+          for (const toolCall of delta.tool_calls) {
+            if (toolCall.id) {
+              // New tool call started
+              if (currentToolCall && currentToolCall.id && currentToolCall.name) {
+                toolCalls.push({
+                  id: currentToolCall.id,
+                  name: currentToolCall.name,
+                  arguments: currentToolCall.arguments || ''
+                });
+              }
+              currentToolCall = {
+                id: toolCall.id,
+                name: toolCall.function?.name || '',
+                arguments: toolCall.function?.arguments || ''
+              };
+            } else if (currentToolCall && toolCall.function) {
+              // Continue existing tool call
+              if (toolCall.function.name) {
+                currentToolCall.name = (currentToolCall.name || '') + toolCall.function.name;
+              }
+              if (toolCall.function.arguments) {
+                currentToolCall.arguments = (currentToolCall.arguments || '') + toolCall.function.arguments;
+              }
+            }
+          }
+        }
+
+        // Handle completion
+        if (chunk.choices[0]?.finish_reason) {
+          // Add final tool call if exists
+          if (currentToolCall && currentToolCall.id && currentToolCall.name) {
+            toolCalls.push({
+              id: currentToolCall.id,
+              name: currentToolCall.name,
+              arguments: currentToolCall.arguments || ''
+            });
+          }
+
+          // Emit tool call events
+          for (const toolCall of toolCalls) {
+            yield this.createStreamingEvent('tool_call', {
+              toolCall: {
+                id: toolCall.id,
+                name: toolCall.name,
+                arguments: toolCall.arguments
+              },
+              timestamp: new Date()
+            });
+          }
+
+          break;
+        }
+    }
+  }
+
   private async getAIResponse(
     prompt: OpenAI.Chat.ChatCompletionCreateParams,
   ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
@@ -501,15 +611,21 @@ class OpenAIService implements IOpenAIService {
           )
         ) {
           throw new Error("No valid messages found in prompt");
-        }
+        }      
       }
-  
-      const completion = (await ai.chat.completions.create(
-        prompt
-      )) as OpenAI.Chat.Completions.ChatCompletion;
       
-      // @ts-ignore
-      return completion;
+      if(this.streamingMode === StreamingMode.SSE) { 
+        const completion = (await this.getStreamingAIResponse(prompt));
+                
+      } 
+      else { 
+        const completion = (await ai.chat.completions.create(
+          prompt
+        )) as OpenAI.Chat.Completions.ChatCompletion;
+        
+        // @ts-ignore
+        return completion; 
+      }            
     } catch (error) {
       this.context.error(
         `Error in getAIResponse: ${error.message || error.toString()}`, 
@@ -519,7 +635,7 @@ class OpenAIService implements IOpenAIService {
   }
 
   async chat(params: ChatParams): Promise<OpenAI.Chat.Completions.ChatCompletion> { 
-    const { message } = params;
+    const { message, streamingMode } = params;
     // create the prompt from the user input.
     const prompt = await this.createPrompt(message);
 
@@ -548,11 +664,11 @@ class OpenAIService implements IOpenAIService {
     throw new Error("Method not implemented.");
   }
 
-  description?: string;
-  tags?: string[];
-  nameSpace: string;
-  name: string;
-  version: string;
+  description?: string = "OpenAI Service.";
+  tags?: string[] = ["ai", "openai", "gpt"];
+  nameSpace: string = "reactor";
+  name: string = "OpenAIService";
+  version: string = "1.0.0";
 }
 
 export default OpenAIService;

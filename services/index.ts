@@ -15,6 +15,9 @@ import {
   NodeJSProjectProcessor,
   ReactNativeProjectProcessor
 } from './SystemGraphProjectProviders';
+import DocumentChunkingService from "./reactor/DocumentChunkingService";
+import { StreamingSessionManager } from "./reactor/StreamingSessionManager";
+import { StreamingTransportManager } from "./reactor/StreamingTransportManager";
 export default [
   ReactorMacroService,
   ReactorConversationService,
@@ -30,5 +33,8 @@ export default [
   TSqlProjectProcessor,
   CSharpProjectProcessor,
   NodeJSProjectProcessor,
-  ReactNativeProjectProcessor
+  ReactNativeProjectProcessor,
+  DocumentChunkingService,
+  StreamingSessionManager,  
+  StreamingTransportManager,
 ];

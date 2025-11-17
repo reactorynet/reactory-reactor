@@ -3,19 +3,78 @@ Represents a single message in a chat conversation between a user and a persona.
 Contains the content and metadata about the message.
 """
 type ReactorChatMessage {
+  """
+  The session ID of the chat session that the message belongs to.
+  """
   sessionId: String!
+  """
+  The token pressure for the session.
+  """
+  tokenPressure: Float
+  """
+  The total token count for the message, including both input and output tokens.
+  This is used to track the overall token usage for the conversation.
+  """
+  tokenCount: Int
+  """
+  The ID of the message.
+  """
   id: String
+  """
+  The role of the message. This will be either "user", "assistant", "tool", or "system".
+  """
   role: String
+  """
+  The content of the message.
+  """
   content: String
+  """
+  The component of the message. This will be a Reactory.FQN type that follows the 
+  nameSpace.name@version format.
+  """
+  component: String
+  """
+  The props of the message. This will be a JSON object that contains the props of the component.
+  """
+  props: Any
+  """
+  The props map of the message. This is a ObjectMap that used with ObjectMapper.merge() to convert 
+  the props to the component.
+  """
+  propsMap: Any
+  """
+  The audio of the message. This will be a base64 encoded string of the audio.
+  or a URL to the audio file.
+  """
   audio: Any
+  """
+  The annotations of the message. This will be a JSON object that contains the annotations of the component.  
+  """
   annotations: Any
+  """
+  The images of the message. This will be a JSON object that contains the images of the component.
+  """
   images: Any
+  """
+  The rating of the message. This will be a string that contains the rating of the message.
+  """
   rating: String
+  """
+  The timestamp of the message. This will be a date that contains the timestamp of the message.
+  """
   timestamp: Date
+  """
+  The tool calls of the message. This will be a JSON object that contains the tool calls of the component.
+  """
   tool_calls: Any
+  """
+  The tool results of the message. This will be a JSON object that contains the tool results of the component.
+  """
   tool_results: Any
-  toolApproval: String
-  refusal: String    
+  """
+  The refusal of the message. This will be a string that contains the refusal of the component.
+  """
+  refusal: String
 }
 
 """
@@ -29,6 +88,17 @@ type ReactorInitiateSSE {
   status: String
   expiry: Date
   headers: Any
+  chatState: ReactorChatState
+}
+
+enum ReactorErrorCategory {
+  VALIDATION
+  PERMISSION
+  RESOURCE_NOT_FOUND
+  EXTERNAL_SERVICE
+  INTERNAL
+  RATE_LIMIT
+  TIMEOUT
 }
 
 """
@@ -42,6 +112,12 @@ type ReactorErrorResponse {
   timestamp: Date
   recoverable: Boolean
   suggestion: String
+  correlationId: String
+  operation: String
+  userId: String
+  conversationId: String
+  retryAfter: Int
+  errorCategory: ReactorErrorCategory
 }
 
 """
@@ -62,6 +138,37 @@ type ReactorSessionVar {
   value: Any
 }
 
+enum ReactorChatContextResourceType {
+  """
+  Represents a file resource in the chat context.
+  """
+  file
+  """
+  Represents a folder resource in the chat context.
+  """
+  folder
+  """
+  Represents a URL resource in the chat context.
+  """
+  url
+}
+
+"""
+Represents a resource that can be used in the chat context.
+Includes file, folder, or URL resources with associated metadata.
+"""
+type ReactorChatContextResource {
+  type: ReactorChatContextResourceType!
+  name: String!
+  description: String
+  url: String!
+  """
+  The tool advice for the resource.
+  This is a string that provides guidance on how the resource can be used with tools.
+  """
+  toolAdvice: String
+}
+
 """
 Represents the overall state of a chat conversation, including
 its history and metadata.
@@ -73,12 +180,62 @@ type ReactorChatState {
   updated: Date
   user: User
   history: [ReactorChatMessage]
+  truncatedHistory: [ReactorChatMessage]
+  """
+  The maximum number of tokens allowed for the conversation.
+  """
+  maxTokens: Int
+  """
+  The current token count for the conversation.
+  """
+  tokenCount: Int
+  """
+  The pressure of the token count. This is the ratio of the token count to the max tokens.
+  """
+  tokenPressure: Float
+  """
+  The tools used in the conversation.
+  """
   tools: [ReactorToolDefinition]
+  """
+  The macros used in the conversation.
+  """
   macros: [ReactorMacro]
+  """
+  The session variables for the chat session.
+  These are key-value pairs that can be used to store state or configuration for the session.
+  """
   vars: Any
+  """
+  Indicates whether the chat session has an active MCP client.
+  This is true if the session has an MCP client that can be used to execute tools.
+  """
   hasMcpClient: Boolean
+  """
+  The MCP sessions associated with the chat session.
+  This includes details about the MCP server, session ID, and available tools.
+  """
   mcpSessions: [ReactorMCPSession]
+  """
+  The current tool approval mode for the chat session.
+  This determines how tools are approved for use by the persona.
+  """
   toolApprovalMode: ReactorToolApprovalMode
+  """
+  Files that have been attached to the chat session.
+  This includes both regular files and audio files.
+  """
+  files: [ReactoryFile]
+  """
+  Folders that have been attached to the chat session.
+  This includes both regular folders and folders containing files.
+  """
+  folders: [ReactoryFolder]
+
+  """
+  Represents a resource that can be used in the chat context.
+  """
+  resources: [ReactorChatContextResource]  
 }
 
 """
@@ -112,6 +269,25 @@ input ReactorSendMessageInput {
   personaId: String!
   chatSessionId: String
   message: String!
+  streamingMode: StreamingMode
+}
+
+"""
+Enum representing different streaming modes for real-time message delivery.
+"""
+enum StreamingMode {
+  """
+  No streaming - traditional request/response mode
+  """
+  NONE
+  """
+  Server-Sent Events streaming for real-time token delivery
+  """
+  SSE
+  """
+  WebSocket streaming for bidirectional real-time communication
+  """
+  WEBSOCKET
 }
 
 """
@@ -138,8 +314,70 @@ input ReactorToolExecuteInput {
   args: Any
 }
 
-union ReactorChatStateOrError = ReactorChatState | ReactorErrorResponse
+"""
+Response type for file attachment operations.
+"""
+union ReactorAttachFileResponse = ReactorChatResponse | ReactorErrorResponse
 
+"""
+Response type for file detachment operations.
+Input type for attaching a user file to a chat session
+"""
+input ReactorAttachUserFileParam {
+  sessionId: String!
+  fileId: String!
+  """
+  Optional description for the file being attached.
+  This can be used to provide context or details about the file to the llm
+  """
+  description: String
+  path: String!
+}
+
+"""
+Input type for detaching a user file from a chat session
+"""
+input ReactorDetachUserFileParam {
+  sessionId: String!
+  fileId: String!
+  delete: Boolean
+  path: String!
+}
+
+"""
+Response type for successful file attachment
+"""
+type ReactorAttachFileResponse {
+  success: Boolean!
+  message: String!
+  sessionId: String!
+  fileId: String!
+  path: String!
+}
+
+"""
+Response type for successful file detachment
+"""
+type ReactorDetachFileResponse {
+  success: Boolean!
+  message: String!
+  sessionId: String!
+  fileId: String!
+  path: String!
+}
+
+"""
+Union types for file operations
+"""
+union ReactorAttachFileResult = ReactorAttachFileResponse | ReactorErrorResponse
+union ReactorDetachFileResult = ReactorDetachFileResponse | ReactorErrorResponse
+
+input ReactorConversationLoadOptions {
+  showAllFiles: Boolean
+}
+
+union ReactorChatStateOrError = ReactorChatState | ReactorErrorResponse
+union ReactorInitChatResponse = ReactorChatState | ReactorErrorResponse | ReactorInitiateSSE
 
 extend type Query {
 
@@ -152,7 +390,7 @@ extend type Query {
   """
   Retrieves a specific chat conversation by its ID.
   """
-  ReactorConversation(id: String!): ReactorChatStateOrError
+  ReactorConversation(id: String!, loadOptions: ReactorConversationLoadOptions): ReactorChatStateOrError
 
   """
   Lists all available AI personas that the current user can access.
@@ -167,7 +405,7 @@ extend type Mutation {
   Creates a new chat session with a specified persona and provides
   the initial message to start the conversation using the persona's default greeting.
   """
-  ReactorStartChatSession(initSession: ReactorInitSession!): ReactorChatState
+  ReactorStartChatSession(initSession: ReactorInitSession!): ReactorInitChatResponse
 
   """
   Set the tool approval mode for a chat session.
@@ -181,6 +419,7 @@ extend type Mutation {
   """
   Sends a message to a persona and returns either a direct response
   or SSE connection details for streaming responses.
+  Supports optional streaming mode parameter for real-time delivery.
   """
   ReactorSendMessage(message: ReactorSendMessageInput!): ReactorChatResponse
 
@@ -198,6 +437,16 @@ extend type Mutation {
   Adds an image to the current chat conversation for analysis by the persona.
   """
   ReactorAttachFile(file: Upload!, chatSessionId: String!): ReactorChatResponse
+
+  """
+  Attaches an existing user file to a chat session.
+  """
+  ReactorAttachUserFileToSession(params: ReactorAttachUserFileParam!): ReactorAttachFileResult
+
+  """
+  Detaches a user file from a chat session.
+  """
+  ReactorDetachUserFileFromSession(params: ReactorDetachUserFileParam!): ReactorDetachFileResult
 
   """
   Permanently removes a chat session and all its messages.

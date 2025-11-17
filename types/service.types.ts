@@ -1,11 +1,13 @@
 import Reactory from '@reactory/reactory-core';
 import OpenAI from "openai"
 import GoogleGenAI from "google-genai";
-import { TReactorConversationDocument, TReactorConversationModel } from "../models/ReactorChatState"
+import { TReactorConversationDocument, TReactorConversationModel, ReactorConversationHistoryItem } from "../models/ReactorChatState"
 import { AIAudioChatParams, AIChatCompletion, AIChatParams, AIFile, AIFineTuningEvent, AIFineTuningJob, AIImage, AIImageGenerationParams, AIListResponse, AIModel, CreateAIFineTuningJobParams, ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorNodeType } from "./model.types"
 import { PagingRequest, PagingResult } from "@reactory/server-core/database/types"
 import { ObjectId } from "mongodb"
-import { MacroComponentDefinition, MacroToolDefinition, Schema, ToolApprovalMode } from '../ai/openai/types/chat';
+import { ChatState, MacroComponentDefinition, MacroToolDefinition, Schema, ToolApprovalMode } from '../ai/openai/types/chat';
+import { ReactoryFileDocument, ReactoryFileModel } from 'modules/reactory-core/models/CoreFile';
+import { PromptMergeStrategy, StreamingMode } from '../services/reactor/types/streaming.types';
 
 
 export type KnownAIProviders = "openai" | "google" | "azure" | "xai" | "anthropic" | "cohere" | "mistral" | "meta" | "deepmind";
@@ -176,7 +178,8 @@ export interface ImageExtensionParams extends ImageGenerationParams, ImageVarian
 export interface ChatParams { 
   personaId: string
   message: string
-  chatSessionId?: string
+  chatSessionId?: string,
+  streamingMode?: StreamingMode
 }
 
 export interface AudioChatParams extends ChatParams {
@@ -214,6 +217,11 @@ export interface IOpenAIServiceProps extends Reactory.Service.IReactoryServicePr
    * The persona id to use for the service insstance. Defaults to "reactor"
    */
   personaId?: string
+
+  /**
+   * The streaming mode to use for the service instance. Defaults to StreamingMode.NONE
+   */
+  streamingMode?: StreamingMode
 }
 
 
@@ -314,10 +322,29 @@ export interface IAIAppearance {
 }
 
 export interface IAIPersonaPromptTemplate {
+  /**
+   * The content of the prompt
+   */
   content?: string;
+  /**
+   * The variables that are available in the prompt
+   */
   variables?: string[];
+  /**
+   * The parameters that are available in the prompt
+   */
   parameters?: Schema;
-  role: "user" | "assistant" | "system";
+  /**
+   * The form that is used to render the input fields for the prompt
+   */
+  formFqn?: Reactory.FQN;
+  /**
+   * The role of the prompt
+   */
+  /**
+   * The role of the prompt
+   */
+  role: "user" | "assistant" | "system" | "tool";
 }
 
 export interface OpenAIModelConfig { }
@@ -325,6 +352,16 @@ export interface xAIModelConfig { }
 export interface AzureModelConfig { }
 export interface GoogleModelConfig { }
 export type KnownAIModelConfigs = OpenAIModelConfig | xAIModelConfig | GoogleModelConfig | AzureModelConfig;
+
+export interface IAIPersonaResource {
+  id: string;
+  name: string;
+  description?: string;
+  type: "file" | "image" | "video" | "audio" | "text" | "code" | "url" | "directory";
+  url?: string;
+  content?: string;
+  created: Date;
+}
 
 /**
  * Defines the shape fo the AI Persona object
@@ -348,6 +385,10 @@ export interface IAIPersona {
   features: string;
   avatar?: string;
   appearance?: IAIAppearance;
+  /**
+   * Maximum number of tokens allowed for this persona's conversations
+   */
+  maxTokens?: number;
   prompts?: {
     [key: string]: IAIPersonaPromptTemplate
   },
@@ -360,7 +401,16 @@ export interface IAIPersona {
     [key: string]: any;
   },
   tools?: MacroToolDefinition[]
-  macros?: MacroComponentDefinition<unknown>[]  
+  macros?: MacroComponentDefinition<unknown>[]
+  resources?: {
+    id: string;
+    name: string;
+    description?: string;
+    type: "file" | "image" | "video" | "audio" | "text" | "code" | "url" | "directory";
+    url?: string;
+    content?: string;
+    created: Date;
+  }[]
 }
 
 /**
@@ -403,6 +453,34 @@ export interface IAIPersonaProviderService {
     deletePersona(id: string): Promise<IAIPersona>;
 }
 
+export type ReactorInitiateSSEResponse = {
+  __typename: 'ReactorInitiateSSE',
+  sessionId: string,
+  endpoint: string,
+  token: string,
+  status: string,
+  expiry: Date,
+  headers: any
+}
+
+export type ReactorErrorResponse = {
+  __typename: 'ReactorErrorResponse',
+  code: string,
+  message: string,
+  details: any,
+  timestamp: Date,
+  recoverable: boolean,
+  suggestion: string
+}
+
+export type ReactorChatState = ChatState & {
+  __typename: 'ReactorChatState',
+  macros: MacroComponentDefinition<unknown>[],
+  tools: MacroToolDefinition[]
+}
+
+export type ReactorInitChatResponse = ReactorChatState | ReactorErrorResponse | ReactorInitiateSSEResponse;
+  
 /**
  * Service interface for managing AI-powered chat conversations within the Reactor system.
  * 
@@ -422,8 +500,12 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
   startChatSession(args: {
     personaId: string, 
     macros: Partial<MacroComponentDefinition<unknown>>,  
-    tools: Partial<MacroToolDefinition>[]
-  }): Promise<any>;
+    tools: Partial<MacroToolDefinition>[],
+    systemPrompt: string,
+    streamingMode: StreamingMode,
+    promptMergeStrategy: PromptMergeStrategy,
+    toolApprovalMode: ToolApprovalMode
+  }): Promise<ReactorInitChatResponse>;
 
   /**
    * Loads a chat session by its ID.
@@ -432,12 +514,76 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
   loadChatSession(chatSessionId: string): Promise<TReactorConversationDocument | null>;
 
   /**
+   * Gets a chat session by its ID without user authentication.
+   * This method is designed for external access like GraphQL resolvers.
+   */
+  getChatSession(args: { id: string }): Promise<TReactorConversationDocument & {
+    context?: Reactory.Server.IReactoryContext;
+  }>;
+
+  /**
    * Sets the tool approval mode for the chat session.
    * This allows you to control how tools are approved for use in the chat session.
    * @param chatSessionId 
    * @param toolApprovalMode 
    */
-  setChatToolApprovalMode(chatSessionId: string, toolApprovalMode: ToolApprovalMode): Promise<any>; 
+  setChatToolApprovalMode(chatSessionId: string, toolApprovalMode: ToolApprovalMode): Promise<any>;
+
+  /**
+   * Sets the maximum number of tokens for the chat session.
+   * This allows you to control the token limit for the conversation.
+   * @param chatSessionId 
+   * @param maxTokens 
+   */
+  setChatMaxTokens(chatSessionId: string, maxTokens: number): Promise<any>;
+
+  /**
+   * Gets the current token count and usage information for the chat session.
+   * @param chatSessionId 
+   */
+  getChatTokenCount(chatSessionId: string): Promise<{
+    currentTokens: number;
+    maxTokens: number | null;
+    exceedsLimit: boolean;
+    percentageUsed: number;
+  }>;
+
+  /**
+   * Gets the full conversation history including truncated messages for analysis.
+   * This combines the active history with truncated history in chronological order.
+   * @param chatSessionId 
+   */
+  getFullConversationHistory(chatSessionId: string): Promise<{
+    fullHistory: ReactorConversationHistoryItem[];
+    activeHistory: ReactorConversationHistoryItem[];
+    truncatedHistory: ReactorConversationHistoryItem[];
+    statistics: {
+      totalMessages: number;
+      activeMessages: number;
+      truncatedMessages: number;
+      totalTokens: number;
+      activeTokens: number;
+      truncatedTokens: number;
+    };
+  }>;
+
+  /**
+   * Gets a list of conversations for the user.
+   * @param args 
+   */
+  getConversations(args: {
+    filter?: { personaId?: string; userId?: string; modelId?: string };
+  }): Promise<TReactorConversationDocument[]>;
+
+  /**
+   * Clear the truncated history for a conversation.
+   * This can be used for cleanup or when you want to free up storage.
+   * @param chatSessionId 
+   */
+  clearTruncatedHistory(chatSessionId: string): Promise<{
+    clearedMessages: number;
+    clearedTokens: number;
+  }>; 
   
   /**
    * Execute a macro string using the macro system.
@@ -480,13 +626,45 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
   deleteChatSession(args: { id: string }): Promise<any>;
   
   /**
+   * Attaches files to the chat session. This can be used to attach files to the chat session
+   * for later retrieval or processing.
+   * @param args 
+   */
+  attachFiles(args: {
+    files: ReactoryFileDocument[],    
+    chatSessionId: string
+  }): Promise<any>;
+
+  /**
+   * Attaches a user file to the chat session using the file path and user file ID.
+   * @param sessionId - The chat session ID
+   * @param userFileId - The user file ID
+   * @param path - The file path
+   */
+  attachUserFileToSession(sessionId: string, userFileId: string, path: string): Promise<any>;
+
+  /**
+   * Detaches a user file from the chat session using the file path and user file ID.
+   * @param sessionId - The chat session ID
+   * @param userFileId - The user file ID  
+   * @param path - The file path
+   */
+  detachUserFileFromSession(sessionId: string,
+    userFileId: string, 
+    path: string, 
+    deleteFile?: boolean): Promise<any>;
+
+  /**
    * Sends a message to the chat session. If no chat session is found then a new one will be created.
    * @param args 
    */
   sendMessage(args: { 
     message: string, 
     personaId: string, 
-    chatSessionId?: string }): Promise<any>;
+    chatSessionId?: string,
+    tool_results?: Record<string, any>,
+    streamingMode: StreamingMode
+  }): Promise<any>;
 }
 
 export type KnownLanguages =
@@ -594,16 +772,26 @@ export interface ReactorProjectDashboard {
   updated: Date
 }
 
+export interface ReactorProjectNote {
+  id: number
+  title: string
+  content: string
+  format: "markdown" | "html" | "text"; // Format of the note content
+  createdBy: Reactory.Models.TUser // User who created the note
+  created: Date // When the note was created
+  updated?: Date // When the note was last updated
+}
+
 /*
 // Enum is used to represent the status of a project.
 // This status is used to track the lifecycle of a project, such as whether it is active,
 // inactive, archived, or deprecated.
 */ 
 export enum ReactorProjectStatus {
-  ACTIVE,
-  INACTIVE,
-  ARCHIVED,
-  DEPRECATED,
+  ACTIVE = 'ACTIVE',
+  INACTIVE = 'INACTIVE',
+  ARCHIVED = 'ARCHIVED',
+  DEPRECATED = 'DEPRECATED',
 }
 
 // """
@@ -619,12 +807,12 @@ export enum ReactorProjectProcessingStatus {
 }
 
 export interface ReactorProjectProcessingEntry {
-  id: number;
+  id: any;
   projectId: number | string; // Reference to the project
   status: ReactorProjectProcessingStatus; // Status of the processing
-  started: Date; // When the processing started
+  started?: Date; // When the processing started
   completed?: Date; // When the processing completed, if applicable
-  errors?: [string]; // Error message if processing failed
+  errors?: string[]; // Error message if processing failed
   notes?: string; // Additional details about the processing
 }
 
@@ -634,7 +822,7 @@ export interface ReactorProjectDocumentation {
   url?: string;
   content?: string;
   path?: string
-  format: "markdown" | "html" | "text"; // Format of the documentation
+  format: "markdown" | "html" | "text" | "pdf" | "docx" | "doc" | "xls" | "xlsx" | "ppt" | "pptx" | "csv"; // Format of the documentation
   createdBy: Reactory.Models.TUser; // User who created the documentation
   created: Date; // When the documentation was created
   updated?: Date; // When the documentation was last updated
@@ -652,12 +840,29 @@ export interface IProjectProcessorConfig {
   options?: any; // Options for the processor
 }
 
+export interface IReactorProjectMetrics {
+  date: Date; // The date for the metrics
+  incidents: number; // Number of incidents reported on that date
+  errors: number; // Number of errors reported on that date
+  deployments: number; // Number of warnings reported on that date
+  activeDeployments: number; // Number of warnings reported on that date
+  openPullRequests: number; // Number of open pull requests on that date
+  closedPullRequests: number; // Number of closed pull requests on that date
+  activeBranches: number; // Performance score for the project on that date
+  totalBranches: number; // Total number of branches in the project on that date
+  activeTasks: number; // Total number of files in the project on that date
+  openedTasks: number; // Total number of files in the project on that date
+  closedTasks: number; // Total number of files in the project on that date
+  totalTeams: number; // Total number of teams working on the project on that date
+  totalEngineers: number; // Total number of engineers working on the project on that date
+}
 
 
 export interface IReactorProject extends Reactory.IComponentFqnDefinition {
   id?: number | string;
   client?: Reactory.Models.TReactoryClient; // ReactoryClient
-  businessUnit?: Reactory.Models.TBusinessUnit; // BusinessUnit
+  organization?: Partial<Reactory.Models.IOrganization> | Partial<Reactory.Models.IOrganizationDocument>; // ReactoryOrganization
+  businessUnit?: Partial<Reactory.Models.TBusinessUnit>; // BusinessUnit
   fqn: string;
   name: string;
   nameSpace: string;
@@ -673,6 +878,7 @@ export interface IReactorProject extends Reactory.IComponentFqnDefinition {
   primarySlackChannel?: ReactorSlackChannel;
   secondarySlackChannels?: ReactorSlackChannel[];
   dependencies?: IReactorProject[];
+  dependents?: IReactorProject[];
   pathSpecs?: IReactorProjectPathSpec[];
   files?: IReactorProjectFileSpec[];
   activeDeployment?: ReactorProjectDeployment; // ReactorProjectDeployment
@@ -690,7 +896,7 @@ export interface IReactorProject extends Reactory.IComponentFqnDefinition {
   created?: Date;
   updated?: Date;
   errors?: any[]; // ReactorProjectError[]
-  notes?: any[]; // ReactorProjectNotes[]
+  notes?: ReactorProjectNote[]; // ReactorProjectNotes[]
   security?: any; // ReactorProjectSecurity
   projectStatus?: ReactorProjectStatus; // Status of the project
   processingHistory?: ReactorProjectProcessingEntry[]; // Processing status of the project
@@ -699,6 +905,11 @@ export interface IReactorProject extends Reactory.IComponentFqnDefinition {
 
 export interface PagedFilter {
   search?: string
+  ownerTeam?: string
+  owner?: string
+  system?: string
+  businessUnit?: string
+  status?: string
   comparitor?: Partial<IReactorProject>
   paging?: PagingRequest
 }
@@ -727,7 +938,7 @@ export interface ProjectSynchronizer extends Reactory.Service.IReactoryService {
   sync(project: IReactorProject): Promise<IReactorProject>;
   
   /**
-   * Used the index the project
+   * Used to index the project and make the content searchable.
    * @param project 
    */
   index(project: IReactorProject): Promise<IReactorProject>;
@@ -789,6 +1000,34 @@ export interface ReactorProjectService extends Reactory.Service.IReactoryService
    * @param project 
    */
   detectProjectProcessors(project: Partial<IReactorProject>): Promise<IProjectProcessorConfig[]>;
+
+  /**
+   * Returns the primary documentation for the project.
+   * @param project 
+   */
+  getPrimaryDocumentation(project: Partial<IReactorProject>): Promise<ReactorProjectDocumentation>;
+
+  /**
+   * Returns the secondary documentation for the project.
+   * @param project 
+   */
+  getAdditionalDocumentation(project: Partial<IReactorProject>): Promise<ReactorProjectDocumentation[]>;
+
+  /**
+   * Returns the repo url for the project.
+   * @param project 
+   */
+  getRepoUrl(project: Partial<IReactorProject>): string;
+
+  /**
+   * Returns a series of metrics for the project for the time period.
+   * Default to the last 14 days
+   * @param project 
+   * @param startDate 
+   * @param endDate 
+   */
+  getProjectMetrics(project: Partial<IReactorProject>, startDate?: Date, endDate?: Date): Promise<IReactorProjectMetrics[]>;
+
 }
 
 export interface ISystemGraphManager extends Reactory.Service.IReactoryDefaultService {
@@ -890,7 +1129,7 @@ export interface IProjectProcessor extends ProjectSynchronizer, AttributeProvide
    * This is used to index the project for search.
    * @param project 
    */
-  process(project: Partial<IReactorProject>): Reactory.Models.ISearchable[];  
+  process(project: Partial<IReactorProject>): Partial<IReactorProject>;  
   /**
    * Returns true if the processor supports the project type.
    * @param project 
@@ -995,6 +1234,123 @@ export interface IAIProviderService extends Reactory.Service.IReactoryService {
   chat(params: AIChatParams): Promise<AIChatCompletion>;
   chatAudio(params: AIAudioChatParams): Promise<AIChatCompletion>;
   speech2Text(audio: string | Buffer[]): Promise<string>;
+}
+
+/**
+ * Extended AI Provider Service interface with streaming capabilities.
+ * Defines streaming methods for real-time AI interactions.
+ */
+export interface IAIStreamingProviderService extends IAIProviderService {
+  // Streaming Chat Methods
+  chatStream(params: AIChatParams): AsyncIterable<AIStreamingEvent>;
+  chatAudioStream(params: AIAudioChatParams): AsyncIterable<AIStreamingEvent>;
+  
+  // Provider-specific streaming capabilities
+  getStreamingCapabilities(): Promise<AIStreamingCapabilities>;
+}
+
+/**
+ * Streaming capabilities supported by an AI provider
+ */
+export interface AIStreamingCapabilities {
+  /** Whether the provider supports token-by-token streaming */
+  supportsTokenStreaming: boolean;
+  /** Whether the provider supports tool execution streaming */
+  supportsToolStreaming: boolean;
+  /** Whether the provider supports function calling during streaming */
+  supportsFunctionStreaming: boolean;
+  /** Maximum concurrent streaming sessions */
+  maxConcurrentStreams?: number;
+  /** Supported streaming formats */
+  supportedFormats: ('json' | 'text' | 'sse')[];
+}
+
+/**
+ * Streaming event types from AI providers
+ */
+export type AIStreamingEventType = 
+  | 'token' 
+  | 'tool_call' 
+  | 'function_call' 
+  | 'error' 
+  | 'complete'
+  | 'metadata';
+
+/**
+ * Base streaming event structure
+ */
+export interface AIStreamingEvent {
+  /** Type of streaming event */
+  type: AIStreamingEventType;
+  /** Event timestamp */
+  timestamp: Date;
+  /** Optional session identifier */
+  sessionId?: string;
+  /** Event data payload */
+  data: any;
+}
+
+/**
+ * Token streaming event data
+ */
+export interface AITokenStreamingData {
+  /** Token content */
+  content: string;
+  /** Token delta (incremental change) */
+  delta: string;
+  /** Position in the response */
+  position: number;
+  /** Whether this is the final token */
+  isComplete: boolean;
+  /** Optional token metadata */
+  metadata?: {
+    logprobs?: number;
+    finish_reason?: string;
+  };
+}
+
+/**
+ * Tool call streaming event data
+ */
+export interface AIToolCallStreamingData {
+  /** Tool call identifier */
+  id: string;
+  /** Tool/function name */
+  name: string;
+  /** Tool arguments (may be partial during streaming) */
+  arguments: string;
+  /** Whether the tool call is complete */
+  isComplete: boolean;
+  /** Tool execution result (if available) */
+  result?: any;
+}
+
+/**
+ * Error streaming event data
+ */
+export interface AIErrorStreamingData {
+  /** Error code */
+  code: string;
+  /** Error message */
+  message: string;
+  /** Optional error details */
+  details?: any;
+}
+
+/**
+ * Completion streaming event data
+ */
+export interface AICompletionStreamingData {
+  /** Complete response content */
+  content: string;
+  /** Completion metadata */
+  metadata: {
+    totalTokens: number;
+    promptTokens: number;
+    completionTokens: number;
+    finishReason: string;
+    model: string;
+  };
 }
 
 export default IOpenAIService;

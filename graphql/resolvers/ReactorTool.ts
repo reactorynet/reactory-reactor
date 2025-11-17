@@ -18,6 +18,11 @@ class ReactorToolResolver {
     if (!tool?.function?.name) return null;
     return new (require('mongodb').ObjectId)(context.utils.hash(tool.function.name)).toString();
   }
+
+  @property("ReactorToolDefinition", "runat")
+  async getToolRunAt(tool: Partial<MacroToolDefinition>, args: any, context: Reactory.Server.IReactoryContext): Promise<ReactorMacroRunAt | null> {
+    return tool.runat || "server";
+  }
 }
 
 export default ReactorToolResolver;

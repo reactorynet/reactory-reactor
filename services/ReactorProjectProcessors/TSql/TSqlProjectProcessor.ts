@@ -404,7 +404,7 @@ class TSqlProjectProcessor
     return fileSpecs;
   }
 
-  process(project: IReactorProject): Reactory.Models.ISearchable[] {
+  process(project: Partial<IReactorProject>): Partial<IReactorProject> {
     const { context } = this;
     const { warn, info, error } = context;
     let nextProject = { ...project };
@@ -450,7 +450,7 @@ class TSqlProjectProcessor
       });
     });
 
-    return searchable;
+    return project;
   }
 
   onStartup(): Promise<void> {

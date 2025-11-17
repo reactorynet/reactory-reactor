@@ -17,6 +17,18 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
             name
             nameSpace
             version
+            ownerTeam {
+              id
+              name
+              avatar
+            }
+            system {
+              id
+              nameSpace
+              name
+              version
+              description
+            }
             owner {
               id
               firstName
@@ -27,8 +39,7 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
               id
               name
             }
-            incidentActive
-            description
+            incidentActive            
           }
         }
       }`,
