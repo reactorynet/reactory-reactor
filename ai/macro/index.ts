@@ -13,6 +13,7 @@ import ChatsMacros from './chats';
 import MCPMacros from './mcp';
 import ProjectMacros from './projects';
 import DataMacros from './data';
+import ModuleMacros from './develop/module';
 
 import  { 
   ReadFile, 
@@ -88,6 +89,7 @@ export const MacroRegistry: MacroComponentDefinition<unknown>[] = [
   ...MCPMacros,
   ...ProjectMacros,
   ...DataMacros,
+  ...ModuleMacros,
 ];
 
 export const getMacrosMD = (): string => {

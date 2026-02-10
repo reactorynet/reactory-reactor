@@ -378,7 +378,6 @@ export class StreamingConversationService extends ReactorConversationService {
   }
 }
 ```
-```
 
 #### 1.3 Enhanced GraphQL Schema
 ```graphql
@@ -468,7 +467,6 @@ type ReactorInitiateSSE {
   expiry: Date
   headers: Any
 }
-```
 ```
 
 ### Phase 2: AI Provider Streaming Integration (Week 2-3)
@@ -575,6 +573,7 @@ export class XAIStreamingService extends OpenAIStreamingService {
     yield* super.chatStream(xaiParams); // Full OpenAI streaming implementation
   }
 }
+```
 
 **Implementation Highlights**:
 ```typescript
