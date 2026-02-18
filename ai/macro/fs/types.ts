@@ -1,6 +1,7 @@
 /**
  * Property interfaces for fs macros - converting from array-based args to named parameters
  */
+import { MacroErrorCode } from '../errors';
 
 /**
  * Properties for ReadFile macro
@@ -20,6 +21,8 @@ export interface ReadFileResult {
   success: boolean;
   /** Error message if operation failed */
   error?: string;
+  /** Standardized error code for programmatic handling */
+  errorCode?: MacroErrorCode;
   /** File data if operation succeeded */
   data?: {
     /** Raw file content as string */
@@ -61,9 +64,9 @@ export interface WriteFileProps {
   /** Write mode: 'overwrite', 'create', 'append', 'prepend', or 'insert' */
   mode?: 'overwrite' | 'create' | 'append' | 'prepend' | 'insert';
   /** Start line number for insert mode */
-  start?: string;
+  start?: string | number;
   /** End line number for insert mode */
-  end?: string;
+  end?: string | number;
 }
 
 /**
@@ -74,6 +77,8 @@ export interface WriteFileResult {
   success: boolean;
   /** Error message if operation failed */
   error?: string;
+  /** Standardized error code for programmatic handling */
+  errorCode?: MacroErrorCode;
   /** File data if operation succeeded */
   data?: {
     /** Full file path */
@@ -118,6 +123,8 @@ export interface ListDirectoryResult {
   success: boolean;
   /** Error message if operation failed */
   error?: string;
+  /** Standardized error code for programmatic handling */
+  errorCode?: MacroErrorCode;
   /** Directory data if operation succeeded */
   data?: {
     /** Full directory path */
@@ -224,6 +231,8 @@ export interface ExtractTextFromFileResult {
   success: boolean;
   /** Error message if operation failed */
   error?: string;
+  /** Standardized error code for programmatic handling */
+  errorCode?: MacroErrorCode;
   /** Text extraction data if operation succeeded */
   data?: {
     /** Full file path */
@@ -313,9 +322,9 @@ export interface ExtractTextFromFileProps {
   /** The file path to extract from */
   path: string;
   /** Start line number */
-  start: string;
+  start: string | number;
   /** End line number */
-  end: string;
+  end: string | number;
 }
 
 /**

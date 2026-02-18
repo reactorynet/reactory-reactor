@@ -29,7 +29,7 @@ export interface ShellCommandProps {
    * @default 60
    * @example 120
    */
-  timeoutInSeconds?: string;
+  timeoutInSeconds?: string | number;
   /**
    * Whether to execute the shell command with sudo
    * @default false

@@ -235,7 +235,13 @@ type ReactorChatState {
   """
   Represents a resource that can be used in the chat context.
   """
-  resources: [ReactorChatContextResource]  
+  resources: [ReactorChatContextResource]
+
+  """
+  Optional reference to the parent session that provided context for this session.
+  Enables tracking conversation lineage across different agents.
+  """
+  parentSessionId: String
 }
 
 """

@@ -6,6 +6,8 @@ import {
 import ReactorConversationModel from '@reactory/server-modules/reactory-reactor/models/ReactorChatState';
 import { ObjectId } from "mongodb";
 import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
+import { IReactorConversationsService } from "../../../types/service.types";
+import { StreamingMode } from "modules/reactory-reactor/services/reactor/types/streaming.types";
 import { ChatsMacroProps } from './types';
 
 
@@ -13,7 +15,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
   props: ChatsMacroProps,
   state: ChatState
 ): Promise<unknown> => {
-  const { action, id, files, model } = props;
+  const { action, id, message, files, model } = props;
   const { context } = state;
 
   try {
@@ -99,14 +101,29 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
       }
       case "speakto": {
         const persona = await state.context.getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0").getPersona(id);
-        if (persona) {
+        if (!persona) return `Persona ${id} not found`;
+
+        if (message) {
+          // Agent-to-agent delegation: ask the target persona a question and return the response
+          const conversationService = state.context.getService<IReactorConversationsService>(
+            "reactor.ReactorConversationService@1.0.0"
+          );
+          const response = await conversationService.sendMessage({
+            personaId: persona.id,
+            message,
+            chatSessionId: undefined,
+            streamingMode: StreamingMode.NONE,
+            tool_results: undefined,
+          });
+          const content = response?.content || response?.message || JSON.stringify(response);
+          return `Response from ${persona.name}:\n${content}`;
+        } else {
+          // Original behavior: switch persona context in-place (CLI mode)
           state.personaId = persona.id;
           state.id = ObjectId.generate().toString();
           state.history.push(await getInitializerMessage(state.personaId, state, context));
           state.persona = persona;
           return `You are now chatting to ${persona.name}`;
-        } else {
-          return `Persona ${id} not found`;
         }
       }
       case "clear": {
@@ -134,7 +151,7 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
   version: "1.0.0",
   component: ChatsMacro,
   roles: ["USER"],
-  description: `# chats macro\nUse this macro to retrieve or switch to a previous chat session\n\n## Usage as a inline function / command action.\n@chats(list) - lists all sessions for the user\n@chats(new) - creates a new chat session\n@chats(size) - calculates the size of the chat in tokens\n@chats(cont, id?) - continues the last session with the user, or continues with the id provided. \n@chats(del, id?) - del deletes a chat session give the id, or if no id it will delete the current chat session\n@chats(exp, id?) - export the chat to data folder for training\n@chats(train, files, model) - uploads training data for a specific model\n@chats(personas) - lists all personas\n@chats(speakto, id) - sets the persona to speak to\n@chats(clear) - clears all chat history for the user\n`,
+  description: `# chats macro\nUse this macro to retrieve or switch to a previous chat session, or delegate a question to another agent.\n\n## Usage as a inline function / command action.\n@chats(list) - lists all sessions for the user\n@chats(new) - creates a new chat session\n@chats(size) - calculates the size of the chat in tokens\n@chats(cont, id?) - continues the last session with the user, or continues with the id provided. \n@chats(del, id?) - del deletes a chat session give the id, or if no id it will delete the current chat session\n@chats(exp, id?) - export the chat to data folder for training\n@chats(train, files, model) - uploads training data for a specific model\n@chats(personas) - lists all personas\n@chats(speakto, id) - sets the persona to speak to\n@chats(speakto, id, message) - sends a message to another agent and returns their response (agent-to-agent delegation)\n@chats(clear) - clears all chat history for the user\n`,
   features: [
     {
       feature: "list",
@@ -157,6 +174,13 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
       description: "Deletes a chat session",
       stem: "delete",
     },
+    {
+      feature: "speakto",
+      featureType: Reactory.FeatureType.function,
+      action: ["speakto"],
+      description: "Switch to another persona or delegate a question to another agent",
+      stem: "speakto",
+    },
   ],
   stem: "chats",
   tags: ["chats", "continue", "delete", "export", "train"],
@@ -176,7 +200,11 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
             },
             id: {
               type: "string",
-              description: "The id of the chat session to act on (optional).",
+              description: "The id of the chat session or persona to act on (optional).",
+            },
+            message: {
+              type: "string",
+              description: "Message to send to the target persona for agent-to-agent delegation (used with speakto action).",
             },
             files: {
               type: "array",

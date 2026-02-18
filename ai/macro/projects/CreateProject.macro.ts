@@ -26,6 +26,64 @@ export type CreateProjectMacroParams = {
     description?: string;
   };
   format?: "json" | "markdown" | "summary";
+  /** Optional template name to pre-fill common project configurations */
+  template?: string;
+}
+
+/**
+ * Built-in project templates.
+ * Each template provides defaults for projectTypes, tags, and description.
+ * Values from the template are only applied when the caller hasn't provided them.
+ */
+const PROJECT_TEMPLATES: Record<string, Partial<CreateProjectMacroParams>> = {
+  'react-app': {
+    projectTypes: ['reactjs', 'typescript', 'pwa'],
+    tags: ['frontend', 'react', 'typescript', 'web'],
+    description: 'A React + TypeScript web application',
+  },
+  'node-api': {
+    projectTypes: ['nodejs', 'typescript', 'express'],
+    tags: ['backend', 'api', 'nodejs', 'typescript'],
+    description: 'A Node.js + Express API server',
+  },
+  'reactory-module': {
+    projectTypes: ['reactory', 'typescript', 'nodejs'],
+    tags: ['reactory', 'module', 'plugin', 'typescript'],
+    description: 'A Reactory server module with routes, services, and models',
+  },
+  'react-native': {
+    projectTypes: ['react-native', 'typescript', 'mobile'],
+    tags: ['mobile', 'react-native', 'typescript', 'ios', 'android'],
+    description: 'A React Native mobile application',
+  },
+  'fullstack': {
+    projectTypes: ['reactjs', 'nodejs', 'typescript', 'express'],
+    tags: ['fullstack', 'react', 'node', 'typescript', 'web'],
+    description: 'A full-stack web application with React frontend and Node.js backend',
+  },
+  'library': {
+    projectTypes: ['typescript', 'npm'],
+    tags: ['library', 'npm', 'typescript', 'reusable'],
+    description: 'A reusable TypeScript library published to npm',
+  },
+};
+
+/**
+ * Apply a template's defaults to the params. Caller-provided values take precedence.
+ */
+function applyTemplate(params: CreateProjectMacroParams): CreateProjectMacroParams {
+  const { template, ...rest } = params;
+  if (!template) return params;
+
+  const tmpl = PROJECT_TEMPLATES[template];
+  if (!tmpl) return params;
+
+  return {
+    ...rest,
+    projectTypes: rest.projectTypes?.length ? rest.projectTypes : (tmpl.projectTypes as string[] ?? []),
+    tags: rest.tags?.length ? rest.tags : (tmpl.tags ?? []),
+    description: rest.description || tmpl.description,
+  };
 }
 
 const CreateProjectMacro = async (
@@ -33,6 +91,10 @@ const CreateProjectMacro = async (
   chatState: ChatState,  
 ) => {
   const { context } = chatState;
+
+  // Apply template defaults if specified
+  const resolvedParams = applyTemplate(params);
+
   const { 
     name,
     nameSpace,
@@ -49,7 +111,7 @@ const CreateProjectMacro = async (
     tasksUrl,
     primarySlackChannel,
     format = "json",
-  } = params;
+  } = resolvedParams;
 
   if (!name || !nameSpace || !version) {
     return {
@@ -430,6 +492,11 @@ const CreateProjectMacroDefinition: MacroComponentDefinition<typeof CreateProjec
               enum: ["json", "markdown", "summary"],
               description: "Output format for the results.",
               default: "json"
+            },
+            template: {
+              type: "string",
+              enum: ["react-app", "node-api", "reactory-module", "react-native", "fullstack", "library"],
+              description: "Optional project template to pre-fill projectTypes, tags, and description. Caller-provided values override template defaults."
             }
           },
           required: ["name", "nameSpace", "version"],

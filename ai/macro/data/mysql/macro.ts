@@ -1,4 +1,10 @@
-import mysql from 'mysql2/promise';
+// mysql2 is an optional dependency - dynamically imported to avoid startup failures
+let mysql: any = null;
+try {
+  mysql = require('mysql2/promise');
+} catch {
+  // mysql2 not installed - macro will return an informative error at runtime
+}
 import { ChatState, Macro, MacroComponentDefinition } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import { DatabaseMacroProps, DatabaseMacroResult } from '../types';
 import { 
@@ -19,6 +25,25 @@ export const MySqlMacro: Macro<DatabaseMacroResult, DatabaseMacroProps> = async 
   props: DatabaseMacroProps,
   state: ChatState): Promise<DatabaseMacroResult> => {
   const startTime = Date.now();
+
+  // Guard: check if mysql2 dependency is available
+  if (!mysql) {
+    return {
+      success: false,
+      error: 'MySQL support is not available. The mysql2 package is not installed. Run `yarn add mysql2` in the server project to enable MySQL queries.',
+      tool: 'mysql',
+      params: props,
+      metadata: {
+        executionTime: Date.now() - startTime,
+        timestamp: new Date(),
+        user: state.user?.id,
+        connectionId: props.connectionId?.trim() || '',
+        variant: 'mysql',
+        queryLength: props.query?.length || 0
+      }
+    };
+  }
+
   const {
     connectionId,
     query,

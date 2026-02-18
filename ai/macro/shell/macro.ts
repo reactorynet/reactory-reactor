@@ -42,7 +42,6 @@ export const secureShell = (command: string, state: ChatState): void => {
     /^mkfs\s/,
     /^mke2fs\s/,
     /^mkswap\s/,
-    /^mkfs\s/,
     /^useradd\s/,
     /^usermod\s/,
     /^userdel\s/,
@@ -59,6 +58,26 @@ export const secureShell = (command: string, state: ChatState): void => {
     /^kill\s/,
     /^pkill\s/,
     /^pgrep\s/,
+    // Data exfiltration and remote execution vectors
+    /^wget\s/,
+    /^curl\s/,
+    /^nc\s/,
+    /^ncat\s/,
+    /^netcat\s/,
+    // Script interpreter direct execution (prevents arbitrary code execution)
+    /^python[23]?\s+-c\s/,
+    /^perl\s+-e\s/,
+    /^ruby\s+-e\s/,
+    /^node\s+-e\s/,
+    /^bash\s+-c\s/,
+    /^sh\s+-c\s/,
+    /^zsh\s+-c\s/,
+    // Process / system modification
+    /^shutdown\s/,
+    /^reboot\s/,
+    /^init\s/,
+    /^systemctl\s/,
+    /^service\s/,
   ];
 
   //check if environment variable DENY_SHELL_EXECUTION is set to true
@@ -100,7 +119,17 @@ const getShellCommandText = async (templateId: string, command: string, state: C
   const { context } = state;
   const templateSvc = context.getService<Reactory.Service.IReactoryTemplateService>('core.TemplateService@1.0.0');
   let shellCommandText = null;
-  const commandWithEnvVars = `${Object.entries(process.env).map(([key, val]) => `export ${key}='${val}'`).join('\n')}`;
+  /** Whitelist of safe environment variables to expose to shell commands */
+  const SAFE_ENV_VARS = [
+    'PATH', 'HOME', 'USER', 'LANG', 'SHELL', 'TERM',
+    'LC_ALL', 'LC_CTYPE', 'EDITOR', 'VISUAL',
+    'APP_DATA_ROOT', 'NODE_ENV', 'REACTORY_SERVER',
+    'REACTORY', 'REACTORY_CLIENT', 'REACTORY_CORE',
+  ];
+  const commandWithEnvVars = `${Object.entries(process.env)
+    .filter(([key]) => SAFE_ENV_VARS.includes(key))
+    .map(([key, val]) => `export ${key}='${val}'`)
+    .join('\n')}`;
 
   const templateFromFile = (): string => {
     if (!fs.existsSync(path.join(process.env.APP_DATA_ROOT, 'templates/shell'))) {
@@ -171,7 +200,7 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
     command: shellCommand,
     workingDir = process.cwd(),
     templateId = 'default',
-    timeoutInSeconds = '60',
+    timeoutInSeconds = 60,
     sudo = 'false',
     format = 'string',
     shell = '/bin/bash'
@@ -279,7 +308,7 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
 
   // Make the file executable
   try {
-    fs.chmodSync(shFilePath, 0o777);
+    fs.chmodSync(shFilePath, 0o700);
   } catch (fsError) {
     logger.error(`Error setting file permissions: ${fsError.message}`);
     return {
@@ -355,7 +384,7 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
           } else {
             cleanExit();
           }
-        }, parseInt(timeoutInSeconds, 10) * 1000);
+        }, Number(timeoutInSeconds) * 1000);
 
         const exitHandler = (code: number, signal: string) => {
           exitCode = code || 0;
@@ -545,8 +574,8 @@ const ShellCommandComponentRegister: MacroComponentDefinition<typeof ShellComman
             description: "The template id to use for the shell command"
           },
           timeoutInSeconds: {
-            type: "string",
-            description: "The timeout in seconds for the shell command"
+            type: "number",
+            description: "The timeout in seconds for the shell command (default: 60)"
           },
           sudo: {
             type: "string",

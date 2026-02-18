@@ -4,6 +4,7 @@ import { promises as fs, readFileSync, existsSync } from 'fs';
 import logger from '@reactory/server-core/logging';
 import { ChatState, Macro, MacroComponentDefinition } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import { ReadFileProps, ReadFileResult } from '../types';
+import { MacroErrorCode } from '../../errors';
 
 export const ReadFile: Macro<ReadFileResult, ReadFileProps> = async (
   props: ReadFileProps,
@@ -15,34 +16,52 @@ export const ReadFile: Macro<ReadFileResult, ReadFileProps> = async (
     return {
       success: false,
       error: 'No path provided',
+      errorCode: MacroErrorCode.VALIDATION_REQUIRED_PARAM,
       tool: 'readFile',
       params: props
     };
   }
 
-  // Security: Prevent path traversal attacks
+  // Security: Normalize path first, then check for traversal
+  if (targetPath.startsWith("~")) targetPath = targetPath.replace("~", os.homedir());
+  
+  const WORKING_FOLDER = process.cwd();
+  const HOME_FOLDER = os.homedir();
+  
+  // Resolve relative paths against the working folder
+  if (!pathModule.isAbsolute(targetPath)) {
+    targetPath = pathModule.resolve(WORKING_FOLDER, targetPath);
+  }
+  
+  // Normalize to remove any ./ or ../ segments
+  targetPath = pathModule.normalize(targetPath);
+  
+  // Security: Reject path traversal after normalization
   if (targetPath.includes('..')) {
     return {
       success: false,
       error: 'Operation not allowed. Path traversal detected.',
+      errorCode: MacroErrorCode.IO_PATH_TRAVERSAL,
       tool: 'readFile',
       params: props
     };
   }
-
-  if (targetPath.startsWith("~")) targetPath = targetPath.replace("~", os.homedir());
-  if (targetPath.startsWith(".")) targetPath = pathModule.resolve(targetPath);
   
-  const WORKING_FOLDER = process.cwd();
-  if (existsSync(pathModule.join(WORKING_FOLDER, targetPath))) {
-    targetPath = pathModule.join(WORKING_FOLDER, targetPath);
+  // Resolve symlinks to get the real path, preventing symlink-based traversal
+  if (existsSync(targetPath)) {
+    try {
+      const realPath = await fs.realpath(targetPath);
+      targetPath = realPath;
+    } catch {
+      // If realpath fails, continue with the normalized path
+    }
   }
   
-  const HOME_FOLDER = os.homedir();
   if (!targetPath.startsWith(HOME_FOLDER)) {
     return {
       success: false,
       error: 'Operation not allowed. You can only read files in your home directory',
+      errorCode: MacroErrorCode.IO_PERMISSION_DENIED,
       tool: 'readFile',
       params: props
     };
@@ -54,6 +73,7 @@ export const ReadFile: Macro<ReadFileResult, ReadFileProps> = async (
       return {
         success: false,
         error: `File not found: ${targetPath}`,
+        errorCode: MacroErrorCode.IO_NOT_FOUND,
         tool: 'readFile',
         params: props
       };

@@ -39,8 +39,8 @@ export const ExtractTextFromFile: Macro<ExtractTextFromFileResult, ExtractTextFr
 
   try {
     const targetPath = path.trim();
-    const startLine = parseInt(start);
-    const endLine = parseInt(end);
+    const startLine = Number(start);
+    const endLine = Number(end);
 
     // Check if file exists
     if (!existsSync(targetPath)) {
@@ -215,11 +215,11 @@ export const ExtractFileComponentRegister: MacroComponentDefinition<typeof Extra
             description: "The file path to extract text from"
           },
           start: {
-            type: "string", 
+            type: "number", 
             description: "Start line number (1-based)"
           },
           end: {
-            type: "string",
+            type: "number",
             description: "End line number (1-based)"
           }
         },

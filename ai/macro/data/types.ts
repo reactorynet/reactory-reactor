@@ -1,6 +1,8 @@
 /**
  * Database connection types
  */
+import { MacroErrorCode } from '../errors';
+
 export type DatabaseVariant = 'postgres' | 'mysql' | 'mongo' | 'mssql' | 'redis';
 
 /**
@@ -74,6 +76,8 @@ export interface DatabaseMacroResult {
   success: boolean;
   /** Error message if operation failed */
   error?: string;
+  /** Standardized error code for programmatic handling */
+  errorCode?: MacroErrorCode;
   /** Database operation data if operation succeeded */
   data?: {
     /** Operation name */

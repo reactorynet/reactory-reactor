@@ -119,7 +119,7 @@ import {
   ReactoryFileModel,
 } from "modules/reactory-core/models/CoreFile";
 import { id } from "schema/reflection";
-import { PromptMergeStrategy, StreamingMode } from "./types/streaming.types";
+import { CompletionStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
 import Helpers from "authentication/strategies/helpers";
 import { StreamingSessionManager } from "./StreamingSessionManager";
 import { StreamingTransportManager } from "./StreamingTransportManager";
@@ -1584,6 +1584,95 @@ export default class ReactorConversationService
     return session;
   }
 
+  /**
+   * Generate a context summary from a previous conversation session.
+   * Used for cross-agent context sharing when a user switches personas.
+   *
+   * For short conversations (<500 estimated tokens), includes the full
+   * user/assistant messages. For longer conversations, builds a condensed
+   * summary of the key points.
+   */
+  private async generateContextSummary(sessionId: string): Promise<string | null> {
+    const previousConversation = await ReactorConversationModel.findById(sessionId)
+      .populate('user', 'firstName lastName')
+      .exec();
+
+    if (!previousConversation) {
+      this.context.warn("Previous session not found for context sharing", { sessionId });
+      return null;
+    }
+
+    // Filter to only user and assistant messages (skip system messages, tool calls)
+    const relevantMessages = previousConversation.history.filter(
+      (msg) => msg.role === "user" || msg.role === "assistant"
+    );
+
+    if (relevantMessages.length === 0) {
+      return null;
+    }
+
+    const previousPersonaId = previousConversation.personaId;
+
+    // Estimate token count of the relevant messages
+    let estimatedTokens = 0;
+    for (const msg of relevantMessages) {
+      if (typeof msg.content === "string") {
+        estimatedTokens += this.chunkingService.estimateTokenCount(msg.content);
+      }
+    }
+
+    const TOKEN_THRESHOLD = 500;
+
+    if (estimatedTokens <= TOKEN_THRESHOLD) {
+      // Short conversation — include full messages
+      const messageLines = relevantMessages.map((msg) => {
+        const role = msg.role === "user" ? "User" : `Agent (${previousPersonaId})`;
+        const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content);
+        return `${role}: ${content}`;
+      });
+
+      return [
+        `Context from previous conversation with agent "${previousPersonaId}" (session: ${sessionId}):`,
+        ...messageLines,
+      ].join("\n");
+    }
+
+    // Longer conversation — build a condensed summary from the messages
+    // Take the first and last few messages to capture the topic and most recent state
+    const firstMessages = relevantMessages.slice(0, 3);
+    const lastMessages = relevantMessages.slice(-3);
+    const summaryMessages = [
+      ...firstMessages,
+      ...(relevantMessages.length > 6 ? lastMessages : []),
+    ];
+
+    // Deduplicate in case conversation is short enough that slices overlap
+    const seen = new Set<string>();
+    const uniqueMessages = summaryMessages.filter((msg) => {
+      const key = `${msg.role}:${msg.content}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+
+    const messageLines = uniqueMessages.map((msg) => {
+      const role = msg.role === "user" ? "User" : `Agent (${previousPersonaId})`;
+      const content = typeof msg.content === "string"
+        ? (msg.content.length > 300 ? msg.content.substring(0, 300) + "..." : msg.content)
+        : JSON.stringify(msg.content).substring(0, 300);
+      return `${role}: ${content}`;
+    });
+
+    const totalMessages = relevantMessages.length;
+    const omitted = totalMessages - uniqueMessages.length;
+
+    return [
+      `Context summary from previous conversation with agent "${previousPersonaId}" (session: ${sessionId}, ${totalMessages} messages):`,
+      ...(omitted > 0 ? [`[${omitted} messages omitted for brevity]`] : []),
+      ...messageLines,
+    ].join("\n");
+  }
+
   // Create a new conversation
   private async getNewConversation(
     persona: IAIPersona
@@ -2059,24 +2148,27 @@ export default class ReactorConversationService
         const adapter = await this.providerService.getAdapter(provider);
 
         if (streamingMode === 'SSE') {
+          // Use the conversation's actual ID — chatSessionId may be null if this is a new conversation
+          const conversationId = chatSessionId || conversation._id.toString();
+
           // check if the sse is connected
-          let sessionId = this.streamingSessionManager.getSessionId(chatSessionId);
+          let sessionId = this.streamingSessionManager.getSessionId(conversationId);
           if (!sessionId) {
             // return initiate sse response
-            return this.createInitiateSSEResponse(chatSessionId, conversation as unknown as ReactorConversationDocument);
+            return this.createInitiateSSEResponse(conversationId, conversation as unknown as ReactorConversationDocument);
           }
 
           let chatSession = await this.streamingSessionManager.getSession(sessionId);
           if (!chatSession) {
             // return initiate sse response
-            return this.createInitiateSSEResponse(chatSessionId, conversation as unknown as ReactorConversationDocument);
+            return this.createInitiateSSEResponse(conversationId, conversation as unknown as ReactorConversationDocument);
           }
 
           // next we check if the transport is connected
           let hasTransport = await this.streamingTransportManager.hasTransport(sessionId);
           if (!hasTransport) {
             // return initiate sse response
-            return this.createInitiateSSEResponse(chatSessionId, conversation as unknown as ReactorConversationDocument);
+            return this.createInitiateSSEResponse(conversationId, conversation as unknown as ReactorConversationDocument);
           }
         }
 
@@ -2104,6 +2196,134 @@ export default class ReactorConversationService
           message,
           streamingMode
         );
+
+        // Server-side auto tool execution loop for AUTO mode.
+        // When the AI returns tool calls and the conversation is in AUTO mode,
+        // execute tools directly on the server instead of round-tripping to the client.
+        const effectiveConversationId = chatSessionId || conversation._id.toString();
+        if (
+          conversation.toolApprovalMode === ToolApprovalMode.AUTO &&
+          response?.choices?.[0]?.message?.tool_calls?.length > 0
+        ) {
+          const MAX_TOOL_ITERATIONS = 10;
+          let iteration = 0;
+
+          while (
+            response?.choices?.[0]?.message?.tool_calls?.length > 0 &&
+            iteration < MAX_TOOL_ITERATIONS
+          ) {
+            iteration++;
+            const toolCalls = response.choices[0].message.tool_calls;
+
+            this.context.info(`[sendMessage] AUTO mode: executing ${toolCalls.length} tool(s) server-side (iteration ${iteration})`, {
+              tools: toolCalls.map((tc: any) => tc.function?.name),
+              conversationId: effectiveConversationId,
+            });
+
+            for (const toolCall of toolCalls) {
+              const toolName = toolCall.function?.name;
+              const toolArgs = typeof toolCall.function?.arguments === 'string'
+                ? JSON.parse(toolCall.function.arguments)
+                : toolCall.function?.arguments;
+
+              try {
+                await this.executeMacro({
+                  macro: toolName,
+                  personaId,
+                  chatSessionId: effectiveConversationId,
+                  calledBy: 'server-auto',
+                  callId: toolCall.id,
+                  args: toolArgs,
+                });
+              } catch (toolError: any) {
+                this.context.warn(`[sendMessage] AUTO tool execution failed for ${toolName}: ${toolError.message}`, {
+                  toolName,
+                  conversationId: effectiveConversationId,
+                });
+                // Add an error tool result to history so the AI knows the tool failed
+                await ReactorConversationModel.findOneAndUpdate(
+                  { _id: effectiveConversationId },
+                  {
+                    $push: {
+                      history: {
+                        id: new ObjectId(),
+                        role: 'tool',
+                        content: `Error executing tool ${toolName}: ${toolError.message}`,
+                        tool_call_id: toolCall.id,
+                        tool_name: toolName,
+                        timestamp: new Date(),
+                        tool_results: [],
+                      },
+                    },
+                    $set: { updated: new Date() },
+                  },
+                  { new: true }
+                ).exec();
+              }
+            }
+
+            // Send tool results back to AI to get the next response
+            response = await this.executeProviderChat(
+              provider,
+              effectiveConversationId,
+              persona,
+              {
+                personaId,
+                chatSessionId: effectiveConversationId,
+                message: '',
+                role: 'tool',
+                streamingMode,
+              }
+            );
+            response = await this.processAIResponse(
+              response,
+              conversation,
+              '',
+              streamingMode
+            );
+          }
+
+          if (iteration >= MAX_TOOL_ITERATIONS) {
+            this.context.warn(`[sendMessage] AUTO tool execution reached max iterations (${MAX_TOOL_ITERATIONS})`, {
+              conversationId: effectiveConversationId,
+            });
+          }
+
+          // In SSE mode, the GoogleAIService deferred the completion event so
+          // the client stays in streaming state while tools execute. Now that
+          // the tool loop is done, send the final content via SSE.
+          if (streamingMode === StreamingMode.SSE) {
+            const finalContent = response?.choices?.[0]?.message?.content || '';
+            try {
+              const sseSessionId = this.streamingSessionManager.getSessionId(effectiveConversationId);
+              if (sseSessionId) {
+                const completionEvent: CompletionStreamingEvent = {
+                  type: StreamingEventType.COMPLETE,
+                  sessionId: effectiveConversationId,
+                  conversationId: effectiveConversationId,
+                  messageId: new ObjectId().toString(),
+                  timestamp: new Date(),
+                  data: {
+                    content: finalContent,
+                    finishReason: 'stop',
+                  },
+                };
+                await this.streamingTransportManager.sendEventToSession(
+                  effectiveConversationId,
+                  completionEvent
+                );
+                this.context.info(`[sendMessage] AUTO mode: sent final completion event via SSE`, {
+                  conversationId: effectiveConversationId,
+                  contentLength: finalContent.length,
+                });
+              }
+            } catch (sseError: any) {
+              this.context.warn(`[sendMessage] AUTO mode: failed to send final SSE completion event: ${sseError.message}`, {
+                conversationId: effectiveConversationId,
+              });
+            }
+          }
+        }
 
         // Return adapted response
         return adapter.adaptResponse(response);        
@@ -3132,6 +3352,7 @@ export default class ReactorConversationService
     streamingMode: StreamingMode;
     promptMergeStrategy: PromptMergeStrategy;
     toolApprovalMode: ToolApprovalMode;
+    contextFromSessionId?: string;
   }): Promise<ReactorInitChatResponse> {
     this.context.debug("Starting chat session", {
       personaId: args.personaId,
@@ -3202,6 +3423,32 @@ export default class ReactorConversationService
           timestamp: new Date(),
           tool_results: [],
         });
+      }
+
+      // Load context from a previous session if requested (cross-agent context sharing)
+      if (args.contextFromSessionId) {
+        try {
+          const contextSummary = await this.generateContextSummary(args.contextFromSessionId);
+          if (contextSummary) {
+            conversation.parentSessionId = args.contextFromSessionId;
+            conversation.history.push({
+              id: new ObjectId(),
+              role: "system",
+              content: contextSummary,
+              timestamp: new Date(),
+              tool_results: [],
+            });
+            this.context.info("Loaded context from previous session", {
+              parentSessionId: args.contextFromSessionId,
+              newSessionId: conversation._id?.toString(),
+            });
+          }
+        } catch (contextError) {
+          this.context.warn("Failed to load context from previous session, continuing without it", {
+            contextFromSessionId: args.contextFromSessionId,
+            error: contextError?.message || contextError,
+          });
+        }
       }
 
       // @ts-ignore

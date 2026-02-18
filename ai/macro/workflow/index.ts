@@ -1,6 +1,8 @@
 import { 
-  ServiceRegisterComponentDefinition
+  ServiceRegisterComponentDefinition,
+  RunWorkflowComponentDefinition,
 } from './macro';
 export default [
-  ServiceRegisterComponentDefinition
+  ServiceRegisterComponentDefinition,
+  RunWorkflowComponentDefinition,
 ];

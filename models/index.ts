@@ -1,6 +1,7 @@
 import { ReactoryPersonaComponentRegistryEntry } from "../ai/persona/reactor";
 import { BookTutorPersonaComponentRegistryEntry } from '../ai/persona/booktutor';
-import { 
+import { ClaudePersonaComponentRegistryEntry } from '../ai/persona/claude';
+import {
   ReactorNodeModelComponentRegistryEntry,
   ReactorNodeMetricTypeModelComponentRegistryEntry,
   ReactorNodeCategoryModelComponentRegistryEntry
@@ -10,5 +11,6 @@ export default [
   ReactorNodeModelComponentRegistryEntry,
   ReactorNodeMetricTypeModelComponentRegistryEntry,
   ReactorNodeCategoryModelComponentRegistryEntry,
-  BookTutorPersonaComponentRegistryEntry
+  BookTutorPersonaComponentRegistryEntry,
+  ClaudePersonaComponentRegistryEntry,
 ]

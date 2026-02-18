@@ -11,7 +11,7 @@ import { ShellCommand } from "../../shell/macro";
 import { template } from "lodash";
 import { ShellCommandProps } from "../../shell/types";
 import Reactory from "@reactorynet/reactory-core";
-import { GitMacroArgs } from "./types";
+import { GitMacroArgs, GitMacroProps } from "./types";
 
 /**
  * A function that checks if the git ignore file exists
@@ -265,6 +265,182 @@ const pushRepo = async (
 };
 
 /**
+ * Manages git branches: list, create, or delete
+ */
+const manageBranch = async (
+  target: string,
+  branchName?: string,
+  deleteBranch: boolean = false,
+  state?: ChatState
+): Promise<string> => {
+  if (!branchName) {
+    // List branches
+    const result = await ShellCommand({
+      command: `git branch -a`,
+      workingDir: target,
+      templateId: "git",
+      timeoutInSeconds: 15,
+      sudo: "false",
+      format: "object",
+    }, state);
+    if (result.error) throw new Error(result.error);
+    return result.data?.stdout || "No branches found";
+  }
+
+  if (deleteBranch) {
+    const result = await ShellCommand({
+      command: `git branch -d ${branchName}`,
+      workingDir: target,
+      templateId: "git",
+      timeoutInSeconds: 15,
+      sudo: "false",
+      format: "object",
+    }, state);
+    if (result.error) throw new Error(result.error);
+    return result.data?.stdout || `Deleted branch ${branchName}`;
+  }
+
+  // Create new branch
+  const result = await ShellCommand({
+    command: `git checkout -b ${branchName}`,
+    workingDir: target,
+    templateId: "git",
+    timeoutInSeconds: 15,
+    sudo: "false",
+    format: "object",
+  }, state);
+  if (result.error) throw new Error(result.error);
+  return result.data?.stdout || `Created and switched to branch ${branchName}`;
+};
+
+/**
+ * Merges a source branch into the current branch
+ */
+const mergeBranch = async (
+  target: string,
+  sourceBranch: string,
+  state: ChatState
+): Promise<string> => {
+  const result = await ShellCommand({
+    command: `git merge ${sourceBranch}`,
+    workingDir: target,
+    templateId: "git",
+    timeoutInSeconds: 60,
+    sudo: "false",
+    format: "object",
+  }, state);
+  if (result.error) throw new Error(result.error);
+  return result.data?.stdout || `Merged ${sourceBranch} into current branch`;
+};
+
+/**
+ * Manages git stash operations
+ */
+const stashOp = async (
+  target: string,
+  stashAction: string = "save",
+  stashRef?: string,
+  state?: ChatState
+): Promise<string> => {
+  let command: string;
+  switch (stashAction) {
+    case "save":
+      command = stashRef ? `git stash save "${stashRef}"` : `git stash`;
+      break;
+    case "pop":
+      command = stashRef ? `git stash pop ${stashRef}` : `git stash pop`;
+      break;
+    case "apply":
+      command = stashRef ? `git stash apply ${stashRef}` : `git stash apply`;
+      break;
+    case "list":
+      command = `git stash list`;
+      break;
+    case "drop":
+      command = stashRef ? `git stash drop ${stashRef}` : `git stash drop`;
+      break;
+    default:
+      throw new Error(`Unknown stash action: ${stashAction}`);
+  }
+
+  const result = await ShellCommand({
+    command,
+    workingDir: target,
+    templateId: "git",
+    timeoutInSeconds: 30,
+    sudo: "false",
+    format: "object",
+  }, state);
+  if (result.error) throw new Error(result.error);
+  return result.data?.stdout || `Stash ${stashAction} completed`;
+};
+
+/**
+ * Gets git log output
+ */
+const gitLog = async (
+  target: string,
+  count: number = 20,
+  state: ChatState
+): Promise<string> => {
+  const result = await ShellCommand({
+    command: `git log --oneline --graph --decorate -n ${count}`,
+    workingDir: target,
+    templateId: "git",
+    timeoutInSeconds: 30,
+    sudo: "false",
+    format: "object",
+  }, state);
+  if (result.error) throw new Error(result.error);
+  return result.data?.stdout || "No log entries found";
+};
+
+/**
+ * Gets git diff
+ */
+const gitDiff = async (
+  target: string,
+  diffTarget?: string,
+  stat: boolean = false,
+  state?: ChatState
+): Promise<string> => {
+  let command = `git diff`;
+  if (stat) command += ` --stat`;
+  if (diffTarget) command += ` ${diffTarget}`;
+
+  const result = await ShellCommand({
+    command,
+    workingDir: target,
+    templateId: "git",
+    timeoutInSeconds: 30,
+    sudo: "false",
+    format: "object",
+  }, state);
+  if (result.error) throw new Error(result.error);
+  return result.data?.stdout || "No differences found";
+};
+
+/**
+ * Adds files to git staging area
+ */
+const addFiles = async (
+  target: string,
+  file: string = ".",
+  state: ChatState
+): Promise<string> => {
+  const result = await ShellCommand({
+    command: `git add ${file}`,
+    workingDir: target,
+    templateId: "git",
+    timeoutInSeconds: 30,
+    sudo: "false",
+    format: "object",
+  }, state);
+  if (result.error) throw new Error(result.error);
+  return result.data?.stdout || `Added ${file} to staging area`;
+};
+
+/**
  * A macro that will perform git operations
  * @param args
  * @param state
@@ -309,14 +485,15 @@ export const GitMacro: Macro<string> = async (
       } catch (err) {
         return `Could not pull the repository due to an error ${err.message}`;
       }
-    case "commit":
-      const commitMessage = "your commit message"; // replace with actual commit message
+    case "commit": {
+      const commitMsg = branch || "auto commit"; // use branch param as commit message, fallback to default
       try {
-        await commitRepo(target, commitMessage, state);
-        return `Successfully committed changes to the repository at ${target} with message "${commitMessage}"`;
+        await commitRepo(target, commitMsg, state);
+        return `Successfully committed changes to the repository at ${target} with message "${commitMsg}"`;
       } catch (err) {
         return `Could not commit changes due to an error ${err.message}`;
       }
+    }
 
     case "push":
       try {
@@ -339,8 +516,52 @@ export const GitMacro: Macro<string> = async (
         return `Could not check out branch ${branch} due to an error ${err.message}`;
       }
     }
+    case "branch": {
+      try {
+        return await manageBranch(target, branch, false, state);
+      } catch (err) {
+        return `Could not complete branch operation due to an error: ${err.message}`;
+      }
+    }
+    case "merge": {
+      try {
+        if (!branch) return "A merge operation requires a source branch name";
+        return await mergeBranch(target, branch, state);
+      } catch (err) {
+        return `Could not merge due to an error: ${err.message}`;
+      }
+    }
+    case "stash": {
+      try {
+        return await stashOp(target, "save", undefined, state);
+      } catch (err) {
+        return `Could not stash due to an error: ${err.message}`;
+      }
+    }
+    case "log": {
+      try {
+        return await gitLog(target, 20, state);
+      } catch (err) {
+        return `Could not retrieve git log due to an error: ${err.message}`;
+      }
+    }
+    case "diff": {
+      try {
+        return await gitDiff(target, undefined, false, state);
+      } catch (err) {
+        return `Could not retrieve diff due to an error: ${err.message}`;
+      }
+    }
+    case "add": {
+      try {
+        const fileToAdd = repo || "."; // repo param repurposed as file pattern for add
+        return await addFiles(target, fileToAdd, state);
+      } catch (err) {
+        return `Could not add files due to an error: ${err.message}`;
+      }
+    }
     default:
-      return `Operation: ${operation} not supported. Available operations are: clone, pull, push, commit, status`;
+      return `Operation: ${operation} not supported. Available operations are: clone, pull, push, commit, status, checkout, branch, merge, stash, log, diff, add`;
   }
 };
 
@@ -369,6 +590,12 @@ const GitMacroComponentDefinition: MacroComponentDefinition<typeof GitMacro> = {
     "commit",
     "status",
     "checkout",
+    "branch",
+    "merge",
+    "stash",
+    "log",
+    "diff",
+    "add",
   ],
   tools: [
     {
@@ -523,10 +750,136 @@ const GitMacroComponentDefinition: MacroComponentDefinition<typeof GitMacro> = {
             },
             file: {
               type: "string",
-              description: "The file or pattern to add to staging",
+              description:
+                "The file or pattern to add to staging (default: '.')",
             },
           },
-          required: ["target", "file"],
+          required: ["target"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "branch",
+        description:
+          "List, create, or delete git branches. Lists branches by default.",
+        parameters: {
+          type: "object",
+          properties: {
+            target: {
+              type: "string",
+              description: "The target folder containing the repository",
+            },
+            branch: {
+              type: "string",
+              description:
+                "The branch name to create. Omit to list all branches.",
+            },
+            deleteBranch: {
+              type: "boolean",
+              description: "If true, delete the specified branch instead of creating it",
+            },
+          },
+          required: ["target"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "merge",
+        description: "Merge a source branch into the current branch",
+        parameters: {
+          type: "object",
+          properties: {
+            target: {
+              type: "string",
+              description: "The target folder containing the repository",
+            },
+            branch: {
+              type: "string",
+              description: "The source branch to merge into the current branch",
+            },
+          },
+          required: ["target", "branch"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "stash",
+        description:
+          "Stash uncommitted changes. Supports save, pop, list, and drop actions.",
+        parameters: {
+          type: "object",
+          properties: {
+            target: {
+              type: "string",
+              description: "The target folder containing the repository",
+            },
+            stashAction: {
+              type: "string",
+              enum: ["save", "pop", "list", "drop"],
+              description: "The stash action to perform (default: save)",
+            },
+            stashRef: {
+              type: "string",
+              description:
+                "The stash reference for pop/drop operations (e.g., 'stash@{0}')",
+            },
+          },
+          required: ["target"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "log",
+        description: "Show recent git commit log",
+        parameters: {
+          type: "object",
+          properties: {
+            target: {
+              type: "string",
+              description: "The target folder containing the repository",
+            },
+            logCount: {
+              type: "number",
+              description: "Number of recent commits to show (default: 20)",
+            },
+          },
+          required: ["target"],
+        },
+      },
+    },
+    {
+      type: "function",
+      function: {
+        name: "diff",
+        description:
+          "Show git diff of uncommitted changes or between branches/commits",
+        parameters: {
+          type: "object",
+          properties: {
+            target: {
+              type: "string",
+              description: "The target folder containing the repository",
+            },
+            diffTarget: {
+              type: "string",
+              description:
+                "A branch or commit to diff against. Omit for working directory diff.",
+            },
+            diffStat: {
+              type: "boolean",
+              description:
+                "If true, show only a stat summary instead of the full diff",
+            },
+          },
+          required: ["target"],
         },
       },
     },

@@ -28,6 +28,16 @@ export interface MongoMacroProps extends DatabaseMacroProps {
   limit?: number;
   /** MongoDB skip */
   skip?: number;
+  /** Write operation type */
+  writeOperation?: 'insertOne' | 'insertMany' | 'updateOne' | 'updateMany' | 'deleteOne' | 'deleteMany';
+  /** Document(s) to insert */
+  document?: any;
+  /** Array of documents for insertMany */
+  documents?: any[];
+  /** Update operations ($set, $unset, etc.) */
+  update?: any;
+  /** If true, create a new document when no document matches the query (for update operations) */
+  upsert?: boolean;
 }
 
 /**
@@ -51,7 +61,12 @@ export const MongoMacro: Macro<DatabaseMacroResult, MongoMacroProps> = async (
     projection,
     sort,
     limit,
-    skip
+    skip,
+    writeOperation,
+    document,
+    documents,
+    update,
+    upsert = false,
   } = props;
 
   if (!connectionId || connectionId.trim().length === 0) {
@@ -72,11 +87,11 @@ export const MongoMacro: Macro<DatabaseMacroResult, MongoMacroProps> = async (
     };
   }
 
-  // Validate that we have either a query, pipeline, or filter
-  if (!query && !pipeline && !filter) {
+  // Validate that we have either a query, pipeline, filter, or write operation
+  if (!query && !pipeline && !filter && !writeOperation) {
     return {
       success: false,
-      error: 'Either query, pipeline, or filter is required',
+      error: 'Either query, pipeline, filter, or writeOperation is required',
       tool: 'mongo',
       params: props,
       metadata: {
@@ -88,6 +103,64 @@ export const MongoMacro: Macro<DatabaseMacroResult, MongoMacroProps> = async (
         queryLength: 0
       }
     };
+  }
+
+  // Validate write operation parameters
+  if (writeOperation) {
+    if (!collection) {
+      return {
+        success: false,
+        error: 'Collection name is required for write operations',
+        tool: 'mongo',
+        params: props,
+      };
+    }
+
+    if ((writeOperation === 'insertOne') && !document) {
+      return {
+        success: false,
+        error: 'A document is required for insertOne operations',
+        tool: 'mongo',
+        params: props,
+      };
+    }
+
+    if ((writeOperation === 'insertMany') && (!documents || !Array.isArray(documents) || documents.length === 0)) {
+      return {
+        success: false,
+        error: 'A non-empty documents array is required for insertMany operations',
+        tool: 'mongo',
+        params: props,
+      };
+    }
+
+    if ((writeOperation === 'updateOne' || writeOperation === 'updateMany') && (!filter || !update)) {
+      return {
+        success: false,
+        error: 'Both filter and update are required for update operations',
+        tool: 'mongo',
+        params: props,
+      };
+    }
+
+    if ((writeOperation === 'deleteOne' || writeOperation === 'deleteMany') && !filter) {
+      return {
+        success: false,
+        error: 'A filter is required for delete operations',
+        tool: 'mongo',
+        params: props,
+      };
+    }
+
+    // Prevent empty filter deletes (safety guard)
+    if ((writeOperation === 'deleteMany') && Object.keys(filter).length === 0) {
+      return {
+        success: false,
+        error: 'Empty filter on deleteMany is not allowed — this would delete all documents. Use a specific filter.',
+        tool: 'mongo',
+        params: props,
+      };
+    }
   }
 
   // Get database connection from partner settings
@@ -210,7 +283,112 @@ Retrieved cached results for: **${name.trim()}**
     let result: any;
     let queryType = 'unknown';
 
-    // Execute query based on provided parameters
+    // Handle write operations separately
+    if (writeOperation) {
+      if (!collection) {
+        throw new Error('Collection name is required for write operations');
+      }
+      const coll = db.collection(collection);
+      let writeResult: any;
+
+      switch (writeOperation) {
+        case 'insertOne': {
+          writeResult = await coll.insertOne(document);
+          queryType = 'insertOne';
+          result = { insertedId: writeResult.insertedId, acknowledged: writeResult.acknowledged };
+          break;
+        }
+        case 'insertMany': {
+          writeResult = await coll.insertMany(documents!);
+          queryType = 'insertMany';
+          result = { insertedCount: writeResult.insertedCount, insertedIds: writeResult.insertedIds, acknowledged: writeResult.acknowledged };
+          break;
+        }
+        case 'updateOne': {
+          writeResult = await coll.updateOne(filter, update, { upsert });
+          queryType = 'updateOne';
+          result = {
+            matchedCount: writeResult.matchedCount,
+            modifiedCount: writeResult.modifiedCount,
+            upsertedId: writeResult.upsertedId,
+            acknowledged: writeResult.acknowledged,
+          };
+          break;
+        }
+        case 'updateMany': {
+          writeResult = await coll.updateMany(filter, update, { upsert });
+          queryType = 'updateMany';
+          result = {
+            matchedCount: writeResult.matchedCount,
+            modifiedCount: writeResult.modifiedCount,
+            upsertedId: writeResult.upsertedId,
+            acknowledged: writeResult.acknowledged,
+          };
+          break;
+        }
+        case 'deleteOne': {
+          writeResult = await coll.deleteOne(filter);
+          queryType = 'deleteOne';
+          result = { deletedCount: writeResult.deletedCount, acknowledged: writeResult.acknowledged };
+          break;
+        }
+        case 'deleteMany': {
+          writeResult = await coll.deleteMany(filter);
+          queryType = 'deleteMany';
+          result = { deletedCount: writeResult.deletedCount, acknowledged: writeResult.acknowledged };
+          break;
+        }
+        default:
+          throw new Error(`Unsupported write operation: ${writeOperation}`);
+      }
+
+      const writeExecutionTime = Date.now() - queryStartTime;
+      const totalExecutionTime = Date.now() - startTime;
+
+      logger.info(`MongoMacro write executed: ${name.trim()} [${writeOperation}] by user: ${state.user?.id || 'unknown'}, connection: ${connectionId.trim()}, collection: ${collection}`);
+
+      return {
+        success: true,
+        data: {
+          name: name.trim(),
+          writeOperation,
+          connectionId: connectionId.trim(),
+          variant: 'mongo',
+          result,
+          collection,
+          queryType,
+        },
+        tool: 'mongo',
+        params: props,
+        metadata: {
+          executionTime: totalExecutionTime,
+          timestamp: new Date(),
+          user: state.user?.id,
+          connectionId: connectionId.trim(),
+          variant: 'mongo',
+          queryLength: 0,
+        },
+        instructions: `
+## MongoDB Write Result
+
+Successfully executed **${writeOperation}** on **${collection}**: **${name.trim()}**
+
+### Operation Details:
+- **Connection**: ${connectionId.trim()}
+- **Database**: ${connection.database}@${connection.host}:${connection.port}
+- **Collection**: ${collection}
+- **Operation**: ${writeOperation}
+- **Execution Time**: ${writeExecutionTime}ms
+
+### Result:
+\`\`\`json
+${JSON.stringify(result, null, 2)}
+\`\`\`
+        `
+      };
+    }
+
+    // Execute read query based on provided parameters
     if (pipeline && Array.isArray(pipeline)) {
       // Aggregation pipeline
       if (!collection) {
@@ -408,12 +586,12 @@ export const MongoMacroRegistry: MacroComponentDefinition<typeof MongoMacro> = {
   features: [],
   stem: 'mongo',
   roles: ['DEVELOPER', 'ADMIN'],
-  tags: ['database', 'mongo', 'mongodb', 'nosql', 'query'],
+  tags: ['database', 'mongo', 'mongodb', 'nosql', 'query', 'write', 'insert', 'update', 'delete'],
   tools: [{
     type: "function",
     function: {
       name: "mongo",
-      description: "Execute queries against MongoDB databases with structured results and comprehensive metadata",
+      description: "Execute read queries against MongoDB databases (find, aggregation, raw JSON query)",
       icon: "storage",
       parameters: {
         type: "object",
@@ -477,6 +655,58 @@ export const MongoMacroRegistry: MacroComponentDefinition<typeof MongoMacro> = {
           }
         },
         required: ["connectionId", "name"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "mongoWrite",
+      description: "Execute write operations (insert, update, delete) against MongoDB databases with validation",
+      icon: "edit",
+      parameters: {
+        type: "object",
+        properties: {
+          connectionId: {
+            type: "string",
+            description: "Connection ID from partner settings"
+          },
+          name: {
+            type: "string",
+            description: "Name for the operation"
+          },
+          collection: {
+            type: "string",
+            description: "MongoDB collection name"
+          },
+          writeOperation: {
+            type: "string",
+            enum: ["insertOne", "insertMany", "updateOne", "updateMany", "deleteOne", "deleteMany"],
+            description: "The write operation to perform"
+          },
+          document: {
+            type: "object",
+            description: "Document to insert (for insertOne)"
+          },
+          documents: {
+            type: "array",
+            items: { type: "object" },
+            description: "Array of documents to insert (for insertMany)"
+          },
+          filter: {
+            type: "object",
+            description: "Filter for update/delete operations"
+          },
+          update: {
+            type: "object",
+            description: "Update operations (e.g., { '$set': { 'field': 'value' } })"
+          },
+          upsert: {
+            type: "boolean",
+            description: "If true, create a new document when no match is found (for update operations)"
+          }
+        },
+        required: ["connectionId", "name", "collection", "writeOperation"]
       }
     }
   }]

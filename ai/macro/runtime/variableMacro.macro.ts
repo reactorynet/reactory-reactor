@@ -2,12 +2,83 @@ import Reactory from "@reactorynet/reactory-core";
 import { ChatState, Macro, MacroComponentDefinition } from "../../../types/chat";
 import { executeMacro } from "..";
 import { VariableMacroProps, SliceVariableMacroProps } from './types';
+import logger from '@reactory/server-core/logging';
+
+/**
+ * Persist a variable value to the database via the context's settings store.
+ * Uses the partner + user scoped settings path:
+ *   reactor.vars.<key>
+ */
+async function persistVariable(
+  key: string,
+  value: unknown,
+  state: ChatState
+): Promise<{ success: boolean; error?: string }> {
+  try {
+    const context = state.context;
+    if (!context) {
+      return { success: false, error: 'No Reactory context available for persistence' };
+    }
+
+    // Use the settings service if available
+    const settingsService = context.getService<any>('core.ReactorySettingsService@1.0.0');
+    if (!settingsService) {
+      return { success: false, error: 'Settings service not available — cannot persist variable' };
+    }
+
+    const settingsKey = `reactor.vars.${key}`;
+    await settingsService.setSetting(settingsKey, {
+      value,
+      updatedAt: new Date().toISOString(),
+      userId: state.user?.id,
+    });
+
+    logger.info(`Variable '${key}' persisted by user ${state.user?.id || 'unknown'}`);
+    return { success: true };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    logger.error(`Failed to persist variable '${key}': ${msg}`);
+    return { success: false, error: `Persistence failed: ${msg}` };
+  }
+}
+
+/**
+ * Load a persisted variable from the database.
+ */
+async function loadPersistedVariable(
+  key: string,
+  state: ChatState
+): Promise<{ success: boolean; value?: unknown; error?: string }> {
+  try {
+    const context = state.context;
+    if (!context) {
+      return { success: false, error: 'No Reactory context available for persistence' };
+    }
+
+    const settingsService = context.getService<any>('core.ReactorySettingsService@1.0.0');
+    if (!settingsService) {
+      return { success: false, error: 'Settings service not available — cannot load variable' };
+    }
+
+    const settingsKey = `reactor.vars.${key}`;
+    const setting = await settingsService.getSetting(settingsKey);
+    if (!setting || setting.value === undefined) {
+      return { success: false, error: `No persisted variable found for '${key}'` };
+    }
+
+    return { success: true, value: setting.value };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Unknown error';
+    logger.error(`Failed to load persisted variable '${key}': ${msg}`);
+    return { success: false, error: `Load failed: ${msg}` };
+  }
+}
 
 // a macro that allows the user to store, retrieve or remove a variable in the chat state
 export const VariableMacro: Macro<unknown, VariableMacroProps> = async (
   props: VariableMacroProps,
   state: ChatState): Promise<unknown> => {
-  const { key, value } = props;
+  const { key, value, persist = false } = props;
   try {
 
     if(!state) {
@@ -22,6 +93,13 @@ export const VariableMacro: Macro<unknown, VariableMacroProps> = async (
     }
 
     if(value === undefined || value === null) {
+      // If persist flag is set and the var is not in memory, try loading from DB
+      if (persist && !(key in state.vars)) {
+        const loaded = await loadPersistedVariable(key, state);
+        if (loaded.success && loaded.value !== undefined) {
+          state.vars[key] = loaded.value;
+        }
+      }
       return {
         result: state.vars[key || ''],
         success: true,
@@ -33,10 +111,35 @@ export const VariableMacro: Macro<unknown, VariableMacroProps> = async (
 
     if(value === 'del') {
       delete state.vars[key];
+      if (persist) {
+        // Also remove from DB
+        await persistVariable(key, undefined, state);
+      }
       return {
         result: `Variable ${key} deleted`,
         success: true,
         operation: 'delete',
+        key: key
+      };
+    }
+
+    if(value === 'load') {
+      // Explicitly load from database
+      const loaded = await loadPersistedVariable(key, state);
+      if (loaded.success) {
+        state.vars[key] = loaded.value;
+        return {
+          result: `Variable ${key} loaded from database`,
+          success: true,
+          operation: 'load',
+          key: key,
+          value: loaded.value
+        };
+      }
+      return {
+        error: loaded.error || `Variable ${key} not found in database`,
+        success: false,
+        operation: 'load',
         key: key
       };
     }
@@ -49,13 +152,30 @@ export const VariableMacro: Macro<unknown, VariableMacroProps> = async (
     } else {
       state.vars[key] = value;
     }
+
+    // Persist to database if requested
+    if (persist) {
+      const persistResult = await persistVariable(key, state.vars[key], state);
+      if (!persistResult.success) {
+        return {
+          result: `Variable ${key} set in memory but persistence failed: ${persistResult.error}`,
+          success: true,
+          operation: 'set',
+          key: key,
+          value: value,
+          persisted: false,
+          persistError: persistResult.error,
+        };
+      }
+    }
     
     return {
       result: `Variable ${key} set to ${value}`,
       success: true,
       operation: 'set',
       key: key,
-      value: value
+      value: value,
+      persisted: persist,
     };
   } catch (err) {
     return {
@@ -279,7 +399,7 @@ export const VariableMacroRegistry: MacroComponentDefinition<typeof VariableMacr
     type: "function",
     function: {
       name: "var",
-      description: "Store, retrieve or remove a variable in the chat state",
+      description: "Store, retrieve or remove a variable in the chat state. Supports optional persistence to database.",
       parameters: {
         type: "object",
         properties: {
@@ -289,7 +409,11 @@ export const VariableMacroRegistry: MacroComponentDefinition<typeof VariableMacr
           },
           value: {
             type: "string",
-            description: "The value to set for the variable (omit for get operation, use 'del' for delete)"
+            description: "The value to set for the variable (omit for get, use 'del' for delete, use 'load' to load from database)"
+          },
+          persist: {
+            type: "boolean",
+            description: "If true, persist the variable to/from the database (default: false)"
           },
         },
         required: ["key"]

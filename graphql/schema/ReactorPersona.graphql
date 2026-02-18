@@ -278,7 +278,7 @@ enum ReactorPromptMergeStrategy {
   replace
 }
 
-input ReactorInitSession { 
+input ReactorInitSession {
   personaId: String!
   message: String
   systemPrompt: String
@@ -287,4 +287,9 @@ input ReactorInitSession {
   macros: [ReactorMacroInput]
   tools: [ReactorToolDefinitionInput]
   toolApprovalMode: ReactorToolApprovalMode
+  """
+  Optional session ID to load context from. When provided, the server loads the
+  previous session's conversation and injects a summary as context for the new agent.
+  """
+  contextFromSessionId: String
 }

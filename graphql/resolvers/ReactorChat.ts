@@ -122,6 +122,7 @@ class ReactorChatResolver {
         toolApprovalMode: ToolApprovalMode;
         macros: Partial<MacroComponentDefinition<unknown>>;
         tools: Partial<MacroToolDefinition>[];
+        contextFromSessionId?: string;
       };
     },
     context: Reactory.Server.IReactoryContext

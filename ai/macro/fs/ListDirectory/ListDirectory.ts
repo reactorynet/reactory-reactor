@@ -4,6 +4,7 @@ import { ListDirectoryProps, ListDirectoryResult } from '../types';
 import { ChatState, Macro, MacroComponentDefinition } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import { DirectoryListFormatter, DirectoryListFormatterService, PathInfo } from '@reactory/server-modules/reactory-reactor/types/macro.types';
 import logger from '@reactory/server-core/logging';
+import { summarizeItems, truncateOutput } from '../../summarize';
 
 const FQN_REGEX = /^\w+\.\w+(?:@.*)?$/;
 
@@ -126,8 +127,11 @@ export const ListDirectory: Macro<ListDirectoryResult, ListDirectoryProps> = asy
     }
 
     const formattedOutput = formatter(fileInfos);
-    const finalOutput = escape ? `\`\`\`${formatterMime}\n${formattedOutput}\n\`\`\`` : formattedOutput;
+    const finalOutput = escape ? `\`\`\`${formatterMime}\n${truncateOutput(formattedOutput)}\n\`\`\`` : truncateOutput(formattedOutput);
     const executionTime = Date.now() - startTime;
+
+    // Apply item-level truncation for very large directories
+    const summarized = summarizeItems(fileInfos);
 
     // Store in chat state for AI reference
     if (!state.vars) {
@@ -135,12 +139,14 @@ export const ListDirectory: Macro<ListDirectoryResult, ListDirectoryProps> = asy
     }
     state.vars.lastListDirectory = {
       path: targetPath,
-      items: fileInfos,
+      items: summarized.items,
       summary,
       pattern: pattern.trim(),
       format,
       includeSubfolders,
-      lastAccessed: new Date()
+      lastAccessed: new Date(),
+      truncated: summarized.truncated,
+      totalCount: summarized.totalCount,
     };
 
     // Log access for security
@@ -150,12 +156,14 @@ export const ListDirectory: Macro<ListDirectoryResult, ListDirectoryProps> = asy
       success: true,
       data: {
         path: targetPath,
-        items: fileInfos,
+        items: summarized.items,
         summary,
         formattedOutput: finalOutput,
         format,
         pattern: pattern.trim(),
-        includeSubfolders
+        includeSubfolders,
+        truncated: summarized.truncated,
+        totalCount: summarized.totalCount,
       },
       tool: 'listDirectory',
       params: props,

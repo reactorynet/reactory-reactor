@@ -195,7 +195,7 @@ export const ReactoryPersona: IAIPersona = {
   persona: REACTOR_PERSONA_TEXT,
   features: REACTOR_FEATURES_TEXT,
   appearance,
-  modelId: process.env.GOOGLE_AI_STUDIO_MODEL_ID || "gemini-2.5-pro",
+  modelId: process.env.GOOGLE_AI_STUDIO_MODEL_ID || "gemini-3-pro-preview",
   providerId: "google",  
   defaultGreeting: "Hello, I am Reactor, your intelligent AI assistant specializing in Reactory and Reactor modules. I can help you with code generation, debugging, documentation, and development tasks. How may I assist you today?",
   prompts: {

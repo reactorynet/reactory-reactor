@@ -13,8 +13,8 @@ export const WriteFile: Macro<WriteFileResult, WriteFileProps> = async (
     path,
     content,
     mode = 'overwrite',
-    start = '0', 
-    end = '-1'
+    start = 0, 
+    end = -1
   } = props;
 
   if (!path) {
@@ -43,19 +43,10 @@ export const WriteFile: Macro<WriteFileResult, WriteFileProps> = async (
 
     // Extract content from code blocks if present
     if (content.indexOf('```') !== -1) {
-      let contentBlocks = '';
-      let contentBlockCount = 0;
-      let matched: RegExpMatchArray = content.match(CONTENT_BLOCK_REGEX);
+      const matches = [...content.matchAll(CONTENT_BLOCK_REGEX)];
       
-      if (matched && matched.length > 0) {
-        while (CONTENT_BLOCK_REGEX.exec(content)) {
-          const match = CONTENT_BLOCK_REGEX.exec(content);
-          if (match) {
-            contentBlocks += match[2];
-            contentBlockCount++;
-            if (contentBlockCount > 0) contentBlocks += '\n';
-          }
-        }
+      if (matches.length > 0) {
+        const contentBlocks = matches.map(match => match[2]).join('\n');
         finalContent = contentBlocks;
       }
     }
@@ -92,8 +83,8 @@ export const WriteFile: Macro<WriteFileResult, WriteFileProps> = async (
     if (fileExisted && mode === 'insert') {
       const lines = finalContent.split('\n');
       const existing = (await fs.readFile(targetPath, 'utf-8')).toString().split('\n');
-      const startLine = parseInt(start);
-      const endLine = parseInt(end);
+      const startLine = Number(start);
+      const endLine = Number(end);
       
       if (endLine < startLine) {
         return {
@@ -237,12 +228,12 @@ export const WriteFileComponentRegister: MacroComponentDefinition<typeof WriteFi
             description: "Write mode"
           },
           start: {
-            type: "string",
-            description: "Start line number for insert mode"
+            type: "number",
+            description: "Start line number for insert mode (1-based)"
           },
           end: {
-            type: "string",
-            description: "End line number for insert mode"
+            type: "number",
+            description: "End line number for insert mode (1-based)"
           }
         },
         required: ["path", "content"]

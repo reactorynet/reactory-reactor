@@ -31,6 +31,7 @@ import ReactorMacroService from "./ReactorMacroService";
 import {
   MacroComponentDefinition,
   MacroToolDefinition,
+  ToolApprovalMode,
 } from "modules/reactory-reactor/ai/openai/types/chat";
 import {
   ChatHistoryItem,
@@ -953,52 +954,44 @@ class GoogleAIService extends AIProviderBase {
             );
           }
 
-          event = this.createToolCallEvent(
-            functionCallId, // Use the generated ID
-            functionCall.name,
-            JSON.stringify(functionCall.args || {}),
-            true,
-            undefined,
-            sessionId
-          );
-          event.messageId = messageId;
-          event.conversationId = sessionId; // Add conversationId field
+          // Only send tool_call events to the client in PROMPT mode.
+          // In AUTO mode, the server will execute tools directly — no need
+          // to round-trip through the client.
+          const toolApprovalMode = this.chatState?.toolApprovalMode;
+          if (toolApprovalMode !== ToolApprovalMode.AUTO) {
+            event = this.createToolCallEvent(
+              functionCallId,
+              functionCall.name,
+              JSON.stringify(functionCall.args || {}),
+              true,
+              undefined,
+              sessionId
+            );
+            event.messageId = messageId;
+            event.conversationId = sessionId;
 
-          console.log(`🔧 [GoogleAIService] Created tool call event:`, {
-            sessionId,
-            messageId,
-            eventType: event.type,
-            eventData: event.data,
-            functionCallId: functionCallId,
-            functionName: functionCall.name,
-          });
-
-          try {
+            try {
+              console.log(
+                `🔧 [GoogleAIService] Sending tool call event for sessionId: ${sessionId}, function: ${functionCall.name}`
+              );
+              await this.streamingTransportManager.sendEventToSession(
+                sessionId,
+                event as ToolCallStreamingEvent
+              );
+              console.log(
+                `✅ [GoogleAIService] Tool call event sent successfully for function: ${functionCall.name}`
+              );
+            } catch (error) {
+              console.error(
+                `❌ [GoogleAIService] Failed to send tool call event:`,
+                error
+              );
+              throw error;
+            }
+          } else {
             console.log(
-              `🔧 [GoogleAIService] Sending tool call event for sessionId: ${sessionId}, function: ${functionCall.name}`
+              `🔧 [GoogleAIService] AUTO mode — suppressing tool_call event for ${functionCall.name}, server will execute`
             );
-            await this.streamingTransportManager.sendEventToSession(
-              sessionId,
-              event as ToolCallStreamingEvent
-            );
-            console.log(
-              `✅ [GoogleAIService] Tool call event sent successfully for function: ${functionCall.name}`
-            );
-          } catch (error) {
-            console.error(
-              `❌ [GoogleAIService] Failed to send tool call event:`,
-              error
-            );
-            console.error(`❌ [GoogleAIService] Error details:`, {
-              errorMessage: error.message,
-              errorStack: error.stack,
-              errorName: error.name,
-              sessionId,
-              messageId,
-              functionCallId: functionCallId,
-              functionName: functionCall.name,
-            });
-            throw error;
           }
         }
       }
@@ -1017,45 +1010,60 @@ class GoogleAIService extends AIProviderBase {
       }
     }
 
-    console.log(
-      `🔧 [GoogleAIService] Streaming completed, sending completion event for session: ${sessionId}`
-    );
+    // In AUTO mode with pending tool calls, defer the completion event —
+    // the server-side tool execution loop in ReactorConversationService will
+    // send the final completion event after all tools have executed and the
+    // final AI response is ready. This keeps the client in streaming state.
+    const toolApprovalMode = this.chatState?.toolApprovalMode;
+    const hasPendingAutoToolCalls =
+      toolApprovalMode === ToolApprovalMode.AUTO &&
+      accumulatedFunctionCalls.length > 0;
 
-    // Send completion event
-    const completionEvent = this.createCompletionEvent(
-      accumulatedText,
-      {
-        totalTokens,
-        promptTokens,
-        completionTokens,
-        finishReason,
-        model: modelName,
-      },
-      sessionId
-    );
-    completionEvent.messageId = messageId;
-    completionEvent.conversationId = sessionId; // Add conversationId field
+    if (!hasPendingAutoToolCalls) {
+      console.log(
+        `🔧 [GoogleAIService] Streaming completed, sending completion event for session: ${sessionId}`
+      );
 
-    console.log(`🔧 [GoogleAIService] Sending completion event:`, {
-      sessionId,
-      messageId,
-      eventType: completionEvent.type,
-      eventData: completionEvent.data,
-      textLength: accumulatedText.length,
-    });
+      // Send completion event
+      const completionEvent = this.createCompletionEvent(
+        accumulatedText,
+        {
+          totalTokens,
+          promptTokens,
+          completionTokens,
+          finishReason,
+          model: modelName,
+        },
+        sessionId
+      );
+      completionEvent.messageId = messageId;
+      completionEvent.conversationId = sessionId;
 
-    try {
-      await this.streamingTransportManager.sendEventToSession(
+      console.log(`🔧 [GoogleAIService] Sending completion event:`, {
         sessionId,
-        completionEvent
+        messageId,
+        eventType: completionEvent.type,
+        eventData: completionEvent.data,
+        textLength: accumulatedText.length,
+      });
+
+      try {
+        await this.streamingTransportManager.sendEventToSession(
+          sessionId,
+          completionEvent
+        );
+        console.log(`✅ [GoogleAIService] Completion event sent successfully`);
+      } catch (error) {
+        console.error(
+          `❌ [GoogleAIService] Failed to send completion event:`,
+          error
+        );
+        throw error;
+      }
+    } else {
+      console.log(
+        `🔧 [GoogleAIService] AUTO mode with ${accumulatedFunctionCalls.length} tool call(s) — deferring completion event to server-side tool loop`
       );
-      console.log(`✅ [GoogleAIService] Completion event sent successfully`);
-    } catch (error) {
-      console.error(
-        `❌ [GoogleAIService] Failed to send completion event:`,
-        error
-      );
-      throw error;
     }
 
     // Update the result with accumulated data

@@ -498,13 +498,14 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
    * @param args 
    */
   startChatSession(args: {
-    personaId: string, 
-    macros: Partial<MacroComponentDefinition<unknown>>,  
+    personaId: string,
+    macros: Partial<MacroComponentDefinition<unknown>>,
     tools: Partial<MacroToolDefinition>[],
     systemPrompt: string,
     streamingMode: StreamingMode,
     promptMergeStrategy: PromptMergeStrategy,
-    toolApprovalMode: ToolApprovalMode
+    toolApprovalMode: ToolApprovalMode,
+    contextFromSessionId?: string,
   }): Promise<ReactorInitChatResponse>;
 
   /**

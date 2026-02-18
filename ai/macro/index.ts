@@ -1,8 +1,6 @@
 import { ChatState, Macro, MacroComponentDefinition, MacroFunctions } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import FileMacros from './fs';
 import DevelopmentMacros from './develop';
-import EmailMacros from './email';
-import FastAIMacros from './fastai';
 import GraphqlMacros from './graphql';
 import RuntimeMacros from './runtime';
 import ShellMacros from './shell';
@@ -15,6 +13,9 @@ import ProjectMacros from './projects';
 import DataMacros from './data';
 import ModuleMacros from './develop/module';
 
+export { MacroErrorCode, MacroError, createMacroError } from './errors';
+export { summarizeItems, truncateOutput } from './summarize';
+export { signMacroRequest, verifyMacroRequest } from './signing';
 import  { 
   ReadFile, 
   WriteFile,
@@ -77,8 +78,8 @@ const outputMacros: MacroFunctions = {
 export const MacroRegistry: MacroComponentDefinition<unknown>[] = [
   ...FileMacros,
   ...DevelopmentMacros,
-  ...EmailMacros,
-  ...FastAIMacros,
+  // EmailMacros and FastAIMacros are excluded - stub implementations with no functionality.
+  // Re-add when email/fastai macros are implemented.
   ...GraphqlMacros,
   ...RuntimeMacros,
   ...ShellMacros,

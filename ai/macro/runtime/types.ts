@@ -23,8 +23,10 @@ export interface AddMacroProps {
 export interface VariableMacroProps {
   /** The key for the variable operation */
   key: string;
-  /** The value to set for the variable (omit for get operation, use 'del' for delete) */
+  /** The value to set for the variable (omit for get operation, use 'del' for delete, use 'load' to load from database) */
   value?: string;
+  /** If true, persist the variable to/from the database (default: false) */
+  persist?: boolean;
 }
 
 /**

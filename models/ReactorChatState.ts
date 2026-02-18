@@ -84,6 +84,8 @@ export interface ReactorConversationDocument {
   truncatedHistory?: ReactorConversationHistory
   // The user files attached to this conversation session
   files: Reactory.Models.IReactoryFile[]
+  // Optional reference to a parent session that provided context for this session
+  parentSessionId?: string
 }
 
 
@@ -189,6 +191,12 @@ const ReactorConversationSchema = new Schema({
   truncatedHistory: {
     type: [ReactorConversationHistorySchema],
     default: [],
+  },
+  // Optional reference to a parent session that provided context for this session
+  parentSessionId: {
+    type: String,
+    default: null,
+    index: true,
   },
 });
 
