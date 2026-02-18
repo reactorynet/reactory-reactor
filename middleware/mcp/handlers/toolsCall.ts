@@ -1,6 +1,6 @@
 import { Response } from "express";
 import { RPCResponse, RPCError, RPCNotification } from "../rpcUtils";
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 import ReactorMacroService from "@reactory/server-modules/reactory-reactor/services/reactor/providers/ReactorMacroService";
 import ReactorConversationService from "@reactory/server-modules/reactory-reactor/services/reactor/ReactorConversationService";
 import { ChatState } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";

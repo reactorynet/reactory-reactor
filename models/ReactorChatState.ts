@@ -1,5 +1,5 @@
 import mongoose, { Schema } from 'mongoose';
-import Reactory from '@reactory/reactory-core';
+import Reactory from '@reactorynet/reactory-core';
 import { ObjectId } from 'mongodb';
 import OpenAI from "openai"
 import { MetaSchema } from '@reactory/server-modules/reactory-core/models/shared';

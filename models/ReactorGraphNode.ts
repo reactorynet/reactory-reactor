@@ -1,6 +1,6 @@
 import mongoose, { Schema } from 'mongoose';
 import { ObjectId } from 'mongodb';
-import Reactory from '@reactory/reactory-core';
+import Reactory from '@reactorynet/reactory-core';
 import Hash from '@reactory/server-core/utils/hash';
 import { 
   ReactorNodeCategory, 

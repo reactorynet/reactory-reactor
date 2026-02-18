@@ -1,4 +1,4 @@
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 import Mongoose from "mongoose";
 import ReactorConversationModel from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import { ChatState, ToolApprovalMode } from "../../../ai/openai/types/chat";

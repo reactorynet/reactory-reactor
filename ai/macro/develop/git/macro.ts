@@ -10,7 +10,7 @@ import { DeleteDirectory } from "../../fs/macro";
 import { ShellCommand } from "../../shell/macro";
 import { template } from "lodash";
 import { ShellCommandProps } from "../../shell/types";
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 import { GitMacroArgs } from "./types";
 
 /**

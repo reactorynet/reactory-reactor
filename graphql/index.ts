@@ -1,4 +1,4 @@
-import Reactory from '@reactory/reactory-core';
+import Reactory from '@reactorynet/reactory-core';
 import Directives from './directives';
 import Types from './schema';
 import Resolvers from './resolvers';

@@ -1,4 +1,4 @@
-import Reactory from '@reactory/reactory-core';
+import Reactory from '@reactorynet/reactory-core';
 
 export const HistoryItemSchema: Reactory.Schema.ISchema = {
   type: 'object',

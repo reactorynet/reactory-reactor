@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import yaml from 'js-yaml';
-import Reactory from '@reactory/reactory-core';
+import Reactory from '@reactorynet/reactory-core';
 import { Macro, MacroComponentDefinition, ChatState, MacroToolDefinition } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import ReactoryClientModel from "@reactory/server-modules/reactory-core/models/ReactoryClient";
 import logger from "@reactory/server-core/logging";

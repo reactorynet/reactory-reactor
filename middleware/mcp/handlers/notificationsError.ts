@@ -1,6 +1,6 @@
 import { Response } from "express";
 import { RPCResponse, RPCError } from "../rpcUtils";
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 
 export async function notificationsError(req: Reactory.Server.ReactoryExpressRequest, res: Response) {
   console.log("[MCP] Error notification...");

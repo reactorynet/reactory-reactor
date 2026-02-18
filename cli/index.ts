@@ -1,4 +1,4 @@
-import Reactory from '@reactory/reactory-core';
+import Reactory from '@reactorynet/reactory-core';
 import ReactorCli from './reactor-cli/ReactorCli';
 import GraphManagerCLI from './SystemGraphManager/GraphManager';
 type ReactoryCliApp = (vargs: string[], context: Reactory.Server.IReactoryContext) => Promise<void>

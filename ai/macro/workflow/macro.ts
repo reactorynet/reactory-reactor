@@ -1,4 +1,4 @@
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 import { readFileSync } from "fs";
 import { ChatState, Macro } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import { ServiceRegisterProps } from './types';

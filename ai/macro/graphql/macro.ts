@@ -1,6 +1,6 @@
 import { ChatState, Macro, MacroComponentDefinition } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import { queryGraph as execql, mutateGraph as execml } from "@reactory/server-core/graph/ReactoryApolloClient";
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 import { QueryGQLProps, MutationGQLProps, QueryGQLResult, MutationGQLResult } from './types';
 import logger from '@reactory/server-core/logging';
 

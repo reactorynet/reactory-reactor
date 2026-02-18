@@ -6,7 +6,7 @@ import {
  processMacroInstructionSet, 
  getMacro 
 } from "@reactory/server-modules/reactory-reactor/ai/macro/index";
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 import AIPersonaProvider from "../AIPersonaProvider";
 
 @service({

@@ -1,4 +1,4 @@
-import Reactory from '@reactory/reactory-core';
+import Reactory from '@reactorynet/reactory-core';
 import ReactorGraphql from './graphql';
 import Workflows from './workflow';
 import ReactorCli from './cli';

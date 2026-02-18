@@ -1,4 +1,4 @@
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 import { ChatState, Macro, MacroComponentDefinition } from "../../../types/chat";
 import { executeMacro } from "..";
 import { AddMacroProps } from './types';

@@ -14,7 +14,7 @@ import {
   ToolApprovalMode,
 } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import ApiError from "exceptions";
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 import logger from "@reactory/server-core/logging";
 import { ReactorConversation, ReactorConversationDocument } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import { PromptMergeStrategy, StreamingMode } from "modules/reactory-reactor/services/reactor/types/streaming.types";

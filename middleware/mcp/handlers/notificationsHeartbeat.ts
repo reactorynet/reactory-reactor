@@ -1,6 +1,6 @@
 import { Response } from "express";
 import { RPCResponse } from "../rpcUtils";
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 
 export async function notificationsHeartbeat(req: Reactory.Server.ReactoryExpressRequest & { body: { id?: string } }, res: Response) {
   return RPCResponse(

@@ -1,4 +1,4 @@
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 import { title } from "schema/reflection";
 
 // List UI options for Reactor Projects

@@ -3,7 +3,7 @@ import fs from 'fs';
 import { ask, colors } from '@reactory/server-modules/reactory-reactor/helpers';
 import { IReactorProject, ISystemGraphManager, ReactorProjectProcessingStatus, ReactorProjectService, ReactorProjectStatus } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { patch } from "superagent";
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 
 type ReactoryCliApp = (vargs: string[], context: Reactory.Server.IReactoryContext) => Promise<void>
 /**

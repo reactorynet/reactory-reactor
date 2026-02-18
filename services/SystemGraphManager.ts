@@ -1,4 +1,4 @@
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 import ApiError from "@reactory/server-core/exceptions";
 
 import { IReactorProject, IProjectProcessor, ISystemGraphManager, PageReactorProjectResult, ReactorProjectService } from "../types/service.types"

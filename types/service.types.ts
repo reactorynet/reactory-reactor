@@ -1,4 +1,4 @@
-import Reactory from '@reactory/reactory-core';
+import Reactory from '@reactorynet/reactory-core';
 import OpenAI from "openai"
 import GoogleGenAI from "google-genai";
 import { TReactorConversationDocument, TReactorConversationModel, ReactorConversationHistoryItem } from "../models/ReactorChatState"

@@ -3,8 +3,8 @@ import { ChildProcess, SpawnOptions, exec, ExecOptions, spawn } from "child_proc
 import fs, { readFileSync } from 'fs';
 import os from 'os';
 import path from 'path';
-import Reactory from "@reactory/reactory-core";
-import { ComponentDomain, FeatureType } from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
+import { ComponentDomain, FeatureType } from "@reactorynet/reactory-core";
 import { ShellCommandArgs, ShellCommandMacroOutput } from "@reactory/server-modules/reactory-reactor/types/macro.types";
 import { ShellCommandProps, ShellCommandResult } from './types';
 import logger from "@reactory/server-core/logging";

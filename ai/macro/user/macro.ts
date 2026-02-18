@@ -1,5 +1,5 @@
 import { ChatState, Macro, MacroComponentDefinition, MacroToolDefinition } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 import { GetUserProps, CreateUserProps, GetUserResult, CreateUserResult } from './types';
 import logger from '@reactory/server-core/logging';
 

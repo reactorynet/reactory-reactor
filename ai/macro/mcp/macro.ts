@@ -6,7 +6,7 @@ import {
   InitializeRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
 import { ChatState, Macro, MacroComponentDefinition } from "../../../types/chat";
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 import { URL } from "url";
 import uuid from "uuid";
 import { McpCliProps } from './types';

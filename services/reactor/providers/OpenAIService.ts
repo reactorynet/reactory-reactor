@@ -1,4 +1,4 @@
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
 import IOpenAIService, { AIStreamingCapabilities, AIStreamingEvent, AudioChatParams, ChatParams, CreateFineTuningJobParams, FineTuningEvent, FineTuningObjectJob, IAIPersona, IAIPersonaPromptTemplate, ImageExtensionParams, ImageGenerationParams, IOpenAIServiceProps, ListFineTuningJobParams, OpenAIFile, OpenAIImage, OpenAIListResponse, OpenAIModel } from "../../../types/service.types";
 import OpenAI, { ClientOptions } from "openai";

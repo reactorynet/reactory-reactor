@@ -1,4 +1,4 @@
-import Reactory, { React } from '@reactory/reactory-core';
+import Reactory, { React } from '@reactorynet/reactory-core';
 import { ReactorProjectDocumentation } from 'modules/reactory-reactor/types/service.types';
 
 interface ReactorProjectDocumentationWidgetProps { 

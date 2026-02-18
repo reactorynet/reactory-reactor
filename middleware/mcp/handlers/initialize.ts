@@ -1,6 +1,6 @@
 import { Response } from "express";
 import { RPCResponse } from "../rpcUtils";
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 import { LATEST_PROTOCOL_VERSION, InitializeRequest, JSONRPCRequest } from "../types";
 
 export async function initialize(req: Reactory.Server.ReactoryExpressRequest & { body: InitializeRequest & JSONRPCRequest }, res: Response) {

@@ -1,6 +1,6 @@
 import { Response } from "express";
 import type { Reactory } from "@reactory/server-core/types";
-import Reactory from "@reactory/reactory-core";
+import Reactory from "@reactorynet/reactory-core";
 
 export async function notificationsInitialized(req: Reactory.Server.ReactoryExpressRequest, res: Response): Promise<null> {
   // do nothing.

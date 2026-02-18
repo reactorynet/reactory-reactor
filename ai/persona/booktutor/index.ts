@@ -2,7 +2,7 @@ import { ingest } from "@reactory/server-core/utils/io"
 import path from "path";
 import appearance from './appearance';
 import { IAIPersona, IAIPersonaResource } from "@reactory/server-modules/reactory-reactor/types/service.types";
-import { FeatureType } from "@reactory/reactory-core";
+import { FeatureType } from "@reactorynet/reactory-core";
 import { MacroRegistry } from "@reactory/server-modules/reactory-reactor/ai/macro";
 import { MacroComponentDefinition, MacroToolDefinition } from "../../openai/types/chat";
 import * as lodash from "lodash";
