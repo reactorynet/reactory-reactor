@@ -210,6 +210,7 @@ export const ReactoryPersona: IAIPersona = {
     project: process.env.GOOGLE_AI_STUDIO_PROJECT_ID,
   },
   tools: [...REACTOR_TOOLS],
+  maxTokens: 1048576,
   // @ts-ignore
   macros: [
     ...REACTOR_MACROS

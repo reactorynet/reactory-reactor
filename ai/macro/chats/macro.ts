@@ -100,8 +100,25 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
         return `List of personas:\n\t${personas.map((persona) => `  ${persona.id} - ${persona.name}`).join("\n")}`;
       }
       case "speakto": {
-        const persona = await state.context.getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0").getPersona(id);
-        if (!persona) return `Persona ${id} not found`;
+        if (!id) {
+          return "The 'speakto' action requires an agent id. Use the 'personas' action to list available agents.";
+        }
+
+        const personaProvider = state.context.getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0");
+        const availablePersonas = await personaProvider.listPersonas();
+
+        // Validate the requested agent id against available personas
+        const persona = availablePersonas.find((p) => p.id === id);
+        if (!persona) {
+          const personaList = availablePersonas.length > 0
+            ? availablePersonas.map((p) => `  • ${p.id} — ${p.name}`).join("\n")
+            : "  (no personas currently registered)";
+          return (
+            `Agent "${id}" is not a registered persona.\n\n` +
+            `Available agents:\n${personaList}\n\n` +
+            `Please retry with one of the listed agent ids.`
+          );
+        }
 
         if (message) {
           // Agent-to-agent delegation: ask the target persona a question and return the response
@@ -151,7 +168,28 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
   version: "1.0.0",
   component: ChatsMacro,
   roles: ["USER"],
-  description: `# chats macro\nUse this macro to retrieve or switch to a previous chat session, or delegate a question to another agent.\n\n## Usage as a inline function / command action.\n@chats(list) - lists all sessions for the user\n@chats(new) - creates a new chat session\n@chats(size) - calculates the size of the chat in tokens\n@chats(cont, id?) - continues the last session with the user, or continues with the id provided. \n@chats(del, id?) - del deletes a chat session give the id, or if no id it will delete the current chat session\n@chats(exp, id?) - export the chat to data folder for training\n@chats(train, files, model) - uploads training data for a specific model\n@chats(personas) - lists all personas\n@chats(speakto, id) - sets the persona to speak to\n@chats(speakto, id, message) - sends a message to another agent and returns their response (agent-to-agent delegation)\n@chats(clear) - clears all chat history for the user\n`,
+  description: [
+    `# chats`,
+    `Manage chat sessions and delegate questions to other AI agents.`,
+    ``,
+    `## Actions`,
+    `| action    | id       | message  | Description |`,
+    `|-----------|----------|----------|-------------|`,
+    `| list      | —        | —        | List all chat sessions for the current user |`,
+    `| new       | —        | —        | Start a new chat session |`,
+    `| size      | —        | —        | Estimate the current chat size in tokens |`,
+    `| cont      | optional | —        | Continue the most recent session, or a specific session by id |`,
+    `| del       | required | —        | Delete a chat session by id |`,
+    `| exp       | optional | —        | Export a chat session to the data folder for training |`,
+    `| train     | —        | —        | Upload training data (also set files and model params) |`,
+    `| personas  | —        | —        | List all registered AI agent personas with their ids |`,
+    `| speakto   | required | optional | Delegate to another agent. If message is provided, sends the message to that agent and returns their response. If message is omitted, switches the active persona for the remainder of the conversation |`,
+    `| clear     | —        | —        | Delete all chat sessions for the current user |`,
+    ``,
+    `## Important notes for the speakto action`,
+    `- The id must be a valid persona id. Call with action "personas" first to get available ids.`,
+    `- If the id is invalid the tool will return a list of valid agent ids.`,
+  ].join('\n'),
   features: [
     {
       feature: "list",
@@ -183,37 +221,38 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
     },
   ],
   stem: "chats",
-  tags: ["chats", "continue", "delete", "export", "train"],
+  tags: ["chats", "continue", "delete", "export", "train", "personas", "speakto", "delegation"],
   tools: [
     {
       type: "function",
       function: {
         name: "chats",
-        description: "Retrieve or switch to a previous chat session",
+        description: "Manage chat sessions: list, create, continue, delete, or export sessions. Delegate questions to other AI agents via the 'speakto' action. Use 'personas' to discover available agent ids before calling 'speakto'.",
         icon: "chat",
         parameters: {
           type: "object",
           properties: {
             action: {
               type: "string",
-              description: "The action to take on the chat session.",
+              enum: ["list", "new", "size", "cont", "del", "exp", "train", "personas", "speakto", "clear"],
+              description: "The action to perform. Use 'personas' to list available agents before 'speakto'.",
             },
             id: {
               type: "string",
-              description: "The id of the chat session or persona to act on (optional).",
+              description: "A chat session id (for cont, del, exp) or an agent persona id (for speakto). Required for del and speakto; optional for cont and exp.",
             },
             message: {
               type: "string",
-              description: "Message to send to the target persona for agent-to-agent delegation (used with speakto action).",
+              description: "Only used with action 'speakto'. The message to send to the target agent. If omitted, the active persona is switched instead of delegating a single question.",
             },
             files: {
               type: "array",
-              description: "Files for training (optional).",
+              description: "File paths for the 'train' action.",
               items: { type: "string" },
             },
             model: {
               type: "string",
-              description: "Model for training (optional).",
+              description: "Model identifier for the 'train' action.",
             },
           },
           required: ["action"],

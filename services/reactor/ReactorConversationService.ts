@@ -148,7 +148,7 @@ import { StreamingTransportManager } from "./StreamingTransportManager";
 // Business Logic Constants
 const TOKEN_LIMITS = {
   /** Default maximum tokens for new conversations when persona doesn't specify */
-  DEFAULT_MAX_TOKENS: 8000,
+  DEFAULT_MAX_TOKENS: 200000,
 
   /** Percentage over limit that triggers automatic truncation (120% of limit) */
   TRUNCATION_THRESHOLD_MULTIPLIER: 1.2,
@@ -552,7 +552,10 @@ export default class ReactorConversationService
       issues.push("Missing user assignment");
       metadata.missingUser = true;
     } else {
-      metadata.conversationUser = conversation.user.toString();
+      const {
+        _id: userId, email, firstName, lastName
+      } = conversation.user;
+      metadata.conversationUser = `${firstName} ${lastName} <${email}> (${userId})`;
     }
 
     // Check for required business fields
@@ -2595,13 +2598,13 @@ export default class ReactorConversationService
         resultString
       );
 
-      if (tokenCount > conversation.maxTokens) {
+      if (conversation.maxTokens != null && tokenCount > conversation.maxTokens) {
         throw new Error(
           `Macro ${macro} result is too large. Max tokens: ${conversation.maxTokens}, Token count: ${tokenCount}`
         );
       }
 
-      if (tokenCount + conversation.tokenCount > conversation.maxTokens) {
+      if (conversation.maxTokens != null && tokenCount + conversation.tokenCount > conversation.maxTokens) {
         // create a copy of the original history, in the event that
         // the truncation is not enough to fit the result.
         // first check what size the new history would be if we truncate it.

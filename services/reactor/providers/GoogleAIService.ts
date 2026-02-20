@@ -32,7 +32,7 @@ import {
   MacroComponentDefinition,
   MacroToolDefinition,
   ToolApprovalMode,
-} from "modules/reactory-reactor/ai/openai/types/chat";
+} from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import {
   ChatHistoryItem,
   ReactorConversationHistory,
@@ -324,7 +324,17 @@ class GoogleAIService extends AIProviderBase {
 
   private async getAITools(): Promise<GoogleGenAI.ToolListUnion> {
     const functions: FunctionDeclaration[] = [];
-    const tools = this.chatState.tools;
+    const tools: MacroToolDefinition[] = this.chatState?.tools ?? [];
+
+    if (!Array.isArray(tools)) {
+      this.context.warn(
+        `getAITools: chatState.tools is not an array (got ${typeof tools}), defaulting to empty tool list`,
+        { tools },
+        "GoogleAIService.getAITools"
+      );
+      return [{ functionDeclarations: [] }];
+    }
+
     tools.forEach((tool: MacroToolDefinition) => {
       const functionDeclaration: FunctionDeclaration = {
         name: tool.function.name,
@@ -456,13 +466,16 @@ class GoogleAIService extends AIProviderBase {
           try {
             response = JSON.parse(response);
           } catch (e) {
-            // If parsing fails, use as-is
-            this.context.warn(
-              "Failed to parse tool result response as JSON",
-              { response },
-              "GoogleAIService"
-            );
+            // If parsing fails, wrap in an object — Gemini requires
+            // function_response.response to be a Struct (JSON object),
+            // not a plain string.
+            response = { result: response };
           }
+        }
+
+        // Ensure response is always an object (Gemini Struct requirement)
+        if (typeof response !== "object" || response === null) {
+          response = { result: response };
         }
 
         parts.push({
@@ -571,28 +584,46 @@ class GoogleAIService extends AIProviderBase {
         throw new AIProviderError("Google AI model not initialized");
       }
 
+      if (!Array.isArray(history)) {
+        this.context.warn(
+          `createChatSession: history is not an array (got ${typeof history}), defaulting to empty history`,
+          { history },
+          "GoogleAIService.createChatSession"
+        );
+        history = [];
+      }
+
       // Convert history to Google AI format
       // get the system instruction from the first message if it exists
       let systemInstruction =
-        history.find((msg) => msg.role === "system")?.content ?? "";
+        history.find((msg) => msg?.role === "system")?.content ?? "";
 
       const googleHistory: any[] = [];
       // add the system instruction to the history as a user message
 
       // add the user information to the system instruction
-      systemInstruction = `
+      const user = this.chatState?.user;
+      if (user) {
+        systemInstruction = `
       ${systemInstruction}
       ## User Information
-      name: ${this.chatState.user.firstName} ${this.chatState.user.lastName}.
-      email: ${this.chatState.user.email}.
-      id: ${this.chatState.user._id}.
+      name: ${user.firstName} ${user.lastName}.
+      email: ${user.email}.
+      id: ${user._id}.
       homeFolder: ${path.join(
         process.env.APP_DATA_ROOT || process.cwd(),
         "profiles",
-        this.chatState.user._id.toString(),
+        user._id.toString(),
         "home"
       )}.
       `;
+      } else {
+        this.context.warn(
+          "createChatSession: chatState.user is undefined — skipping user context injection",
+          { chatStateKeys: this.chatState ? Object.keys(this.chatState) : null },
+          "GoogleAIService.createChatSession"
+        );
+      }
 
       // googleHistory.push({
       //   role: "user",
@@ -605,7 +636,15 @@ class GoogleAIService extends AIProviderBase {
       //   parts: [{ text: "I'm ready to help you with your request." }],
       // });
 
-      history.forEach((msg) => {
+      history.forEach((msg, idx) => {
+        if (!msg) {
+          this.context.warn(
+            `createChatSession: history[${idx}] is null/undefined — skipping`,
+            {},
+            "GoogleAIService.createChatSession"
+          );
+          return;
+        }
         let googleRole = "user";
         let parts: any[] = [];
         switch (msg.role) {
@@ -654,7 +693,16 @@ class GoogleAIService extends AIProviderBase {
     } catch (error) {
       this.context.error(
         `Error creating chat session: ${error.message}`,
-        { error, historyLength: history.length },
+        {
+          error,
+          errorStack: error?.stack,
+          historyLength: Array.isArray(history) ? history.length : typeof history,
+          modelName: this.model?.name,
+          personaId: this.chatState?.personaId,
+          userId: this.chatState?.user?._id,
+          hasTools: Array.isArray(this.chatState?.tools),
+          toolCount: Array.isArray(this.chatState?.tools) ? this.chatState.tools.length : 'n/a',
+        },
         "GoogleAIService.createChatSession"
       );
 
