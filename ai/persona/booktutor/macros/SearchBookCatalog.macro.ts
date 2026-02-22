@@ -284,6 +284,7 @@ function formatAsSummary(books: BookCatalogEntry[], query: string, searchType: s
 export const SearchBookCatalogMacroDefinition: MacroComponentDefinition<any> = {
   component: SearchBookCatalogMacro,
   name: 'search_book_catalog',
+  alias: 'search_book_catalog',
   nameSpace: 'booktutor',
   version: '1.0.0',
   description: 'Search the book catalog for books by title, author, subject, or keywords',

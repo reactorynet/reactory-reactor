@@ -46,6 +46,7 @@ export const StateMacroRegistry: MacroComponentDefinition<typeof StateMacro> = {
   nameSpace: 'reactor-macros',
   name: 'state',
   version: '1.0.0',
+  alias: 'state',
   component: StateMacro,
   description: `# state macro
   Use this macro to access the current chat state

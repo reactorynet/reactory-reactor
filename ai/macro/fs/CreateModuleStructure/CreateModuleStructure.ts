@@ -70,7 +70,7 @@ export const CreateModuleStructure: Macro<string, CreateModuleStructureProps> = 
 
 export const CreateModuleStructureComponentRegister: MacroComponentDefinition<typeof CreateModuleStructure> = {
   component: CreateModuleStructure,
-  name: 'createModuleStructure',
+  name: 'createModuleStructure',  
   nameSpace: 'reactor-macros',
   version: '1.0.0',
   description: '', // Should import readme if needed

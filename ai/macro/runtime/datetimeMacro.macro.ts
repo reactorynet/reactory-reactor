@@ -251,6 +251,7 @@ export const DateTimeMacroRegistry: MacroComponentDefinition<typeof DateTimeMacr
   nameSpace: 'reactor-macros',
   name: 'datetime',
   version: '1.0.0',
+  alias: 'datetime',
   component: DateTimeMacro,
   roles: ['ADMIN', 'DEVELOPER', 'USER'],
   description: `# datetime macro

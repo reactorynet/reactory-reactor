@@ -394,6 +394,7 @@ function formatContentAsSummary(results: BookContentResult[], metadata: BookCont
 export const SearchBookContentMacroDefinition: MacroComponentDefinition<any> = {
   component: SearchBookContentMacro,
   name: 'search_book_content',
+  alias: 'search_book_content',
   nameSpace: 'booktutor',
   version: '1.0.0',
   description: 'Search within book pages and chapters for specific content',

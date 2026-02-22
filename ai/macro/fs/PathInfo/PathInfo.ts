@@ -207,7 +207,7 @@ Successfully retrieved information for: **${fileInfo.name}**
 export const PathInfoComponentRegister: MacroComponentDefinition<typeof PathInfoMacro> = {
   component: PathInfoMacro,
   name: 'pathInfo',
-  nameSpace: 'reactor',
+  nameSpace: 'reactor-macros',
   version: '1.0.0',
   description: 'Gets detailed information about a file or directory with structured results and metadata',
   features: [],

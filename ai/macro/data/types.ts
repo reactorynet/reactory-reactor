@@ -128,4 +128,56 @@ export interface DatabaseMacroResult {
   };
   /** Instructions for AI on how to use the data */
   instructions?: string;
-} 
+}
+
+/**
+ * Result type for MongoDB write operations (insert, update, delete).
+ * Separate from DatabaseMacroResult because write results carry
+ * operation-specific fields instead of query rows / formatted output.
+ */
+export interface MongoWriteMacroResult {
+  /** Whether the operation was successful */
+  success: boolean;
+  /** Error message if operation failed */
+  error?: string;
+  /** Standardized error code for programmatic handling */
+  errorCode?: MacroErrorCode;
+  /** Write operation data if succeeded */
+  data?: {
+    /** Operation name */
+    name: string;
+    /** The write operation that was performed */
+    writeOperation: string;
+    /** Connection ID used */
+    connectionId: string;
+    /** Database variant */
+    variant: DatabaseVariant;
+    /** MongoDB collection name */
+    collection: string;
+    /** Operation-specific result (insertedId, matchedCount, deletedCount, etc.) */
+    result: any;
+    /** Categorised query type (insertOne, updateMany, etc.) */
+    queryType: string;
+  };
+  /** Tool name for context */
+  tool: string;
+  /** Original parameters passed to the macro */
+  params: any;
+  /** Metadata about the operation */
+  metadata?: {
+    /** Total execution time in milliseconds */
+    executionTime?: number;
+    /** Timestamp of operation */
+    timestamp: Date;
+    /** User who performed the operation */
+    user?: string;
+    /** Connection ID used */
+    connectionId: string;
+    /** Database variant */
+    variant: DatabaseVariant;
+    /** Query length */
+    queryLength: number;
+  };
+  /** Instructions for AI on how to use the data */
+  instructions?: string;
+}

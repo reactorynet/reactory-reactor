@@ -551,6 +551,7 @@ function formatChapterAsText(chapter: ChapterContent): string {
 export const GetBookChapterMacroDefinition: MacroComponentDefinition<any> = {
   component: GetBookChapterMacro,
   name: 'get_book_chapter',
+  alias: 'get_book_chapter',
   nameSpace: 'booktutor',
   version: '1.0.0',
   description: 'Retrieve complete chapter content from a specific book',

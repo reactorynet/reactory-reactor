@@ -14,7 +14,7 @@
 import { MsSqlMacroRegistry } from './mssql/macro';
 import { PostgresMacroRegistry } from './pgsql/macro';
 import { MySqlMacroRegistry } from './mysql/macro';
-import { MongoMacroRegistry } from './mongo/macro';
+import { MongoReadMacroRegistry, MongoWriteMacroRegistry } from './mongo/macro';
 import SearchMacroRegistryEntries from './search/macro';
 
 // Export types
@@ -32,15 +32,16 @@ export { MySqlMacro, MySqlMacroRegistry } from './mysql/macro';
 // Export MSSQL macro
 export { MsSqlMacro, MsSqlMacroRegistry } from './mssql/macro';
 
-// Export MongoDB macro
-export { MongoMacro, MongoMacroRegistry } from './mongo/macro';
+// Export MongoDB macros
+export { MongoReadMacro, MongoReadMacroRegistry, MongoWriteMacro, MongoWriteMacroRegistry } from './mongo/macro';
 
 // Export all macro registries for easy registration
 export const DatabaseMacros = [
   PostgresMacroRegistry,
   MySqlMacroRegistry, // Uncomment when mysql2 is available
   MsSqlMacroRegistry,
-  MongoMacroRegistry,
+  MongoReadMacroRegistry,
+  MongoWriteMacroRegistry,
   ...SearchMacroRegistryEntries
 ];
 
