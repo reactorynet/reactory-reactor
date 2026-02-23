@@ -71,6 +71,7 @@ export const EnvironmentMacroRegistry: MacroComponentDefinition<typeof Environme
   nameSpace: 'reactor-macros',
   name: 'env',
   version: '1.0.0',
+  alias: 'env',
   component: EnvironmentMacro,
   roles: ['ADMIN', 'DEVELOPER'],
   description: `# env macro

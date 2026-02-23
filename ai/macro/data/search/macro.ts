@@ -214,6 +214,8 @@ const SearchContentMacro = async (
     };
   }
 
+  chatState.vars = chatState.vars || {};
+
   const { service: searchService, error } = validateSearchService(context, 'searchContent', params);
   if (error) return error;
 
@@ -422,9 +424,13 @@ const IndexContentMacro = async (
         success: false,
         error: `${invalidDocs.length} documents missing required ID field '${idField}'`,
         tool: 'indexContent',
-        params: params
+        params: params  
       };
     }
+
+    // Ensure vars object exists on chatState
+    chatState.vars = chatState.vars || {};
+
 
     // Index the documents
     const indexResult = await searchService.index(index, documents);
@@ -575,6 +581,8 @@ const DeleteIndexMacro = async (
     const deleteResult = await searchService.deleteIndex(index);
     const executionTime = Date.now() - startTime;
 
+    chatState.vars = chatState.vars || {};
+
     // Store in chat state for AI reference
     chatState.vars.lastDeletedIndex = {
       index,
@@ -660,7 +668,8 @@ ${deleteResult ?
 
 const SearchContentMacroDefinition: MacroComponentDefinition<typeof SearchContentMacro> = {
   name: "SearchContent",
-  nameSpace: "reactory-reactor",
+  nameSpace: "reactor-macros",
+  alias: "searchContent",
   description: "Performs full-text search across one or more indices with advanced filtering and pagination. Supports educational content discovery for the BookTutor AI agent.",
   component: SearchContentMacro,
   version: "1.0.0",
@@ -731,7 +740,8 @@ const SearchContentMacroDefinition: MacroComponentDefinition<typeof SearchConten
 
 const IndexContentMacroDefinition: MacroComponentDefinition<typeof IndexContentMacro> = {
   name: "IndexContent",
-  nameSpace: "reactory-reactor",
+  nameSpace: "reactor-macros",
+  alias: "indexContent",
   description: "Adds documents to a search index for future searching. Supports batch operations and educational content indexing.",
   component: IndexContentMacro,
   version: "1.0.0",
@@ -785,7 +795,8 @@ const IndexContentMacroDefinition: MacroComponentDefinition<typeof IndexContentM
 
 const DeleteIndexMacroDefinition: MacroComponentDefinition<typeof DeleteIndexMacro> = {
   name: "DeleteIndex",
-  nameSpace: "reactory-reactor",
+  nameSpace: "reactor-macros",
+  alias: "deleteIndex",
   description: "Deletes a search index and all its documents. Requires explicit confirmation to prevent accidental deletion.",
   component: DeleteIndexMacro,
   version: "1.0.0",

@@ -11,7 +11,8 @@ const REACTOR_PERSONA_TEXT = ingest(require.resolve('./persona.md'));
 const REACTOR_FEATURES_TEXT = ingest(require.resolve('./features.md'));
 
 const REACTOR_TOOL_INCLUDES = [
-  'readFile',
+  'readFile',  
+  'todo',
   'writeFile',
   'http',
   'httpPost',

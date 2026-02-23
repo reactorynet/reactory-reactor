@@ -697,8 +697,9 @@ function formatLearningPathAsSummary(learningPath: LearningPath): any {
 export const CreateLearningPathMacroDefinition: MacroComponentDefinition<any> = {
   component: CreateLearningPathMacro,
   name: 'create_learning_path',
-  nameSpace: 'booktutor',
+  nameSpace: 'booktutor',  
   version: '1.0.0',
+  alias: 'create_learning_path',
   description: 'Create a structured learning path from book content',
   features: [],
   runat: 'server',

@@ -51,6 +51,7 @@ export const ModuleMacro: Macro<unknown, ModuleMacroProps> = async (
 export const ModuleMacroRegistry: MacroComponentDefinition<typeof ModuleMacro> = { 
   nameSpace: 'reactor-macros',
   name: 'modules',
+  alias: 'modules',
   version: '1.0.0',
   component: ModuleMacro,
   roles: ['ADMIN', 'DEVELOPER'],

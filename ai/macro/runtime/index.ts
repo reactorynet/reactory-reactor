@@ -4,6 +4,7 @@ import { EnvironmentMacroRegistry } from './environmentMacro.macro';
 import { StateMacroRegistry } from './stateMacro.macro';
 import { AddMacroRegistry } from './addMacro.macro';
 import { DateTimeMacroRegistry } from './datetimeMacro.macro';
+import { TodoMacroRegistry } from './todoMacro.macro';
 
 export default [
   VariableMacroRegistry,
@@ -12,5 +13,6 @@ export default [
   EnvironmentMacroRegistry,
   StateMacroRegistry,
   AddMacroRegistry,
-  DateTimeMacroRegistry
+  DateTimeMacroRegistry,
+  TodoMacroRegistry
 ];

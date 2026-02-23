@@ -234,7 +234,8 @@ Successfully listed directory: **${pathModule.basename(targetPath)}**
 export const ListDirectoryComponentRegister: MacroComponentDefinition<typeof ListDirectory> = {
   component: ListDirectory,
   name: 'listDirectory',
-  nameSpace: 'reactor',
+  nameSpace: 'reactor-macros',
+  alias: 'listDirectory',
   version: '1.0.0',
   description: 'Lists files and directories in a specified path with detailed metadata and structured results',
   features: [],
