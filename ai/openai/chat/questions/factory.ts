@@ -70,9 +70,9 @@ export const INITIAL_CHAT_STATE: ChatState = {
   apiKey: process.env.OPENAI_API_KEY || "",
   apiOrg: process.env.OPENAI_ORG || "",
   ai: new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY,
+    apiKey: process.env.OPENAI_API_KEY || "", 
     // organization: process.env.OPENAI_ORG
-    baseURL: process.env.OPENAI_BASE_URL,
+    baseURL: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
   }),
   personaId: "Reactor",
   persona: null,
