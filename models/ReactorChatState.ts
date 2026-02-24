@@ -19,13 +19,42 @@ export type ChatHistoryItem = OpenAI.Chat.Completions.ChatCompletionMessage |
 // Add more specific types for other providers if needed
 export type ValidProviderResponseTypes = OpenAI.Chat.Completions.ChatCompletion;
 
+/**
+ * Represents the execution status of a tool call.
+ */
+export type ReactorToolCallStatus = 'pending' | 'running' | 'success' | 'error';
+
+/**
+ * Represents a single tool call requested by the AI,
+ * enriched with execution status when loaded from history.
+ */
+export type ReactorToolCallEntry = {
+  id: string
+  type?: string
+  function?: {
+    name: string
+    arguments?: string
+  }
+  /** Execution status derived from correlating tool results/errors in history */
+  status?: ReactorToolCallStatus
+};
+
 export type ReactorToolResult = {
   id?: string
   tool_call_id?: string
-  role: 'tool'  
+  name?: string
+  role?: 'tool'  
   content: any
-  timestamp: Date
+  result?: any
+  timestamp?: Date
   [key: string]: any
+};
+
+export type ReactorToolError = {
+  id?: string
+  name?: string
+  error?: string
+  timestamp?: Date
 };
 
 export type ReactorConversationHistoryItem = ChatHistoryItem & {
@@ -38,8 +67,9 @@ export type ReactorConversationHistoryItem = ChatHistoryItem & {
   tool_name?: string
   tool_args?: any
   tool_call_id?: string
+  tool_calls?: ReactorToolCallEntry[]
   tool_results?: ReactorToolResult[]
-  tool_errors?: any[]
+  tool_errors?: ReactorToolError[]
 }
 
 export type ReactorConversationHistory = ReactorConversationHistoryItem[];

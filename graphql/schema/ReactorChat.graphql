@@ -1,4 +1,74 @@
 """
+Represents the status of a tool call execution lifecycle.
+"""
+enum ReactorToolCallStatus {
+  """Tool call has been requested by the AI but not yet started"""
+  pending
+  """Tool call is currently executing"""
+  running
+  """Tool call completed successfully"""
+  success
+  """Tool call failed with an error"""
+  error
+}
+
+"""
+Represents the function invocation details within a tool call.
+"""
+type ReactorToolCallFunction {
+  """The name of the function/tool being called"""
+  name: String!
+  """The arguments passed to the function, serialized as JSON string"""
+  arguments: String
+}
+
+"""
+Represents a single tool call requested by the AI assistant.
+Contains the call metadata and its current execution status.
+"""
+type ReactorToolCall {
+  """The unique identifier for this tool call (e.g. 'call_abc123')"""
+  id: String!
+  """The type of tool call, typically 'function'"""
+  type: String
+  """The function invocation details"""
+  function: ReactorToolCallFunction
+  """
+  The current execution status of this tool call.
+  Derived from whether a matching tool result or error exists in the conversation history.
+  """
+  status: ReactorToolCallStatus!
+}
+
+"""
+Represents the result of a successfully executed tool call.
+"""
+type ReactorToolResult {
+  """The tool call ID this result corresponds to"""
+  id: String!
+  """The name of the tool/macro that was executed"""
+  name: String
+  """The result content returned by the tool execution"""
+  content: Any
+  """The timestamp when the tool result was recorded"""
+  timestamp: Date
+}
+
+"""
+Represents an error that occurred during tool call execution.
+"""
+type ReactorToolError {
+  """The tool call ID this error corresponds to"""
+  id: String!
+  """The name of the tool/macro that failed"""
+  name: String
+  """The error message describing what went wrong"""
+  error: String
+  """The timestamp when the error occurred"""
+  timestamp: Date
+}
+
+"""
 Represents a single message in a chat conversation between a user and a persona.
 Contains the content and metadata about the message.
 """
@@ -64,13 +134,21 @@ type ReactorChatMessage {
   """
   timestamp: Date
   """
-  The tool calls of the message. This will be a JSON object that contains the tool calls of the component.
+  The tool calls requested by the AI in this message.
+  Each tool call includes its execution status, derived from
+  whether matching tool results or errors exist in the conversation history.
   """
-  tool_calls: Any
+  tool_calls: [ReactorToolCall]
   """
-  The tool results of the message. This will be a JSON object that contains the tool results of the component.
+  The results from executed tool calls associated with this message.
+  For assistant messages, these are correlated from subsequent tool-role messages in the history.
   """
-  tool_results: Any
+  tool_results: [ReactorToolResult]
+  """
+  The errors from failed tool calls associated with this message.
+  For assistant messages, these are correlated from subsequent tool-role messages in the history.
+  """
+  tool_errors: [ReactorToolError]
   """
   The refusal of the message. This will be a string that contains the refusal of the component.
   """

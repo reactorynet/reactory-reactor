@@ -215,6 +215,121 @@ class ReactorChatResolver {
     return chatState?.user;
   }
 
+  /**
+   * Property resolver for ReactorChatState.history
+   * 
+   * Enriches assistant messages that contain tool_calls with correlated
+   * tool_results and tool_errors from subsequent role:"tool" messages in
+   * the conversation history. This ensures the client receives the complete
+   * execution state for each tool call when loading a session, rather than
+   * seeing them as perpetually "running".
+   * 
+   * The correlation is done by matching tool_call_id on tool-role messages
+   * to the id on each tool call in the assistant message.
+   */
+  @property("ReactorChatState", "history")
+  async ReactorChatStateHistory(
+    chatState: ChatState,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ) {
+    const history = chatState?.history;
+    if (!history || !Array.isArray(history) || history.length === 0) {
+      return [];
+    }
+
+    // Build a lookup map: tool_call_id -> tool role message(s)
+    // These are the result messages created by executeMacro/executeTool
+    const toolResultsByCallId = new Map<string, any>();
+    for (const msg of history) {
+      const plain = typeof msg.toObject === 'function' ? msg.toObject() : msg;
+      if (plain.role === 'tool' && plain.tool_call_id) {
+        toolResultsByCallId.set(plain.tool_call_id, plain);
+      }
+    }
+
+    // Enrich assistant messages that have tool_calls
+    return history.map((msg: any) => {
+      // Convert Mongoose subdocuments to plain JS objects so that
+      // spread and GraphQL field resolution work correctly.
+      const plainMsg = typeof msg.toObject === 'function' ? msg.toObject() : msg;
+
+      // Only process assistant messages that have tool_calls
+      if (plainMsg.role !== 'assistant' || !Array.isArray(plainMsg.tool_calls) || plainMsg.tool_calls.length === 0) {
+        return plainMsg;
+      }
+
+      const correlatedResults: any[] = [];
+      const correlatedErrors: any[] = [];
+
+      // For each tool call, find the matching tool result message
+      const enrichedToolCalls = plainMsg.tool_calls.map((tc: any) => {
+        const plainTc = typeof tc.toObject === 'function' ? tc.toObject() : tc;
+        const callId = plainTc.id;
+        const toolResultMsg = callId ? toolResultsByCallId.get(callId) : null;
+
+        let status = 'pending';
+        if (toolResultMsg) {
+          // Check if this is an error result
+          const content = toolResultMsg.content || '';
+          const hasErrorInContent = typeof content === 'string' && content.startsWith('Error executing tool');
+          const hasToolErrors = Array.isArray(toolResultMsg.tool_errors) && toolResultMsg.tool_errors.length > 0;
+
+          if (hasErrorInContent || hasToolErrors) {
+            status = 'error';
+            correlatedErrors.push({
+              id: callId,
+              name: toolResultMsg.tool_name || plainTc.function?.name,
+              error: hasToolErrors 
+                ? toolResultMsg.tool_errors.map((e: any) => e.message || JSON.stringify(e)).join('; ')
+                : content,
+              timestamp: toolResultMsg.timestamp,
+            });
+          } else {
+            status = 'success';
+            // Extract result from tool_results array on the tool message
+            const resultEntry = Array.isArray(toolResultMsg.tool_results) 
+              ? toolResultMsg.tool_results.find((r: any) => r.id === callId)
+              : null;
+            
+            correlatedResults.push({
+              id: callId,
+              name: toolResultMsg.tool_name || plainTc.function?.name || resultEntry?.name,
+              content: resultEntry?.result ?? resultEntry?.content ?? toolResultMsg.content,
+              timestamp: toolResultMsg.timestamp,
+            });
+          }
+        }
+
+        return {
+          ...plainTc,
+          id: callId || plainTc.id,
+          type: plainTc.type || 'function',
+          function: plainTc.function ? {
+            name: plainTc.function.name,
+            arguments: typeof plainTc.function.arguments === 'string' 
+              ? plainTc.function.arguments 
+              : JSON.stringify(plainTc.function.arguments),
+          } : null,
+          status,
+        };
+      });
+
+      return {
+        ...plainMsg,
+        tool_calls: enrichedToolCalls,
+        tool_results: [
+          ...(Array.isArray(plainMsg.tool_results) ? plainMsg.tool_results.filter((r: any) => r?.id && r?.name) : []),
+          ...correlatedResults,
+        ],
+        tool_errors: [
+          ...(Array.isArray(plainMsg.tool_errors) ? plainMsg.tool_errors : []),
+          ...correlatedErrors,
+        ],
+      };
+    });
+  }
+
   @property("ReactorChatState", "tools")
   async ReactorChatStateTools(
     chatState: ChatState,
