@@ -129,7 +129,7 @@ abstract class AIProviderBase implements IAIProviderService {
     }
     
     try {
-      const chatSession = await ReactorConversationModel.findById(chatSessionId).exec();
+      const chatSession = await ReactorConversationModel.findById(chatSessionId).populate("files").exec();
       
       if (!chatSession) {
         this.chatStateModel = null;
@@ -155,8 +155,8 @@ abstract class AIProviderBase implements IAIProviderService {
         sseSession: chatSession.sseSessionId,
         macros: chatSession.macros || [],
         tools: chatSession.tools || [],
+        files: chatSession.files || [],
         toolApprovalMode: (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
-        // Add missing required properties
         apiKey: undefined,
         apiOrg: undefined,
         ai: undefined,

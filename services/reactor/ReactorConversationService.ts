@@ -2825,13 +2825,14 @@ export default class ReactorConversationService
         );
       }
 
-      // Create a user message indicating files were attached
+      const fileDetails = files.map((f) =>
+        `- "${f.filename || f.alias || 'Unknown'}" (${f.mimetype || 'unknown type'}, ${f.size ? Math.round(f.size / 1024) + 'KB' : 'unknown size'}, path: ${f.path || 'N/A'}, id: ${f._id || f.id})`
+      ).join("\n");
+
       const fileMessage = {
         id: new ObjectId(),
         role: "user" as const,
-        content: `I have uploaded ${files.length} file(s): ${files
-          .map((f) => f.filename || f.alias || "Unknown file")
-          .join(", ")} to my user profile home folder.`,
+        content: `I have attached ${files.length} file(s) to this chat session:\n${fileDetails}\n\nYou can read the contents of any attached file using the readChatFile tool with the file id.`,
         timestamp: new Date(),
       };
 
@@ -2964,14 +2965,20 @@ export default class ReactorConversationService
       }
            
 
-      // Use atomic update to add the file attachment
+      const fileMessage = {
+        id: new ObjectId(),
+        role: "user" as const,
+        content: `I have attached a file from my files to this chat session:\n- "${fileModel.filename}" (${fileModel.mimetype || 'unknown type'}, path: ${path}, id: ${fileModel._id || userFileId})\n\nYou can read the contents using the readChatFile tool.`,
+        timestamp: new Date(),
+      };
+
       const updatedConversation = await ReactorConversationModel.findOneAndUpdate(
         {
           _id: sessionId,
           user: this.context.user._id,
         },
         {
-          $push: { files: ObjectId.createFromHexString(userFileId) },
+          $push: { files: ObjectId.createFromHexString(userFileId), history: fileMessage },
           $set: { updated: new Date() },
         },
         {

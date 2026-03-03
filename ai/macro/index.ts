@@ -18,6 +18,7 @@ export { summarizeItems, truncateOutput } from './summarize';
 export { signMacroRequest, verifyMacroRequest } from './signing';
 import  { 
   ReadFile, 
+  ReadChatFile,
   WriteFile,
   ExtractTextFromFile,
   ListDirectory,
@@ -44,6 +45,8 @@ export const REACTOR_MACRO_MD = require.resolve('./macros.md');
 const inputMacros: MacroFunctions = {
   file: ReadFile,
   ReadFile,
+  ReadChatFile,
+  readChatFile: ReadChatFile,
   ExtractFile: ExtractTextFromFile,
   snip: ExtractTextFromFile,
   ListDirectory,

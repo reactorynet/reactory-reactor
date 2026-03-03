@@ -601,7 +601,6 @@ class GoogleAIService extends AIProviderBase {
       const googleHistory: any[] = [];
       // add the system instruction to the history as a user message
 
-      // add the user information to the system instruction
       const user = this.chatState?.user;
       if (user) {
         systemInstruction = `
@@ -623,6 +622,14 @@ class GoogleAIService extends AIProviderBase {
           { chatStateKeys: this.chatState ? Object.keys(this.chatState) : null },
           "GoogleAIService.createChatSession"
         );
+      }
+
+      if (this.chatState?.files && this.chatState.files.length > 0) {
+        const fileManifest = this.chatState.files.map((f: any) =>
+          `- id: "${f._id || f.id}", filename: "${f.filename}", path: "${f.path || 'N/A'}", type: "${f.mimetype || 'unknown'}", size: ${f.size || 0}`
+        ).join("\n");
+
+        systemInstruction += `\n## Attached Files\nThe user has the following files attached to this chat session. You can read their contents using the readChatFile tool with the file id.\n\n${fileManifest}\n`;
       }
 
       // googleHistory.push({

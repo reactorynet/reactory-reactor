@@ -1,6 +1,7 @@
 // All macro/component implementations have been moved to their own files.
 // This file now only imports and re-exports them for backward compatibility.
 export * from './ReadFile/ReadFile';
+export * from './ReadChatFile/ReadChatFile';
 export * from './WriteFile/WriteFile';
 export * from './ListDirectory/ListDirectory';
 export * from './PathInfo/PathInfo';
@@ -11,6 +12,7 @@ export * from './DeleteDirectory/DeleteDirectory';
 export * from './CreateModuleStructure/CreateModuleStructure';
 
 import { ReadFileComponentRegister } from './ReadFile/ReadFile';
+import { ReadChatFileComponentRegister } from './ReadChatFile/ReadChatFile';
 import { WriteFileComponentRegister } from './WriteFile/WriteFile';
 import { ListDirectoryComponentRegister } from './ListDirectory/ListDirectory';
 import { PathInfoComponentRegister } from './PathInfo/PathInfo';
@@ -22,6 +24,7 @@ import { CreateModuleStructureComponentRegister } from './CreateModuleStructure/
 
 export const FileMacros = [
   ReadFileComponentRegister,
+  ReadChatFileComponentRegister,
   WriteFileComponentRegister,
   ListDirectoryComponentRegister,
   ExtractFileComponentRegister,

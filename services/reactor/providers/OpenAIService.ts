@@ -160,7 +160,7 @@ class OpenAIService implements IOpenAIService {
     
     try {
       // Load existing chat session
-      const chatSession = await ReactorConversationModel.findById(chatSessionId);
+      const chatSession = await ReactorConversationModel.findById(chatSessionId).populate("files");
       
       if (!chatSession) {
         // Chat session ID was provided but not found
@@ -191,6 +191,7 @@ class OpenAIService implements IOpenAIService {
         persona: this.personaProvider?.getPersona(chatSession.personaId),
         macros: MacroRegistry,
         vars: chatSession.vars || {},
+        files: chatSession.files || [],
         sseSession: chatSession.sseSessionId,
         toolApprovalMode: (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
       };
@@ -467,15 +468,56 @@ class OpenAIService implements IOpenAIService {
     let messages: ChatCompletionMessageParam[] = [];
 
     history.forEach((msg) => {
-      if (msg?.content && typeof msg.content === "string") {
-        //@ts-ignore
-        messages.push({
-          // @ts-ignore
-          role: msg.role,
-          content: msg.content,          
-        });
+      if (!msg) return;
+
+      if (msg.role === "system" && msg.content) {
+        messages.push({ role: "system", content: msg.content as string });
+      } else if (msg.role === "user" && msg.content) {
+        messages.push({ role: "user", content: msg.content as string });
+      } else if (msg.role === "assistant") {
+        const toolCalls = (msg as any).tool_calls;
+        if (toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0) {
+          messages.push({
+            role: "assistant",
+            content: (msg.content as string) || null,
+            tool_calls: toolCalls.map((tc: any) => ({
+              id: tc.id?.toString() || tc._id?.toString(),
+              type: "function" as const,
+              function: {
+                name: tc.function?.name || tc.name,
+                arguments: typeof tc.function?.arguments === "string"
+                  ? tc.function.arguments
+                  : JSON.stringify(tc.function?.arguments ?? tc.args ?? {}),
+              },
+            })),
+          });
+        } else if (msg.content) {
+          messages.push({ role: "assistant", content: msg.content as string });
+        }
+      } else if (msg.role === "tool") {
+        const toolCallId = (msg as any).tool_call_id;
+        if (toolCallId) {
+          messages.push({
+            role: "tool",
+            tool_call_id: toolCallId,
+            content: typeof msg.content === "string"
+              ? msg.content
+              : JSON.stringify((msg as any).tool_results || msg.content || ""),
+          });
+        }
       }
     });
+
+    if (chatState.files && chatState.files.length > 0) {
+      const fileManifest = chatState.files.map((f: any) =>
+        `- id: "${f._id || f.id}", filename: "${f.filename}", path: "${f.path || 'N/A'}", type: "${f.mimetype || 'unknown'}", size: ${f.size || 0}`
+      ).join("\n");
+
+      messages.push({
+        role: "system",
+        content: `The user has the following files attached to this chat session. You can read their contents using the readChatFile tool with the file id.\n\nAttached files:\n${fileManifest}`,
+      });
+    }
 
     messages.push({
       role: "user",
@@ -594,16 +636,16 @@ class OpenAIService implements IOpenAIService {
   ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
     const { ai } = this;
     try {
-      // Filter out any messages with empty content
       if (prompt.messages && Array.isArray(prompt.messages)) {
         prompt.messages = prompt.messages.filter(
-          (msg: OpenAI.ChatCompletionMessageParam) =>
-            msg?.content &&
-            typeof msg.content === "string" &&
-            msg?.content.trim() !== ""
+          (msg: OpenAI.ChatCompletionMessageParam) => {
+            if (!msg) return false;
+            if (msg.role === "tool") return true;
+            if (msg.role === "assistant" && (msg as any).tool_calls?.length > 0) return true;
+            return msg?.content && typeof msg.content === "string" && msg.content.trim() !== "";
+          }
         );
   
-        // If there are no valid messages after filtering, add a default message
         if (
           prompt.messages.length === 0 ||
           !prompt.messages.some(
