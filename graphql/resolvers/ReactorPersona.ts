@@ -3,6 +3,7 @@ import AIPersonaProvider from "@reactory/server-core/modules/reactory-reactor/se
 import { IAIPersona } from "@reactory/server-core/modules/reactory-reactor/types/service.types";
 import path from "path";
 import fs from "fs";
+import { safeCDNUrl } from '@reactory/server-core/utils/url/safeUrl';
 
 @resolver
 class ReactorPersonaResolver {
@@ -19,20 +20,20 @@ class ReactorPersonaResolver {
 
     const personaId = persona.id?.toLowerCase();
     const baseDir = path.join(process.env.APP_DATA_ROOT, 'profiles/reactor/personas/', personaId);
-    const cdnBase = `${process.env.CDN_ROOT}profiles/reactor/personas/${personaId}`;
+    const cdnBase = safeCDNUrl(`profiles/reactor/personas/${personaId}`);
 
     // If persona.avatar is set, check for its existence
     if (persona.avatar) {
       const customAvatarPath = path.join(baseDir, persona.avatar);
       if (fs.existsSync(customAvatarPath)) {
-        return `${cdnBase}/${persona.avatar}`;
+        return safeCDNUrl(`profiles/reactor/personas/${personaId}/${persona.avatar}`);
       }
     }
 
     // Fallback to default avatar.png
     const defaultAvatarPath = path.join(baseDir, 'avatar.png');
     if (fs.existsSync(defaultAvatarPath)) {
-      return `${cdnBase}/avatar.png`;
+      return safeCDNUrl(`profiles/reactor/personas/${personaId}/avatar.png`);
     }
 
     return null;
