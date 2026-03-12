@@ -21,6 +21,7 @@ import AIPersonaProvider from "./AIPersonaProvider";
 import ReactorMessageProcessingService from "./ReactorMessageProcessingService";
 import { v4 } from "uuid";
 import { ObjectId } from "mongodb";
+import safeUrl from "@reactory/server-core/utils/url/safeUrl";
 
 /**
  * Enhanced error response interface with correlation tracking
@@ -3314,7 +3315,7 @@ export default class ReactorConversationService
       capabilities: session.capabilities
     });
     
-    const sseUrl = new URL(`${process.env.API_URI_ROOT || "http://localhost:4000/"}reactor-chat/streaming/sse/${session.sessionId} `);
+    const sseUrl = new URL(safeUrl([process.env.API_URI_ROOT || "http://localhost:4000", `reactor-chat/streaming/sse/${session.sessionId}`]));
     const clientKeyString = `${this.context.partner.key.toUpperCase().replace(/-/g, "_")}_APPLICATION_USERNAME`;
     const clientPasswordString = `${this.context.partner.key.toUpperCase().replace(/-/g, "_")}_APPLICATION_PASSWORD`;
     sseUrl.searchParams.set('transport', 'sse');
