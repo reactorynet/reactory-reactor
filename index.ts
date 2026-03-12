@@ -18,7 +18,7 @@ const ReactorModule: Reactory.Server.IReactoryModule = {
   nameSpace: 'reactory',
   version: '1.0.0',
   name: 'Reactor',
-  dependencies: [],
+  dependencies: ['speech.SpeechService@1.0.0'],
   priority: 1,
   graphDefinitions: ReactorGraphql,
   workflows: Workflows,

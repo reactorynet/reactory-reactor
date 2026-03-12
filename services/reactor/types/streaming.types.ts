@@ -78,6 +78,18 @@ export interface StreamingSession {
   
   /** Client streaming capabilities */
   capabilities: StreamingClientCapabilities;
+
+  /** Voice session configuration (present when voice is enabled) */
+  voice?: {
+    /** Whether TTS is enabled for AI responses */
+    ttsEnabled: boolean;
+    /** Whether STT is enabled for user input */
+    sttEnabled: boolean;
+    /** The voice ID to use for TTS synthesis */
+    voiceId?: string;
+    /** The language for STT transcription */
+    sttLanguage?: string;
+  };
 }
 
 /**
@@ -174,4 +186,11 @@ export interface CreateStreamingSessionArgs {
   transport: 'sse' | 'websocket';
   /** Client streaming capabilities */
   capabilities: StreamingClientCapabilities;
+  /** Optional voice session configuration */
+  voice?: {
+    ttsEnabled: boolean;
+    sttEnabled: boolean;
+    voiceId?: string;
+    sttLanguage?: string;
+  };
 }

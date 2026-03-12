@@ -105,7 +105,8 @@ export class StreamingSessionManager implements Reactory.Service.IReactoryServic
       createdAt: now,
       lastActivity: now,
       expiresAt,
-      capabilities: args.capabilities
+      capabilities: args.capabilities,
+      voice: args.voice,
     };
 
     this.sessionMap.set(args.conversationId, sessionId);

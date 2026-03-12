@@ -584,9 +584,21 @@ class ReactorChatResolver {
     context: Reactory.Server.IReactoryContext
   ) {
     try {
-      const openAIService = context.getService("reactor.OpenAIService@1.0.0");
-      // Convert audio to text
-      const text = await openAIService.speech2Text(args.audio);
+      // Use the SpeechService for transcription instead of provider-specific speech2Text
+      const speechService = context.getService('speech.SpeechService@1.0.0') as any;
+
+      // The audio comes as a GraphQL Upload — read the stream into a Buffer
+      const audioFile = await args.audio;
+      const chunks: Buffer[] = [];
+      const stream = audioFile.createReadStream();
+      for await (const chunk of stream) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const audioBuffer = Buffer.concat(chunks);
+
+      // Transcribe audio to text
+      const transcription = await speechService.transcribe(audioBuffer);
+      const text = transcription.text;
 
       // Pass to regular message handler
       const conversationService =
@@ -671,6 +683,155 @@ class ReactorChatResolver {
         timestamp: new Date(),
         recoverable: true,
         suggestion: "Please try again or contact support",
+      };
+    }
+  }
+
+  @mutation("ReactorStartVoiceSession")
+  async ReactorStartVoiceSession(
+    _: any,
+    args: {
+      input: {
+        personaId: string;
+        message?: string;
+        ttsEnabled?: boolean;
+        sttEnabled?: boolean;
+        voice?: string;
+        sttLanguage?: string;
+        chatSessionId?: string;
+      };
+    },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    try {
+      const speechService = context.getService('speech.SpeechService@1.0.0') as any;
+      const conversationService = context.getService<IReactorConversationsService>(
+        "reactor.ReactorConversationService@1.0.0"
+      );
+
+      const { input } = args;
+      let chatSessionId = input.chatSessionId;
+
+      // If no existing session, create a new chat session
+      if (!chatSessionId) {
+        const session = await conversationService.startChatSession({
+          personaId: input.personaId,
+          message: input.message || '',
+          systemPrompt: '',
+          streamingMode: StreamingMode.NONE,
+        });
+        chatSessionId = session?.id || session?._id?.toString();
+      }
+
+      return {
+        __typename: "ReactorVoiceSession",
+        chatSessionId,
+        personaId: input.personaId,
+        ttsEnabled: input.ttsEnabled !== false,
+        sttEnabled: input.sttEnabled !== false,
+        voice: input.voice || null,
+        sttLanguage: input.sttLanguage || null,
+        ttsStreamUrl: speechService.getTTSStreamUrl(),
+        sttStreamUrl: speechService.getSTTStreamUrl(),
+        created: new Date(),
+      };
+    } catch (error) {
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "VOICE_SESSION_ERROR",
+        message: error.message || "Error starting voice session",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion: "Ensure the speech service is running and try again",
+      };
+    }
+  }
+
+  @mutation("ReactorEndVoiceSession")
+  async ReactorEndVoiceSession(
+    _: any,
+    args: { chatSessionId: string },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    // Voice session is a lightweight wrapper —  ending it is a no-op on the backend.
+    // The underlying chat session is preserved for history.
+    return true;
+  }
+
+  @mutation("ReactorSendVoiceMessage")
+  async ReactorSendVoiceMessage(
+    _: any,
+    args: {
+      audio: any;
+      input: {
+        chatSessionId: string;
+        personaId: string;
+        synthesizeResponse?: boolean;
+        voice?: string;
+      };
+    },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    try {
+      const speechService = context.getService('speech.SpeechService@1.0.0') as any;
+      const conversationService = context.getService<IReactorConversationsService>(
+        "reactor.ReactorConversationService@1.0.0"
+      );
+
+      // Read the uploaded audio into a buffer
+      const audioFile = await args.audio;
+      const chunks: Buffer[] = [];
+      const stream = audioFile.createReadStream();
+      for await (const chunk of stream) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+      }
+      const audioBuffer = Buffer.concat(chunks);
+
+      // Transcribe
+      const transcription = await speechService.transcribe(audioBuffer);
+
+      // Send through the conversation pipeline
+      const chatResponse = await conversationService.sendMessage({
+        personaId: args.input.personaId,
+        chatSessionId: args.input.chatSessionId,
+        message: transcription.text,
+      });
+
+      // Extract the assistant's response text
+      const responseContent = chatResponse?.content || chatResponse?.message || '';
+
+      // Optionally synthesize the response to audio
+      let audioBase64: string | null = null;
+      let audioFormat: string | null = null;
+      let audioDuration: number | null = null;
+
+      if (args.input.synthesizeResponse && responseContent) {
+        const synthesis = await speechService.synthesize(responseContent, {
+          voice: args.input.voice,
+        });
+        audioBase64 = synthesis.audioBuffer.toString('base64');
+        audioFormat = synthesis.format;
+        audioDuration = synthesis.duration;
+      }
+
+      return {
+        __typename: "ReactorVoiceChatMessage",
+        sessionId: args.input.chatSessionId,
+        content: responseContent,
+        role: "assistant",
+        audioBase64,
+        audioFormat,
+        audioDuration,
+        timestamp: new Date(),
+      };
+    } catch (error) {
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "VOICE_MESSAGE_ERROR",
+        message: error.message || "Error processing voice message",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion: "Try a clearer audio recording or type your message instead",
       };
     }
   }

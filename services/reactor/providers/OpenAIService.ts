@@ -295,12 +295,47 @@ class OpenAIService implements IOpenAIService {
     }
   }
 
-  chatAudio(params: AudioChatParams): Promise<ChatCompletionResponseMessage> {
-    throw new Error("Method not implemented.");
+  async chatAudio(params: AudioChatParams): Promise<any> {
+    const speechService = this.getSpeechService();
+    if (!speechService) {
+      throw new Error("SpeechService is not available. Ensure the reactory-speech module is loaded.");
+    }
+
+    const audioBuffer = typeof params.audio === 'string'
+      ? Buffer.from(params.audio, 'base64')
+      : Buffer.concat(params.audio);
+
+    const transcription = await speechService.transcribe(audioBuffer);
+
+    // Delegate to regular chat with transcribed text
+    const chatResult = await this.chat({
+      ...params,
+      message: transcription.text,
+    });
+
+    return chatResult;
   }
 
-  speech2Text(audio: string | Buffer[]): Promise<string> {
-    throw new Error("Method not implemented.");
+  async speech2Text(audio: string | Buffer[]): Promise<string> {
+    const speechService = this.getSpeechService();
+    if (!speechService) {
+      throw new Error("SpeechService is not available. Ensure the reactory-speech module is loaded.");
+    }
+
+    const audioBuffer = typeof audio === 'string'
+      ? Buffer.from(audio, 'base64')
+      : Buffer.concat(audio);
+
+    const result = await speechService.transcribe(audioBuffer);
+    return result.text;
+  }
+
+  private getSpeechService(): any | null {
+    try {
+      return this.context.getService('speech.SpeechService@1.0.0');
+    } catch {
+      return null;
+    }
   }
 
   createFineTuningJob(params: CreateFineTuningJobParams): Promise<FineTuningObjectJob> {

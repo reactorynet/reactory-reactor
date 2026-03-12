@@ -463,6 +463,87 @@ input ReactorConversationLoadOptions {
 union ReactorChatStateOrError = ReactorChatState | ReactorErrorResponse
 union ReactorInitChatResponse = ReactorChatState | ReactorErrorResponse | ReactorInitiateSSE
 
+"""
+Represents a voice-enabled chat session with TTS/STT configuration.
+"""
+type ReactorVoiceSession {
+  """The ID of the underlying chat session"""
+  chatSessionId: String!
+  """The persona ID for this voice session"""
+  personaId: String!
+  """Whether TTS is enabled for AI responses"""
+  ttsEnabled: Boolean!
+  """Whether STT is enabled for user input"""
+  sttEnabled: Boolean!
+  """The voice ID to use for TTS synthesis"""
+  voice: String
+  """The language for STT transcription"""
+  sttLanguage: String
+  """WebSocket URL for real-time TTS streaming"""
+  ttsStreamUrl: String
+  """WebSocket URL for real-time STT streaming"""
+  sttStreamUrl: String
+  """When the voice session was created"""
+  created: Date
+}
+
+"""
+Input for starting a voice-enabled chat session.
+"""
+input ReactorStartVoiceSessionInput {
+  """The persona to chat with"""
+  personaId: String!
+  """Optional initial message to start the conversation"""
+  message: String
+  """Whether to enable TTS for AI responses (default: true)"""
+  ttsEnabled: Boolean
+  """Whether to enable STT for user input (default: true)"""
+  sttEnabled: Boolean
+  """The voice ID to use for TTS synthesis"""
+  voice: String
+  """The language for STT transcription"""
+  sttLanguage: String
+  """Optional existing chat session ID to enable voice on"""
+  chatSessionId: String
+}
+
+"""
+Input for sending an audio message in a voice session.
+"""
+input ReactorVoiceMessageInput {
+  """The chat session ID"""
+  chatSessionId: String!
+  """The persona ID"""
+  personaId: String!
+  """Whether to synthesize the AI response as audio"""
+  synthesizeResponse: Boolean
+  """The voice to use for TTS synthesis of the response"""
+  voice: String
+}
+
+"""
+A chat response that includes optional audio data.
+"""
+type ReactorVoiceChatMessage {
+  """The text content of the AI response"""
+  sessionId: String!
+  """The text content of the AI response"""
+  content: String
+  """The role of the message"""
+  role: String
+  """Base64-encoded audio of the AI response (if TTS was requested)"""
+  audioBase64: String
+  """The audio format (e.g., wav, mp3)"""
+  audioFormat: String
+  """The duration of the audio in seconds"""
+  audioDuration: Float
+  """Timestamp of the message"""
+  timestamp: Date
+}
+
+union ReactorVoiceSessionResult = ReactorVoiceSession | ReactorErrorResponse
+union ReactorVoiceChatResult = ReactorVoiceChatMessage | ReactorErrorResponse
+
 extend type Query {
 
   """
@@ -541,5 +622,23 @@ extend type Mutation {
   Converts spoken audio to text and sends it as a message to the persona.
   """
   ReactorAskQuestionAudio(audio: Upload!, chatSessionId: String!): ReactorChatResponse
+
+  """
+  Starts a voice-enabled chat session with TTS/STT configuration.
+  Creates a new chat session (or attaches to an existing one) with voice capabilities.
+  """
+  ReactorStartVoiceSession(input: ReactorStartVoiceSessionInput!): ReactorVoiceSessionResult
+
+  """
+  Ends a voice session. The underlying chat session is preserved.
+  """
+  ReactorEndVoiceSession(chatSessionId: String!): Boolean
+
+  """
+  Sends an audio message and optionally receives the AI response as audio.
+  The audio is transcribed, sent through the conversation pipeline, and the
+  response is optionally synthesized back to speech.
+  """
+  ReactorSendVoiceMessage(audio: Upload!, input: ReactorVoiceMessageInput!): ReactorVoiceChatResult
 }
 

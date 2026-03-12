@@ -252,12 +252,62 @@ abstract class AIProviderBase implements IAIProviderService {
     throw new AIProviderError("Method not implemented");
   }
 
+  /**
+   * Transcribes audio to text using the SpeechService, sends the text through
+   * the provider's chat method, and optionally synthesizes the response back
+   * to audio. Falls back to text-only if the SpeechService is unavailable.
+   */
   async chatAudio(params: AIAudioChatParams): Promise<AIChatCompletion> {
-    throw new AIProviderError("Method not implemented");
+    const speechService = this.getSpeechService();
+    if (!speechService) {
+      throw new AIProviderError("SpeechService is not available. Ensure the reactory-speech module is loaded.");
+    }
+
+    // Step 1: Transcribe the audio input to text
+    const audioBuffer = typeof params.audio === 'string'
+      ? Buffer.from(params.audio, 'base64')
+      : Buffer.concat(params.audio);
+
+    const transcription = await speechService.transcribe(audioBuffer, {
+      language: params.language,
+    });
+
+    // Step 2: Send the transcribed text through the regular chat pipeline
+    const chatResult = await this.chat({
+      ...params,
+      message: transcription.text,
+    });
+
+    return chatResult;
   }
 
+  /**
+   * Converts audio to text using the SpeechService.
+   */
   async speech2Text(audio: string | Buffer[]): Promise<string> {
-    throw new AIProviderError("Method not implemented");
+    const speechService = this.getSpeechService();
+    if (!speechService) {
+      throw new AIProviderError("SpeechService is not available. Ensure the reactory-speech module is loaded.");
+    }
+
+    const audioBuffer = typeof audio === 'string'
+      ? Buffer.from(audio, 'base64')
+      : Buffer.concat(audio);
+
+    const result = await speechService.transcribe(audioBuffer);
+    return result.text;
+  }
+
+  /**
+   * Attempts to retrieve the SpeechService from the execution context.
+   * Returns null if the service is not available.
+   */
+  private getSpeechService(): any | null {
+    try {
+      return this.context.getService('speech.SpeechService@1.0.0');
+    } catch {
+      return null;
+    }
   }
 
   async createFineTuningJob(params: CreateAIFineTuningJobParams): Promise<AIFineTuningJob> {

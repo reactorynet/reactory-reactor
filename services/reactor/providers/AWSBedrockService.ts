@@ -652,16 +652,8 @@ class AWSBedrockService extends AIProviderBase {
     );
   }
 
-  // Override only needed methods, using base class implementations for others
-  async chatAudio(params: AIAudioChatParams): Promise<AIChatCompletion> {
-    this.context.warn("chatAudio not implemented", {}, "AWSBedrockService");
-    throw new AIProviderError("Method not implemented");
-  }
-
-  async speech2Text(audio: string | Buffer[]): Promise<string> {
-    this.context.warn("speech2Text not implemented", {}, "AWSBedrockService");
-    throw new AIProviderError("Method not implemented");
-  }
+  // chatAudio and speech2Text are inherited from AIProviderBase
+  // which delegates to the SpeechService
 
   // Dependency injection setters
   setFileService(fileService: Reactory.Service.IReactoryFileService) {
