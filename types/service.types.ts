@@ -451,6 +451,15 @@ export interface IAIPersonaProviderService {
     * @returns {Promise<Persona>} A promise that resolves to the deleted persona.
     */
     deletePersona(id: string): Promise<IAIPersona>;
+
+    /**
+    * Loads an AI persona from a YAML string or file path, registers it in
+    * the model registry, and returns the resulting persona.
+    * @param yamlContentOrFilePath - A YAML string or filesystem path
+    * @param options - When fromFile is true, the first argument is treated as a file path
+    * @returns The parsed and registered persona
+    */
+    loadPersonaYaml(yamlContentOrFilePath: string, options?: { fromFile?: boolean }): Promise<IAIPersona>;
 }
 
 export type ReactorInitiateSSEResponse = {
