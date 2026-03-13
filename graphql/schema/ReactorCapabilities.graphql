@@ -44,4 +44,10 @@ extend type Query {
   Get all configured AI providers with their statuses and capabilities.
   """
   ReactorProviders: [ReactorProviderConfig!]!
+
+  """
+  Get compatible models for a given persona. Returns models filtered by the persona's
+  required capabilities. If no personaId is provided, returns all available models.
+  """
+  ReactorModelsForPersona(personaId: String): [ReactorProviderModelResult!]!
 }

@@ -1,0 +1,427 @@
+# Reactory AI Provider & Model Registry
+# This file defines all available AI providers and their models.
+# Environment variables are interpolated using ${VAR_NAME:-default} syntax.
+#
+# Provider availability is determined at runtime based on whether
+# the required API keys are configured.
+
+providers:
+  - id: openai
+    name: OpenAI
+    endpointUrl: "${OPENAI_API_URL:-https://api.openai.com/v1}"
+    apiVersion: v1
+    defaultModel: gpt-4o
+    capabilities:
+      - text-generation
+      - code-generation
+      - image-generation
+      - speech-to-text
+      - image-understanding
+    credentialRequirements:
+      - apiKey
+      - organization
+    credentialEnvVars:
+      apiKey: OPENAI_API_KEY
+    models:
+      - id: gpt-4o
+        name: GPT-4o
+        version: "2024-05-13"
+        capabilities:
+          - text-generation
+          - code-generation
+          - image-understanding
+          - reasoning
+        contextLength: 128000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: gpt-4o-mini
+        name: GPT-4o Mini
+        version: "2024-07-18"
+        capabilities:
+          - text-generation
+          - code-generation
+          - image-understanding
+        contextLength: 128000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: gpt-4-turbo
+        name: GPT-4 Turbo
+        version: "2024-04-09"
+        capabilities:
+          - text-generation
+          - code-generation
+          - image-understanding
+          - reasoning
+        contextLength: 128000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: gpt-4
+        name: GPT-4
+        version: "1"
+        capabilities:
+          - text-generation
+          - code-generation
+          - image-understanding
+        contextLength: 8192
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+      - id: gpt-3.5-turbo
+        name: GPT-3.5 Turbo
+        version: "1"
+        capabilities:
+          - text-generation
+          - code-generation
+        contextLength: 16385
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+      - id: o1
+        name: o1
+        version: "2024-12-17"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+        contextLength: 200000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: o3-mini
+        name: o3 Mini
+        version: "2025-01-31"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+        contextLength: 200000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+
+  - id: xai
+    name: xAI
+    endpointUrl: "${XAI_API_URL:-https://api.x.ai/v1}"
+    apiVersion: v1
+    defaultModel: grok-3-mini-beta
+    capabilities:
+      - text-generation
+      - code-generation
+      - reasoning
+    credentialRequirements:
+      - apiKey
+    credentialEnvVars:
+      apiKey: XAI_API_KEY
+    models:
+      - id: grok-2-latest
+        name: Grok 2 [Latest]
+        version: "2"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+        contextLength: 131072
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: grok-3-mini-beta
+        name: Grok 3 Mini [Beta]
+        version: "3"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+        contextLength: 131072
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+
+  - id: google
+    name: Google Gemini
+    endpointUrl: "${GOOGLE_AI_API_URL:-https://generativelanguage.googleapis.com}"
+    apiVersion: v1
+    defaultModel: gemini-2.5-pro
+    capabilities:
+      - text-generation
+      - code-generation
+      - reasoning
+      - image-understanding
+    credentialRequirements:
+      - apiKey
+    credentialEnvVars:
+      apiKey: GOOGLE_AI_API_KEY
+    models:
+      - id: gemini-2.5-pro
+        name: Gemini 2.5 Pro
+        version: "2.5"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+        contextLength: 1048576
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+          - video
+          - audio
+      - id: gemini-2.5-flash
+        name: Gemini 2.5 Flash
+        version: "2.5"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+        contextLength: 1048576
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+          - video
+          - audio
+      - id: gemini-2.0-flash
+        name: Gemini 2.0 Flash
+        version: "2.0"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+        contextLength: 1048576
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: gemini-pro
+        name: Gemini Pro
+        version: "1.0"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+        contextLength: 32768
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+      - id: gemini-pro-vision
+        name: Gemini Pro Vision
+        version: "1.0"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+        contextLength: 16384
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+
+  - id: anthropic
+    name: Anthropic
+    endpointUrl: "${ANTHROPIC_API_URL:-https://api.anthropic.com}"
+    apiVersion: v1
+    defaultModel: claude-sonnet-4-5-20250929
+    capabilities:
+      - text-generation
+      - code-generation
+      - reasoning
+      - image-understanding
+    credentialRequirements:
+      - apiKey
+    credentialEnvVars:
+      apiKey: ANTHROPIC_API_KEY
+    models:
+      - id: claude-sonnet-4-5-20250929
+        name: Claude Sonnet 4.5
+        version: "4.5"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+        contextLength: 200000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: claude-3-opus
+        name: Claude 3 Opus
+        version: "3.0"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+        contextLength: 200000
+        inputCostPerToken: 0.00003
+        outputCostPerToken: 0.00015
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: claude-3-sonnet
+        name: Claude 3 Sonnet
+        version: "3.0"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+        contextLength: 200000
+        inputCostPerToken: 0.00001
+        outputCostPerToken: 0.00003
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: claude-3-haiku
+        name: Claude 3 Haiku
+        version: "3.0"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+        contextLength: 200000
+        inputCostPerToken: 0.00000025
+        outputCostPerToken: 0.00000125
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+
+  - id: amazon
+    name: Amazon Bedrock
+    endpointUrl: "${AMAZON_Q_API_URL:-https://q.amazonaws.com}"
+    apiVersion: v1
+    defaultModel: amazon-titan
+    capabilities:
+      - text-generation
+      - code-generation
+      - reasoning
+      - aws-service-integration
+    credentialRequirements:
+      - awsAccessKeyId
+      - awsSecretAccessKey
+      - awsRegion
+    credentialEnvVars:
+      awsAccessKeyId: AWS_ACCESS_KEY_ID
+      awsSecretAccessKey: AWS_SECRET_ACCESS_KEY
+      awsRegion: AWS_REGION
+    models:
+      - id: amazon-titan
+        name: Amazon Titan
+        version: "1.0"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+        contextLength: 8192
+        supportsStreaming: true
+        supportedTools:
+          - aws-service-integration
+        supportedMediaTypes:
+          - text
+      - id: claude-3-haiku-aws
+        name: Claude 3 Haiku (via AWS)
+        version: "1.0"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+        contextLength: 200000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+
+  - id: cohere
+    name: Cohere
+    endpointUrl: "${COHERE_API_URL:-https://api.cohere.ai}"
+    apiVersion: v1
+    defaultModel: command-r
+    capabilities:
+      - text-generation
+      - code-generation
+      - reasoning
+      - rag-optimization
+    credentialRequirements:
+      - apiKey
+    credentialEnvVars:
+      apiKey: COHERE_API_KEY
+    models:
+      - id: command-r
+        name: Command R
+        version: "1.0"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+        contextLength: 128000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+      - id: command-r-plus
+        name: Command R+
+        version: "1.0"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+        contextLength: 128000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text

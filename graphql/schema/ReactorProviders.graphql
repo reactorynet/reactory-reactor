@@ -54,3 +54,11 @@ type ReactorProviderRateLimits {
   tokensPerMinute: Int
   concurrentRequests: Int
 }
+
+"""
+A model paired with its provider, returned by ReactorModelsForPersona query.
+"""
+type ReactorProviderModelResult {
+  provider: ReactorProviderConfig!
+  model: ReactorModelDefinition!
+}

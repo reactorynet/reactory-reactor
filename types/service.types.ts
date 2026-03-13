@@ -1188,6 +1188,11 @@ export interface IReactorProviderService extends Reactory.Service.IReactoryServi
    * Get adapter for provider
    */
   getAdapter(providerId: string): Promise<any>;
+
+  /**
+   * Get compatible models for a persona based on its capabilities.
+   */
+  getModelsForPersona(personaCapabilities?: string[]): Promise<{ provider: any; model: any }[]>;
 }
 
 /**

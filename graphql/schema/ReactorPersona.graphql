@@ -292,4 +292,12 @@ input ReactorInitSession {
   previous session's conversation and injects a summary as context for the new agent.
   """
   contextFromSessionId: String
+  """
+  Optional model ID override. When provided, uses this model instead of the persona default.
+  """
+  modelId: String
+  """
+  Optional provider ID override. When provided, uses this provider instead of the persona default.
+  """
+  providerId: String
 }

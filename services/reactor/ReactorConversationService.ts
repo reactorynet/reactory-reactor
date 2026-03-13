@@ -1980,6 +1980,8 @@ export default class ReactorConversationService
     tool_args?: any;
     tool_call_id?: string;  
     streamingMode?: StreamingMode;
+    modelId?: string;
+    providerId?: string;
   }): Promise<any> {
     const {
       personaId,
@@ -1991,6 +1993,8 @@ export default class ReactorConversationService
       tool_args,
       tool_call_id,
       streamingMode = StreamingMode.NONE,
+      modelId: modelIdOverride,
+      providerId: providerIdOverride,
     } = args;
     const { user } = this.context;
 
@@ -2019,7 +2023,11 @@ export default class ReactorConversationService
             chatSessionId,
           })
           .getPersona(personaId);
-        const provider = persona.providerId || "xai";
+        const provider = providerIdOverride || persona.providerId || "xai";
+        // Apply overrides: if caller specified a different model/provider, use it
+        const effectivePersona = (modelIdOverride || providerIdOverride)
+          ? { ...persona, modelId: modelIdOverride || persona.modelId, providerId: provider }
+          : persona;
 
         // Save message to conversation history
         let conversation;
@@ -2103,7 +2111,7 @@ export default class ReactorConversationService
           conversation = new ReactorConversationModel({
             personaId,
             user,
-            modelId: persona.modelId,
+            modelId: modelIdOverride || persona.modelId,
             providerId: provider,
             history: [
               {
@@ -2180,7 +2188,7 @@ export default class ReactorConversationService
         let response = await this.executeProviderChat(
           provider,
           chatSessionId,
-          persona,
+          effectivePersona,
           {
             personaId,
             chatSessionId,
@@ -3364,6 +3372,8 @@ export default class ReactorConversationService
     promptMergeStrategy: PromptMergeStrategy;
     toolApprovalMode: ToolApprovalMode;
     contextFromSessionId?: string;
+    modelId?: string;
+    providerId?: string;
   }): Promise<ReactorInitChatResponse> {
     this.context.debug("Starting chat session", {
       personaId: args.personaId,
@@ -3395,6 +3405,17 @@ export default class ReactorConversationService
           }
         );
         throw new Error("Failed to create new conversation");
+      }
+
+      // Apply model/provider overrides if specified
+      if (args.modelId) {
+        conversation.modelId = args.modelId;
+      }
+      if (args.providerId) {
+        conversation.providerId = args.providerId;
+      }
+      if (args.modelId || args.providerId) {
+        await conversation.save();
       }
 
       const { macros, tools } = this.collectMacrosAndTools({

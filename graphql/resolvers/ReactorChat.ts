@@ -432,6 +432,8 @@ class ReactorChatResolver {
         personaId: string;
         chatSessionId?: string;
         streamingMode: StreamingMode;
+        modelId?: string;
+        providerId?: string;
       };
     },
     context: Reactory.Server.IReactoryContext
@@ -462,6 +464,8 @@ class ReactorChatResolver {
         chatSessionId: args.message.chatSessionId,
         message: args.message.message,
         streamingMode: args.message.streamingMode,
+        modelId: args.message.modelId,
+        providerId: args.message.providerId,
       });
     } catch (error) {
       return {
