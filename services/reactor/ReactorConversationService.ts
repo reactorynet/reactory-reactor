@@ -1885,7 +1885,8 @@ export default class ReactorConversationService
     switch (provider) {
       case "xai":
       case "openai":
-        // x-ai and openai use the same service
+      case "ollama":
+        // x-ai, openai, and ollama use the same service
         // first we need to initialize the openai service
         // to use the correct model and connection parameters.
         await this.openaiService.initialize(chatSessionId, persona);

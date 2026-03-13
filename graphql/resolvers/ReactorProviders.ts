@@ -8,7 +8,8 @@ class ReactorProvidersResolver {
   @query("ReactorProviders")
   async ReactorProviders(_: any, args: any, context: Reactory.Server.IReactoryContext) {
     const providerService = context.getService<IReactorProviderService>("reactor.ReactorProviderService@1.0.0");
-    return await providerService.getProviders();
+    const providers = await providerService.getProviders();
+    return providers;
   }
 
   @query("ReactorModelsForPersona")
