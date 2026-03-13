@@ -28,6 +28,7 @@
     "openai": "4.87.3",
     "@aws-sdk/client-bedrock": "3.864.0",
     "@anthropic-ai/sdk": "0.59.0",
-    "@modelcontextprotocol/sdk": "1.26.0"
+    "@modelcontextprotocol/sdk": "1.26.0",
+    "ollama": "0.6.3"
   }
 }

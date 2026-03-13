@@ -286,6 +286,7 @@ class ReactorProviderService implements IReactorProviderService {
     // Map provider IDs to their adapters
     this.adapters.set("openai", openaiCompatibleAdapter("OpenAI", "/api/reactor/stream"));
     this.adapters.set("xai", openaiCompatibleAdapter("xAI", "/api/reactor/stream/xai"));
+    this.adapters.set("ollama", openaiCompatibleAdapter("Ollama", "/api/reactor/stream/ollama"));
     this.adapters.set("google", googleAdapter);
     this.adapters.set("amazon", amazonAdapter);
     this.adapters.set("anthropic", anthropicAdapter);
