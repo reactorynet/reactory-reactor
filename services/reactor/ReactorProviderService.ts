@@ -26,11 +26,16 @@ class ReactorProviderService implements IReactorProviderService {
     this.initialize();
   }
 
-  private async initialize() {
-    // Load providers from YAML
-    const providerConfigs = loadProviders();
-    for (const config of providerConfigs) {
-      this.providers.set(config.id, config);
+  private initialize() {
+    // Load providers from YAML (synchronous — loadProviders uses fs.readFileSync)
+    try {
+      const providerConfigs = loadProviders();
+      for (const config of providerConfigs) {
+        this.providers.set(config.id, config);
+      }
+    } catch (err) {
+      // Log but don't crash — adapters still register and providers can be added dynamically
+      console.error('[ReactorProviderService] Failed to load providers.yaml:', err?.message || err);
     }
     // Register response adapters for each provider type
     this.registerAdapters();
