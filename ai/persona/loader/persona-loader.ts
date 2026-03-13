@@ -141,7 +141,7 @@ export class PersonaLoader {
     try {
       const files = fs.readdirSync(dirPath);
       const yamlFiles = files.filter(file => 
-        file.endsWith('.yaml') || file.endsWith('.yml')
+        file.endsWith('agent.yaml') || file.endsWith('agent.yml')
       );
 
       for (const file of yamlFiles) {

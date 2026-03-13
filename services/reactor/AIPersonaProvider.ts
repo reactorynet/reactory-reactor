@@ -105,34 +105,55 @@ export default class AIPersonaProvider
       const personaDir = path.join(modulePath, "ai", "persona");
       if (!fs.existsSync(personaDir)) continue;
 
-      try {
-        const personas = personaLoader.loadFromDirectory(personaDir, { targetModule: mod }) as unknown as IAIPersona[];
-        for (const persona of personas) {
+
+
+      // Check in subdirectories of personaDir for any additional persona YAML files
+      if (fs.existsSync(personaDir)) {
+        const subdirs = fs.readdirSync(personaDir, { withFileTypes: true }).filter((d) => d.isDirectory());
+        for (const subdir of subdirs) {
+          const subdirPath = path.join(personaDir, subdir.name);
           try {
-            this.registerPersona(persona, mod);
-            totalLoaded++;
+            const personas = personaLoader.loadFromDirectory(subdirPath, { targetModule: mod }) as unknown as IAIPersona[];
+            for (const persona of personas) {
+              try {
+                this.registerPersona(persona, mod);
+                totalLoaded++;
+                log(
+                  `Registered AI persona "${persona.name}" (${persona.id}) from module ${mod.id} (subdirectory ${subdir.name})`,
+                  {},
+                  "debug",
+                  "reactor.AIPersonaProvider",
+                );
+              } catch (regErr) {
+                log(
+                  `Failed to register persona "${persona.id}" from module ${mod.id} (subdirectory ${subdir.name}): ${regErr}`,
+                  { error: regErr },
+                  "error",
+                  "reactor.AIPersonaProvider",
+                );
+              }
+            }
+
+            // check if the subdir has an avatar.png and if so, copy it to the public/avatars directory with the name {persona.id}.png
+            const avatarPath = path.join(subdirPath, "avatar.png");
+            if (fs.existsSync(avatarPath)) {
+              const personaName = subdirPath.split(path.sep).pop(); // get the name of the subdir as the persona name
+              const publicAvatarDir = path.join(process.env.REACTORY_DATA as string, "profiles", "reactor", "personas", personaName);
+              if (!fs.existsSync(publicAvatarDir)) {
+                fs.mkdirSync(publicAvatarDir, { recursive: true });
+              }
+              const targetAvatarPath = path.join(publicAvatarDir, "avatar.png");
+              fs.copyFileSync(avatarPath, targetAvatarPath);
+            }
+          } catch (subdirErr) {
             log(
-              `Registered AI persona "${persona.name}" (${persona.id}) from module ${mod.id}`,
-              {},
-              "debug",
-              "reactor.AIPersonaProvider",
-            );
-          } catch (regErr) {
-            log(
-              `Failed to register persona "${persona.id}" from module ${mod.id}: ${regErr}`,
-              { error: regErr },
-              "error",
+              `Failed to load personas from ${subdirPath}: ${subdirErr}`,
+              { error: subdirErr },
+              "warning",
               "reactor.AIPersonaProvider",
             );
           }
         }
-      } catch (dirErr) {
-        log(
-          `Failed to load personas from ${personaDir}: ${dirErr}`,
-          { error: dirErr },
-          "warning",
-          "reactor.AIPersonaProvider",
-        );
       }
     }
 

@@ -18,7 +18,7 @@ class ReactorPersonaResolver {
   async ReactorAIPersonaAvatar(persona: IAIPersona, _: any, context: Reactory.Server.IReactoryContext): Promise<string | null> {
     if (!persona) return null;
 
-    const personaId = persona.id?.toLowerCase();
+    const personaId = persona.id?.toLowerCase().replace("aipersona", "");
     const baseDir = path.join(process.env.APP_DATA_ROOT, 'profiles/reactor/personas/', personaId);
     const cdnBase = safeCDNUrl(`profiles/reactor/personas/${personaId}`);
 
