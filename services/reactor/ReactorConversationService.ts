@@ -2030,6 +2030,12 @@ export default class ReactorConversationService
           ? { ...persona, modelId: modelIdOverride || persona.modelId, providerId: provider }
           : persona;
 
+        // if we added a persona model / provider override we need to 
+        // remove the persona.config since it may contain provider/model specific settings that are no longer valid.
+        if (modelIdOverride || providerIdOverride) {
+          delete effectivePersona.config;
+        }
+
         // Save message to conversation history
         let conversation;
         if (chatSessionId) {
