@@ -109,6 +109,7 @@ export interface StreamingToken {
 export enum StreamingEventType {
   TOKEN = 'token',
   TOOL_CALL = 'tool_call',
+  REASONING = 'reasoning',
   COMPLETE = 'complete',
   ERROR = 'error'
 }
@@ -156,11 +157,28 @@ export interface ToolCallStreamingEvent extends StreamingEventBase {
   };
 }
 
+/**
+ * Reasoning/thinking streaming event — emitted for AI models that produce
+ * a visible chain-of-thought before the final response (e.g. OpenAI o1/o3,
+ * Anthropic extended thinking, Google Gemini thinking mode).
+ */
+export interface ReasoningStreamingEvent extends StreamingEventBase {
+  type: StreamingEventType.REASONING;
+  data: {
+    content: string;
+    delta: string;
+    position: number;
+    isComplete: boolean;
+  };
+}
+
 export interface CompletionStreamingEvent extends StreamingEventBase {
   type: StreamingEventType.COMPLETE;
   data: {
     content: string;
     finishReason: 'stop' | 'error';
+    /** Full reasoning/thinking content accumulated during streaming (if any) */
+    thinking?: string;
   };
 }
 
@@ -172,7 +190,7 @@ export interface ErrorStreamingEvent extends StreamingEventBase {
   };
 }
 
-export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent;
+export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent;
 
 /**
  * Arguments for creating a streaming session

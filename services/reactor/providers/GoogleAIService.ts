@@ -51,6 +51,7 @@ import path from "path";
 import {
   CompletionStreamingEvent,
   ErrorStreamingEvent,
+  ReasoningStreamingEvent,
   StreamingEvent,
   StreamingEventType,
   StreamingMode,
@@ -695,6 +696,7 @@ class GoogleAIService extends AIProviderBase {
           topP: 1.0,
           frequencyPenalty: 0.0,
           presencePenalty: 0.0,
+          includeThoughts: true,
         },
       });
     } catch (error) {
@@ -740,6 +742,30 @@ class GoogleAIService extends AIProviderBase {
       sessionId,
       sessionId
     ) as TokenStreamingEvent;
+  }
+
+  /**
+   * Create a reasoning/thinking streaming event
+   */
+  private createReasoningEvent(
+    content: string,
+    delta: string,
+    position: number,
+    isComplete: boolean = false,
+    sessionId?: string
+  ): ReasoningStreamingEvent {
+    const data: AITokenStreamingData = {
+      content,
+      delta,
+      position,
+      isComplete,
+    };
+    return this.createStreamingEvent(
+      StreamingEventType.REASONING,
+      data,
+      sessionId,
+      sessionId
+    ) as ReasoningStreamingEvent;
   }
 
   /**
@@ -896,6 +922,7 @@ class GoogleAIService extends AIProviderBase {
 
     let result: GoogleGenAI.GenerateContentResponse = null;
     let accumulatedText = "";
+    let accumulatedReasoning = "";
     let accumulatedFunctionCalls: any[] = [];
     let totalTokens = 0;
     let promptTokens = 0;
@@ -914,6 +941,36 @@ class GoogleAIService extends AIProviderBase {
       // Initialize result with the first chunk
       if (result === null) {
         result = chunk;
+      }
+
+      // Handle thought/reasoning parts
+      if (chunk.candidates?.[0]?.content?.parts) {
+        for (const part of chunk.candidates[0].content.parts) {
+          if ((part as any).thought && part.text) {
+            accumulatedReasoning += part.text;
+            const reasoningEvent = this.createReasoningEvent(
+              accumulatedReasoning,
+              part.text,
+              accumulatedReasoning.length,
+              false,
+              sessionId
+            );
+            reasoningEvent.messageId = messageId ?? "";
+            reasoningEvent.conversationId = sessionId;
+            try {
+              await this.streamingTransportManager.sendEventToSession(
+                sessionId,
+                reasoningEvent
+              );
+            } catch (error) {
+              this.context.error(
+                `Failed to send reasoning event for session ${sessionId}`,
+                { error },
+                logTag,
+              );
+            }
+          }
+        }
       }
 
       // Handle text content
@@ -1025,6 +1082,7 @@ class GoogleAIService extends AIProviderBase {
           completionTokens,
           finishReason,
           model: modelName,
+          thinking: accumulatedReasoning || undefined,
         },
         sessionId
       );
@@ -1062,6 +1120,11 @@ class GoogleAIService extends AIProviderBase {
       }
 
       candidate.finishReason = finishReason;
+    }
+
+    // Attach accumulated reasoning for persistence by the caller
+    if (accumulatedReasoning) {
+      (result as any).__reasoning = accumulatedReasoning;
     }
 
     return result;

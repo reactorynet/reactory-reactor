@@ -26,7 +26,7 @@ import {
   ReactorConversationHistory,
   ReactorConversationHistoryItem,
 } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
-import { CompletionStreamingEvent, ErrorStreamingEvent, StreamingEvent, StreamingEventType, StreamingMode, TokenStreamingEvent, ToolCallStreamingEvent } from "../types/streaming.types";
+import { CompletionStreamingEvent, ErrorStreamingEvent, ReasoningStreamingEvent, StreamingEvent, StreamingEventType, StreamingMode, TokenStreamingEvent, ToolCallStreamingEvent } from "../types/streaming.types";
 import { StreamingSessionManager } from "../StreamingSessionManager";
 import { StreamingTransportManager } from "../StreamingTransportManager";
 
@@ -346,6 +346,25 @@ class AnthropicService extends AIProviderBase {
   }
 
   /**
+   * Create a reasoning/thinking streaming event
+   */
+  private createReasoningEvent(
+    content: string,
+    delta: string,
+    position: number,
+    isComplete: boolean = false,
+    sessionId?: string
+  ): ReasoningStreamingEvent {
+    const data: AITokenStreamingData = {
+      content,
+      delta,
+      position,
+      isComplete,
+    };
+    return this.createStreamingEvent(StreamingEventType.REASONING, data, sessionId) as ReasoningStreamingEvent;
+  }
+
+  /**
    * Create a tool call streaming event
    */
   private createToolCallEvent(
@@ -427,20 +446,38 @@ class AnthropicService extends AIProviderBase {
   /**
    * Build the common request parameters for Anthropic messages.create()
    */
+  /**
+   * Check if the current model supports extended thinking.
+   */
+  private supportsThinking(): boolean {
+    const thinkingModels = ["claude-sonnet-4", "claude-3-7-sonnet", "claude-3-5-sonnet"];
+    return thinkingModels.some((m) => this.modelId.includes(m));
+  }
+
   private buildRequestParams(
     messages: Anthropic.Messages.MessageParam[],
     persona: IAIPersona,
     options?: { stream?: boolean }
   ): Anthropic.Messages.MessageCreateParams {
     const tools = this.convertToolsToAnthropicFormat(persona.tools);
+    const enableThinking = this.supportsThinking() && persona.modelConfig?.enableThinking !== false;
     const params: Anthropic.Messages.MessageCreateParams = {
       model: this.modelId,
-      max_tokens: persona.modelConfig?.maxTokens || 8192,
+      max_tokens: persona.modelConfig?.maxTokens || 16000,
       messages,
       system: this.createSystemPrompt(persona).content,
-      temperature: persona.modelConfig?.temperature || 0.7,
-      top_p: persona.modelConfig?.topP || 1.0,
     };
+
+    if (enableThinking) {
+      // Extended thinking requires budget_tokens and disallows temperature/top_p
+      (params as any).thinking = {
+        type: "enabled",
+        budget_tokens: persona.modelConfig?.thinkingBudget || 10000,
+      };
+    } else {
+      params.temperature = persona.modelConfig?.temperature || 0.7;
+      (params as any).top_p = persona.modelConfig?.topP || 1.0;
+    }
 
     if (tools && tools.length > 0) {
       params.tools = tools;
@@ -462,13 +499,14 @@ class AnthropicService extends AIProviderBase {
     persona: IAIPersona;
     history: ReactorConversationHistory;
     messageId?: string;
-  }): Promise<{ content: string; finishReason: string; toolCalls: any[] }> {
+  }): Promise<{ content: string; finishReason: string; toolCalls: any[]; reasoning?: string }> {
     const { sessionId, message, persona, history, messageId } = args;
 
     const messages = this.convertHistoryToAnthropicFormat(history);
     messages.push({ role: "user", content: message });
 
     let accumulatedText = "";
+    let accumulatedReasoning = "";
     let totalTokens = 0;
     let promptTokens = 0;
     let completionTokens = 0;
@@ -510,6 +548,8 @@ class AnthropicService extends AIProviderBase {
             );
             toolEvent.messageId = messageId;
             await this.streamingTransportManager.sendEventToSession(sessionId, toolEvent);
+          } else if (chunk.content_block?.type === "thinking") {
+            currentBlocks.set(index, { type: "thinking", inputJson: "" });
           } else if (chunk.content_block?.type === "text") {
             currentBlocks.set(index, { type: "text", inputJson: "" });
           }
@@ -520,7 +560,19 @@ class AnthropicService extends AIProviderBase {
           const block = currentBlocks.get(index);
           if (!block) break;
 
-          if (chunk.delta?.type === "text_delta") {
+          if (chunk.delta?.type === "thinking_delta" && block.type === "thinking") {
+            const delta = chunk.delta.thinking || "";
+            accumulatedReasoning += delta;
+            const event = this.createReasoningEvent(
+              accumulatedReasoning,
+              delta,
+              accumulatedReasoning.length,
+              false,
+              sessionId
+            );
+            event.messageId = messageId;
+            await this.streamingTransportManager.sendEventToSession(sessionId, event);
+          } else if (chunk.delta?.type === "text_delta") {
             const delta = chunk.delta.text || "";
             accumulatedText += delta;
             const event = this.createTokenEvent(
@@ -587,7 +639,7 @@ class AnthropicService extends AIProviderBase {
     // Send completion event
     const completionEvent = this.createCompletionEvent(
       accumulatedText,
-      { totalTokens, promptTokens, completionTokens, finishReason, model: this.modelId },
+      { totalTokens, promptTokens, completionTokens, finishReason, model: this.modelId, thinking: accumulatedReasoning || undefined },
       sessionId
     );
     completionEvent.messageId = messageId;
@@ -597,6 +649,7 @@ class AnthropicService extends AIProviderBase {
       content: accumulatedText,
       finishReason,
       toolCalls: collectedToolCalls,
+      reasoning: accumulatedReasoning || undefined,
     };
   }
 

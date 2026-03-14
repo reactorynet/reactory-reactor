@@ -38,6 +38,7 @@ import {
   StreamingEvent,
   TokenStreamingEvent,
   ToolCallStreamingEvent,
+  ReasoningStreamingEvent,
   CompletionStreamingEvent,
   ErrorStreamingEvent,
 } from "../types/streaming.types";
@@ -251,6 +252,19 @@ class OpenAIService extends AIProviderBase {
     ) as TokenStreamingEvent;
   }
 
+  private createReasoningEvent(
+    content: string,
+    delta: string,
+    position: number,
+    isComplete: boolean = false,
+    sessionId?: string,
+  ): ReasoningStreamingEvent {
+    const data: AITokenStreamingData = { content, delta, position, isComplete };
+    return this.createStreamingEvent(
+      StreamingEventType.REASONING, data, sessionId,
+    ) as ReasoningStreamingEvent;
+  }
+
   private createToolCallEvent(
     id: string,
     name: string,
@@ -354,6 +368,7 @@ class OpenAIService extends AIProviderBase {
     }
 
     let accumulatedText = "";
+    let accumulatedReasoning = "";
     const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
     let currentToolCall: { id?: string; name?: string; arguments?: string } | null = null;
     let finishReason: string | null = null;
@@ -380,6 +395,20 @@ class OpenAIService extends AIProviderBase {
           event.conversationId = sessionId;
           await this.streamingTransportManager.sendEventToSession(
             sessionId, event as TokenStreamingEvent,
+          );
+        }
+
+        // Stream reasoning/thinking tokens (OpenAI o1/o3 models)
+        const reasoningContent = (delta as any)?.reasoning_content;
+        if (reasoningContent) {
+          accumulatedReasoning += reasoningContent;
+          const event = this.createReasoningEvent(
+            reasoningContent, reasoningContent, accumulatedReasoning.length, false, sessionId,
+          );
+          event.messageId = messageId ?? "";
+          event.conversationId = sessionId;
+          await this.streamingTransportManager.sendEventToSession(
+            sessionId, event as ReasoningStreamingEvent,
           );
         }
 
@@ -478,6 +507,10 @@ class OpenAIService extends AIProviderBase {
         },
         sessionId,
       );
+      // Include accumulated reasoning in completion metadata
+      if (accumulatedReasoning) {
+        (completionEvent.data as any).thinking = accumulatedReasoning;
+      }
       completionEvent.messageId = messageId ?? "";
       completionEvent.conversationId = sessionId;
       await this.streamingTransportManager.sendEventToSession(
@@ -507,6 +540,8 @@ class OpenAIService extends AIProviderBase {
         finish_reason: finishReason || "stop",
       }],
       usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      // Carry reasoning through for persistence by the conversation service
+      reasoning: accumulatedReasoning || undefined,
     } as any;
   }
 

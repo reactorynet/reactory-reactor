@@ -2452,6 +2452,8 @@ export default class ReactorConversationService
     // Add AI response if available
     if (response?.choices && response?.choices?.length > 0) {
       const aiMessage = response.choices[0].message;
+      // Extract reasoning/thinking from provider response
+      const thinking = response.reasoning || response.__reasoning || undefined;
 
       // Use findOneAndUpdate for atomic update
       await ReactorConversationModel.findOneAndUpdate(
@@ -2463,6 +2465,7 @@ export default class ReactorConversationService
               response, // add the original response for debugging
               role: aiMessage.role,
               content: aiMessage.content,
+              thinking,
               timestamp: new Date(),
               tool_calls: aiMessage.tool_calls,
               tool_results: [],

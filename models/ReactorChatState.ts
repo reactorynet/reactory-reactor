@@ -70,6 +70,8 @@ export type ReactorConversationHistoryItem = ChatHistoryItem & {
   tool_calls?: ReactorToolCallEntry[]
   tool_results?: ReactorToolResult[]
   tool_errors?: ReactorToolError[]
+  /** Reasoning/thinking content from models with extended thinking (OpenAI o1/o3, Anthropic, Gemini) */
+  thinking?: string
 }
 
 export type ReactorConversationHistory = ReactorConversationHistoryItem[];
@@ -130,6 +132,7 @@ const ReactorConversationHistorySchema = new Schema({
   response: {},
   content: String,
   refusal: String,
+  thinking: String,
   component: String,
   rating: Number,
   role: String,

@@ -153,6 +153,12 @@ type ReactorChatMessage {
   The refusal of the message. This will be a string that contains the refusal of the component.
   """
   refusal: String
+  """
+  The reasoning/thinking content from AI models that support extended thinking
+  (e.g. OpenAI o1/o3, Anthropic Claude extended thinking, Google Gemini thinking mode).
+  Contains the model's internal chain-of-thought before producing the final response.
+  """
+  thinking: String
 }
 
 """
