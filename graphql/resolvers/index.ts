@@ -5,6 +5,7 @@ import ReactorMacro from './ReactorMacro';
 import ReactorTool from './ReactorTool';
 import ReactorSystemGraph from './ReactorSystemGraph';
 import ReactorSystem from './Platform/ReactorSystem';
+import ReactorProviders from './ReactorProviders';
 
 export default mergeGraphResolver([
   ReactorChat,
@@ -12,5 +13,6 @@ export default mergeGraphResolver([
   ReactorPersona,
   ReactorMacro,
   ReactorTool,
-  ReactorSystem
+  ReactorSystem,
+  ReactorProviders
 ]);

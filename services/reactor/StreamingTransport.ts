@@ -51,8 +51,12 @@ export class SSETransport implements StreamingTransport {
     this.response.setHeader('Content-Type', 'text/event-stream');
     this.response.setHeader('Cache-Control', 'no-cache');
     this.response.setHeader('Connection', 'keep-alive');
+    this.response.setHeader('X-Accel-Buffering', 'no');
     this.response.setHeader('Access-Control-Allow-Origin', '*');
     this.response.setHeader('Access-Control-Allow-Headers', 'Cache-Control');
+    
+    // Flush headers immediately to establish the SSE connection
+    this.response.flushHeaders();
     
     // Handle client disconnect
     this.response.on('close', () => {
@@ -84,9 +88,13 @@ export class SSETransport implements StreamingTransport {
       const eventData = JSON.stringify(event);
       const sseMessage = `event: ${event.type}\ndata: ${eventData}\n\n`;
       
-      console.log(`[SSETransport] Sending SSE event: ${event.type}`, { eventData });
       this.response.write(sseMessage);
-      console.log(`[SSETransport] SSE event sent successfully`);
+      // Flush immediately to prevent Node.js from buffering small chunks.
+      // Without this, tokens accumulate in the write buffer and the client
+      // sees the entire response arrive at once instead of streaming.
+      if (typeof (this.response as any).flush === 'function') {
+        (this.response as any).flush();
+      }
     } catch (error) {
       console.error(`[SSETransport] Error sending SSE event:`, error);
       this._isConnected = false;

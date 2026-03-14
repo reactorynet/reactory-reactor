@@ -122,45 +122,160 @@ providers:
 
   - id: xai
     name: xAI
-    endpointUrl: "${XAI_API_URL:-https://api.x.ai/v1}"
+    endpointUrl: "${XAI_API_BASE_URL:-https://api.x.ai/v1}"
     apiVersion: v1
-    defaultModel: grok-3-mini-beta
+    defaultModel: grok-4-1-fast-reasoning
     capabilities:
       - text-generation
       - code-generation
       - reasoning
+      - image-understanding
+      - image-generation
+      - video-generation
+      - speech-synthesis
     credentialRequirements:
       - apiKey
     credentialEnvVars:
-      apiKey: XAI_API_KEY
+      apiKey: X_AI_API_KEY
     models:
-      - id: grok-2-latest
-        name: Grok 2 [Latest]
-        version: "2"
+      # Language models
+      - id: grok-4.20-multi-agent-beta-0309
+        name: Grok 4.20 Multi-Agent Beta
+        version: "4.20"
         capabilities:
           - text-generation
           - code-generation
           - reasoning
-        contextLength: 131072
+          - image-understanding
+        contextLength: 2000000
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
-      - id: grok-3-mini-beta
-        name: Grok 3 Mini [Beta]
-        version: "3"
+      - id: grok-4.20-beta-0309-reasoning
+        name: Grok 4.20 Beta (Reasoning)
+        version: "4.20"
         capabilities:
           - text-generation
           - code-generation
           - reasoning
-        contextLength: 131072
+          - image-understanding
+        contextLength: 2000000
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+          - image
+      - id: grok-4.20-beta-0309-non-reasoning
+        name: Grok 4.20 Beta (Non-Reasoning)
+        version: "4.20"
+        capabilities:
+          - text-generation
+          - code-generation
+          - image-understanding
+        contextLength: 2000000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: grok-code-fast-1
+        name: Grok Code Fast 1
+        version: "1"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+        contextLength: 256000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+      - id: grok-4-1-fast-reasoning
+        name: Grok 4-1 Fast (Reasoning)
+        version: "4.1"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+        contextLength: 2000000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: grok-4-1-fast-non-reasoning
+        name: Grok 4-1 Fast (Non-Reasoning)
+        version: "4.1"
+        capabilities:
+          - text-generation
+          - code-generation
+          - image-understanding
+        contextLength: 2000000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      # Image generation models
+      - id: grok-imagine-image-pro
+        name: Grok Imagine Image Pro
+        version: "1"
+        capabilities:
+          - image-generation
+        supportsStreaming: false
+        supportedMediaTypes:
+          - text
+          - image
+      - id: grok-imagine-image
+        name: Grok Imagine Image
+        version: "1"
+        capabilities:
+          - image-generation
+        supportsStreaming: false
+        supportedMediaTypes:
+          - text
+          - image
+      # Video generation models
+      - id: grok-imagine-video
+        name: Grok Imagine Video
+        version: "1"
+        capabilities:
+          - video-generation
+        supportsStreaming: false
+        supportedMediaTypes:
+          - text
+          - image
+          - video
+      # Voice & Audio
+      - id: grok-realtime
+        name: Realtime API
+        version: "1"
+        capabilities:
+          - speech-to-text
+          - speech-synthesis
+        supportsStreaming: true
+        supportedMediaTypes:
+          - text
+          - audio
+      - id: grok-tts
+        name: Text to Speech
+        version: "1"
+        beta: true
+        capabilities:
+          - speech-synthesis
+        supportsStreaming: false
+        supportedMediaTypes:
+          - text
+          - audio
 
   - id: google
     name: Google Gemini
@@ -428,7 +543,7 @@ providers:
 
   - id: ollama
     name: Ollama
-    endpointUrl: "${OLLAMA_API_URL:-http://localhost:11434}"
+    endpointUrl: "${OLLAMA_API_BASE_URL:-http://localhost:11434}"
     apiVersion: v1
     defaultModel: llama3.2
     capabilities:
@@ -620,6 +735,15 @@ providers:
         supportsStreaming: true
         supportedMediaTypes:
           - text
+      - id: qwen3.5
+        name: Qwen 3.5 9b
+        version: "3.5"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+        supportedTools:
+          - function-calling
       - id: qwen2.5
         name: Qwen 2.5 (7B)
         version: "2.5"

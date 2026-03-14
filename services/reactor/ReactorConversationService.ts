@@ -2033,6 +2033,45 @@ export default class ReactorConversationService
         // Save message to conversation history
         let conversation;
         if (chatSessionId) {
+          // For SSE streaming on a resumed session, check that the SSE transport
+          // is connected *before* persisting the message.  If the session/transport
+          // is missing we return a ReactorInitiateSSE response so the client can
+          // establish the SSE connection first, then re-send the message.
+          if (streamingMode === "SSE") {
+            const sseSessionId = this.streamingSessionManager.getSessionId(chatSessionId);
+            const sseSession = sseSessionId
+              ? await this.streamingSessionManager.getSession(sseSessionId)
+              : null;
+            const hasTransport = sseSession
+              ? await this.streamingTransportManager.hasTransport(sseSessionId!)
+              : false;
+
+            if (!sseSessionId || !sseSession || !hasTransport) {
+              // Fetch the conversation without modifying it so we can build the SSE init response
+              const existingConversation = await ReactorConversationModel.findOne(
+                { _id: chatSessionId, user: this.context.user },
+              ).populate("user").exec();
+
+              if (!existingConversation) {
+                const errorResponse = this.createErrorResponse(
+                  ReactorErrorCode.CONVERSATION_NOT_FOUND,
+                  `Chat session with id ${chatSessionId} not found or you do not have permission to access it.`,
+                  {
+                    operation: "sendMessage",
+                    conversationId: chatSessionId,
+                    recoverable: false,
+                  },
+                );
+                throw new Error(errorResponse.message);
+              }
+
+              return this.createInitiateSSEResponse(
+                chatSessionId,
+                existingConversation as unknown as ReactorConversationDocument,
+              );
+            }
+          }
+
           this.context.debug("Finding existing conversation", {
             chatSessionId,
             userId: this.context.user?._id,
@@ -2160,27 +2199,23 @@ export default class ReactorConversationService
         // Get provider adapter
         const adapter = await this.providerService.getAdapter(provider);
 
-        if (streamingMode === 'SSE') {
-          // Use the conversation's actual ID — chatSessionId may be null if this is a new conversation
-          const conversationId = chatSessionId || conversation._id.toString();
+        // For new conversations with SSE, ensure the streaming session is set up.
+        // (Resumed sessions are checked earlier, before the message is persisted.)
+        if (streamingMode === 'SSE' && !chatSessionId) {
+          const conversationId = conversation._id.toString();
 
-          // check if the sse is connected
           let sessionId = this.streamingSessionManager.getSessionId(conversationId);
           if (!sessionId) {
-            // return initiate sse response
             return this.createInitiateSSEResponse(conversationId, conversation as unknown as ReactorConversationDocument);
           }
 
           let chatSession = await this.streamingSessionManager.getSession(sessionId);
           if (!chatSession) {
-            // return initiate sse response
             return this.createInitiateSSEResponse(conversationId, conversation as unknown as ReactorConversationDocument);
           }
 
-          // next we check if the transport is connected
           let hasTransport = await this.streamingTransportManager.hasTransport(sessionId);
           if (!hasTransport) {
-            // return initiate sse response
             return this.createInitiateSSEResponse(conversationId, conversation as unknown as ReactorConversationDocument);
           }
         }

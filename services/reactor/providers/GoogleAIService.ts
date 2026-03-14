@@ -83,16 +83,16 @@ import { StreamingTransportManager } from "../StreamingTransportManager";
   ],
 })
 class GoogleAIService extends AIProviderBase {
-  ai: GoogleGenAI.GoogleGenAI;
-  model: GoogleGenAI.Model;
-  fileService: Reactory.Service.IReactoryFileService;
-  userService: Reactory.Service.IReactoryUserService;
-  fetchService: Reactory.Service.IFetchService;
-  macroService: ReactorMacroService;
+  ai!: GoogleGenAI.GoogleGenAI;
+  model!: GoogleGenAI.Model;
+  fileService!: Reactory.Service.IReactoryFileService;
+  userService!: Reactory.Service.IReactoryUserService;
+  fetchService!: Reactory.Service.IFetchService;
+  macroService!: ReactorMacroService;
   streamingMode: StreamingMode = StreamingMode.NONE;
-  streamingSessionManager: StreamingSessionManager;
-  streamingTransportManager: StreamingTransportManager;
-  models: GoogleGenAI.Pager<GoogleGenAI.Model> = null;
+  streamingSessionManager!: StreamingSessionManager;
+  streamingTransportManager!: StreamingTransportManager;
+  models: GoogleGenAI.Pager<GoogleGenAI.Model> | null = null;
 
   constructor(props: any, context: Reactory.Server.IReactoryContext) {
     super(props, context);
@@ -764,11 +764,6 @@ class GoogleAIService extends AIProviderBase {
       result,
     };
 
-    console.log(
-      `🔧 [GoogleAIService] Creating tool call event with data:`,
-      toolData
-    );
-
     return this.createStreamingEvent(
       StreamingEventType.TOOL_CALL,
       toolData,
@@ -891,14 +886,13 @@ class GoogleAIService extends AIProviderBase {
   }): Promise<GoogleGenAI.GenerateContentResponse> {
     const { sessionId, message, persona, history, messageId } = args;
     const chat = args.chat;
+    const logTag = "GoogleAIService.handleStreamingRequest";
 
-    console.log(`🔧 [GoogleAIService] handleStreamingRequest started:`, {
-      sessionId,
-      messageLength: message.length,
-      messageId,
-      historyLength: history.length,
-      hasStreamingTransportManager: !!this.streamingTransportManager,
-    });
+    this.context.log(
+      `Streaming request started for session ${sessionId}`,
+      { messageLength: message.length, messageId, historyLength: history.length },
+      logTag,
+    );
 
     let result: GoogleGenAI.GenerateContentResponse = null;
     let accumulatedText = "";
@@ -914,23 +908,8 @@ class GoogleAIService extends AIProviderBase {
       config: persona.messageConfig,
     });
 
-    console.log(
-      `🔧 [GoogleAIService] Starting to process streaming response for session: ${sessionId}`
-    );
-
     for await (const chunk of response) {
       let event: StreamingEvent;
-
-      console.log(`🔧 [GoogleAIService] Processing chunk:`, {
-        sessionId,
-        messageId,
-        hasText: !!chunk.text,
-        hasFunctionCalls: !!(
-          chunk.functionCalls && chunk.functionCalls.length > 0
-        ),
-        textLength: chunk.text?.length || 0,
-        functionCallsCount: chunk.functionCalls?.length || 0,
-      });
 
       // Initialize result with the first chunk
       if (result === null) {
@@ -947,22 +926,19 @@ class GoogleAIService extends AIProviderBase {
           false,
           sessionId
         );
-        event.messageId = messageId;
-        event.conversationId = sessionId; // Add conversationId field
-        console.log(
-          `🔧 [GoogleAIService] Sending token event for sessionId: ${sessionId}, text: "${chunk.text}"`
-        );
+        event.messageId = messageId ?? "";
+        event.conversationId = sessionId;
 
         try {
           await this.streamingTransportManager.sendEventToSession(
             sessionId,
             event as TokenStreamingEvent
           );
-          console.log(`✅ [GoogleAIService] Token event sent successfully`);
         } catch (error) {
-          console.error(
-            `❌ [GoogleAIService] Failed to send token event:`,
-            error
+          this.context.error(
+            `Failed to send token event for session ${sessionId}`,
+            { error },
+            logTag,
           );
           throw error;
         }
@@ -970,18 +946,7 @@ class GoogleAIService extends AIProviderBase {
 
       // Handle function calls
       if (chunk.functionCalls && chunk.functionCalls.length > 0) {
-        console.log(`🔧 [GoogleAIService] Processing function calls:`, {
-          sessionId,
-          messageId,
-          functionCallsCount: chunk.functionCalls.length,
-          functionCalls: chunk.functionCalls.map((fc) => ({
-            id: fc.id,
-            name: fc.name,
-          })),
-        });
-
         for (const functionCall of chunk.functionCalls) {
-          // Generate a unique ID for the function call since Google doesn't provide one
           const functionCallId = functionCall.id || new ObjectId().toString();
 
           // Check if we already have this function call
@@ -989,29 +954,20 @@ class GoogleAIService extends AIProviderBase {
             (fc) => fc.id === functionCallId
           );
           if (existingCallIndex >= 0) {
-            // Update existing function call
             accumulatedFunctionCalls[existingCallIndex] = {
               ...accumulatedFunctionCalls[existingCallIndex],
               ...functionCall,
-              id: functionCallId, // Ensure the ID is set
+              id: functionCallId,
             };
-            console.log(
-              `🔧 [GoogleAIService] Updated existing function call: ${functionCall.name}`
-            );
           } else {
-            // Add new function call with generated ID
             accumulatedFunctionCalls.push({
               ...functionCall,
-              id: functionCallId, // Ensure the ID is set
+              id: functionCallId,
             });
-            console.log(
-              `🔧 [GoogleAIService] Added new function call: ${functionCall.name} with ID: ${functionCallId}`
-            );
           }
 
           // Only send tool_call events to the client in PROMPT mode.
-          // In AUTO mode, the server will execute tools directly — no need
-          // to round-trip through the client.
+          // In AUTO mode, the server will execute tools directly.
           const toolApprovalMode = this.chatState?.toolApprovalMode;
           if (toolApprovalMode !== ToolApprovalMode.AUTO) {
             event = this.createToolCallEvent(
@@ -1022,31 +978,22 @@ class GoogleAIService extends AIProviderBase {
               undefined,
               sessionId
             );
-            event.messageId = messageId;
+            event.messageId = messageId ?? "";
             event.conversationId = sessionId;
 
             try {
-              console.log(
-                `🔧 [GoogleAIService] Sending tool call event for sessionId: ${sessionId}, function: ${functionCall.name}`
-              );
               await this.streamingTransportManager.sendEventToSession(
                 sessionId,
                 event as ToolCallStreamingEvent
               );
-              console.log(
-                `✅ [GoogleAIService] Tool call event sent successfully for function: ${functionCall.name}`
-              );
             } catch (error) {
-              console.error(
-                `❌ [GoogleAIService] Failed to send tool call event:`,
-                error
+              this.context.error(
+                `Failed to send tool call event for ${functionCall.name}`,
+                { error, sessionId },
+                logTag,
               );
               throw error;
             }
-          } else {
-            console.log(
-              `🔧 [GoogleAIService] AUTO mode — suppressing tool_call event for ${functionCall.name}, server will execute`
-            );
           }
         }
       }
@@ -1054,12 +1001,8 @@ class GoogleAIService extends AIProviderBase {
       // Handle candidates and metadata
       if (chunk.candidates && chunk.candidates.length > 0) {
         for (const candidate of chunk.candidates) {
-          // Update finish reason if present
           if (candidate.finishReason) {
             finishReason = candidate.finishReason;
-            console.log(
-              `🔧 [GoogleAIService] Updated finish reason: ${finishReason}`
-            );
           }
         }
       }
@@ -1067,19 +1010,13 @@ class GoogleAIService extends AIProviderBase {
 
     // In AUTO mode with pending tool calls, defer the completion event —
     // the server-side tool execution loop in ReactorConversationService will
-    // send the final completion event after all tools have executed and the
-    // final AI response is ready. This keeps the client in streaming state.
+    // send the final completion event after all tools have executed.
     const toolApprovalMode = this.chatState?.toolApprovalMode;
     const hasPendingAutoToolCalls =
       toolApprovalMode === ToolApprovalMode.AUTO &&
       accumulatedFunctionCalls.length > 0;
 
     if (!hasPendingAutoToolCalls) {
-      console.log(
-        `🔧 [GoogleAIService] Streaming completed, sending completion event for session: ${sessionId}`
-      );
-
-      // Send completion event
       const completionEvent = this.createCompletionEvent(
         accumulatedText,
         {
@@ -1091,69 +1028,76 @@ class GoogleAIService extends AIProviderBase {
         },
         sessionId
       );
-      completionEvent.messageId = messageId;
+      completionEvent.messageId = messageId ?? "";
       completionEvent.conversationId = sessionId;
-
-      console.log(`🔧 [GoogleAIService] Sending completion event:`, {
-        sessionId,
-        messageId,
-        eventType: completionEvent.type,
-        eventData: completionEvent.data,
-        textLength: accumulatedText.length,
-      });
 
       try {
         await this.streamingTransportManager.sendEventToSession(
           sessionId,
           completionEvent
         );
-        console.log(`✅ [GoogleAIService] Completion event sent successfully`);
       } catch (error) {
-        console.error(
-          `❌ [GoogleAIService] Failed to send completion event:`,
-          error
+        this.context.error(
+          `Failed to send completion event for session ${sessionId}`,
+          { error },
+          logTag,
         );
         throw error;
       }
-    } else {
-      console.log(
-        `🔧 [GoogleAIService] AUTO mode with ${accumulatedFunctionCalls.length} tool call(s) — deferring completion event to server-side tool loop`
-      );
     }
 
     // Update the result with accumulated data
     if (result && result.candidates && result.candidates.length > 0) {
-      // Update the first candidate with accumulated content
       const candidate = result.candidates[0];
 
-      // Update content parts
       if (candidate.content && candidate.content.parts) {
-        // Clear existing parts and add accumulated text
         candidate.content.parts = [];
         if (accumulatedText) {
           candidate.content.parts.push({ text: accumulatedText });
         }
 
-        // Add function calls if any
         for (const functionCall of accumulatedFunctionCalls) {
           candidate.content.parts.push({ functionCall });
         }
       }
 
-      // Update finish reason
       candidate.finishReason = finishReason;
-
-      console.log(`🔧 [GoogleAIService] Final result updated:`, {
-        sessionId,
-        messageId,
-        hasText: !!accumulatedText,
-        textLength: accumulatedText.length,
-        functionCallsCount: accumulatedFunctionCalls.length,
-        finishReason,
-      });
     }
 
     return result;
+  }
+
+  /**
+   * Build a normalized AIChatCompletion from extracted Gemini response data.
+   */
+  private buildCompletion(
+    responseText: string,
+    functionCalls: any[],
+    finishReason: string = "stop",
+  ): AIChatCompletion {
+    return {
+      id: new ObjectId(),
+      object: "chat.completion",
+      choices: [{
+        index: 0,
+        message: {
+          content: responseText,
+          role: "assistant",
+          tool_calls: functionCalls && functionCalls.length > 0
+            ? functionCalls.map((func) => ({
+                id: new ObjectId().toString(),
+                type: "function",
+                function: {
+                  name: func.name,
+                  arguments: func.args,
+                },
+              }))
+            : [],
+        },
+        finish_reason: finishReason,
+      }],
+      created: new Date(),
+    };
   }
 
   private async getAIResponse(
@@ -1203,36 +1147,7 @@ class GoogleAIService extends AIProviderBase {
         const { responseText, functionCalls } =
           this.extractGeminiCandidate(candidate);
 
-        // Format response similar to OpenAI for compatibility
-        const completion: AIChatCompletion = {
-          id: new ObjectId(),
-          object: "chat.completion",
-          choices: [
-            {
-              index: 0,
-              message: {
-                content: responseText,
-                role: "assistant",
-                tool_calls: functionCalls
-                  ? [
-                      ...functionCalls.map((func) => ({
-                        id: new ObjectId().toString(),
-                        type: "function",
-                        function: {
-                          name: func.name,
-                          arguments: func.args,
-                        },
-                      })),
-                    ]
-                  : [],
-              },
-              finish_reason: "stop",
-            },
-          ],
-          created: new Date(),
-        };
-
-        return completion;
+        return this.buildCompletion(responseText, functionCalls);
       }
 
       // Handle user messages
@@ -1330,36 +1245,7 @@ class GoogleAIService extends AIProviderBase {
           // Add user message to history
           this.chatState.history.push(userConversationHistoryItem);
 
-          // Format response similar to OpenAI for compatibility
-          const completion: AIChatCompletion = {
-            id: new ObjectId(),
-            object: "chat.completion",
-            choices: [
-              {
-                index: 0,
-                message: {
-                  content: responseText,
-                  role: "assistant",
-                  tool_calls: functionCalls
-                    ? [
-                        ...functionCalls.map((func) => ({
-                          id: new ObjectId().toString(),
-                          type: "function",
-                          function: {
-                            name: func.name,
-                            arguments: func.args,
-                          },
-                        })),
-                      ]
-                    : [],
-                },
-                finish_reason: "stop",
-              },
-            ],
-            created: new Date(),
-          };
-
-          return completion;
+          return this.buildCompletion(responseText, functionCalls);
         } catch (extractError) {
           this.context.error(
             `Error extracting Gemini candidate: ${extractError.message}`,
@@ -1378,23 +1264,10 @@ class GoogleAIService extends AIProviderBase {
 
           this.chatState.history.push(userConversationHistoryItem);
 
-          return {
-            id: new ObjectId(),
-            object: "chat.completion",
-            choices: [
-              {
-                index: 0,
-                message: {
-                  content:
-                    "I encountered an issue processing the response. Let me try to help you in a different way.",
-                  role: "assistant",
-                  tool_calls: [],
-                },
-                finish_reason: "stop",
-              },
-            ],
-            created: new Date(),
-          };
+          return this.buildCompletion(
+            "I encountered an issue processing the response. Let me try to help you in a different way.",
+            [],
+          );
         }
       }
 
@@ -1410,22 +1283,7 @@ class GoogleAIService extends AIProviderBase {
       this.chatState.history.push(historyItem);
 
       // Return empty completion for non-user/tool messages
-      return {
-        id: new ObjectId(),
-        object: "chat.completion",
-        choices: [
-          {
-            index: 0,
-            message: {
-              content: "",
-              role: "assistant",
-              tool_calls: [],
-            },
-            finish_reason: "stop",
-          },
-        ],
-        created: new Date(),
-      };
+      return this.buildCompletion("", []);
     } catch (error) {
       this.context.error(
         `Error in getAIResponse: ${error.message ?? error.toString()}`,
@@ -1539,8 +1397,14 @@ class GoogleAIService extends AIProviderBase {
       }
     }
 
-    // If no content was extracted, provide a fallback
+    // If no content was extracted, check if this is a valid terminal response
     if (functionCalls.length === 0 && !responseText.trim()) {
+      // A STOP finish reason with empty text is valid — the model is done
+      // (e.g. after processing tool results with nothing more to say)
+      if (candidate.finishReason === "STOP") {
+        return { responseText: "", functionCalls: [] };
+      }
+
       this.context.warn(
         "No text or function call found in Gemini candidate response - will retry",
         { candidate },

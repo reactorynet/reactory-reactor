@@ -1,506 +1,168 @@
 import Reactory from "@reactorynet/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
-import IOpenAIService, { AIStreamingCapabilities, AIStreamingEvent, AudioChatParams, ChatParams, CreateFineTuningJobParams, FineTuningEvent, FineTuningObjectJob, IAIPersona, IAIPersonaPromptTemplate, ImageExtensionParams, ImageGenerationParams, IOpenAIServiceProps, ListFineTuningJobParams, OpenAIFile, OpenAIImage, OpenAIListResponse, OpenAIModel } from "../../../types/service.types";
+import {
+  AIStreamingCapabilities,
+  AIStreamingEvent,
+  AITokenStreamingData,
+  AIToolCallStreamingData,
+  AIErrorStreamingData,
+  AICompletionStreamingData,
+  IAIPersona,
+  IOpenAIServiceProps,
+} from "../../../types/service.types";
+import {
+  AIChatParams,
+  AIChatCompletion,
+} from "../../../types/model.types";
 import OpenAI, { ClientOptions } from "openai";
 import AIPersonaProvider from "../AIPersonaProvider";
-import { 
-  ChatState, 
-  MacroComponentDefinition, 
-  MacroToolDefinition, 
-  ToolApprovalMode 
-} from "../../../ai/openai/types/chat";
-import { 
-  ChatCompletionMessageParam, 
-  ChatCompletionTool, 
-  CompletionChoice 
-} from "openai/resources";
-import Mongoose from "mongoose";
-import ReactorConversationModel, { TReactorConversationModel } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
-
+import AIProviderBase from "./AIProviderBase";
+import { AIProviderError } from "./AIProviderError";
 import {
-  handleUserResponse,
-  handleChatCompletionResponse,
-  MacroRegistry,
-  handleCommandAction,
-} from "@reactory/server-modules/reactory-reactor/ai/macro";
+  MacroComponentDefinition,
+  MacroToolDefinition,
+  ToolApprovalMode,
+} from "../../../ai/openai/types/chat";
+import {
+  ChatCompletionMessageParam,
+  ChatCompletionTool,
+} from "openai/resources";
+import { ObjectId } from "mongodb";
+import {
+  ReactorConversationHistoryItem,
+} from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import ReactorMacroService from "./ReactorMacroService";
-import { StreamingMode } from "../types/streaming.types";
+import {
+  StreamingMode,
+  StreamingEventType,
+  StreamingEvent,
+  TokenStreamingEvent,
+  ToolCallStreamingEvent,
+  CompletionStreamingEvent,
+  ErrorStreamingEvent,
+} from "../types/streaming.types";
+import { StreamingSessionManager } from "../StreamingSessionManager";
+import { StreamingTransportManager } from "../StreamingTransportManager";
 
 
 @service({
   id: "reactor.OpenAIService@1.0.0",
   name: "OpenAI Service",
   nameSpace: "reactor",
-  description: "Service for managing OpenAI API requests",
-  serviceType:  "ai",
+  description: "Service for managing OpenAI-compatible API requests (OpenAI, xAI, Ollama)",
+  serviceType: "ai",
   dependencies: [
     { id: "core.ReactoryFileService@1.0.0", alias: "fileService" },
     { id: "core.UserService@1.0.0", alias: "userService" },
     { id: "core.FetchService@1.0.0", alias: "fetchService" },
     { id: "reactor.AIPersonaProvider@1.0.0", alias: "personaProvider" },
-    { id: "reactor.ReactorMacroService@1.0.0", alias: "macroService" },  
+    { id: "reactor.ReactorMacroService@1.0.0", alias: "macroService" },
+    { id: "reactor.StreamingTransportManager@1.0.0", alias: "streamingTransportManager" },
+    { id: "reactor.StreamingSessionManager@1.0.0", alias: "streamingSessionManager" },
   ],
 })
-class OpenAIService implements IOpenAIService {
-  
-  context: Reactory.Server.IReactoryContext;
-  props: IOpenAIServiceProps;
-  ai: OpenAI;
-  fileService: Reactory.Service.IReactoryFileService;
-  userService: Reactory.Service.IReactoryUserService;
-  fetchService: Reactory.Service.IFetchService;
-  personaProvider: AIPersonaProvider;
-  macroService: ReactorMacroService;
-  // keep a local copy of the chat state model
-  // for the duration of the service to reduce 
-  // the number of calls to the database to load 
-  // the chat state model
-  chatStateModel: Mongoose.Document;
-  // chat state object used by the service during the
-  // lifecycle of the service
-  chatState: ChatState;
-  // the streaming mode for the service
-  // if streamingMode is NONE then the service will not stream
-  // if streamingMode is SSE then the service will stream using SSE as the transport
-  streamingMode: StreamingMode = StreamingMode.NONE;
+class OpenAIService extends AIProviderBase {
 
-  constructor(props: IOpenAIServiceProps, 
-    context: Reactory.Server.IReactoryContext) {
-    this.context = context;
-    this.props = props;
+  ai!: OpenAI;
+  fileService!: Reactory.Service.IReactoryFileService;
+  userService!: Reactory.Service.IReactoryUserService;
+  fetchService!: Reactory.Service.IFetchService;
+  macroService!: ReactorMacroService;
+  streamingMode: StreamingMode = StreamingMode.NONE;
+  streamingSessionManager!: StreamingSessionManager;
+  streamingTransportManager!: StreamingTransportManager;
+
+  constructor(props: IOpenAIServiceProps, context: Reactory.Server.IReactoryContext) {
+    super(props, context);
     this.streamingMode = props.streamingMode || StreamingMode.NONE;
   }
 
-    /**
+  /**
    * Get streaming capabilities for this provider
    */
-    async getStreamingCapabilities(): Promise<AIStreamingCapabilities> {
-      return {
-        supportsTokenStreaming: true,
-        supportsToolStreaming: true,
-        supportsFunctionStreaming: true,
-        maxConcurrentStreams: 10,
-        supportedFormats: ['json', 'text', 'sse']
-      };
-    }
-
-  /**
-   * Persists the chat state to the database
-   * @param state 
-   */
-  private async persistChatState(): Promise<void> {
-    const { history, personaId, modelId, started, context, id, sseSession, persona, vars } = this.chatState;
-    const { user } = context;
-    const meta = {
-      summary: "Chat session with Reactor",
-      title: `Chat session with Reactor`,
+  async getStreamingCapabilities(): Promise<AIStreamingCapabilities> {
+    return {
+      supportsTokenStreaming: true,
+      supportsToolStreaming: true,
+      supportsFunctionStreaming: true,
+      maxConcurrentStreams: 10,
+      supportedFormats: ['json', 'text', 'sse'],
     };
-
-    try {
-      let nextStateModel = null;
-      if (this.chatStateModel !== null && this.chatStateModel._id.toString() === id &&
-        this.chatStateModel.user._id.toString() === user._id.toString()) {
-        nextStateModel = this.chatStateModel;
-      }
-      if (!nextStateModel) {
-        nextStateModel = new ReactorConversationModel({
-          _id: id,
-          id,
-          personaId,
-          modelId,
-          started,
-          history,
-          sseSessionId: sseSession,
-          user,
-          vars,
-          created: new Date(),
-          updated: new Date(),
-          meta
-        });
-        await nextStateModel.save();
-      } else {
-        // check if the user matches the one in the chat state
-        if (nextStateModel.user && nextStateModel.user._id.toString() !== user._id.toString()) {
-          // throw an error if the user does not match
-          throw new Error(`User ${user._id.toString()} does not match chat state user ${nextStateModel.user._id.toString()}`);
-        } else {
-          nextStateModel.history = history;
-          nextStateModel.updated = new Date();
-          nextStateModel.sseSessionId = sseSession;
-          await nextStateModel.save();
-        }
-
-        this.chatStateModel = nextStateModel;
-
-      }
-    } catch (error) {
-      this.context.error(
-        `Error persisting chat state: ${error.message || error.toString()}`,
-        { error },
-        'OpenAIService.persistChatState'
-      );
-      throw new Error('Failed to persist chat state');
-    }
   }
 
   /**
-   * Loads a chat state from the database or creates a new one if it doesn't exist
-   * @param chatSessionId Optional chat session ID
-   * @returns Boolean indicating if this is a new chat session
+   * Initialize the OpenAI-compatible client based on providerId.
+   * Supports OpenAI, xAI, and Ollama endpoints.
    */
-  private async loadChatState(chatSessionId?: string): Promise<boolean> {
-    const { context } = this;
-    
-    // Generate a new ID if none provided
-    if (!chatSessionId) {
-      chatSessionId = new Mongoose.Types.ObjectId().toString();
-      this.chatStateModel = null;
-      return true; // This is a new chat session
-    }
-    
-    try {
-      // Load existing chat session
-      const chatSession = await ReactorConversationModel.findById(chatSessionId).populate("files");
-      
-      if (!chatSession) {
-        // Chat session ID was provided but not found
-        this.chatStateModel = null;
-        return true;
-      }
-      
-      // Verify ownership of the chat session
-      if (chatSession.user && chatSession.user._id.toString() !== context.user._id.toString()) {
-        throw new Error(`Chat session ${chatSessionId} does not belong to user ${context.user._id.toString()}`);
-      }
-      
-      // Set the chat state model
-      // @ts-ignore
-      this.chatStateModel = chatSession;
-      
-      // Set the chat state from the model
-      this.chatState = {
-        id: chatSession._id.toString(),
-        user: context.user,
-        modelId: chatSession.modelId,
-        started: chatSession.started,
-        history: chatSession.history,
-        apiKey: process.env.OPENAI_API_KEY || "",
-        apiOrg: process.env.OPENAI_ORG || "",
-        ai: this.ai,
-        personaId: chatSession.personaId,
-        persona: this.personaProvider?.getPersona(chatSession.personaId),
-        macros: MacroRegistry,
-        vars: chatSession.vars || {},
-        files: chatSession.files || [],
-        sseSession: chatSession.sseSessionId,
-        toolApprovalMode: (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
-      };
-      
-      return this.chatState.history?.length > 0;
-    } catch (error) {
-      if (error.message.includes('does not belong to user')) {
-        throw error; // Rethrow ownership errors
-      }
-      
-      this.context.error(
-        `Error loading chat state: ${error.message || error.toString()}`,
-        { error, chatSessionId },
-        'OpenAIService.loadChatState'
-      );
-      
-      // Fall back to creating a new session
-      this.chatStateModel = null;
-      return true;
-    }
-  }
+  protected async initializeClient(persona: IAIPersona): Promise<void> {
+    const { apiKey, apiOrganizationId, apiBaseURL } = this.props;
+    const { providerId } = persona;
 
-  public async initialize(chatSessionId: string, persona: IAIPersona) {
-    // Set up OpenAI client
-    const {
-      apiKey,
-      apiOrganizationId,
-      apiBaseURL,
-    } = this.props;
-    
     const openAIArgs: ClientOptions = {
-      apiKey: `${apiKey || process.env.OPENAI_API_KEY}`,
+      apiKey: apiKey || process.env.OPENAI_API_KEY,
       organization: apiOrganizationId,
-      baseURL: `${apiBaseURL || process.env.OPENAI_API_BASE_URL}`
+      baseURL: apiBaseURL || process.env.OPENAI_API_BASE_URL,
     };
 
-    // Apply any provider-specific configuration
-    if (openAIArgs.baseURL.indexOf("x.ai") > -1) {
-      delete openAIArgs.organization;
+    switch (providerId) {
+      case "xai":
+        openAIArgs.baseURL = apiBaseURL || process.env.XAI_API_BASE_URL || "https://api.x.ai/v1";
+        openAIArgs.apiKey = apiKey || process.env.X_AI_API_KEY;
+        delete openAIArgs.organization;
+        break;
+      case "ollama":
+        openAIArgs.baseURL = apiBaseURL || process.env.OLLAMA_API_BASE_URL || "http://localhost:11434/v1";
+        openAIArgs.apiKey = "";
+        openAIArgs.organization = "";
+        break;
     }
-    
-    // Apply persona-specific configuration if available
+
+    // Apply persona-specific configuration overrides
     if (persona.config) {
       if (persona.config.apiKey) openAIArgs.apiKey = persona.config.apiKey;
       if (persona.config.apiOrg) openAIArgs.organization = persona.config.apiOrg;
       if (persona.config.apiBaseURL) openAIArgs.baseURL = persona.config.apiBaseURL;
     }
-    
-    // Initialize OpenAI client
+
     this.ai = new OpenAI(openAIArgs);
-
-    // Load or create chat state
-    const isNewSession = await this.loadChatState(chatSessionId);
-    
-    // For new sessions, initialize with system prompt
-    if (isNewSession) {
-      // Validate persona has system prompt
-      if (!persona.prompts || !persona.prompts["system"]) {
-        throw new Error("Persona does not have a system prompt");
-      }
-      
-      // Create system prompt message
-      const promptTemplate: IAIPersonaPromptTemplate = persona.prompts["system"];
-      const SYSTEM_INITIALIZER_MESSAGE: any = {
-        role: "system",
-        content: this.context.utils.lodash.template(promptTemplate.content)({
-          persona: persona,
-          tools: persona.tools,
-          macros: persona.macros,
-          user: {
-            id: this.context.user.id, 
-            fullName: this.context.user.fullName(false),
-            firstName: this.context.user.firstName,
-            lastName: this.context.user.lastName,
-          },
-        }),
-      };
-      
-      // Set model ID
-      const modelId = persona.modelId || process.env.OPENAI_MODEL_ID;
-      if (!modelId) {
-        throw new Error("Model ID is not set, set config for the environment or for the persona");
-      }
-      
-      // Initialize new chat state
-      this.chatState = {
-        id: chatSessionId,
-        user: this.context.user,
-        modelId,
-        started: new Date(),
-        history: [SYSTEM_INITIALIZER_MESSAGE],
-        apiKey: process.env.OPENAI_API_KEY || "",
-        apiOrg: process.env.OPENAI_ORG || "",
-        ai: this.ai,
-        personaId: persona.id,
-        persona,
-        macros: MacroRegistry,
-        vars: {},
-        toolApprovalMode: (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
-      };
-    }
   }
 
-  async chatAudio(params: AudioChatParams): Promise<any> {
-    const speechService = this.getSpeechService();
-    if (!speechService) {
-      throw new Error("SpeechService is not available. Ensure the reactory-speech module is loaded.");
-    }
-
-    const audioBuffer = typeof params.audio === 'string'
-      ? Buffer.from(params.audio, 'base64')
-      : Buffer.concat(params.audio);
-
-    const transcription = await speechService.transcribe(audioBuffer);
-
-    // Delegate to regular chat with transcribed text
-    const chatResult = await this.chat({
-      ...params,
-      message: transcription.text,
-    });
-
-    return chatResult;
-  }
-
-  async speech2Text(audio: string | Buffer[]): Promise<string> {
-    const speechService = this.getSpeechService();
-    if (!speechService) {
-      throw new Error("SpeechService is not available. Ensure the reactory-speech module is loaded.");
-    }
-
-    const audioBuffer = typeof audio === 'string'
-      ? Buffer.from(audio, 'base64')
-      : Buffer.concat(audio);
-
-    const result = await speechService.transcribe(audioBuffer);
-    return result.text;
-  }
-
-  private getSpeechService(): any | null {
-    try {
-      return this.context.getService('speech.SpeechService@1.0.0');
-    } catch {
-      return null;
-    }
-  }
-
-  createFineTuningJob(params: CreateFineTuningJobParams): Promise<FineTuningObjectJob> {
-    throw new Error("Method not implemented.");
-  }
-  listFineTuningJobs(params: ListFineTuningJobParams): Promise<FineTuningObjectJob[]> {
-    throw new Error("Method not implemented.");
-  }
-  getFineTuningJob(jobId: string): Promise<FineTuningObjectJob> {
-    throw new Error("Method not implemented.");
-  }
-  cancelFineTuningJob(jobId: string): Promise<FineTuningObjectJob> {
-    throw new Error("Method not implemented.");
-  }
-  listFineTuningEvents(jobId: string): Promise<FineTuningEvent[]> {
-    throw new Error("Method not implemented.");
-  }
-  listFiles(): Promise<OpenAIFile[]> {
-    throw new Error("Method not implemented.");
-  }
-  uploadFile(filename: string, purpose: string): Promise<OpenAIFile> {
-    throw new Error("Method not implemented.");
-  }
-  deleteFile(fileId: string): Promise<OpenAIFile> {
-    throw new Error("Method not implemented.");
-  }
-  getFile(fileId: string): Promise<OpenAIFile> {
-    throw new Error("Method not implemented.");
-  }
-  getFileContents(fileId: string): Promise<string> {
-    throw new Error("Method not implemented.");
-  }
-  generateImage(params: ImageGenerationParams): Promise<OpenAIListResponse<OpenAIImage>> {
-    throw new Error("Method not implemented.");
-  }
-  extendImage(params: ImageExtensionParams): Promise<OpenAIListResponse<OpenAIImage>> {
-    throw new Error("Method not implemented.");
-  }
-  listModels(): Promise<OpenAIListResponse<OpenAIModel>> {
-    throw new Error("Method not implemented.");
-  }
-
-
-  /**
-   * This is a placeholder function to handle the selection of choices from a list of responses.
-   */
-  async makeSelectionFromChoices(choices: OpenAI.Chat.ChatCompletion.Choice[], state: ChatState): Promise<number> {
-    
-    // use the SSE client connetion to send
-    // the choices to the user and wait for a response
-    const choicesString = choices.map((choice, index) => `${index + 1}: ${choice.message.content}`).join("\n");
-    
-    const result = await state.sseSession.send({
-      type: "choices",
-      data: {
-        choices: choicesString,
-        message: "Please select a choice by number:"
-      }
-    });
-
-    if(result.type === "choices") { 
-      const choiceIndex = parseInt(result.data);
-      return choiceIndex - 1;
-    } else {
-      return 0;
-    }
-  }
-
-
-  /**
-   * This function will handle the completion response from the openai api
-   * @param response 
-   * @param prompt 
-   * @param state 
-   * @returns 
-   */
-  async handleChatCompletionResponse(
-    response: OpenAI.Chat.Completions.ChatCompletion, 
-    prompt: OpenAI.ChatCompletionCreateParams,
-    state: ChatState
-    ): Promise<OpenAI.Chat.Completions.ChatCompletion.Choice & { __index: number }> {
-  
-    // Clone the response to avoid mutating the original object
-    const cloned: OpenAI.Chat.Completions.ChatCompletion = JSON.parse(JSON.stringify(response));
-    // first we check if there is a macro block definition
-    // which is recognise by the characters ```rfm as the start of the block and ``` as the end of the block
-    // const macroBlockRegex = /```rfm([\s\S]*?)```/g;
-    let choice_index = 0;  
-    // if there is more than one choice we need display a short summary of each choice
-    // and then ask the user to select one of the choices to display the full text  
-    if(cloned.choices.length > 1) { 
-      let validChoice = false;
-      while(!validChoice) { 
-        choice_index = await this.makeSelectionFromChoices(cloned.choices, state);
-        if(choice_index > 0 && choice_index <= cloned.choices.length) { 
-          validChoice = true;
-        } else {
-          state.rl.write(`Invalid choice, please select a number between 1 and ${cloned.choices.length}\n`);
-        }
-      }    
-    }
-  
-    return { 
-      ...cloned.choices[choice_index],
-      __index: choice_index
-    };
-  }
-
-  private getMacroRegistry(): MacroComponentDefinition<unknown>[] {
-    // convert the macro registry to a list of tools
-    const { hasRole } = this.context;
-    const macros: MacroComponentDefinition<unknown>[] = [];
-    const { context } = this;
-    MacroRegistry.forEach((macro: MacroComponentDefinition<unknown>) => {
-      let hasAccess = false;
-      if (macro.roles && macro.roles.length > 0) { 
-        hasAccess = context.hasAnyRole(macro.roles);
-        if (hasAccess === false) {
-          return;
-        }
-      } 
-      else hasAccess = true;
-      if (macro.tools && hasAccess === true) {
-        macros.push(macro);
-      }
-    });
-  
-    return macros;
-  }
+  // --- Tool definitions ---
 
   private async getToolsDefinitions(): Promise<ChatCompletionTool[]> {
-    // convert the macro registry to a list of tools    
-    const tools: any[] = [];
+    const tools: ChatCompletionTool[] = [];
     const macros = await this.macroService.listMacrosForPersona(this.chatState.personaId);
-    
-    macros.forEach((macro: MacroComponentDefinition<unknown>) => {      
+
+    macros.forEach((macro: MacroComponentDefinition<unknown>) => {
       if (macro.tools) {
         macro.tools.forEach((tool: MacroToolDefinition) => {
           if (tool.type === "function") {
             const { function: func } = tool;
-            const toolDefinition = {
+            tools.push({
               type: "function",
               function: {
                 name: func.name,
                 description: func.description || "",
-                parameters: func.parameters,
-              }
-            };
-            tools.push(toolDefinition);
+                parameters: func.parameters as Record<string, unknown>,
+              },
+            });
           }
         });
       }
     });
-  
+
     return tools;
   }
 
-  private async createPrompt(    
-    message: string,    
-  ): Promise<OpenAI.Chat.Completions.ChatCompletionCreateParams> {
+  // --- Prompt building ---
 
+  private async createPrompt(
+    message: string,
+  ): Promise<OpenAI.Chat.Completions.ChatCompletionCreateParams> {
     const { chatState } = this;
     const { history, modelId } = chatState;
 
-    let messages: ChatCompletionMessageParam[] = [];
+    const messages: ChatCompletionMessageParam[] = [];
 
     history.forEach((msg) => {
       if (!msg) return;
@@ -558,191 +220,500 @@ class OpenAIService implements IOpenAIService {
       role: "user",
       content: message,
     });
-  
+
     const tools = await this.getToolsDefinitions();
     if (tools.length > 0) {
       return {
         model: modelId,
-        messages: messages,
-        tools: tools,
+        messages,
+        tools,
         tool_choice: "auto",
       };
-    } else {
-      return {
-        model: modelId,
-        messages: messages,
-      };
     }
+    return {
+      model: modelId,
+      messages,
+    };
   }
 
-    /**
-   * Create a streaming event with proper structure
+  // --- Streaming event helpers ---
+
+  private createTokenEvent(
+    content: string,
+    delta: string,
+    position: number,
+    isComplete: boolean = false,
+    sessionId?: string,
+  ): TokenStreamingEvent {
+    const tokenData: AITokenStreamingData = { content, delta, position, isComplete };
+    return this.createStreamingEvent(
+      StreamingEventType.TOKEN, tokenData, sessionId,
+    ) as TokenStreamingEvent;
+  }
+
+  private createToolCallEvent(
+    id: string,
+    name: string,
+    toolArguments: string,
+    isComplete: boolean = false,
+    result?: any,
+    sessionId?: string,
+  ): ToolCallStreamingEvent {
+    const toolCallId = id || new ObjectId().toString();
+    const toolData: AIToolCallStreamingData = {
+      id: toolCallId, name, arguments: toolArguments, isComplete, result,
+    };
+    return this.createStreamingEvent(
+      StreamingEventType.TOOL_CALL, toolData, sessionId,
+    ) as ToolCallStreamingEvent;
+  }
+
+  private createErrorEvent(
+    code: string,
+    message: string,
+    details?: any,
+    sessionId?: string,
+  ): ErrorStreamingEvent {
+    const errorData: AIErrorStreamingData = { code, message, details };
+    return this.createStreamingEvent(
+      StreamingEventType.ERROR, errorData, sessionId,
+    ) as ErrorStreamingEvent;
+  }
+
+  private createCompletionEvent(
+    content: string,
+    metadata: {
+      totalTokens: number;
+      promptTokens: number;
+      completionTokens: number;
+      finishReason: string;
+      model: string;
+    },
+    sessionId?: string,
+  ): CompletionStreamingEvent {
+    const completionData: AICompletionStreamingData = { content, metadata };
+    return this.createStreamingEvent(
+      StreamingEventType.COMPLETE, completionData, sessionId,
+    ) as CompletionStreamingEvent;
+  }
+
+  private createStreamingEvent(
+    type: StreamingEventType,
+    data: any,
+    sessionId?: string,
+    conversationId?: string,
+    messageId?: string,
+  ): StreamingEvent {
+    return {
+      type,
+      timestamp: new Date(),
+      sessionId: sessionId ?? "",
+      conversationId: conversationId ?? "",
+      messageId: messageId ?? "",
+      data,
+    };
+  }
+
+  // --- Streaming request handling ---
+
+  /**
+   * Handles a streaming AI request using the StreamingTransportManager,
+   * sending token, tool_call, and completion events to the client.
    */
-    private createStreamingEvent(type: AIStreamingEvent['type'], data: any): AIStreamingEvent {
-      return {
-        type,
-        data,
-        timestamp: new Date(),
-        sessionId: this.chatState?.sseSession || 'unknown'
-      };
+  private async handleStreamingRequest(args: {
+    sessionId: string;
+    prompt: OpenAI.Chat.Completions.ChatCompletionCreateParams;
+    messageId?: string;
+  }): Promise<OpenAI.Chat.Completions.ChatCompletion> {
+    const { sessionId, prompt, messageId } = args;
+
+    let stream: Awaited<ReturnType<typeof this.ai.chat.completions.create>>;
+    try {
+      stream = await this.ai.chat.completions.create({ ...prompt, stream: true });
+    } catch (error: any) {
+      // Connection/auth errors — send an error event over SSE so the client
+      // sees the failure immediately instead of hanging.
+      const errorEvent = this.createErrorEvent(
+        error.message || "Failed to connect to AI provider",
+        error.code || error.status || "CONNECTION_ERROR",
+        false,
+        sessionId,
+      );
+      errorEvent.messageId = messageId ?? "";
+      errorEvent.conversationId = sessionId;
+      try {
+        await this.streamingTransportManager.sendEventToSession(
+          sessionId, errorEvent as ErrorStreamingEvent,
+        );
+      } catch (_) {
+        // Transport may not be available; the throw below still surfaces the error.
+      }
+      throw new AIProviderError(
+        `Failed to connect to AI provider: ${error.message || error.toString()}`,
+      );
     }
 
-  private async* getStreamingAIResponse(prompt: OpenAI.Chat.ChatCompletionCreateParams) {
-    const { ai } = this;
-    const stream = await ai.chat.completions.create({...prompt, stream: true});
-    
-    let assistantMessage = '';
-    let toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
+    let accumulatedText = "";
+    const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
     let currentToolCall: { id?: string; name?: string; arguments?: string } | null = null;
+    let finishReason: string | null = null;
+    let completionId: string | null = null;
+    let model = "";
 
-    for await (const chunk of stream) {
-      const delta = chunk.choices[0]?.delta;
-        
-        if (!delta) continue;
+    try {
+      for await (const chunk of stream) {
+        const choice = chunk.choices[0];
+        if (!choice) continue;
 
-        // Handle content tokens
-        if (delta.content) {
-          assistantMessage += delta.content;
-          yield this.createStreamingEvent('token', {
-            token: delta.content,
-            timestamp: new Date()
-          });
+        if (!completionId && chunk.id) completionId = chunk.id;
+        if (!model && chunk.model) model = chunk.model;
+
+        const delta = choice.delta;
+
+        // Stream content tokens
+        if (delta?.content) {
+          accumulatedText += delta.content;
+          const event = this.createTokenEvent(
+            delta.content, delta.content, accumulatedText.length, false, sessionId,
+          );
+          event.messageId = messageId ?? "";
+          event.conversationId = sessionId;
+          await this.streamingTransportManager.sendEventToSession(
+            sessionId, event as TokenStreamingEvent,
+          );
         }
 
-        // Handle tool calls
-        if (delta.tool_calls) {
-          for (const toolCall of delta.tool_calls) {
-            if (toolCall.id) {
-              // New tool call started
-              if (currentToolCall && currentToolCall.id && currentToolCall.name) {
+        // Accumulate tool calls from deltas
+        if (delta?.tool_calls) {
+          for (const tc of delta.tool_calls) {
+            if (tc.id) {
+              // New tool call started — flush previous
+              if (currentToolCall?.id && currentToolCall?.name) {
                 toolCalls.push({
                   id: currentToolCall.id,
                   name: currentToolCall.name,
-                  arguments: currentToolCall.arguments || ''
+                  arguments: currentToolCall.arguments || "",
                 });
               }
               currentToolCall = {
-                id: toolCall.id,
-                name: toolCall.function?.name || '',
-                arguments: toolCall.function?.arguments || ''
+                id: tc.id,
+                name: tc.function?.name || "",
+                arguments: tc.function?.arguments || "",
               };
-            } else if (currentToolCall && toolCall.function) {
-              // Continue existing tool call
-              if (toolCall.function.name) {
-                currentToolCall.name = (currentToolCall.name || '') + toolCall.function.name;
+            } else if (currentToolCall && tc.function) {
+              if (tc.function.name) {
+                currentToolCall.name = (currentToolCall.name || "") + tc.function.name;
               }
-              if (toolCall.function.arguments) {
-                currentToolCall.arguments = (currentToolCall.arguments || '') + toolCall.function.arguments;
+              if (tc.function.arguments) {
+                currentToolCall.arguments = (currentToolCall.arguments || "") + tc.function.arguments;
               }
             }
           }
         }
 
-        // Handle completion
-        if (chunk.choices[0]?.finish_reason) {
-          // Add final tool call if exists
-          if (currentToolCall && currentToolCall.id && currentToolCall.name) {
-            toolCalls.push({
-              id: currentToolCall.id,
-              name: currentToolCall.name,
-              arguments: currentToolCall.arguments || ''
-            });
-          }
-
-          // Emit tool call events
-          for (const toolCall of toolCalls) {
-            yield this.createStreamingEvent('tool_call', {
-              toolCall: {
-                id: toolCall.id,
-                name: toolCall.name,
-                arguments: toolCall.arguments
-              },
-              timestamp: new Date()
-            });
-          }
-
-          break;
+        // Capture finish reason
+        if (choice.finish_reason) {
+          finishReason = choice.finish_reason;
         }
+      }
+    } catch (streamError: any) {
+      // Mid-stream failure — notify the client via SSE before re-throwing
+      const errorEvent = this.createErrorEvent(
+        streamError.message || "Stream interrupted",
+        streamError.code || "STREAM_ERROR",
+        false,
+        sessionId,
+      );
+      errorEvent.messageId = messageId ?? "";
+      errorEvent.conversationId = sessionId;
+      try {
+        await this.streamingTransportManager.sendEventToSession(
+          sessionId, errorEvent as ErrorStreamingEvent,
+        );
+      } catch (_) {
+        // best-effort
+      }
+      throw new AIProviderError(
+        `AI provider stream interrupted: ${streamError.message || streamError.toString()}`,
+      );
     }
+
+    // Flush final tool call
+    if (currentToolCall?.id && currentToolCall?.name) {
+      toolCalls.push({
+        id: currentToolCall.id,
+        name: currentToolCall.name,
+        arguments: currentToolCall.arguments || "",
+      });
+    }
+
+    // Send tool_call events (suppress in AUTO mode — server handles them)
+    const toolApprovalMode = this.chatState?.toolApprovalMode;
+    if (toolApprovalMode !== ToolApprovalMode.AUTO) {
+      for (const tc of toolCalls) {
+        const event = this.createToolCallEvent(
+          tc.id, tc.name, tc.arguments, true, undefined, sessionId,
+        );
+        event.messageId = messageId ?? "";
+        event.conversationId = sessionId;
+        await this.streamingTransportManager.sendEventToSession(
+          sessionId, event as ToolCallStreamingEvent,
+        );
+      }
+    }
+
+    // Send completion event (defer in AUTO mode with pending tool calls)
+    const hasPendingAutoToolCalls =
+      toolApprovalMode === ToolApprovalMode.AUTO && toolCalls.length > 0;
+
+    if (!hasPendingAutoToolCalls) {
+      const completionEvent = this.createCompletionEvent(
+        accumulatedText,
+        {
+          totalTokens: 0,
+          promptTokens: 0,
+          completionTokens: 0,
+          finishReason: finishReason || "stop",
+          model,
+        },
+        sessionId,
+      );
+      completionEvent.messageId = messageId ?? "";
+      completionEvent.conversationId = sessionId;
+      await this.streamingTransportManager.sendEventToSession(
+        sessionId, completionEvent,
+      );
+    }
+
+    // Reconstruct a ChatCompletion-shaped result for the caller
+    return {
+      id: completionId || new ObjectId().toString(),
+      object: "chat.completion",
+      created: Math.floor(Date.now() / 1000),
+      model,
+      choices: [{
+        index: 0,
+        message: {
+          role: "assistant",
+          content: accumulatedText || null,
+          tool_calls: toolCalls.length > 0
+            ? toolCalls.map((tc) => ({
+                id: tc.id,
+                type: "function" as const,
+                function: { name: tc.name, arguments: tc.arguments },
+              }))
+            : undefined,
+        },
+        finish_reason: finishReason || "stop",
+      }],
+      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+    } as any;
   }
+
+  // --- AI response ---
 
   private async getAIResponse(
-    prompt: OpenAI.Chat.ChatCompletionCreateParams,
+    prompt: OpenAI.Chat.Completions.ChatCompletionCreateParams,
+    messageId?: string,
   ): Promise<OpenAI.Chat.Completions.ChatCompletion> {
-    const { ai } = this;
-    try {
-      if (prompt.messages && Array.isArray(prompt.messages)) {
-        prompt.messages = prompt.messages.filter(
-          (msg: OpenAI.ChatCompletionMessageParam) => {
-            if (!msg) return false;
-            if (msg.role === "tool") return true;
-            if (msg.role === "assistant" && (msg as any).tool_calls?.length > 0) return true;
-            return msg?.content && typeof msg.content === "string" && msg.content.trim() !== "";
-          }
-        );
-  
-        if (
-          prompt.messages.length === 0 ||
-          !prompt.messages.some(
-            (msg: OpenAI.ChatCompletionMessageParam) => msg.role === "user"
-          )
-        ) {
-          throw new Error("No valid messages found in prompt");
-        }      
+    // Filter out empty/invalid messages
+    if (prompt.messages && Array.isArray(prompt.messages)) {
+      prompt.messages = prompt.messages.filter(
+        (msg: OpenAI.ChatCompletionMessageParam) => {
+          if (!msg) return false;
+          if (msg.role === "tool") return true;
+          if (msg.role === "assistant" && (msg as any).tool_calls?.length > 0) return true;
+          return msg?.content && typeof msg.content === "string" && msg.content.trim() !== "";
+        },
+      );
+
+      if (
+        prompt.messages.length === 0 ||
+        !prompt.messages.some((msg) => msg.role === "user")
+      ) {
+        throw new AIProviderError("No valid messages found in prompt");
       }
-      
-      if(this.streamingMode === StreamingMode.SSE) { 
-        const completion = (await this.getStreamingAIResponse(prompt));
-                
-      } 
-      else { 
-        const completion = (await ai.chat.completions.create(
-          prompt
-        )) as OpenAI.Chat.Completions.ChatCompletion;
-        
-        // @ts-ignore
-        return completion; 
-      }            
-    } catch (error) {
-      this.context.error(
-        `Error in getAIResponse: ${error.message || error.toString()}`, 
-        { error },
-        'OpenAIService')
     }
+
+    if (this.streamingMode === StreamingMode.SSE) {
+      return await this.handleStreamingRequest({
+        sessionId: this.chatState.id ?? "",
+        prompt,
+        messageId,
+      });
+    }
+
+    return await this.ai.chat.completions.create(prompt) as OpenAI.Chat.Completions.ChatCompletion;
   }
 
-  async chat(params: ChatParams): Promise<OpenAI.Chat.Completions.ChatCompletion> { 
-    const { message, streamingMode } = params;
-    // create the prompt from the user input.
-    const prompt = await this.createPrompt(message);
+  // --- Normalize to AIChatCompletion ---
 
-    // get the response from the AI
-    return await this.getAIResponse(prompt);    
+  private normalizeCompletion(
+    response: OpenAI.Chat.Completions.ChatCompletion,
+  ): AIChatCompletion {
+    return {
+      id: new ObjectId(),
+      object: "chat.completion",
+      created: new Date(),
+      choices: response.choices.map((choice) => ({
+        index: choice.index,
+        message: {
+          role: choice.message.role,
+          content: choice.message.content || "",
+          tool_calls: choice.message.tool_calls
+            ? choice.message.tool_calls.map((tc) => ({
+                id: tc.id,
+                type: tc.type,
+                function: {
+                  name: tc.function.name,
+                  arguments: tc.function.arguments,
+                },
+              }))
+            : [],
+        },
+        finish_reason: choice.finish_reason || "stop",
+      })),
+    };
   }
 
-  // add setters for service dependencies
-  setFileService(fileService: Reactory.Service.IReactoryFileService) {
-    this.fileService = fileService;
-  }
-  setUserService(userService: Reactory.Service.IReactoryUserService) {
-    this.userService = userService;
-  }
-  setFetchService(fetchService: Reactory.Service.IFetchService) {
-    this.fetchService = fetchService;
-  }
-  setPersonaProvider(personaProvider: AIPersonaProvider) {
-    this.personaProvider = personaProvider;
-  }
-  setMacroService(macroService: ReactorMacroService) {
-    this.macroService = macroService;
+  // --- Retry helpers ---
+
+  private isRetryableError(error: any): boolean {
+    if (!error) return false;
+    const msg = error.message?.toLowerCase() || "";
+    const code = error.code?.toLowerCase() || "";
+    const retryablePatterns = [
+      "rate limit", "timeout", "network", "connection",
+      "temporary", "service unavailable", "internal server error",
+      "bad gateway", "gateway timeout",
+    ];
+    return retryablePatterns.some((p) => msg.includes(p) || code.includes(p));
   }
 
-  toString?(includeVersion?: boolean): string {
-    throw new Error("Method not implemented.");
+  private modifyMessageForRetry(message: string, lastError: any): string {
+    const errorMsg = lastError?.message?.toLowerCase() || "";
+    if (errorMsg.includes("tool") || errorMsg.includes("function")) {
+      return `Please provide a simple, direct response to: ${message}`;
+    }
+    return message;
   }
 
-  description?: string = "OpenAI Service.";
-  tags?: string[] = ["ai", "openai", "gpt"];
+  // --- Public chat method ---
+
+  async chat(
+    params: AIChatParams & { persistState?: boolean },
+  ): Promise<AIChatCompletion> {
+    const {
+      personaId,
+      chatSessionId,
+      message,
+      role = "user",
+      persistState = true,
+      streamingMode = StreamingMode.NONE,
+    } = params;
+
+    const maxRetries = 2;
+    let lastError: any;
+    this.streamingMode = streamingMode;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        // Re-initialize if needed
+        if (!this.ai || (chatSessionId && this.chatState?.id !== chatSessionId)) {
+          const persona = this.personaProvider.getPersona(personaId);
+          if (!persona) {
+            throw new AIProviderError(`Persona ${personaId} not found`);
+          }
+          await this.initialize(chatSessionId ?? "", persona);
+        }
+
+        const modifiedMessage = attempt > 1
+          ? this.modifyMessageForRetry(message, lastError)
+          : message;
+
+        const messageId = new ObjectId();
+        const prompt = await this.createPrompt(modifiedMessage);
+        const response = await this.getAIResponse(prompt, messageId.toString());
+        const completion = this.normalizeCompletion(response);
+
+        // Add user message to history
+        const userHistoryItem: ReactorConversationHistoryItem = {
+          id: new ObjectId(),
+          role: "user",
+          content: message,
+          timestamp: new Date(),
+          tool_results: [],
+        };
+        this.chatState.history.push(userHistoryItem);
+
+        // Add assistant response to history
+        if (completion.choices && completion.choices.length > 0) {
+          this.chatState.history.push({
+            id: messageId,
+            timestamp: new Date(),
+            tool_calls: (completion.choices[0].message.tool_calls ?? []).map((tc) => ({
+              id: tc.id,
+              type: "function" as const,
+              function: tc.function,
+            })),
+            tool_results: [],
+            role: "assistant",
+            content: completion.choices[0].message.content,
+          });
+        }
+
+        if (persistState) {
+          await this.persistChatState();
+        }
+
+        return completion;
+      } catch (error: any) {
+        lastError = error;
+        if (attempt < maxRetries && this.isRetryableError(error)) {
+          this.context.warn(
+            `Retry attempt ${attempt} for OpenAI chat (${error.message})`,
+            { error, attempt, maxRetries },
+            "OpenAIService.chat",
+          );
+          const backoffDelay = Math.pow(2, attempt) * 1000;
+          await new Promise((resolve) => setTimeout(resolve, backoffDelay));
+          continue;
+        }
+        break;
+      }
+    }
+
+    this.context.error(
+      `Error in chat after ${maxRetries} attempts: ${lastError?.message ?? lastError?.toString()}`,
+      { error: lastError, params },
+      "OpenAIService.chat",
+    );
+
+    // Surface the error to the caller so the conversation service can
+    // return a proper ReactorErrorResponse to the client.
+    throw new AIProviderError(
+      lastError?.message || "AI provider request failed after retries",
+    );
+  }
+
+  // --- Service dependency setters ---
+
+  setStreamingSessionManager(streamingSessionManager: StreamingSessionManager) {
+    this.streamingSessionManager = streamingSessionManager;
+  }
+
+  setStreamingTransportManager(streamingTransportManager: StreamingTransportManager) {
+    this.streamingTransportManager = streamingTransportManager;
+  }
+
+  // --- IReactoryService interface ---
+
+  toString(includeVersion?: boolean): string {
+    return `OpenAIService${includeVersion ? "@1.0.0" : ""}`;
+  }
+
+  description?: string = "OpenAI-compatible AI Service (OpenAI, xAI, Ollama)";
+  tags?: string[] = ["ai", "openai", "xai", "ollama"];
   nameSpace: string = "reactor";
   name: string = "OpenAIService";
   version: string = "1.0.0";

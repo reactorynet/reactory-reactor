@@ -92,6 +92,11 @@ export class StreamingEndpoints {
       
       // Create SSE transport and register it
       const transport = new SSETransport(res);
+
+      // Disable Nagle's algorithm so small SSE chunks are sent immediately
+      // instead of being buffered into larger TCP segments.
+      req.socket.setNoDelay(true);
+
       console.log(`🔌 [StreamingEndpoints] Created SSE transport for session: ${sessionId}`);
       console.log(`🔌 [StreamingEndpoints] Transport details:`, {
         transportType: transport.constructor.name,
