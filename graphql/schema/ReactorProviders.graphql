@@ -32,6 +32,7 @@ type ReactorProviderConfig {
   capabilities: [String!]!
   rateLimits: ReactorProviderRateLimits
   credentialRequirements: [String]
+  authComponentFqn: String
 }
 
 """
@@ -61,4 +62,32 @@ A model paired with its provider, returned by ReactorModelsForPersona query.
 type ReactorProviderModelResult {
   provider: ReactorProviderConfig!
   model: ReactorModelDefinition!
+}
+
+"""
+Represents the authentication configuration status for a provider.
+"""
+type ReactorProviderAuthConfig {
+  provider: String!
+  configured: Boolean!
+  isDefault: Boolean!
+  isAppDefault: Boolean!
+  source: String
+}
+
+"""
+Input for saving provider authentication credentials.
+"""
+input ReactorSaveProviderAuthInput {
+  providerId: String!
+  credentials: JSON!
+  setAsAccountDefault: Boolean
+  setAsAppDefault: Boolean
+}
+
+"""
+Input for removing provider authentication credentials.
+"""
+input ReactorRemoveProviderAuthInput {
+  providerId: String!
 }

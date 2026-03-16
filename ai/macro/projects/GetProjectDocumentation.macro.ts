@@ -23,7 +23,8 @@ const GetProjectDocumentationMacro = async (
       success: false,
       error: "idOrPath parameter is required",
       tool: 'getProjectDocumentation',
-      params: params
+      params: params,
+      instructions: `## Get Documentation \u2014 Missing Parameter\n\n**idOrPath** is required.\n\n### Recovery Options:\n- Use \`listProjects\` to find project IDs`
     };
   }
 
@@ -37,7 +38,8 @@ const GetProjectDocumentationMacro = async (
         success: false,
         error: "ReactorProjectService is not available",
         tool: 'getProjectDocumentation',
-        params: params
+        params: params,
+        instructions: `## Get Documentation \u2014 Service Unavailable\n\nThe ReactorProjectService is not registered.`
       };
     }
 
@@ -51,7 +53,8 @@ const GetProjectDocumentationMacro = async (
         success: false,
         error: `Project not found with idOrPath: ${idOrPath}`,
         tool: 'getProjectDocumentation',
-        params: params
+        params: params,
+        instructions: `## Get Documentation \u2014 Project Not Found\n\nNo project matches "${idOrPath}".\n\n### Recovery Options:\n- Use \`listProjects\` to find valid project identifiers`
       };
     }
 
@@ -227,7 +230,8 @@ Use this documentation for project analysis, understanding project structure, or
       success: false,
       error: `Failed to retrieve project documentation: ${error?.message ?? "Unknown error"}`,
       tool: 'getProjectDocumentation',
-      params: params
+      params: params,
+      instructions: `## Get Documentation \u2014 Error\n\n${error?.message ?? 'Unknown error'}\n\n### Recovery Options:\n- Use \`getProject\` to verify the project exists first`
     };
   }
 };

@@ -8,9 +8,15 @@ class ReactorToolResolver {
   resolver: any;
 
   @mutation("ReactorExecuteTool")
-  async ReactorExecuteTool(_: any, args: { tool: string, personaId: string, chatSessionId: string }, context: Reactory.Server.IReactoryContext) {
+  async ReactorExecuteTool(_: any, args: { tool: string, personaId: string, chatSessionId: string, callId?: string, args?: any }, context: Reactory.Server.IReactoryContext) {
     const conversationService = context.getService<ReactorConversationService>("reactor.ReactorConversationService@1.0.0");
-    return await conversationService.executeTool(args);
+    return await conversationService.executeTool({
+      tool: args.tool,
+      personaId: args.personaId,
+      chatSessionId: args.chatSessionId,
+      toolArgs: args.args,
+      callId: args.callId,
+    });
   }
 
   @property("ReactorToolDefinition", "id")

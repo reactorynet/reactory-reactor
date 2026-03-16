@@ -1267,6 +1267,40 @@ export default class ReactorConversationService
   }
 
   /**
+   * Set the model and/or provider for an existing conversation.
+   * Persists the override so it is used for subsequent messages and tool executions.
+   */
+  async setChatModelProvider(
+    chatSessionId: string,
+    modelId?: string,
+    providerId?: string
+  ): Promise<any> {
+    this.validateChatSessionId(chatSessionId, "setChatModelProvider");
+
+    if (!modelId && !providerId) {
+      throw new Error("At least one of modelId or providerId must be provided.");
+    }
+
+    const update: Record<string, any> = { updated: new Date() };
+    if (modelId) update.modelId = modelId;
+    if (providerId) update.providerId = providerId;
+
+    const chatState = await ReactorConversationModel.findOneAndUpdate(
+      { _id: chatSessionId, user: this.context.user },
+      { $set: update },
+      { new: true }
+    ).exec();
+
+    if (!chatState) {
+      throw new Error(
+        `Chat session with id ${chatSessionId} not found or you do not have permission to modify it.`
+      );
+    }
+
+    return chatState;
+  }
+
+  /**
    * Set the maximum token limit for a conversation
    *
    * This method updates the token limit for a conversation and validates the input.
@@ -1886,7 +1920,9 @@ export default class ReactorConversationService
       case "xai":
       case "openai":
       case "ollama":
-        // x-ai, openai, and ollama use the same service
+      case "copilot":
+      case "azure-openai":
+        // x-ai, openai, ollama, copilot, and azure-openai use the same service
         // first we need to initialize the openai service
         // to use the correct model and connection parameters.
         await this.openaiService.initialize(chatSessionId, persona);
@@ -2024,15 +2060,31 @@ export default class ReactorConversationService
             chatSessionId,
           })
           .getPersona(personaId);
-        const provider = providerIdOverride || persona.providerId || "xai";
+
+        // When resuming a conversation, the stored modelId/providerId take
+        // precedence over persona defaults but are overridden by per-message values.
+        let storedModelId: string | undefined;
+        let storedProviderId: string | undefined;
+        if (chatSessionId) {
+          const stored = await ReactorConversationModel.findOne(
+            { _id: chatSessionId, user: this.context.user },
+            { modelId: 1, providerId: 1 }
+          ).lean().exec();
+          storedModelId = stored?.modelId || undefined;
+          storedProviderId = stored?.providerId || undefined;
+        }
+
+        const effectiveModelId = modelIdOverride || storedModelId || persona.modelId;
+        const provider = providerIdOverride || storedProviderId || persona.providerId || "xai";
         // Apply overrides: if caller specified a different model/provider, use it
-        const effectivePersona = (modelIdOverride || providerIdOverride)
-          ? { ...persona, modelId: modelIdOverride || persona.modelId, providerId: provider }
+        const hasOverride = effectiveModelId !== persona.modelId || provider !== persona.providerId;
+        const effectivePersona = hasOverride
+          ? { ...persona, modelId: effectiveModelId, providerId: provider }
           : persona;
 
         // if we added a persona model / provider override we need to 
         // remove the persona.config since it may contain provider/model specific settings that are no longer valid.
-        if (modelIdOverride || providerIdOverride) {
+        if (hasOverride) {
           delete effectivePersona.config;
         }
 
@@ -2100,7 +2152,11 @@ export default class ReactorConversationService
             { _id: chatSessionId, user: this.context.user },
             {
               $push: { history: messageToAdd },
-              $set: { updated: new Date() },
+              $set: {
+                updated: new Date(),
+                ...(modelIdOverride ? { modelId: modelIdOverride } : {}),
+                ...(providerIdOverride ? { providerId: providerIdOverride } : {}),
+              },
             },
             { new: true, upsert: false }
           )
@@ -2227,6 +2283,20 @@ export default class ReactorConversationService
         }
 
         // Execute chat with the specified provider
+        // Resolve user/app credentials and inject into persona config
+        const resolvedCreds = await this.providerService.resolveProviderCredentials(
+          provider,
+          effectivePersona.config
+        );
+        if (resolvedCreds.source !== "none" && resolvedCreds.source !== "persona") {
+          effectivePersona.config = {
+            ...effectivePersona.config,
+            apiKey: resolvedCreds.apiKey || effectivePersona.config?.apiKey,
+            apiOrg: resolvedCreds.organization || effectivePersona.config?.apiOrg,
+            apiBaseURL: resolvedCreds.endpoint || effectivePersona.config?.apiBaseURL,
+          };
+        }
+
         let response = await this.executeProviderChat(
           provider,
           chatSessionId,
@@ -2320,7 +2390,7 @@ export default class ReactorConversationService
             response = await this.executeProviderChat(
               provider,
               effectiveConversationId,
-              persona,
+              effectivePersona,
               {
                 personaId,
                 chatSessionId: effectiveConversationId,
@@ -2585,12 +2655,9 @@ export default class ReactorConversationService
       const persona = await this.context
         .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0")
         .getPersona(personaId);
-      const provider = persona.providerId || "openai";
 
       // Get provider adapter
-      const adapter = await this.providerService.getAdapter(provider);
-
-      // Get conversation without modifying it
+      // Use conversation-level override if stored, otherwise fall back to persona default
       const conversation = await ReactorConversationModel.findOne({
         _id: chatSessionId,
         user: this.context.user,
@@ -2599,6 +2666,9 @@ export default class ReactorConversationService
       if (!conversation) {
         throw new Error("Conversation not found");
       }
+
+      const provider = conversation.providerId || persona.providerId || "openai";
+      const adapter = await this.providerService.getAdapter(provider);
 
       // @ts-ignore
       conversation.context = this.context;
@@ -2699,6 +2769,26 @@ export default class ReactorConversationService
         { new: true }
       ).exec();
 
+      // Backfill tool_results on the original assistant message that initiated this tool call
+      if (callId) {
+        await ReactorConversationModel.findOneAndUpdate(
+          {
+            _id: chatSessionId,
+            "history.tool_calls.id": callId,
+          },
+          {
+            $push: {
+              "history.$.tool_results": {
+                id: callId,
+                name: macro,
+                content: result,
+                timestamp: new Date(),
+              },
+            },
+          }
+        ).exec();
+      }
+
       return adapter.adaptResponse(toolResult);
     } catch (error: any) {
       this.context.error(`Error executing macro: ${error.message}`, {
@@ -2727,6 +2817,7 @@ export default class ReactorConversationService
     toolArgs?: any;
     personaId: string;
     chatSessionId: string;
+    callId?: string;
   }): Promise<any> {
     const { tool, personaId, chatSessionId } = args;
 
@@ -2738,6 +2829,7 @@ export default class ReactorConversationService
       personaId,
       chatSessionId,
       args: args.toolArgs,
+      callId: args.callId,
     });
   }
 
@@ -3653,25 +3745,9 @@ export default class ReactorConversationService
               maxRetries
             );
             results.push(result);
-
-            // Use atomic update to add tool result to conversation history
-            await ReactorConversationModel.findOneAndUpdate(
-              { _id: chatSessionId },
-              {
-                $push: {
-                  history: {
-                    id: new ObjectId(),
-                    role: "tool",
-                    content: `Tool ${toolCalls[i].function?.name} executed successfully`,
-                    timestamp: new Date(),
-                    tool_results: [result],
-                    tool_call_id: toolCalls[i].id,
-                  },
-                },
-                $set: { updated: new Date() },
-              },
-              { new: true }
-            ).exec();
+            // Note: executeSingleToolCall → executeMacro already pushes
+            // the tool result to conversation history, so no additional
+            // history push is needed here.
           } catch (error) {
             errors.push({
               toolCall: toolCalls[i],
@@ -3679,7 +3755,8 @@ export default class ReactorConversationService
               index: i,
             });
 
-            // Use atomic update to add error message to conversation history
+            // Add error entry to history — executeMacro only pushes on success,
+            // so we need to record failures here.
             await ReactorConversationModel.findOneAndUpdate(
               { _id: chatSessionId },
               {

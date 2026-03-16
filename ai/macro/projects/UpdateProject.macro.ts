@@ -41,7 +41,8 @@ const UpdateProjectMacro = async (
       success: false,
       error: "idOrPath parameter is required",
       tool: 'updateProject',
-      params: params
+      params: params,
+      instructions: `## Update Project \u2014 Missing Parameter\n\n**idOrPath** is required.\n\n### Recovery Options:\n- Use \`listProjects\` to find project IDs`
     };
   }
 
@@ -55,7 +56,8 @@ const UpdateProjectMacro = async (
         success: false,
         error: "ReactorProjectService is not available",
         tool: 'updateProject',
-        params: params
+        params: params,
+        instructions: `## Update Project \u2014 Service Unavailable\n\nThe ReactorProjectService is not registered.\n\n### Recovery Options:\n- Use \`svc\` with action="list" to check available services`
       };
     }
 
@@ -69,7 +71,8 @@ const UpdateProjectMacro = async (
         success: false,
         error: `Project not found with idOrPath: ${idOrPath}`,
         tool: 'updateProject',
-        params: params
+        params: params,
+        instructions: `## Update Project \u2014 Not Found\n\nNo project matches "${idOrPath}".\n\n### Recovery Options:\n- Use \`listProjects\` to find valid project identifiers`
       };
     }
 
@@ -226,7 +229,8 @@ The project has been successfully updated with the specified changes.
       success: false,
       error: `Failed to update project: ${error?.message ?? "Unknown error"}`,
       tool: 'updateProject',
-      params: params
+      params: params,
+      instructions: `## Update Project \u2014 Error\n\n${error?.message ?? 'Unknown error'}\n\n### Recovery Options:\n- Verify the parameters and retry\n- Use \`getProject\` to inspect the current state`
     };
   }
 };

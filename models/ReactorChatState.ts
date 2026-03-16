@@ -84,6 +84,8 @@ export interface ReactorConversationDocument {
   started: Date,
   // The model id used for the conversation
   modelId: string
+  // The provider id used for the conversation (e.g. "openai", "google", "xai")
+  providerId?: string
   // The user associated with the conversation
   user: Reactory.Models.IUser
   // The meta data for the conversation
@@ -166,6 +168,10 @@ const ReactorConversationSchema = new Schema({
     type: String,
     required: true,
     default: process.env.OPENAI_DEFAULT_MODEL_ID || 'grok-2-latest',
+  },
+  providerId: {
+    type: String,
+    default: null,
   },
   user: {
     type: ObjectId,

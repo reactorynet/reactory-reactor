@@ -83,6 +83,7 @@ export const TodoMacro: Macro<unknown, TodoMacroProps> = async (
           operation: 'create',
           listId: id,
           list: newList,
+          instructions: `## Todo List Created\n\n**${name}** (ID: ${id}, mode: ${executionMode})\n\n### Available Data:\n- **listId**: "${id}" — use this ID to add items\n- **list**: The full list object\n\n### Suggested Next Steps:\n- Use \`todo\` with action="add", listId="${id}", title="..." to add items\n- Use \`todo\` with action="list" to see all lists`
         };
       }
 
@@ -99,27 +100,36 @@ export const TodoMacro: Macro<unknown, TodoMacroProps> = async (
           failed: l.items.filter((i) => i.status === 'failed').length,
         }));
 
+        const listSummary = summaries.length === 0
+          ? 'No todo lists exist yet.'
+          : summaries.map(s => `- **${s.name}** (${s.id}): ${s.totalItems} items — ${s.pending} pending, ${s.inProgress} in progress, ${s.completed} completed, ${s.failed} failed`).join('\n');
+
         return {
           success: true,
           operation: 'list',
           lists: summaries,
+          instructions: `## Todo Lists (${summaries.length})\n\n${listSummary}\n\n### Suggested Next Steps:\n${summaries.length === 0 ? '- Use \`todo\` with action="create" to create a new list' : '- Use \`todo\` with action="get" and a listId to see all items\n- Use \`todo\` with action="add" to add items to a list'}`
         };
       }
 
       // ── GET ─────────────────────────────────────────────────
       case 'get': {
         if (!props.listId) {
-          return { error: 'listId is required for the get action', success: false };
+          return { error: 'listId is required for the get action', success: false, instructions: '## Todo Get — Error\n\nlistId is required. Use \`todo\` with action="list" to see available list IDs.' };
         }
         const list = lists[props.listId];
         if (!list) {
-          return { error: `Todo list "${props.listId}" not found`, success: false };
+          return { error: `Todo list "${props.listId}" not found`, success: false, instructions: `## Todo Get — Not Found\n\nList "${props.listId}" does not exist.\n\n### Recovery Options:\n- Use \`todo\` with action="list" to see available lists\n- Use \`todo\` with action="create" to create one` };
         }
 
+        const pending = list.items.filter(i => i.status === 'pending').length;
+        const inProg = list.items.filter(i => i.status === 'in_progress').length;
+        const done = list.items.filter(i => i.status === 'completed').length;
         return {
           success: true,
           operation: 'get',
           list,
+          instructions: `## Todo List: ${list.name}\n\n${list.items.length} items — ${pending} pending, ${inProg} in progress, ${done} completed (mode: ${list.executionMode})\n\n${list.items.map(i => `- [${i.status}] **${i.title}** (${i.id})${i.assignee ? ` → ${i.assignee}` : ''}`).join('\n')}\n\n### Suggested Next Steps:\n- Use \`todo\` with action="update" to change an item's status\n- Use \`todo\` with action="add" to add more items\n- Use \`todo\` with action="assign" to delegate an item`
         };
       }
 
@@ -155,6 +165,7 @@ export const TodoMacro: Macro<unknown, TodoMacroProps> = async (
           operation: 'add',
           listId: list.id,
           todo: todoItem,
+          instructions: `## Todo Item Added\n\n**${todoItem.title}** added to list "${list.name}" (item ID: ${todoItem.id}).\n\n### Suggested Next Steps:\n- Use \`todo\` with action="update", listId="${list.id}", todoId="${todoItem.id}", status="in_progress" to start working\n- Use \`todo\` with action="assign", todoId="${todoItem.id}" to delegate this item\n- Use \`todo\` with action="get", listId="${list.id}" to see all items`
         };
       }
 
@@ -189,6 +200,7 @@ export const TodoMacro: Macro<unknown, TodoMacroProps> = async (
           operation: 'update',
           listId: list.id,
           todo: item,
+          instructions: `## Todo Item Updated\n\n**${item.title}** is now **${item.status}**${item.assignee ? ` (assigned to ${item.assignee})` : ''}.\n\n### Suggested Next Steps:\n${item.status === 'completed' ? '- Use \`todo\` with action="get" to see remaining items' : item.status === 'failed' ? '- Review the failure and update with a new status or result' : '- Continue working and update status when done'}`
         };
       }
 
@@ -224,6 +236,7 @@ export const TodoMacro: Macro<unknown, TodoMacroProps> = async (
           listId: list.id,
           todo: item,
           assignee: props.assignee,
+          instructions: `## Todo Item Assigned\n\n**${item.title}** assigned to **${props.assignee}**.\n\n### Suggested Next Steps:\n- Use \`todo\` with action="update" to set status to "in_progress"\n- Use \`chats\` with action="speakto" and persona "${props.assignee}" to delegate the task`
         };
       }
 
@@ -254,6 +267,7 @@ export const TodoMacro: Macro<unknown, TodoMacroProps> = async (
           operation: 'remove',
           listId: list.id,
           removedTodo: removed,
+          instructions: `## Todo Item Removed\n\n**${removed.title}** removed from list "${list.name}".\n\n### Suggested Next Steps:\n- Use \`todo\` with action="get", listId="${list.id}" to see remaining items\n- Use \`todo\` with action="add" to add new items`
         };
       }
 

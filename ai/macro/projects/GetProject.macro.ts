@@ -65,7 +65,8 @@ const GetProjectMacro = async (
       success: false,
       error: "idOrPath parameter is required",
       tool: 'getProject',
-      params: params
+      params: params,
+      instructions: `## Get Project \u2014 Missing Parameter\n\n**idOrPath** is required. Provide a project ID or FQN path.\n\n### Recovery Options:\n- Use \`listProjects\` to find project IDs\n- Format: namespace.name@version or MongoDB ObjectId`
     };
   }
 
@@ -79,7 +80,8 @@ const GetProjectMacro = async (
         success: false,
         error: "ReactorProjectService is not available",
         tool: 'getProject',
-        params: params
+        params: params,
+        instructions: `## Get Project \u2014 Service Unavailable\n\nThe ReactorProjectService is not registered.\n\n### Recovery Options:\n- Use \`svc\` with action="list" to check available services\n- Verify the reactor module is loaded`
       };
     }
 
@@ -92,7 +94,8 @@ const GetProjectMacro = async (
         success: false,
         error: `Project not found with idOrPath: ${idOrPath}`,
         tool: 'getProject',
-        params: params
+        params: params,
+        instructions: `## Get Project \u2014 Not Found\n\nNo project matches "${idOrPath}".\n\n### Recovery Options:\n- Use \`listProjects\` to see available projects\n- Check the format: namespace.name@version or ObjectId`
       };
     }
 
@@ -234,7 +237,8 @@ Use this project data for analysis, updates, or further processing.
       success: false,
       error: `Failed to retrieve project: ${error?.message ?? "Unknown error"}`,
       tool: 'getProject',
-      params: params
+      params: params,
+      instructions: `## Get Project \u2014 Error\n\n${error?.message ?? 'Unknown error'}\n\n### Recovery Options:\n- Verify the idOrPath is valid\n- Use \`listProjects\` to find valid project identifiers`
     };
   }
 };

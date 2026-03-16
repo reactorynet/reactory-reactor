@@ -52,7 +52,8 @@ const ListProjectsMacro = async (
         success: false,
         error: "ReactorProjectService is not available",
         tool: 'listProjects',
-        params: params
+        params: params,
+        instructions: `## List Projects \u2014 Service Unavailable\n\nThe ReactorProjectService is not registered.\n\n### Recovery Options:\n- Use \`svc\` with action="list" to check available services\n- Verify the reactor module is loaded with \`modules\``
       };
     }
 
@@ -90,7 +91,8 @@ const ListProjectsMacro = async (
         },
         tool: 'listProjects',
         params: params,
-        format: format
+        format: format,
+        instructions: `## List Projects \u2014 No Results\n\nNo projects match the current filters.\n\n### Suggestions:\n- Use \`listProjects\` without filters to see all projects\n- Use \`catalogProject\` to catalog a new project from a repository`
       };
     }
 
@@ -210,7 +212,8 @@ Use this data to analyze project patterns, identify trends, or select specific p
       success: false,
       error: `Failed to list projects: ${error?.message ?? "Unknown error"}`,
       tool: 'listProjects',
-      params: params
+      params: params,
+      instructions: `## List Projects \u2014 Error\n\n${error?.message ?? 'Unknown error'}\n\n### Recovery Options:\n- Retry the request\n- Use \`svc\` to verify ReactorProjectService is available`
     };
   }
 };

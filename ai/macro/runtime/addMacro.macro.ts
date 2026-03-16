@@ -73,7 +73,8 @@ export const AddMacro: Macro<unknown, AddMacroProps> = async (
       macroDescription: description,
       parameters: parameters,
       nameSpace: 'runtime-macro',
-      version: '1.0.0'
+      version: '1.0.0',
+      instructions: `## Macro Registered\n\n**${name}** is now available as a tool in this session.\n\n### Macro Details:\n- **Name**: ${name}\n- **Namespace**: runtime-macro\n- **Description**: ${description || 'No description provided'}\n- **Parameters**: ${parameters ? Object.keys(parameters).join(', ') : 'none'}\n\n### Suggested Next Steps:\n- Call \`${name}\` with the defined parameters to use it\n- Use \`state\` to verify the macro appears in the session\n- This macro exists only in the current session and will not persist across restarts`
     };
   } catch (err) {
     return {

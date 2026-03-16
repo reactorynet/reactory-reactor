@@ -75,6 +75,7 @@ class ReactorChatResolver {
         id: args.id,
         personaId: conversation.personaId,
         modelId: conversation.modelId,
+        providerId: conversation.providerId,
         user: {
           __typename: "User",
           _id: conversation.user?._id?.toString(),
@@ -167,6 +168,52 @@ class ReactorChatResolver {
         suggestion:
           "Check if the chat session exists and you have permission to modify it",
       });
+    }
+  }
+
+  @mutation("ReactorSetChatModelProvider")
+  async ReactorSetChatModelProvider(
+    _: any,
+    args: { chatSessionId: string; modelId?: string; providerId?: string },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!args || !args.chatSessionId) {
+      throw new ApiError("InvalidInputError", {
+        message: "chatSessionId is required",
+        code: "INVALID_INPUT",
+        timestamp: new Date(),
+        recoverable: true,
+      });
+    }
+    if (!args.modelId && !args.providerId) {
+      throw new ApiError("InvalidInputError", {
+        message: "At least one of modelId or providerId must be provided",
+        code: "INVALID_INPUT",
+        timestamp: new Date(),
+        recoverable: true,
+      });
+    }
+
+    const conversationService =
+      context.getService<IReactorConversationsService>(
+        "reactor.ReactorConversationService@1.0.0"
+      );
+    try {
+      return await conversationService.setChatModelProvider(
+        args.chatSessionId,
+        args.modelId,
+        args.providerId
+      );
+    } catch (error) {
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "SET_MODEL_PROVIDER_ERROR",
+        message: error.message || "Error setting model/provider",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion:
+          "Check if the chat session exists and you have permission to modify it",
+      };
     }
   }
 
@@ -432,6 +479,8 @@ class ReactorChatResolver {
         personaId: string;
         chatSessionId?: string;
         streamingMode: StreamingMode;
+        role?: string;
+        tool_call_id?: string;
         modelId?: string;
         providerId?: string;
       };
@@ -464,6 +513,8 @@ class ReactorChatResolver {
         chatSessionId: args.message.chatSessionId,
         message: args.message.message,
         streamingMode: args.message.streamingMode,
+        role: args.message.role,
+        tool_call_id: args.message.tool_call_id,
         modelId: args.message.modelId,
         providerId: args.message.providerId,
       });

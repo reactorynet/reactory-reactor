@@ -45,7 +45,8 @@ const CatalogProjectMacro = async (
       success: false,
       error: "Missing required parameters: name, nameSpace, and version are required.",
       tool: 'catalogProject',
-      params: params
+      params: params,
+      instructions: `## Catalog Project \u2014 Missing Parameters\n\nRequired: **name**, **nameSpace**, **version**.\n\n### Usage:\n- catalogProject with name="MyApp", nameSpace="org", version="1.0.0", repoPath="/path/to/repo"\n- Also requires either repoPath or repoUrl`
     };
   }
 
@@ -54,7 +55,8 @@ const CatalogProjectMacro = async (
       success: false,
       error: "Either repoPath or repoUrl is required for cataloging a project.",
       tool: 'catalogProject',
-      params: params
+      params: params,
+      instructions: `## Catalog Project \u2014 Missing Repository\n\nEither **repoPath** (local) or **repoUrl** (remote) is required.`
     };
   }
 
@@ -68,7 +70,8 @@ const CatalogProjectMacro = async (
         success: false,
         error: "ReactorProjectService is not available",
         tool: 'catalogProject',
-        params: params
+        params: params,
+        instructions: `## Catalog Project \u2014 Service Unavailable\n\nThe ReactorProjectService is not registered.`
       };
     }
 
@@ -251,7 +254,8 @@ The project has been successfully cataloged and processed. Project types and pro
       success: false,
       error: `Failed to catalog project: ${error?.message || "Unknown error"}`,
       tool: 'catalogProject',
-      params: params
+      params: params,
+      instructions: `## Catalog Project \u2014 Error\n\n${error?.message || 'Unknown error'}\n\n### Recovery Options:\n- Verify the repository path/URL is accessible\n- Check that name, nameSpace, version are valid`
     };
   }    
 };

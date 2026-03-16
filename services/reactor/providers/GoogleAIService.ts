@@ -325,14 +325,36 @@ class GoogleAIService extends AIProviderBase {
 
   private async getAITools(): Promise<GoogleGenAI.ToolListUnion> {
     const functions: FunctionDeclaration[] = [];
-    const tools: MacroToolDefinition[] = this.chatState?.tools ?? [];
+    let tools: MacroToolDefinition[] = (this.chatState?.tools ?? []) as MacroToolDefinition[];
+
+    // Dynamic fallback: if persisted tools are empty, fetch from macroService
+    if (!Array.isArray(tools) || tools.length === 0) {
+      if (this.macroService && this.chatState?.personaId) {
+        try {
+          const macros = await this.macroService.listMacrosForPersona(this.chatState.personaId);
+          const dynamicTools: MacroToolDefinition[] = [];
+          macros.forEach((macro: MacroComponentDefinition<unknown>) => {
+            if (macro.tools) {
+              macro.tools.forEach((tool: MacroToolDefinition) => {
+                if (tool.type === "function") {
+                  dynamicTools.push(tool);
+                }
+              });
+            }
+          });
+          tools = dynamicTools;
+        } catch (err) {
+          this.context.warn(
+            `getAITools: Failed to fetch tools from macroService, using empty list`,
+            { error: err },
+            "GoogleAIService.getAITools"
+          );
+          tools = [];
+        }
+      }
+    }
 
     if (!Array.isArray(tools)) {
-      this.context.warn(
-        `getAITools: chatState.tools is not an array (got ${typeof tools}), defaulting to empty tool list`,
-        { tools },
-        "GoogleAIService.getAITools"
-      );
       return [{ functionDeclarations: [] }];
     }
 

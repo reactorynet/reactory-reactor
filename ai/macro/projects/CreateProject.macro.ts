@@ -118,7 +118,8 @@ const CreateProjectMacro = async (
       success: false,
       error: "Missing required parameters: name, nameSpace, and version are required.",
       tool: 'createProject',
-      params: params
+      params: params,
+      instructions: `## Create Project \u2014 Missing Parameters\n\nRequired: **name**, **nameSpace**, **version**.\n\n### Usage:\n- createProject with name="MyApp", nameSpace="org", version="1.0.0"\n- Optional: repoPath, repoUrl, description, projectTypes, etc.`
     };
   }
 
@@ -132,7 +133,8 @@ const CreateProjectMacro = async (
         success: false,
         error: "ReactorProjectService is not available",
         tool: 'createProject',
-        params: params
+        params: params,
+        instructions: `## Create Project \u2014 Service Unavailable\n\nThe ReactorProjectService is not registered.\n\n### Recovery Options:\n- Use \`svc\` with action="list" to check available services`
       };
     }
 
@@ -371,7 +373,8 @@ The project has been created and is ready for further configuration or processin
       success: false,
       error: `Failed to create new project: ${error?.message || "Unknown error"}`,
       tool: 'createProject',
-      params: params
+      params: params,
+      instructions: `## Create Project \u2014 Error\n\n${error?.message || 'Unknown error'}\n\n### Recovery Options:\n- Check that name, nameSpace, version are valid\n- Use \`listProjects\` to verify the project doesn't already exist`
     };
   }    
 };

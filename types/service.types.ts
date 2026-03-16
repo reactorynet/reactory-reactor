@@ -10,7 +10,7 @@ import { ReactoryFileDocument, ReactoryFileModel } from 'modules/reactory-core/m
 import { PromptMergeStrategy, StreamingMode } from '../services/reactor/types/streaming.types';
 
 
-export type KnownAIProviders = "openai" | "google" | "azure" | "xai" | "anthropic" | "cohere" | "mistral" | "meta" | "deepmind";
+export type KnownAIProviders = "openai" | "google" | "azure" | "xai" | "anthropic" | "cohere" | "mistral" | "meta" | "deepmind" | "copilot" | "azure-openai";
 
 export type OpenAIModel = {
   id: string
@@ -378,7 +378,9 @@ export interface IAIPersona {
    */
   messageConfig?: any;
   providerId?: string;
+  nameSpace: string;
   name: string;
+  version: string;
   description?: string;
   defaultGreeting?: string;
   persona: string;
@@ -538,6 +540,16 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
    * @param toolApprovalMode 
    */
   setChatToolApprovalMode(chatSessionId: string, toolApprovalMode: ToolApprovalMode): Promise<any>;
+
+  /**
+   * Sets the model and/or provider for an existing chat session.
+   * This persists the override so it survives page reloads and is used
+   * for subsequent messages and tool executions.
+   * @param chatSessionId
+   * @param modelId - New model ID (optional)
+   * @param providerId - New provider ID (optional)
+   */
+  setChatModelProvider(chatSessionId: string, modelId?: string, providerId?: string): Promise<any>;
 
   /**
    * Sets the maximum number of tokens for the chat session.
@@ -1193,6 +1205,14 @@ export interface IReactorProviderService extends Reactory.Service.IReactoryServi
    * Get compatible models for a persona based on its capabilities.
    */
   getModelsForPersona(personaCapabilities?: string[]): Promise<{ provider: any; model: any }[]>;
+
+  /**
+   * Resolves provider credentials using priority: User > App > Persona config > Environment.
+   */
+  resolveProviderCredentials(
+    providerId: string,
+    personaConfig?: Record<string, any>
+  ): Promise<{ apiKey?: string; endpoint?: string; organization?: string; deploymentName?: string; apiVersion?: string; source: string; [key: string]: any }>;
 }
 
 /**

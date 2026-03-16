@@ -2,6 +2,19 @@ import Reactory from "@reactorynet/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
 import { IReactorProviderService } from "../../types/service.types";
 import { loadProviders, ProviderConfig, ProviderModelConfig, getCompatibleModels, findModelById } from "../../ai/providers/provider-loader";
+import { decryptCredentials } from "../../utils/credential-encryption";
+
+const AUTH_KEY_PREFIX = "ai-provider:";
+
+export interface ResolvedCredentials {
+  apiKey?: string;
+  endpoint?: string;
+  organization?: string;
+  deploymentName?: string;
+  apiVersion?: string;
+  source: "user" | "app" | "persona" | "environment" | "none";
+  [key: string]: any;
+}
 
 /**
  * Service for managing AI provider integrations.
@@ -35,7 +48,7 @@ class ReactorProviderService implements IReactorProviderService {
       }
     } catch (err) {
       // Log but don't crash — adapters still register and providers can be added dynamically
-      console.error('[ReactorProviderService] Failed to load providers.yaml:', err?.message || err);
+      console.error('[ReactorProviderService] Failed to load providers.yaml:', (err as Error)?.message || err);
     }
     // Register response adapters for each provider type
     this.registerAdapters();
@@ -287,6 +300,8 @@ class ReactorProviderService implements IReactorProviderService {
     this.adapters.set("openai", openaiCompatibleAdapter("OpenAI", "/api/reactor/stream"));
     this.adapters.set("xai", openaiCompatibleAdapter("xAI", "/api/reactor/stream/xai"));
     this.adapters.set("ollama", openaiCompatibleAdapter("Ollama", "/api/reactor/stream/ollama"));
+    this.adapters.set("copilot", openaiCompatibleAdapter("GitHub Copilot", "/api/reactor/stream/copilot"));
+    this.adapters.set("azure-openai", openaiCompatibleAdapter("Azure OpenAI", "/api/reactor/stream/azure-openai"));
     this.adapters.set("google", googleAdapter);
     this.adapters.set("amazon", amazonAdapter);
     this.adapters.set("anthropic", anthropicAdapter);
@@ -346,6 +361,77 @@ class ReactorProviderService implements IReactorProviderService {
 
   async getAdapter(providerId: string): Promise<any> {
     return this.adapters.get(providerId);
+  }
+
+  /**
+   * Resolves provider credentials using priority: User > App > Persona config > Environment.
+   * Decrypts any encrypted values before returning.
+   */
+  async resolveProviderCredentials(
+    providerId: string,
+    personaConfig?: Record<string, any>
+  ): Promise<ResolvedCredentials> {
+    const authKey = `${AUTH_KEY_PREFIX}${providerId}`;
+    const user = this.context.user;
+
+    // 1. Check user-level auth
+    const userAuths: any[] = (user as any)?.authentications || [];
+    const userAuth = userAuths.find((a: any) => a.provider === authKey);
+    if (userAuth?.props) {
+      try {
+        const decrypted = decryptCredentials(userAuth.props.toObject ? userAuth.props.toObject() : userAuth.props);
+        return { ...decrypted, source: "user" };
+      } catch (err) {
+        this.context.error?.(`Failed to decrypt user credentials for ${providerId}`, err);
+      }
+    }
+
+    // 2. Check app-level (ReactoryClient) auth
+    const partner = this.context.partner;
+    const appConfigs: any[] = (partner as any)?.auth_config || [];
+    const appAuth = appConfigs.find((a: any) => a.provider === authKey && a.enabled);
+    if (appAuth?.properties) {
+      try {
+        const decrypted = decryptCredentials(
+          appAuth.properties.toObject ? appAuth.properties.toObject() : appAuth.properties
+        );
+        return { ...decrypted, source: "app" };
+      } catch (err) {
+        this.context.error?.(`Failed to decrypt app credentials for ${providerId}`, err);
+      }
+    }
+
+    // 3. Check persona config
+    if (personaConfig) {
+      const { apiKey, apiOrg, apiBaseURL } = personaConfig;
+      if (apiKey) {
+        return {
+          apiKey,
+          organization: apiOrg,
+          endpoint: apiBaseURL,
+          source: "persona",
+        };
+      }
+    }
+
+    // 4. Fall back to environment variables
+    const provider = this.providers.get(providerId);
+    if (provider?.credentialEnvVars) {
+      const envCreds: Record<string, any> = {};
+      let hasAny = false;
+      for (const [key, envVar] of Object.entries(provider.credentialEnvVars)) {
+        const val = process.env[envVar];
+        if (val) {
+          envCreds[key] = val;
+          hasAny = true;
+        }
+      }
+      if (hasAny) {
+        return { ...envCreds, source: "environment" };
+      }
+    }
+
+    return { source: "none" };
   }
 
   toString?(includeVersion?: boolean): string {

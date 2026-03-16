@@ -38,6 +38,7 @@ export interface ProviderConfig {
   capabilities: string[];
   credentialRequirements?: string[];
   credentialEnvVars?: Record<string, string>;
+  authComponentFqn?: string;
   rateLimits?: {
     requestsPerMinute?: number;
     tokensPerMinute?: number;
@@ -58,6 +59,7 @@ interface ProviderYamlEntry {
   capabilities?: string[];
   credentialRequirements?: string[];
   credentialEnvVars?: Record<string, string>;
+  authComponentFqn?: string;
   models?: ProviderModelConfig[];
 }
 
@@ -115,6 +117,7 @@ function toProviderConfig(entry: ProviderYamlEntry): ProviderConfig {
     capabilities: entry.capabilities || [],
     credentialRequirements: entry.credentialRequirements || [],
     credentialEnvVars: entry.credentialEnvVars,
+    authComponentFqn: entry.authComponentFqn,
     status: {
       available: resolveAvailability(entry),
       lastChecked: new Date(),

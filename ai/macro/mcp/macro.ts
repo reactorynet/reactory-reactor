@@ -361,45 +361,144 @@ export const McpCli: Macro<unknown, McpCliProps> = async (
       format = 'text' 
     } = props;
 
+    const clientCount = state.mcpClients?.length || 0;
+    const availableCommands = 'capabilities, prompts, tools, resources, add-connection, connect, disconnect, connections, call-tool';
+
     // Map command to appropriate handler
     switch (command) {
-      case 'capabilities':
-        return getCapabilities(id ? [id] : [], state);
-      case 'prompts':
-        return getPrompts(id ? [id] : [], state);
-      case 'tools':
-        return getTools(id ? [id, format] : [format], state);
-      case 'resources':
-        return getResources(id ? [id] : [], state);
-      case 'add-connection':
+      case 'capabilities': {
+        const result = await getCapabilities(id ? [id] : [], state);
+        return {
+          success: !result?.error,
+          data: result,
+          instructions: result?.error
+            ? `## MCP Capabilities \u2014 Error\n\n${result.error}\n\n### Recovery Options:\n- Use \`mcp\` with command="connections" to verify available clients\n- Ensure the client is connected first with command="connect"`
+            : `## MCP Server Capabilities\n\nRetrieved capabilities for ${id || 'all'} client(s).\n\n### Suggested Next Steps:\n- Use \`mcp\` with command="tools" to list available tools\n- Use \`mcp\` with command="prompts" to list available prompts\n- Use \`mcp\` with command="resources" to list resources`
+        };
+      }
+      case 'prompts': {
+        const result = await getPrompts(id ? [id] : [], state);
+        return {
+          success: !result?.error,
+          data: result,
+          instructions: result?.error
+            ? `## MCP Prompts \u2014 Error\n\n${result.error}\n\n### Recovery Options:\n- Verify client is connected with \`mcp\` command="connections"`
+            : `## MCP Prompts\n\nRetrieved prompts for ${id || 'all'} client(s).\n\n### Suggested Next Steps:\n- Use \`mcp\` with command="tools" to list tools\n- Use \`mcp\` with command="call-tool" to execute a tool`
+        };
+      }
+      case 'tools': {
+        const result = await getTools(id ? [id, format] : [format], state);
+        const hasError = typeof result === 'object' && result?.error;
+        return {
+          success: !hasError,
+          data: result,
+          instructions: hasError
+            ? `## MCP Tools \u2014 Error\n\n${result.error}\n\n### Recovery Options:\n- Use \`mcp\` command="connections" to check available clients\n- Use \`mcp\` command="connect" to establish a connection first`
+            : `## MCP Tools\n\nRetrieved tool list for ${id || 'default'} client.\n\n### Suggested Next Steps:\n- Use \`mcp\` with command="call-tool", id="<client_id>", toolName="<tool_name>" to execute a tool\n- Use format="json" for machine-readable output`
+        };
+      }
+      case 'resources': {
+        const result = await getResources(id ? [id] : [], state);
+        return {
+          success: !result?.error,
+          data: result,
+          instructions: result?.error
+            ? `## MCP Resources \u2014 Error\n\n${result.error}`
+            : `## MCP Resources\n\nRetrieved resources for ${id || 'all'} client(s).`
+        };
+      }
+      case 'add-connection': {
         if (!id || !url) {
-          return "Missing required parameters. Usage requires id and url";
+          return {
+            success: false,
+            error: 'Missing required parameters: id and url',
+            instructions: `## MCP Add Connection \u2014 Missing Parameters\n\nBoth **id** and **url** are required.\n\n### Usage:\n- command="add-connection", id="my-server", url="http://localhost:3001/sse"\n- Optional: transport="sse" (default), "stdio", or "websocket"`
+          };
         }
-        return addConnection([id, url, transport], state);
-      case 'connect':
+        const result = await addConnection([id, url, transport], state);
+        const hasError = typeof result === 'object' && result?.error;
+        return {
+          success: !hasError,
+          data: result,
+          instructions: hasError
+            ? `## MCP Add Connection \u2014 Error\n\n${result.error}\n\n### Recovery Options:\n- Verify the URL is correct and the MCP server is running\n- Check the transport type (sse, stdio, websocket)`
+            : `## MCP Connection Added\n\nConnection **${id}** registered (${url}, transport: ${transport}).\n\n### Suggested Next Steps:\n- Use \`mcp\` with command="connect", id="<connection_id>" to establish the connection\n- Use \`mcp\` with command="connections" to list all registered connections`
+        };
+      }
+      case 'connect': {
         if (!id) {
-          return "Missing required parameter: id";
+          return {
+            success: false,
+            error: 'Missing required parameter: id',
+            instructions: `## MCP Connect \u2014 Missing ID\n\nA client **id** is required.\n\n### Recovery Options:\n- Use \`mcp\` with command="connections" to list available client IDs\n- Use \`mcp\` with command="add-connection" to register a new connection first`
+          };
         }
-        return connectClient([id], state);
-      case 'disconnect':
+        const result = await connectClient([id], state);
+        const hasError = typeof result === 'object' && result?.error;
+        return {
+          success: !hasError,
+          data: result,
+          instructions: hasError
+            ? `## MCP Connect \u2014 Error\n\n${typeof result === 'object' ? result.error : result}\n\n### Recovery Options:\n- Verify the MCP server is running at the configured URL\n- Check the transport configuration\n- Use \`mcp\` command="connections" to verify client registration`
+            : `## MCP Client Connected\n\n${typeof result === 'string' ? result : `Connected to client ${id}.`}\n\n### Suggested Next Steps:\n- Use \`mcp\` with command="tools", id="${id}" to discover available tools\n- Use \`mcp\` with command="call-tool" to execute a tool`
+        };
+      }
+      case 'disconnect': {
         if (!id) {
-          return "Missing required parameter: id";
+          return {
+            success: false,
+            error: 'Missing required parameter: id',
+            instructions: `## MCP Disconnect \u2014 Missing ID\n\nA client **id** is required.\n\n### Recovery Options:\n- Use \`mcp\` with command="connections" to find client IDs`
+          };
         }
-        return disconnectClient([id], state);
-      case 'call-tool':
+        const result = await disconnectClient([id], state);
+        const hasError = typeof result === 'string' && result.startsWith('Failed');
+        return {
+          success: !hasError,
+          data: result,
+          instructions: hasError
+            ? `## MCP Disconnect \u2014 Error\n\n${result}\n\n### Recovery Options:\n- Use \`mcp\` command="connections" to verify the client exists`
+            : `## MCP Client Disconnected\n\nDisconnected from **${id}**.\n\n### Suggested Next Steps:\n- Use \`mcp\` with command="connect", id="${id}" to reconnect\n- Use \`mcp\` with command="connections" to see remaining connections`
+        };
+      }
+      case 'call-tool': {
         if (!id || !toolName) {
-          return "Missing required parameters: id and toolName";
+          return {
+            success: false,
+            error: 'Missing required parameters: id and toolName',
+            instructions: `## MCP Call Tool \u2014 Missing Parameters\n\nBoth **id** (client) and **toolName** are required.\n\n### Usage:\n- command="call-tool", id="<client_id>", toolName="<tool_name>", toolParams=["arg1", "arg2"]\n\n### Recovery Options:\n- Use \`mcp\` with command="tools", id="<client_id>" to list available tool names`
+          };
         }
-        return callTool([id, toolName, ...toolParams], state);
+        const result = await callTool([id, toolName, ...toolParams], state);
+        const hasError = typeof result === 'object' && result?.error;
+        return {
+          success: !hasError,
+          data: result,
+          instructions: hasError
+            ? `## MCP Call Tool \u2014 Error\n\n${result.error}\n\n### Recovery Options:\n- Verify the tool name with \`mcp\` command="tools"\n- Check the client is connected with \`mcp\` command="connections"\n- Review toolParams format`
+            : `## MCP Tool Executed\n\nTool **${toolName}** on client **${id}** returned successfully.\n\n### Suggested Next Steps:\n- Inspect the returned data\n- Call another tool if needed\n- Use \`var\` to store the result for later use`
+        };
+      }
       case 'connections':
-      default:
-        return listConnections([], state);
+      default: {
+        const result = await listConnections([], state);
+        const hasError = typeof result === 'object' && result?.error;
+        return {
+          success: !hasError,
+          data: result,
+          instructions: hasError
+            ? `## MCP Connections \u2014 Error\n\n${result.error}`
+            : `## MCP Connections (${clientCount})\n\n${clientCount === 0 ? 'No connections registered.' : `${clientCount} connection(s) available.`}\n\n### Suggested Next Steps:\n${clientCount === 0 ? '- Use \\`mcp\\` with command="add-connection", id="name", url="http://..." to add one' : '- Use \\`mcp\\` with command="connect", id="<client_id>" to establish a connection\\n- Use \\`mcp\\` with command="tools" to discover available tools'}\n\n### Available Commands:\n${availableCommands}`
+        };
+      }
     }
   } catch (error) {
     console.error(`Error in MCP CLI: ${error instanceof Error ? error.message : 'Unknown error'}`, error);
-    return JSON.stringify({ 
-      error: `An error occurred while executing the command: ${error instanceof Error ? error.message : 'Unknown error'}` 
-    });
+    return {
+      success: false,
+      error: `An error occurred: ${error instanceof Error ? error.message : 'Unknown error'}`,
+      instructions: `## MCP Error\n\n${error instanceof Error ? error.message : 'Unknown error'}\n\n### Recovery Options:\n- Use \`mcp\` with command="connections" to check client state\n- Verify the MCP server is running and accessible`
+    };
   }
 };
 

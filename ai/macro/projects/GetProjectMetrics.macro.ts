@@ -33,7 +33,8 @@ const GetProjectMetricsMacro = async (
       success: false,
       error: "idOrPath parameter is required",
       tool: 'getProjectMetrics',
-      params: params
+      params: params,
+      instructions: `## Get Metrics \u2014 Missing Parameter\n\n**idOrPath** is required.\n\n### Recovery Options:\n- Use \`listProjects\` to find project IDs`
     };
   }
 
@@ -47,7 +48,8 @@ const GetProjectMetricsMacro = async (
         success: false,
         error: "ReactorProjectService is not available",
         tool: 'getProjectMetrics',
-        params: params
+        params: params,
+        instructions: `## Get Metrics \u2014 Service Unavailable\n\nThe ReactorProjectService is not registered.`
       };
     }
 
@@ -61,7 +63,8 @@ const GetProjectMetricsMacro = async (
         success: false,
         error: `Project not found with idOrPath: ${idOrPath}`,
         tool: 'getProjectMetrics',
-        params: params
+        params: params,
+        instructions: `## Get Metrics \u2014 Project Not Found\n\nNo project matches "${idOrPath}".\n\n### Recovery Options:\n- Use \`listProjects\` to find valid project identifiers`
       };
     }
 
@@ -105,7 +108,8 @@ const GetProjectMetricsMacro = async (
         },
         tool: 'getProjectMetrics',
         params: params,
-        format: format
+        format: format,
+        instructions: `## Project Metrics \u2014 No Data\n\nNo metrics found for **${project.name}** between ${start.toISOString().split('T')[0]} and ${end.toISOString().split('T')[0]}.\n\n### Suggestions:\n- Try a wider date range with startDate and endDate parameters\n- Verify the project has been generating metrics data`
       };
     }
 
@@ -252,7 +256,8 @@ Use this metrics data for project health analysis, trend identification, or perf
       success: false,
       error: `Failed to retrieve project metrics: ${error?.message ?? "Unknown error"}`,
       tool: 'getProjectMetrics',
-      params: params
+      params: params,
+      instructions: `## Get Metrics \u2014 Error\n\n${error?.message ?? 'Unknown error'}\n\n### Recovery Options:\n- Verify the project exists with \`getProject\`\n- Try a different date range`
     };
   }
 };

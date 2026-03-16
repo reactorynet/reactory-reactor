@@ -18,13 +18,15 @@ export const EnvironmentMacro: Macro<unknown, EnvironmentMacroProps> = async (
             success: true,
             operation: 'get',
             envKey: envKey,
-            value: value
+            value: value,
+            instructions: `## Environment Variable Retrieved\n\nSuccessfully read **${envKey}**.\n\n### Available Data:\n- **value**: The value of ${envKey}\n- **envKey**: The variable name queried\n\n### Suggested Next Steps:\n- Use \`var\` to store this value for later reference\n- Use \`env\` without parameters to list all safe environment variables`
           };
         } else {
           return {
             error: `Environment variable ${envKey} not found`,
             success: false,
-            envKey: envKey
+            envKey: envKey,
+            instructions: `## Environment Variable — Not Found\n\n**${envKey}** is not set in the current environment.\n\n### Recovery Options:\n- Use \`env\` without parameters to list available variables\n- Check the variable name spelling (names are case-sensitive)`
           };
         }
       }
@@ -52,12 +54,16 @@ export const EnvironmentMacro: Macro<unknown, EnvironmentMacroProps> = async (
         }
       });
       
+      const envCount = Object.keys(safeEnvVars).length;
+      const envList = Object.entries(safeEnvVars).map(([k, v]) => `- **${k}**: ${v}`).join('\n');
+
       return {
         result: safeEnvVars,
         success: true,
         operation: 'list',
         environmentVariables: safeEnvVars,
-        count: Object.keys(safeEnvVars).length
+        count: envCount,
+        instructions: `## Environment Variables (${envCount} available)\n\n${envList}\n\n### Available Data:\n- **environmentVariables**: Object with all safe environment variable key-value pairs\n- **count**: Number of variables returned\n\n### Suggested Next Steps:\n- Use \`env\` with a specific envKey to retrieve a single variable\n- Use \`var\` to store an env value for later reference\n- Only safe/non-secret variables are exposed; sensitive keys are filtered`
       };
     } catch (err) {
       return {

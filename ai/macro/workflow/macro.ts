@@ -243,7 +243,14 @@ export const ServiceRegister: Macro<string | object | object[], ServiceRegisterP
   if(action) {
     switch(action) {
       case 'list': {
-        return list(format);
+        const result = list(format);
+        const serviceList = typeof result === 'string' ? result : JSON.stringify(result);
+        const count = Array.isArray(result) ? result.length : (typeof result === 'string' && result !== 'No services registered' ? result.split('\n').length : 0);
+        return {
+          success: true,
+          data: result,
+          instructions: `## Registered Services (${count})\n\n${typeof result === 'string' ? result.substring(0, 500) : `${count} services returned in object format.`}\n\n### Suggested Next Steps:\n- Use \`svc\` with action="get", name, nameSpace, version to interact with a specific service\n- Use \`svc\` with format="object" for machine-readable output`
+        };
       }
       case 'get': { 
         if (name && nameSpace && version) {
@@ -251,22 +258,50 @@ export const ServiceRegister: Macro<string | object | object[], ServiceRegisterP
           if(service) {
             if(func && funcParams) { 
               const result = await service[func](...funcParams);
-              return result;
+              return {
+                success: true,
+                data: result,
+                instructions: `## Service Function Result\n\nCalled **${func}** on service **${nameSpace}.${name}@${version}**.\n\n### Suggested Next Steps:\n- Inspect the returned data\n- Call another function on this or another service\n- Use \`var\` to store the result`
+              };
             } else {
-              return service;
+              return {
+                success: true,
+                data: { serviceFqn: `${nameSpace}.${name}@${version}` },
+                instructions: `## Service Retrieved\n\n**${nameSpace}.${name}@${version}** resolved successfully.\n\n### Suggested Next Steps:\n- Use \`svc\` with func="methodName" and funcParams=[...] to call a method on this service\n- Use \`svc\` with action="list" to see all available services`
+              };
             }
+          } else {
+            return {
+              success: false,
+              error: `Service ${nameSpace}.${name}@${version} not found`,
+              instructions: `## Service Not Found\n\n**${nameSpace}.${name}@${version}** is not registered.\n\n### Recovery Options:\n- Use \`svc\` with action="list" to see available services\n- Verify the name, nameSpace, and version are correct`
+            };
           }
         }
-        break;
+        return {
+          success: false,
+          error: 'name, nameSpace, and version are all required for action="get"',
+          instructions: `## Missing Parameters\n\nThe get action requires **name**, **nameSpace**, and **version**.\n\n### Recovery Options:\n- Use \`svc\` with action="list" to find the correct service identifiers`
+        };
       }
       default: {
-        return list();
+        const result = list();
+        return {
+          success: true,
+          data: result,
+          instructions: `## Services Listed\n\nUnknown action "${action}", falling back to list.\n\n### Valid Actions:\n- action="list" — list all services\n- action="get" — retrieve and optionally call a service method`
+        };
       }
     }
   } 
   
   //assume we are listing all services
-  return list() as string;
+  const result = list();
+  return {
+    success: true,
+    data: result,
+    instructions: `## Services Listed\n\nReturned all registered services.\n\n### Suggested Next Steps:\n- Use \`svc\` with action="get" and a service FQN to interact with it`
+  };
 }
 
 
@@ -295,6 +330,7 @@ export const RunWorkflow: Macro<WorkflowResult, RunWorkflowProps> = async (
       stepsFailed: 1,
       results: [],
       error: 'Either a "workflow" definition or a "description" must be provided.',
+      instructions: `## Workflow Error \u2014 Missing Definition\n\nYou must provide either a **workflow** object (with name and steps) or a **description**.\n\n### Usage Example:\n\`workflow\` with workflow={ name: "my-flow", steps: [{ id: "step1", macro: "readFile", params: { path: "..." } }] }`
     };
   }
 
@@ -310,6 +346,7 @@ export const RunWorkflow: Macro<WorkflowResult, RunWorkflowProps> = async (
       error:
         'AI-generated workflows from plain-English descriptions are not yet supported. ' +
         'Please supply a structured "workflow" definition with steps.',
+      instructions: `## Workflow Error \u2014 Description-Only Not Supported\n\nPlain-English workflow generation is not yet available.\nPlease provide a structured \`workflow\` object with explicit steps.\n\n### Step Format:\n{ id: "step1", macro: "<toolName>", params: { ... }, conditions: [...], outputVar: "result1" }\n\n### Interpolation:\nUse \`{{vars.step1}}\` in later step params to reference earlier results.`
     };
   }
 
@@ -323,10 +360,24 @@ export const RunWorkflow: Macro<WorkflowResult, RunWorkflowProps> = async (
       stepsFailed: 1,
       results: [],
       error: 'Workflow must contain at least one step.',
+      instructions: `## Workflow Error \u2014 Empty Steps\n\nWorkflow "${workflow!.name ?? 'unnamed'}" has no steps.\nAdd at least one step with { id, macro, params }.`
     };
   }
 
-  return runWorkflow(workflow!, state, initialVars);
+  const result = await runWorkflow(workflow!, state, initialVars);
+  
+  const stepSummary = result.results.map(r => {
+    if (r.skipped) return `- **${r.stepId}**: skipped (${r.skipReason || 'conditions not met'})`;
+    if (!r.success) return `- **${r.stepId}**: FAILED \u2014 ${r.error}`;
+    return `- **${r.stepId}**: \u2713 completed`;
+  }).join('\n');
+
+  return {
+    ...result,
+    instructions: result.success
+      ? `## Workflow "${result.workflowName}" Completed\n\n${result.stepsExecuted} executed, ${result.stepsSkipped} skipped, ${result.stepsFailed} failed.\n\n### Step Results:\n${stepSummary}\n\n### Suggested Next Steps:\n- Use \`var\` to access stored step outputs\n- Run another workflow or inspect the results`
+      : `## Workflow "${result.workflowName}" Failed\n\n${result.error || 'Unknown error'}\n\n### Step Results:\n${stepSummary}\n\n### Recovery Options:\n- Fix the failing step's parameters and retry\n- Add continueOnError: true to non-critical steps\n- Use \`state\` to inspect current variables`
+  };
 }
 
 export const ServiceRegisterComponentDefinition: Reactory.IReactoryComponentDefinition<Macro<string | string[] | object | object[]>> = {

@@ -116,6 +116,20 @@ class OpenAIService extends AIProviderBase {
         openAIArgs.apiKey = "";
         openAIArgs.organization = "";
         break;
+      case "copilot":
+        openAIArgs.baseURL = apiBaseURL || process.env.GITHUB_COPILOT_API_URL || "https://models.inference.ai.azure.com";
+        openAIArgs.apiKey = apiKey || process.env.GITHUB_TOKEN;
+        delete openAIArgs.organization;
+        break;
+      case "azure-openai": {
+        const endpoint = apiBaseURL || process.env.AZURE_OPENAI_ENDPOINT || "";
+        const apiVersion = process.env.AZURE_OPENAI_API_VERSION || "2024-02-15-preview";
+        openAIArgs.baseURL = endpoint ? `${endpoint.replace(/\/$/, '')}/openai` : undefined;
+        openAIArgs.apiKey = apiKey || process.env.AZURE_OPENAI_API_KEY;
+        openAIArgs.defaultQuery = { 'api-version': apiVersion };
+        delete openAIArgs.organization;
+        break;
+      }
     }
 
     // Apply persona-specific configuration overrides
@@ -375,6 +389,55 @@ class OpenAIService extends AIProviderBase {
     let completionId: string | null = null;
     let model = "";
 
+    // Token buffering: accumulate small OpenAI deltas and flush in larger batches
+    // to reduce per-token SSE overhead while keeping output feeling responsive.
+    const TOKEN_BUFFER_THRESHOLD = 4; // chars (~2 tokens) before flushing
+    const REASONING_BUFFER_THRESHOLD = 4;
+    const BUFFER_FLUSH_TIMEOUT_MS = 8; // ~1 frame at 60fps
+    let tokenBuffer = "";
+    let reasoningBuffer = "";
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const flushTokenBuffer = async () => {
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
+      if (tokenBuffer) {
+        const content = tokenBuffer;
+        tokenBuffer = "";
+        const event = this.createTokenEvent(
+          content, content, accumulatedText.length, false, sessionId,
+        );
+        event.messageId = messageId ?? "";
+        event.conversationId = sessionId;
+        await this.streamingTransportManager.sendEventToSession(
+          sessionId, event as TokenStreamingEvent,
+        );
+      }
+      if (reasoningBuffer) {
+        const content = reasoningBuffer;
+        reasoningBuffer = "";
+        const event = this.createReasoningEvent(
+          content, content, accumulatedReasoning.length, false, sessionId,
+        );
+        event.messageId = messageId ?? "";
+        event.conversationId = sessionId;
+        await this.streamingTransportManager.sendEventToSession(
+          sessionId, event as ReasoningStreamingEvent,
+        );
+      }
+    };
+
+    const scheduleFlush = () => {
+      if (flushTimer === null) {
+        flushTimer = setTimeout(() => {
+          flushTimer = null;
+          flushTokenBuffer().catch(() => {});
+        }, BUFFER_FLUSH_TIMEOUT_MS);
+      }
+    };
+
     try {
       for await (const chunk of stream) {
         const choice = chunk.choices[0];
@@ -385,31 +448,27 @@ class OpenAIService extends AIProviderBase {
 
         const delta = choice.delta;
 
-        // Stream content tokens
+        // Buffer content tokens instead of sending immediately
         if (delta?.content) {
           accumulatedText += delta.content;
-          const event = this.createTokenEvent(
-            delta.content, delta.content, accumulatedText.length, false, sessionId,
-          );
-          event.messageId = messageId ?? "";
-          event.conversationId = sessionId;
-          await this.streamingTransportManager.sendEventToSession(
-            sessionId, event as TokenStreamingEvent,
-          );
+          tokenBuffer += delta.content;
+          if (tokenBuffer.length >= TOKEN_BUFFER_THRESHOLD) {
+            await flushTokenBuffer();
+          } else {
+            scheduleFlush();
+          }
         }
 
-        // Stream reasoning/thinking tokens (OpenAI o1/o3 models)
+        // Buffer reasoning/thinking tokens (OpenAI o1/o3 models)
         const reasoningContent = (delta as any)?.reasoning_content;
         if (reasoningContent) {
           accumulatedReasoning += reasoningContent;
-          const event = this.createReasoningEvent(
-            reasoningContent, reasoningContent, accumulatedReasoning.length, false, sessionId,
-          );
-          event.messageId = messageId ?? "";
-          event.conversationId = sessionId;
-          await this.streamingTransportManager.sendEventToSession(
-            sessionId, event as ReasoningStreamingEvent,
-          );
+          reasoningBuffer += reasoningContent;
+          if (reasoningBuffer.length >= REASONING_BUFFER_THRESHOLD) {
+            await flushTokenBuffer();
+          } else {
+            scheduleFlush();
+          }
         }
 
         // Accumulate tool calls from deltas
@@ -445,7 +504,15 @@ class OpenAIService extends AIProviderBase {
           finishReason = choice.finish_reason;
         }
       }
+
+      // Flush any remaining buffered tokens after stream ends
+      await flushTokenBuffer();
     } catch (streamError: any) {
+      // Clean up buffer timer on error
+      if (flushTimer !== null) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
+      }
       // Mid-stream failure — notify the client via SSE before re-throwing
       const errorEvent = this.createErrorEvent(
         streamError.message || "Stream interrupted",

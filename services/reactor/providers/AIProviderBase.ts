@@ -51,6 +51,8 @@ abstract class AIProviderBase implements IAIProviderService {
         sseSessionId: sseSession,
         user,
         vars,
+        tools: this.chatState.tools || [],
+        macros: this.chatState.macros || [],
         updated: new Date(),
         meta
       };
@@ -100,6 +102,8 @@ abstract class AIProviderBase implements IAIProviderService {
           existingConversation.updated = new Date();
           existingConversation.sseSessionId = sseSession;
           existingConversation.vars = vars;
+          existingConversation.tools = this.chatState.tools || [];
+          existingConversation.macros = this.chatState.macros || [];
           await existingConversation.save();
           
           this.chatStateModel = existingConversation;
@@ -231,7 +235,8 @@ abstract class AIProviderBase implements IAIProviderService {
           personaId: persona.id,
           persona,
           vars: {},
-          macros: persona.macros || [],          
+          macros: persona.macros || [],
+          tools: persona.tools || [],
           toolApprovalMode: (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
         };
 

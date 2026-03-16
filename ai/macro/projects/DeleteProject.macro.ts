@@ -23,7 +23,8 @@ const DeleteProjectMacro = async (
       success: false,
       error: "idOrPath parameter is required",
       tool: 'deleteProject',
-      params: params
+      params: params,
+      instructions: `## Delete Project \u2014 Missing Parameter\n\n**idOrPath** is required.\n\n### Recovery Options:\n- Use \`listProjects\` to find project IDs`
     };
   }
 
@@ -32,7 +33,8 @@ const DeleteProjectMacro = async (
       success: false,
       error: "Confirmation required. Set confirm=true to proceed with deletion.",
       tool: 'deleteProject',
-      params: params
+      params: params,
+      instructions: `## Delete Project \u2014 Confirmation Required\n\nDeletion requires explicit confirmation.\n\n### To Proceed:\n- Call \`deleteProject\` with idOrPath="${idOrPath || '...'}", confirm=true`
     };
   }
 
@@ -46,7 +48,8 @@ const DeleteProjectMacro = async (
         success: false,
         error: "ReactorProjectService is not available",
         tool: 'deleteProject',
-        params: params
+        params: params,
+        instructions: `## Delete Project \u2014 Service Unavailable\n\nThe ReactorProjectService is not registered.`
       };
     }
 
@@ -60,7 +63,8 @@ const DeleteProjectMacro = async (
         success: false,
         error: `Project not found with idOrPath: ${idOrPath}`,
         tool: 'deleteProject',
-        params: params
+        params: params,
+        instructions: `## Delete Project \u2014 Not Found\n\nNo project matches "${idOrPath}".\n\n### Recovery Options:\n- Use \`listProjects\` to find valid project identifiers`
       };
     }
 
@@ -87,7 +91,8 @@ const DeleteProjectMacro = async (
         success: false,
         error: `Failed to delete project with idOrPath: ${idOrPath}`,
         tool: 'deleteProject',
-        params: params
+        params: params,
+        instructions: `## Delete Project \u2014 Deletion Failed\n\nThe deletion operation did not succeed for "${idOrPath}".\n\n### Recovery Options:\n- Use \`getProject\` with idOrPath="${idOrPath}" to verify the project state`
       };
     }
 
@@ -197,7 +202,8 @@ The project has been permanently deleted from the system. This action cannot be 
       success: false,
       error: `Failed to delete project: ${error?.message ?? "Unknown error"}`,
       tool: 'deleteProject',
-      params: params
+      params: params,
+      instructions: `## Delete Project \u2014 Error\n\n${error?.message ?? 'Unknown error'}\n\n### Recovery Options:\n- Retry with confirm=true\n- Use \`getProject\` to verify the project still exists`
     };
   }
 };

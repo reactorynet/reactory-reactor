@@ -100,12 +100,20 @@ export const VariableMacro: Macro<unknown, VariableMacroProps> = async (
           state.vars[key] = loaded.value;
         }
       }
+      const varValue = state.vars[key || ''];
+      const varType = varValue === undefined ? 'undefined' : Array.isArray(varValue) ? 'array' : typeof varValue;
+      const varPreview = varValue === undefined ? 'not set'
+        : typeof varValue === 'string' ? (varValue.length > 100 ? varValue.slice(0, 100) + '...' : varValue)
+        : Array.isArray(varValue) ? `array[${varValue.length}]`
+        : typeof varValue === 'object' && varValue !== null ? `object{${Object.keys(varValue).slice(0, 5).join(', ')}${Object.keys(varValue).length > 5 ? '...' : ''}}`
+        : String(varValue);
       return {
-        result: state.vars[key || ''],
+        result: varValue,
         success: true,
         operation: 'get',
         key: key,
-        value: state.vars[key || '']
+        value: varValue,
+        instructions: `## Variable Retrieved\n\n**${key}** = ${varPreview}\n\n### Available Data:\n- **value**: The stored value (type: ${varType})\n- **key**: The variable name queried\n\n### Suggested Next Steps:\n- Use \`var\` with key="${key}" and a value to update it\n- Use \`var\` with value="del" to delete this variable\n- Use \`sliceVariable\` to extract subsets (arrays: "0:5", objects: "prop.path", strings: "0:10")${varValue === undefined ? '\n- This variable is not set yet — use \`var\` with a value to create it' : ''}`
       };
     }
 
@@ -119,7 +127,8 @@ export const VariableMacro: Macro<unknown, VariableMacroProps> = async (
         result: `Variable ${key} deleted`,
         success: true,
         operation: 'delete',
-        key: key
+        key: key,
+        instructions: `## Variable Deleted\n\n**${key}** has been removed from the session${persist ? ' and database' : ''}.\n\n### Suggested Next Steps:\n- Use \`var\` with key="${key}" and a value to re-create it\n- Use \`state\` to see all remaining variables`
       };
     }
 
@@ -128,19 +137,22 @@ export const VariableMacro: Macro<unknown, VariableMacroProps> = async (
       const loaded = await loadPersistedVariable(key, state);
       if (loaded.success) {
         state.vars[key] = loaded.value;
+        const loadedType = Array.isArray(loaded.value) ? 'array' : typeof loaded.value;
         return {
           result: `Variable ${key} loaded from database`,
           success: true,
           operation: 'load',
           key: key,
-          value: loaded.value
+          value: loaded.value,
+          instructions: `## Variable Loaded from Database\n\nSuccessfully loaded **${key}** (type: ${loadedType}).\n\n### Available Data:\n- **value**: The loaded value\n- **key**: The variable name\n\n### Suggested Next Steps:\n- Use \`var\` with key="${key}" to access the value\n- Use \`sliceVariable\` to extract subsets if the value is an array or object`
         };
       }
       return {
         error: loaded.error || `Variable ${key} not found in database`,
         success: false,
         operation: 'load',
-        key: key
+        key: key,
+        instructions: `## Variable Load — Failed\n\nCould not load **${key}** from the database.\n\n### Error Details:\n- **Message**: ${loaded.error || 'Not found'}\n\n### Recovery Options:\n- Use \`var\` with key="${key}" and a value to create it\n- Check the key name spelling`
       };
     }
 
@@ -165,6 +177,7 @@ export const VariableMacro: Macro<unknown, VariableMacroProps> = async (
           value: value,
           persisted: false,
           persistError: persistResult.error,
+          instructions: `## Variable Set (Partial)\n\n**${key}** stored in session memory, but **database persistence failed**.\n\n### Error Details:\n- **Message**: ${persistResult.error}\n\n### Available Data:\n- **value**: The value stored in memory\n- **persisted**: false\n\n### Suggested Next Steps:\n- Use \`var\` with key="${key}" and persist=true to retry persistence\n- The variable is available in this session but will not survive restart`
         };
       }
     }
@@ -176,6 +189,7 @@ export const VariableMacro: Macro<unknown, VariableMacroProps> = async (
       key: key,
       value: value,
       persisted: persist,
+      instructions: `## Variable Set\n\n**${key}** = ${typeof value === 'string' && value.length > 100 ? value.slice(0, 100) + '...' : value}${persist ? ' (persisted to database)' : ''}\n\n### Available Data:\n- **value**: The value that was stored\n- **key**: "${key}"\n- **persisted**: ${persist}\n\n### Suggested Next Steps:\n- Use \`var\` with key="${key}" (no value) to retrieve it later\n- Use \`sliceVariable\` to extract subsets from complex values\n- Use \`state\` to see all stored variables`
     };
   } catch (err) {
     return {
@@ -246,16 +260,19 @@ export const SliceVariableMacro: Macro<unknown, SliceVariableMacroProps> = async
         operation: 'store',
         sourceVariable: variableName,
         targetVariable: targetVariable,
-        slicedData: slicedResult
+        slicedData: slicedResult,
+        instructions: `## Slice — Result Stored\n\nExtracted data from **${variableName}** and stored in **${targetVariable}**.\n\n### Available Data:\n- **slicedData**: The extracted result\n- **sourceVariable**: "${variableName}"\n- **targetVariable**: "${targetVariable}"\n\n### Suggested Next Steps:\n- Use \`var\` with key="${targetVariable}" to access the result\n- Use \`sliceVariable\` again to further refine the data`
       };
     } else {
+      const resultType = Array.isArray(slicedResult) ? `array[${slicedResult.length}]` : typeof slicedResult;
       return {
         result: slicedResult,
         success: true,
         operation: 'slice',
         sourceVariable: variableName,
         predicate: predicate,
-        slicedData: slicedResult
+        slicedData: slicedResult,
+        instructions: `## Slice Result\n\nExtracted from **${variableName}** using predicate \`${predicate}\` — result type: ${resultType}.\n\n### Available Data:\n- **slicedData**: The extracted result\n- **sourceVariable**: "${variableName}"\n- **predicate**: "${predicate}"\n\n### Predicate Reference:\n- Arrays: \`"0:5"\` (range), \`"0,2,4"\` (indices), \`"item > 5"\` (condition)\n- Objects: \`"user.name"\` (path), \`"name,email"\` (properties), \`"value > 10"\` (condition)\n- Strings: \`"0:10"\` (range), \`"0,5,10"\` (indices)\n\n### Suggested Next Steps:\n- Use \`sliceVariable\` with a targetVariable to store the result\n- Use \`var\` to store the result manually`
       };
     }
 

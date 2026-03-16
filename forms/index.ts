@@ -13,6 +13,7 @@ import ReactorProjectHistoryForm from "./projectHistory";
 import ReactorProjectIncidentsForm from "./projectIncidents";
 import ReactorProjectTeamForm from "./projectTeamPanel";
 import ReactorProjectDeploymentsForm from "./projectDeployments";
+import ProviderConfigForm from "./providerConfig";
 
 export default [
   GraphExplorerForm,
@@ -30,4 +31,5 @@ export default [
   ReactorProjectIncidentsForm,
   ReactorProjectTeamForm,
   ReactorProjectDeploymentsForm,
+  ProviderConfigForm,
 ];

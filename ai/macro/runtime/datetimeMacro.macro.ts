@@ -172,7 +172,8 @@ export const DateTimeMacro: Macro<unknown, DateTimeMacroProps> = async (
         result: `Date/time stored in variable '${targetVariable}': ${formattedDate}`,
         success: true,
         storedVariable: targetVariable,
-        value: formattedDate
+        value: formattedDate,
+        instructions: `## Date/Time Stored\n\nStored in variable **${targetVariable}**: ${formattedDate}\n\n### Available Data:\n- **value**: "${formattedDate}"\n- **storedVariable**: "${targetVariable}"\n\n### Suggested Next Steps:\n- Use \`var\` with key="${targetVariable}" to retrieve this value later\n- Use \`datetime\` with a different format to get an alternative representation`
       };
     } else {
       // Return structured response for Google API compatibility
@@ -183,7 +184,8 @@ export const DateTimeMacro: Macro<unknown, DateTimeMacroProps> = async (
         timezone: timezone,
         date: date,
         timestamp: dateObj.getTime(),
-        iso: dateObj.toISOString()
+        iso: dateObj.toISOString(),
+        instructions: `## Date/Time Result\n\n**${formattedDate}** (format: ${format}, timezone: ${timezone})\n\n### Available Data:\n- **result**: Formatted date string\n- **timestamp**: Unix timestamp in milliseconds (${dateObj.getTime()})\n- **iso**: ISO 8601 representation (${dateObj.toISOString()})\n\n### Available Formats:\niso, date, time, locale, unix, unix-ms, rfc2822, yyyy-mm-dd, mm/dd/yyyy, dd/mm/yyyy, hh:mm:ss, hh:mm, 12h, relative, json\n\n### Suggested Next Steps:\n- Use \`datetime\` with targetVariable to store the result\n- Use \`datetime\` with format="json" to get all date components\n- Use \`var\` to store the result manually`
       };
     }
 

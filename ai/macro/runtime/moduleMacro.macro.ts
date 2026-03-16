@@ -32,18 +32,23 @@ export const ModuleMacro: Macro<unknown, ModuleMacroProps> = async (
       
       const modulesList = modules.enabled?.map((mod) => describeModule(mod)) || [];
       
+      const namespaces = [...new Set(modulesList.map((m: any) => m.nameSpace))];
+
       return {
         result: modulesList,
         success: true,
         operation: 'list',
         modules: modulesList,
         count: modulesList.length,
-        details: details
+        details: details,
+        instructions: `## Installed Modules (${modulesList.length})\n\n${modulesList.length} module${modulesList.length !== 1 ? 's' : ''} across ${namespaces.length} namespace${namespaces.length !== 1 ? 's' : ''}: ${namespaces.join(', ')}\n\n### Available Data:\n- **modules**: Array of module objects (id, nameSpace, name, version${details ? ', dependencies, services' : ''})\n- **count**: Total number of modules\n- **details**: ${details ? 'Detailed view (includes dependencies and services)' : 'Summary view — set details=true for dependencies and services'}\n\n### Suggested Next Steps:\n- Use \`modules\` with details=true to see service registrations and dependencies\n- Use \`queryGQL\` to interact with module-specific GraphQL endpoints\n- Use \`state\` to see current session context`
       };
     } catch (err) {
+      const errMsg = err instanceof Error ? err.message : 'Unknown error';
       return {
-        error: `Error in modules macro: ${err instanceof Error ? err.message : 'Unknown error'}`,
-        success: false
+        error: `Error in modules macro: ${errMsg}`,
+        success: false,
+        instructions: `## Modules — Error\n\nFailed to list installed modules.\n\n### Error Details:\n- **Message**: ${errMsg}\n\n### Recovery Options:\n- Retry the \`modules\` tool\n- Use \`state\` to check session health`
       };
     }
 };

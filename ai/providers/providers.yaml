@@ -370,6 +370,111 @@ providers:
           - text
           - image
 
+  - id: copilot
+    name: GitHub Copilot
+    endpointUrl: "${GITHUB_COPILOT_API_URL:-https://models.inference.ai.azure.com}"
+    apiVersion: v1
+    defaultModel: gpt-4o
+    authComponentFqn: "reactor.CopilotProviderConfig@1.0.0"
+    capabilities:
+      - text-generation
+      - code-generation
+    credentialRequirements:
+      - apiKey
+    credentialEnvVars:
+      apiKey: GITHUB_TOKEN
+    models:
+      - id: gpt-4o
+        name: GPT-4o (Copilot)
+        version: "2024-05-13"
+        capabilities:
+          - text-generation
+          - code-generation
+          - image-understanding
+          - reasoning
+        contextLength: 128000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: gpt-4o-mini
+        name: GPT-4o Mini (Copilot)
+        version: "2024-07-18"
+        capabilities:
+          - text-generation
+          - code-generation
+          - image-understanding
+        contextLength: 128000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+
+  - id: azure-openai
+    name: Azure OpenAI
+    endpointUrl: "${AZURE_OPENAI_ENDPOINT:-}"
+    apiVersion: "${AZURE_OPENAI_API_VERSION:-2024-02-15-preview}"
+    defaultModel: gpt-4o
+    authComponentFqn: "reactor.AzureOpenAIProviderConfig@1.0.0"
+    capabilities:
+      - text-generation
+      - code-generation
+      - image-understanding
+    credentialRequirements:
+      - apiKey
+      - endpoint
+      - deploymentName
+    credentialEnvVars:
+      apiKey: AZURE_OPENAI_API_KEY
+      endpoint: AZURE_OPENAI_ENDPOINT
+    models:
+      - id: gpt-4o
+        name: GPT-4o (Azure)
+        version: "2024-05-13"
+        capabilities:
+          - text-generation
+          - code-generation
+          - image-understanding
+          - reasoning
+        contextLength: 128000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: gpt-4o-mini
+        name: GPT-4o Mini (Azure)
+        version: "2024-07-18"
+        capabilities:
+          - text-generation
+          - code-generation
+          - image-understanding
+        contextLength: 128000
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: gpt-4
+        name: GPT-4 (Azure)
+        version: "1"
+        capabilities:
+          - text-generation
+          - code-generation
+          - image-understanding
+        contextLength: 8192
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+
   - id: anthropic
     name: Anthropic
     endpointUrl: "${ANTHROPIC_API_URL:-https://api.anthropic.com}"

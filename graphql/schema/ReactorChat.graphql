@@ -369,6 +369,14 @@ input ReactorSendMessageInput {
   message: String!
   streamingMode: StreamingMode
   """
+  Optional message role. Defaults to "user". Use "tool" when sending tool execution results back.
+  """
+  role: String
+  """
+  When role is "tool", the tool_call_id that this result responds to.
+  """
+  tool_call_id: String
+  """
   Optional model ID override. When provided, uses this model instead of the persona default.
   """
   modelId: String
@@ -604,6 +612,16 @@ extend type Mutation {
   ): ReactorChatState
 
   """
+  Set the model and/or provider for an existing chat session.
+  Persists the selection so it is used for subsequent messages and tool executions.
+  """
+  ReactorSetChatModelProvider(
+    chatSessionId: String!
+    modelId: String
+    providerId: String
+  ): ReactorChatStateOrError
+
+  """
   Sends a message to a persona and returns either a direct response
   or SSE connection details for streaming responses.
   Supports optional streaming mode parameter for real-time delivery.
@@ -616,9 +634,16 @@ extend type Mutation {
   ReactorExecuteMacro(macroInput: ReactorMacroExecuteInput!): ReactorChatResponse
 
   """
-  Activates a specific tool for use by the persona in the current chat session.
+  Executes a specific tool within the context of a chat session.
+  Returns the tool execution result as a chat response.
   """
-  ReactorExecuteTool(toolInput: ReactorToolDefinitionInput!): ReactorChatResponse
+  ReactorExecuteTool(
+    tool: String!
+    personaId: String!
+    chatSessionId: String!
+    callId: String
+    args: Any
+  ): ReactorChatResponse
   
   """
   Adds an image to the current chat conversation for analysis by the persona.
