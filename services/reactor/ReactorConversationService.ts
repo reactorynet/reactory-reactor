@@ -1285,6 +1285,39 @@ export default class ReactorConversationService
     if (modelId) update.modelId = modelId;
     if (providerId) update.providerId = providerId;
 
+    // Look up the model's contextLength from the provider registry
+    // and update maxTokens so the conversation reflects the new model's capacity.
+    if (modelId) {
+      try {
+        const effectiveProviderId = providerId
+          || (await ReactorConversationModel.findOne({ _id: chatSessionId, user: this.context.user }).select('providerId').lean().exec())?.providerId;
+        const provider = effectiveProviderId
+          ? await this.providerService.getProvider(effectiveProviderId)
+          : null;
+        const model = provider?.models?.find((m: any) => m.id === modelId);
+
+        if (model?.contextLength) {
+          update.maxTokens = model.contextLength;
+        } else {
+          // Model not found on specified provider — search across all providers
+          const allProviders = await this.providerService.getProviders();
+          for (const p of allProviders) {
+            const found = p.models?.find((m: any) => m.id === modelId);
+            if (found?.contextLength) {
+              update.maxTokens = found.contextLength;
+              break;
+            }
+          }
+        }
+      } catch (err) {
+        this.context.warn?.(
+          `[setChatModelProvider] Failed to resolve contextLength for model ${modelId}: ${(err as Error)?.message}`,
+          {},
+          "ReactorConversationService.setChatModelProvider"
+        );
+      }
+    }
+
     const chatState = await ReactorConversationModel.findOneAndUpdate(
       { _id: chatSessionId, user: this.context.user },
       { $set: update },
@@ -2332,7 +2365,8 @@ export default class ReactorConversationService
           conversation.toolApprovalMode === ToolApprovalMode.AUTO &&
           response?.choices?.[0]?.message?.tool_calls?.length > 0
         ) {
-          const MAX_TOOL_ITERATIONS = 10;
+          const MAX_TOOL_ITERATIONS = (conversation as any).maxToolIterations
+            || parseInt(process.env.REACTOR_MAX_TOOL_ITERATIONS || '25', 10);
           let iteration = 0;
 
           while (
@@ -2742,12 +2776,19 @@ export default class ReactorConversationService
         );
       }
 
+      // Build a content string that includes the actual result data so the AI
+      // provider can see tool output (not just a status message).
+      let toolContentString: string;
+      try {
+        toolContentString = resultString;
+      } catch {
+        toolContentString = `Tool ${macro} (${callId || "no call id"}) executed successfully.`;
+      }
+
       const toolResult = {
         __typename: "ReactorChatMessage",
         role: "tool",
-        content: `Tool ${macro} (${
-          callId || "no call id"
-        }) executed successfully.`,
+        content: toolContentString,
         tool_results: [
           {
             id: callId,

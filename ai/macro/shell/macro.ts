@@ -123,8 +123,8 @@ const getShellCommandText = async (templateId: string, command: string, state: C
   const SAFE_ENV_VARS = [
     'PATH', 'HOME', 'USER', 'LANG', 'SHELL', 'TERM',
     'LC_ALL', 'LC_CTYPE', 'EDITOR', 'VISUAL',
-    'APP_DATA_ROOT', 'NODE_ENV', 'REACTORY_SERVER',
-    'REACTORY', 'REACTORY_CLIENT', 'REACTORY_CORE',
+    'APP_DATA_ROOT', 'NODE_ENV', 'REACTORY_SERVER', 
+    'REACTORY', 'REACTORY_CLIENT', 'REACTORY_CORE', 'REACTORY_DATA', 'REACTORY_HOME'
   ];
   const commandWithEnvVars = `${Object.entries(process.env)
     .filter(([key]) => SAFE_ENV_VARS.includes(key))

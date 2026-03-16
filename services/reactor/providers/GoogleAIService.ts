@@ -466,12 +466,19 @@ class GoogleAIService extends AIProviderBase {
           }
         }
 
-        parts.push({
+        const functionCallPart: any = {
           functionCall: {
             name: toolCall.function?.name || (toolCall as any).name,
             args: args,
           },
-        });
+        };
+        // Preserve thoughtSignature for Gemini thinking models — the API requires
+        // it on functionCall parts when includeThoughts is enabled
+        const sig = toolCall.thought_signature || (toolCall as any).thoughtSignature;
+        if (sig) {
+          functionCallPart.thoughtSignature = sig;
+        }
+        parts.push(functionCallPart);
       }
     }
 
@@ -675,28 +682,74 @@ class GoogleAIService extends AIProviderBase {
           );
           return;
         }
-        let googleRole = "user";
+
+        let googleRole: string;
         let parts: any[] = [];
-        switch (msg.role) {
-          case "assistant":
-          case "tool":
-            googleRole = "model";
-            // check if the message has tool calls
+
+        if (msg.role === "tool") {
+          // Tool result messages MUST be sent as "user" role in Gemini.
+          // Gemini expects functionResponse parts under the "user" role.
+          googleRole = "user";
+
+          // Extract functionResponse parts from tool_results
+          if (msg.tool_results && Array.isArray(msg.tool_results) && msg.tool_results.length > 0) {
             parts = this.getPartsForAssistantMessage(msg);
-            break;
-          default:
-            googleRole = "user";
-            //@ts-ignore
-            parts = this.getPartsForUserMessage(msg);
-            break;
+            // Filter to only functionResponse parts — text content from tool
+            // messages is redundant (the actual data is in functionResponse).
+            const fnResponseParts = parts.filter((p: any) => p.functionResponse);
+            if (fnResponseParts.length > 0) {
+              parts = fnResponseParts;
+            }
+          } else if ((msg as any).tool_call_id && msg.content) {
+            // Tool message without tool_results (e.g. client-consolidated result).
+            // Wrap content as a functionResponse so Gemini understands it's a tool reply.
+            const toolName = (msg as any).tool_name || "unknown_tool";
+            let responseBody: any;
+            if (typeof msg.content === "string") {
+              try {
+                responseBody = JSON.parse(msg.content);
+              } catch {
+                responseBody = { result: msg.content };
+              }
+            } else {
+              responseBody = msg.content;
+            }
+            if (typeof responseBody !== "object" || responseBody === null) {
+              responseBody = { result: responseBody };
+            }
+            parts = [{
+              functionResponse: {
+                name: toolName,
+                response: responseBody,
+              },
+            }];
+          } else {
+            // Fallback: skip tool messages with no useful content
+            return;
+          }
+        } else if (msg.role === "assistant") {
+          googleRole = "model";
+          parts = this.getPartsForAssistantMessage(msg);
+        } else {
+          // user, system (system already extracted above, but handle gracefully)
+          if (msg.role === "system") return; // system is handled via systemInstruction
+          googleRole = "user";
+          //@ts-ignore
+          parts = this.getPartsForUserMessage(msg);
         }
 
-        let googleHistoryItem: any = {
-          role: googleRole,
-          parts,
-        };
+        if (parts.length === 0) {
+          return; // Skip empty messages
+        }
 
-        googleHistory.push(googleHistoryItem);
+        // Gemini requires strict user/model role alternation.
+        // Merge consecutive same-role messages by appending parts.
+        const lastEntry = googleHistory[googleHistory.length - 1];
+        if (lastEntry && lastEntry.role === googleRole) {
+          lastEntry.parts.push(...parts);
+        } else {
+          googleHistory.push({ role: googleRole, parts });
+        }
       });
 
       const tools = await this.getAITools();
@@ -1023,9 +1076,13 @@ class GoogleAIService extends AIProviderBase {
         }
       }
 
-      // Handle function calls
-      if (chunk.functionCalls && chunk.functionCalls.length > 0) {
-        for (const functionCall of chunk.functionCalls) {
+      // Handle function calls — extract from raw parts to preserve thoughtSignature
+      // (chunk.functionCalls strips thoughtSignature, so we read parts directly)
+      const rawParts = chunk.candidates?.[0]?.content?.parts ?? [];
+      const functionCallParts = rawParts.filter((p: any) => p.functionCall);
+      if (functionCallParts.length > 0) {
+        for (const part of functionCallParts) {
+          const functionCall = part.functionCall;
           const functionCallId = functionCall.id || new ObjectId().toString();
 
           // Check if we already have this function call
@@ -1037,11 +1094,15 @@ class GoogleAIService extends AIProviderBase {
               ...accumulatedFunctionCalls[existingCallIndex],
               ...functionCall,
               id: functionCallId,
+              // Preserve thoughtSignature from the part (required by Gemini thinking models)
+              ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
             };
           } else {
             accumulatedFunctionCalls.push({
               ...functionCall,
               id: functionCallId,
+              // Preserve thoughtSignature from the part (required by Gemini thinking models)
+              ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
             });
           }
 
@@ -1137,7 +1198,14 @@ class GoogleAIService extends AIProviderBase {
         }
 
         for (const functionCall of accumulatedFunctionCalls) {
-          candidate.content.parts.push({ functionCall });
+          // Separate thoughtSignature from the functionCall object — Gemini expects
+          // thoughtSignature as a sibling to functionCall on the part, not inside it.
+          const { thoughtSignature, id, ...cleanFunctionCall } = functionCall;
+          const part: any = { functionCall: cleanFunctionCall };
+          if (thoughtSignature) {
+            part.thoughtSignature = thoughtSignature;
+          }
+          candidate.content.parts.push(part);
         }
       }
 
@@ -1174,8 +1242,13 @@ class GoogleAIService extends AIProviderBase {
                 type: "function",
                 function: {
                   name: func.name,
-                  arguments: func.args,
+                  arguments: typeof func.args === "string"
+                    ? func.args
+                    : JSON.stringify(func.args ?? {}),
                 },
+                // Preserve thoughtSignature for Gemini thinking models — needed when
+                // rebuilding history to send back to the API
+                ...(func.thoughtSignature ? { thought_signature: func.thoughtSignature } : {}),
               }))
             : [],
         },
@@ -1198,16 +1271,69 @@ class GoogleAIService extends AIProviderBase {
 
       // Handle tool results differently - add them to history and get next response
       if (role === "tool") {
-        // Create a new chat session with updated history
-        const chat = await this.createChatSession(this.chatState.history);
+        // Split history: everything up to the last tool result messages goes into
+        // the chat session history, and the tool result messages themselves are sent
+        // as the next user turn (functionResponse parts). This avoids sending an
+        // empty message after tool results which confuses Gemini.
+        const historyForSession: ReactorConversationHistoryItem[] = [];
+        const pendingToolResults: any[] = [];
+
+        // Walk backwards from the end to collect trailing tool messages
+        let i = this.chatState.history.length - 1;
+        while (i >= 0 && this.chatState.history[i]?.role === "tool") {
+          pendingToolResults.unshift(this.chatState.history[i]);
+          i--;
+        }
+        // Everything before the trailing tool messages is session history
+        for (let j = 0; j <= i; j++) {
+          historyForSession.push(this.chatState.history[j]);
+        }
+
+        const chat = await this.createChatSession(historyForSession);
         if (!chat) {
           throw new AIProviderError("Failed to create chat session");
         }
 
-        // Send an empty message to get the next response from the AI
+        // Build functionResponse parts from the pending tool results
+        const functionResponseParts: any[] = [];
+        for (const toolMsg of pendingToolResults) {
+          if (toolMsg.tool_results && Array.isArray(toolMsg.tool_results) && toolMsg.tool_results.length > 0) {
+            for (const tr of toolMsg.tool_results) {
+              let response = tr?.content ?? tr?.result ?? tr;
+              if (typeof response === "string") {
+                try { response = JSON.parse(response); } catch { response = { result: response }; }
+              }
+              if (typeof response !== "object" || response === null) {
+                response = { result: response };
+              }
+              functionResponseParts.push({
+                functionResponse: {
+                  name: tr.tool_name || tr.name || (toolMsg as any).tool_name || "unknown_tool",
+                  response,
+                },
+              });
+            }
+          } else if ((toolMsg as any).tool_call_id && toolMsg.content) {
+            const toolName = (toolMsg as any).tool_name || "unknown_tool";
+            let responseBody: any;
+            if (typeof toolMsg.content === "string") {
+              try { responseBody = JSON.parse(toolMsg.content); } catch { responseBody = { result: toolMsg.content }; }
+            } else {
+              responseBody = toolMsg.content;
+            }
+            if (typeof responseBody !== "object" || responseBody === null) {
+              responseBody = { result: responseBody };
+            }
+            functionResponseParts.push({
+              functionResponse: { name: toolName, response: responseBody },
+            });
+          }
+        }
+
+        // Send the tool results as the next user message
         const result = await chat.sendMessage({
           config: persona.messageConfig,
-          message: "",
+          message: functionResponseParts.length > 0 ? functionResponseParts : "",
         });
 
         this.context.log(
@@ -1474,7 +1600,12 @@ class GoogleAIService extends AIProviderBase {
     ) {
       for (const part of candidate.content.parts) {
         if (part.functionCall) {
-          functionCalls.push(part.functionCall);
+          // Preserve thoughtSignature from the part for Gemini thinking models
+          const fc: any = { ...part.functionCall };
+          if ((part as any).thoughtSignature) {
+            fc.thoughtSignature = (part as any).thoughtSignature;
+          }
+          functionCalls.push(fc);
         }
         if (part.text) {
           responseText += part.text;
