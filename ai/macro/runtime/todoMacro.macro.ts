@@ -156,6 +156,12 @@ export const TodoMacro: Macro<unknown, TodoMacroProps> = async (
           updatedAt: now,
         };
 
+        // Defensive: Mongoose Mixed type with minimize:true can strip empty arrays
+        // on round-trip, leaving items as undefined. Re-initialize if needed.
+        if (!Array.isArray(list.items)) {
+          list.items = [];
+        }
+
         list.items.push(todoItem);
         list.updatedAt = now;
 

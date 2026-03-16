@@ -2762,14 +2762,23 @@ export default class ReactorConversationService
         timestamp: new Date(),
       };
 
-      // Use atomic update to add macro result to conversation history
-      // Persist conversation.vars — macros (e.g. todoMacro, variableMacro)
-      // mutate state.vars in-memory but nothing else saves them back to the DB.
+      // Use atomic update to add macro result to conversation history.
+      // Persist conversation.vars — macros (e.g. todoMacro, variableMacro) mutate
+      // state.vars in-memory. A JSON round-trip strips any Mongoose Mixed-type
+      // internal wrappers and produces a plain POJO that BSON serializes correctly,
+      // including nested arrays such as TodoList.items[].
+      let persistedVars: Record<string, unknown>;
+      try {
+        persistedVars = JSON.parse(JSON.stringify(conversation.vars ?? {}));
+      } catch {
+        persistedVars = {};
+      }
+
       await ReactorConversationModel.findOneAndUpdate(
         { _id: chatSessionId },
         {
           $push: { history: toolResult },
-          $set: { updated: new Date(), vars: conversation.vars || {} },
+          $set: { updated: new Date(), vars: persistedVars },
         },
         { new: true }
       ).exec();
