@@ -483,6 +483,7 @@ class ReactorChatResolver {
         tool_call_id?: string;
         modelId?: string;
         providerId?: string;
+        continueAfterTools?: boolean;
       };
     },
     context: Reactory.Server.IReactoryContext
@@ -490,7 +491,7 @@ class ReactorChatResolver {
     if (
       !args ||
       !args.message ||
-      !args.message.message ||
+      (!args.message.continueAfterTools && !args.message.message) ||
       !args.message.personaId
     ) {
       return {
@@ -511,12 +512,13 @@ class ReactorChatResolver {
       return await conversationService.sendMessage({
         personaId: args.message.personaId,
         chatSessionId: args.message.chatSessionId,
-        message: args.message.message,
+        message: args.message.message || '',
         streamingMode: args.message.streamingMode,
         role: args.message.role,
         tool_call_id: args.message.tool_call_id,
         modelId: args.message.modelId,
         providerId: args.message.providerId,
+        continueAfterTools: args.message.continueAfterTools,
       });
     } catch (error) {
       return {

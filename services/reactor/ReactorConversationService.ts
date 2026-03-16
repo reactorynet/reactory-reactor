@@ -2051,10 +2051,11 @@ export default class ReactorConversationService
     role?: string;
     tool_name?: string;
     tool_args?: any;
-    tool_call_id?: string;  
+    tool_call_id?: string;
     streamingMode?: StreamingMode;
     modelId?: string;
     providerId?: string;
+    continueAfterTools?: boolean;
   }): Promise<any> {
     const {
       personaId,
@@ -2068,6 +2069,7 @@ export default class ReactorConversationService
       streamingMode = StreamingMode.NONE,
       modelId: modelIdOverride,
       providerId: providerIdOverride,
+      continueAfterTools = false,
     } = args;
     const { user } = this.context;
 
@@ -2170,34 +2172,43 @@ export default class ReactorConversationService
             chatSessionId,
             userId: this.context.user?._id,
             timestamp: new Date().toISOString(),
+            continueAfterTools,
           });
 
-          // Use findOneAndUpdate to atomically find and update the conversation
-          // This prevents race conditions that could lead to duplicate creation
-          const messageToAdd = {
-            id: new ObjectId(),
-            role: role as any,
-            content: message,
-            timestamp: new Date(),
-            tool_name,
-            tool_args,
-            tool_call_id,
-          };
+          if (continueAfterTools) {
+            // Tool results were already persisted by executeMacro — just load
+            // the conversation and call the AI provider without adding a duplicate message.
+            conversation = await ReactorConversationModel.findOne(
+              { _id: chatSessionId, user: this.context.user },
+            ).populate("user").exec();
+          } else {
+            // Use findOneAndUpdate to atomically find and update the conversation
+            // This prevents race conditions that could lead to duplicate creation
+            const messageToAdd = {
+              id: new ObjectId(),
+              role: role as any,
+              content: message,
+              timestamp: new Date(),
+              tool_name,
+              tool_args,
+              tool_call_id,
+            };
 
-          conversation = await ReactorConversationModel.findOneAndUpdate(
-            { _id: chatSessionId, user: this.context.user },
-            {
-              $push: { history: messageToAdd },
-              $set: {
-                updated: new Date(),
-                ...(modelIdOverride ? { modelId: modelIdOverride } : {}),
-                ...(providerIdOverride ? { providerId: providerIdOverride } : {}),
+            conversation = await ReactorConversationModel.findOneAndUpdate(
+              { _id: chatSessionId, user: this.context.user },
+              {
+                $push: { history: messageToAdd },
+                $set: {
+                  updated: new Date(),
+                  ...(modelIdOverride ? { modelId: modelIdOverride } : {}),
+                  ...(providerIdOverride ? { providerId: providerIdOverride } : {}),
+                },
               },
-            },
-            { new: true, upsert: false }
-          )
-            .populate("user")
-            .exec();
+              { new: true, upsert: false }
+            )
+              .populate("user")
+              .exec();
+          }
 
           // Validate the found/updated conversation
           this.validateConversationDocument(

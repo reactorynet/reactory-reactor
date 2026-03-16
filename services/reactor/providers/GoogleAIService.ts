@@ -1198,12 +1198,17 @@ class GoogleAIService extends AIProviderBase {
         }
 
         for (const functionCall of accumulatedFunctionCalls) {
-          // Separate thoughtSignature from the functionCall object — Gemini expects
+          // Separate thoughtSignature and id from the functionCall object — Gemini expects
           // thoughtSignature as a sibling to functionCall on the part, not inside it.
+          // We preserve id as _toolCallId so buildCompletion can reuse it (avoiding
+          // ID mismatch between SSE events and stored tool_calls).
           const { thoughtSignature, id, ...cleanFunctionCall } = functionCall;
           const part: any = { functionCall: cleanFunctionCall };
           if (thoughtSignature) {
             part.thoughtSignature = thoughtSignature;
+          }
+          if (id) {
+            part._toolCallId = id;
           }
           candidate.content.parts.push(part);
         }
@@ -1238,7 +1243,7 @@ class GoogleAIService extends AIProviderBase {
           role: "assistant",
           tool_calls: functionCalls && functionCalls.length > 0
             ? functionCalls.map((func) => ({
-                id: new ObjectId().toString(),
+                id: func.id || new ObjectId().toString(),
                 type: "function",
                 function: {
                   name: func.name,
@@ -1604,6 +1609,11 @@ class GoogleAIService extends AIProviderBase {
           const fc: any = { ...part.functionCall };
           if ((part as any).thoughtSignature) {
             fc.thoughtSignature = (part as any).thoughtSignature;
+          }
+          // Preserve _toolCallId from streaming handler so buildCompletion reuses
+          // the same ID that was sent to the client via SSE events
+          if ((part as any)._toolCallId) {
+            fc.id = (part as any)._toolCallId;
           }
           functionCalls.push(fc);
         }

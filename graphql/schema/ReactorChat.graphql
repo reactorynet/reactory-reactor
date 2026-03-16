@@ -431,6 +431,12 @@ input ReactorSendMessageInput {
   Optional provider ID override. When provided, uses this provider instead of the persona default.
   """
   providerId: String
+  """
+  When true, skip persisting the message to history and only call the AI provider.
+  Use this when tool results have already been persisted (e.g. by executeMacro)
+  and you just need the AI to continue processing.
+  """
+  continueAfterTools: Boolean
 }
 
 """
