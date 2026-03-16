@@ -1,4 +1,51 @@
 """
+Status of a single todo item within a todo list.
+"""
+enum ReactorTodoStatus {
+  pending
+  in_progress
+  completed
+  failed
+  cancelled
+}
+
+"""
+Execution strategy for todo items in a list.
+"""
+enum ReactorTodoExecutionMode {
+  series
+  parallel
+}
+
+"""
+A single todo item within a todo list managed by the AI agent.
+"""
+type ReactorTodoItem {
+  id: String!
+  title: String!
+  description: String
+  status: ReactorTodoStatus!
+  assignee: String
+  result: Any
+  error: String
+  createdAt: String!
+  updatedAt: String!
+}
+
+"""
+A todo list created and managed by AI agents via the todo macro.
+Todo lists are stored in the conversation vars under the key "reactor.todos".
+"""
+type ReactorTodoList {
+  id: String!
+  name: String!
+  executionMode: ReactorTodoExecutionMode!
+  items: [ReactorTodoItem!]!
+  createdAt: String!
+  updatedAt: String!
+}
+
+"""
 Represents the status of a tool call execution lifecycle.
 """
 enum ReactorToolCallStatus {

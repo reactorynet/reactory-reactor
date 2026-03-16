@@ -1926,7 +1926,10 @@ export default class ReactorConversationService
         // first we need to initialize the openai service
         // to use the correct model and connection parameters.
         await this.openaiService.initialize(chatSessionId, persona);
-        return await this.openaiService.chat(chatArgs);
+        return await this.openaiService.chat({
+          ...chatArgs,
+          persistState: false, // Don't persist here since we handle it in ReactorConversationService
+        });
 
       case "google":
         // Google AI service implementation
@@ -2760,11 +2763,13 @@ export default class ReactorConversationService
       };
 
       // Use atomic update to add macro result to conversation history
+      // Persist conversation.vars — macros (e.g. todoMacro, variableMacro)
+      // mutate state.vars in-memory but nothing else saves them back to the DB.
       await ReactorConversationModel.findOneAndUpdate(
         { _id: chatSessionId },
         {
           $push: { history: toolResult },
-          $set: { updated: new Date() },
+          $set: { updated: new Date(), vars: conversation.vars || {} },
         },
         { new: true }
       ).exec();

@@ -738,32 +738,13 @@ class OpenAIService extends AIProviderBase {
         const response = await this.getAIResponse(prompt, messageId.toString());
         const completion = this.normalizeCompletion(response);
 
-        // Add user message to history
-        const userHistoryItem: ReactorConversationHistoryItem = {
-          id: new ObjectId(),
-          role: "user",
-          content: message,
-          timestamp: new Date(),
-          tool_results: [],
-        };
-        this.chatState.history.push(userHistoryItem);
-
-        // Add assistant response to history
-        if (completion.choices && completion.choices.length > 0) {
-          this.chatState.history.push({
-            id: messageId,
-            timestamp: new Date(),
-            tool_calls: (completion.choices[0].message.tool_calls ?? []).map((tc) => ({
-              id: tc.id,
-              type: "function" as const,
-              function: tc.function,
-            })),
-            tool_results: [],
-            role: "assistant",
-            content: completion.choices[0].message.content,
-          });
-        }
-
+        // NOTE: We do NOT push the user message or assistant response to chatState.history here.
+        // ReactorConversationService owns persistence of all conversation turns via atomic
+        // $push operations and processAIResponse(). Pushing here would cause duplicates because:
+        //   1. sendMessage() already $push-ed the user/tool message before calling us.
+        //   2. loadChatState() loaded that message into this.chatState.history during initialize().
+        //   3. processAIResponse() will $push the assistant response after we return.
+        // Only persist if the caller explicitly opts in (e.g. standalone usage).
         if (persistState) {
           await this.persistChatState();
         }

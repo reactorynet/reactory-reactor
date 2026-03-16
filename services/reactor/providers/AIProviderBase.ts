@@ -160,7 +160,7 @@ abstract class AIProviderBase implements IAIProviderService {
         macros: chatSession.macros || [],
         tools: chatSession.tools || [],
         files: chatSession.files || [],
-        toolApprovalMode: (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
+        toolApprovalMode: chatSession.toolApprovalMode || (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
         apiKey: undefined,
         apiOrg: undefined,
         ai: undefined,

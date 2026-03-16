@@ -179,7 +179,9 @@ export interface ChatParams {
   personaId: string
   message: string
   chatSessionId?: string,
-  streamingMode?: StreamingMode
+  streamingMode?: StreamingMode,
+  /** When false, the provider should not persist history/state (ReactorConversationService handles it). */
+  persistState?: boolean
 }
 
 export interface AudioChatParams extends ChatParams {
