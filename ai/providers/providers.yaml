@@ -477,9 +477,9 @@ providers:
 
   - id: anthropic
     name: Anthropic
-    endpointUrl: "${ANTHROPIC_API_URL:-https://api.anthropic.com}"
+    endpointUrl: "${ANTHROPIC_API_BASE_URL:-https://api.anthropic.com}"
     apiVersion: v1
-    defaultModel: claude-sonnet-4-5-20250929
+    defaultModel: claude-sonnet-4-6
     capabilities:
       - text-generation
       - code-generation
@@ -490,7 +490,22 @@ providers:
     credentialEnvVars:
       apiKey: ANTHROPIC_API_KEY
     models:
-      - id: claude-sonnet-4-5-20250929
+      - id: claude-opus-4-6
+        name: Claude Opus 4.6
+        version: "4.6"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+        contextLength: 200000
+        supportsStreaming: true
+        supportedTools: 
+          - function-calling
+        supportedMediaTypes:
+          - image
+          - text
+      - id: claude-sonnet-4-5
         name: Claude Sonnet 4.5
         version: "4.5"
         capabilities:
@@ -499,7 +514,6 @@ providers:
           - reasoning
           - image-understanding
         contextLength: 200000
-        supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:

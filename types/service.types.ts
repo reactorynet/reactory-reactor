@@ -402,6 +402,17 @@ export interface IAIPersona {
     apiEndpoint?: string;
     apiVersion?: string;
     apiBaseURL?: string;
+    /**
+     * Per-persona streaming pace configuration.
+     * Controls how fast streamed tokens are delivered to the client.
+     * Omitted values fall back to system defaults (~250 WPM).
+     */
+    streamingPace?: {
+      minChunkSize?: number;
+      maxChunkSize?: number;
+      targetIntervalMs?: number;
+      flushTimeoutMs?: number;
+    };
     [key: string]: any;
   },
   tools?: MacroToolDefinition[]
@@ -542,6 +553,25 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
    * @param toolApprovalMode 
    */
   setChatToolApprovalMode(chatSessionId: string, toolApprovalMode: ToolApprovalMode): Promise<any>;
+
+  /**
+   * Sets the maximum number of auto tool call iterations before pausing for user confirmation.
+   * When null, the server default is used.
+   * @param chatSessionId
+   * @param maxToolIterations
+   */
+  setChatMaxToolIterations(chatSessionId: string, maxToolIterations: number): Promise<any>;
+
+  /**
+   * Continue tool execution after the agent paused due to reaching the max tool iteration limit.
+   * Reloads the conversation, checks for pending tool_calls in the last assistant message,
+   * and re-enters the tool execution loop.
+   * @param chatSessionId
+   * @param personaId
+   * @param maxToolIterations - Optional new limit to apply before resuming
+   * @param streamingMode - Optional streaming mode override
+   */
+  continueToolExecution(chatSessionId: string, personaId: string, maxToolIterations?: number, streamingMode?: any): Promise<any>;
 
   /**
    * Sets the model and/or provider for an existing chat session.

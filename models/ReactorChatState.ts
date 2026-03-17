@@ -103,7 +103,9 @@ export interface ReactorConversationDocument {
   // The date the conversation was last
   updated: Date
   // The tool approval mode for the conversation
-  toolApprovalMode: ToolApprovalMode  
+  toolApprovalMode: ToolApprovalMode
+  // The maximum number of auto tool call iterations before pausing for user confirmation
+  maxToolIterations?: number
   // The macros used in the conversation
   macros?: Partial<MacroComponentDefinition<any>>[]
   // The tools used in the conversation
@@ -208,6 +210,12 @@ const ReactorConversationSchema = new Schema({
     type: String,
     enum: Object.values(ToolApprovalMode),
     default: ToolApprovalMode.PROMPT,
+  },
+  // The maximum number of auto tool call iterations before pausing for user confirmation
+  maxToolIterations: {
+    type: Number,
+    default: null,
+    min: 1,
   },
   // The estimated token count for the conversation
   tokenCount: {

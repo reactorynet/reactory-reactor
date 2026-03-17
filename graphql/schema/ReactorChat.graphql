@@ -353,6 +353,11 @@ type ReactorChatState {
   """
   toolApprovalMode: ReactorToolApprovalMode
   """
+  The maximum number of auto tool call iterations before pausing for user confirmation.
+  When null, the server default is used.
+  """
+  maxToolIterations: Int
+  """
   Files that have been attached to the chat session.
   This includes both regular files and audio files.
   """
@@ -663,6 +668,26 @@ extend type Mutation {
     chatSessionId: String!
     mode: ReactorToolApprovalMode!
   ): ReactorChatState
+
+  """
+  Set the maximum number of auto tool call iterations for a chat session.
+  When set, the agent will pause after this many iterations and ask the user to continue.
+  """
+  ReactorSetChatMaxToolIterations(
+    chatSessionId: String!
+    maxToolIterations: Int!
+  ): ReactorChatState
+
+  """
+  Continue tool execution after the agent paused due to reaching the max tool iteration limit.
+  Optionally accepts a new max iterations value to apply before resuming.
+  """
+  ReactorContinueToolExecution(
+    chatSessionId: String!
+    personaId: String!
+    maxToolIterations: Int
+    streamingMode: StreamingMode
+  ): ReactorChatResponse
 
   """
   Set the model and/or provider for an existing chat session.

@@ -1,7 +1,7 @@
 import Reactory from "@reactorynet/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
+import AnthropicService from "./providers/AnthropicService";
 import {
-  IReactorConversationsService,
   IOpenAIService,
   IReactorProviderService,
   IAIPersona,
@@ -19,10 +19,23 @@ import ReactorConversationModel, {
 } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import AIPersonaProvider from "./AIPersonaProvider";
 import ReactorMessageProcessingService from "./ReactorMessageProcessingService";
+import GoogleAIService from "./providers/GoogleAIService";
 import { v4 } from "uuid";
 import { ObjectId } from "mongodb";
 import safeUrl from "@reactory/server-core/utils/url/safeUrl";
-
+import { ChatCompletion, ChatCompletionMessage } from "openai/resources";
+import ReactorMacroService from "./providers/ReactorMacroService";
+import DocumentChunkingService from "./DocumentChunkingService";
+import { ReactorConversationHistoryItem } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
+import {
+  ReactoryFileDocument,
+  ReactoryFileModel,
+} from "@reactory/server-modules/reactory-core/models/CoreFile";
+import { id } from "schema/reflection";
+import { CompletionStreamingEvent, ToolIterationLimitStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
+import Helpers from "authentication/strategies/helpers";
+import { StreamingSessionManager } from "./StreamingSessionManager";
+import { StreamingTransportManager } from "./StreamingTransportManager";
 /**
  * Enhanced error response interface with correlation tracking
  */
@@ -109,21 +122,8 @@ import {
   MacroToolDefinition,
   ToolApprovalMode,
 } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
-// import { MacroRegistry } from "@reactory/server-modules/reactory-reactor/ai/openai/chat/macro";
-import GoogleAIService from "./providers/GoogleAIService";
-import { ChatCompletion, ChatCompletionMessage } from "openai/resources";
-import ReactorMacroService from "./providers/ReactorMacroService";
-import DocumentChunkingService from "./DocumentChunkingService";
-import { ReactorConversationHistoryItem } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
-import {
-  ReactoryFileDocument,
-  ReactoryFileModel,
-} from "modules/reactory-core/models/CoreFile";
-import { id } from "schema/reflection";
-import { CompletionStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
-import Helpers from "authentication/strategies/helpers";
-import { StreamingSessionManager } from "./StreamingSessionManager";
-import { StreamingTransportManager } from "./StreamingTransportManager";
+
+
 
 /**
  * ReactorConversationService - Core AI Conversation Management Service
@@ -188,6 +188,7 @@ const DATABASE_CONSTANTS = {
     { id: "core.ReactoryFileService@1.0.0", alias: "fileService" },
     { id: "reactor.OpenAIService@1.0.0", alias: "openaiService" },
     { id: "reactor.GoogleAIService@1.0.0", alias: "googleAIService" },
+    { id: "reactor.AnthropicService@1.0.0", alias: "anthropicService" },
     { id: "reactor.ReactorProviderService@1.0.0", alias: "providerService" },
     {
       id: "reactor.ReactorMessageProcessingService@1.0.0",
@@ -211,6 +212,9 @@ export default class ReactorConversationService
 
   /** Google AI service for Google Gemini interactions */
   private googleAIService: GoogleAIService;
+
+  /** Anthropic service for Anthropic AI interactions */
+  private anthropicService: AnthropicService;
 
   /** Provider service for managing multiple AI providers and adapters */
   private providerService: IReactorProviderService;
@@ -1267,6 +1271,68 @@ export default class ReactorConversationService
   }
 
   /**
+   * Set the maximum number of auto tool call iterations for a conversation.
+   * When set, the agent will pause after this many iterations and signal the client.
+   */
+  async setChatMaxToolIterations(
+    chatSessionId: string,
+    maxToolIterations: number
+  ): Promise<any> {
+    this.validateChatSessionId(chatSessionId, "setChatMaxToolIterations");
+
+    if (maxToolIterations < 1) {
+      throw new Error("maxToolIterations must be at least 1");
+    }
+
+    const chatState = await ReactorConversationModel.findOneAndUpdate(
+      { _id: chatSessionId, user: this.context.user },
+      { maxToolIterations, updated: new Date() },
+      { new: true }
+    ).exec();
+
+    if (!chatState) {
+      throw new Error(
+        `Chat session with id ${chatSessionId} not found or you do not have permission to modify it.`
+      );
+    }
+
+    return chatState;
+  }
+
+  /**
+   * Continue tool execution after the agent paused due to reaching the max tool iteration limit.
+   * Reloads the conversation, checks for pending tool_calls in the last assistant message,
+   * and re-enters the tool execution loop respecting the (optionally updated) maxToolIterations.
+   */
+  async continueToolExecution(
+    chatSessionId: string,
+    personaId: string,
+    maxToolIterations?: number,
+    streamingMode?: StreamingMode,
+  ): Promise<any> {
+    this.validateChatSessionId(chatSessionId, "continueToolExecution");
+
+    // Optionally update maxToolIterations before resuming
+    if (maxToolIterations != null && maxToolIterations >= 1) {
+      await ReactorConversationModel.findOneAndUpdate(
+        { _id: chatSessionId, user: this.context.user },
+        { maxToolIterations, updated: new Date() },
+      ).exec();
+    }
+
+    // Re-send an empty continuation message. sendMessage already handles
+    // the AUTO tool execution loop and will run another batch of iterations
+    // with the conversation's (potentially updated) maxToolIterations.
+    return this.sendMessage({
+      personaId,
+      chatSessionId,
+      message: 'Continue executing tool calls — the user has approved additional iterations.',
+      role: 'user',
+      streamingMode: streamingMode || StreamingMode.NONE,
+    });
+  }
+
+  /**
    * Set the model and/or provider for an existing conversation.
    * Persists the override so it is used for subsequent messages and tool executions.
    */
@@ -1526,6 +1592,10 @@ export default class ReactorConversationService
 
   setOpenAIService(service: IOpenAIService) {
     this.openaiService = service;
+  }
+
+  setAnthropicsService(service: IAnthropicService) {
+    this.anthropicService = service;
   }
 
   setProviderService(service: IReactorProviderService) {
@@ -1971,7 +2041,13 @@ export default class ReactorConversationService
           ...chatArgs,
           persistState: false, // Don't persist here since we handle it in ReactorConversationService
         });
-
+      case "anthropic":
+        // Anthropic service implementation
+        await this.anthropicService.initialize(chatSessionId, persona);
+        return await this.anthropicService.chat({
+          ...chatArgs,
+          persistState: false, // Don't persist here since we handle it in ReactorConversationService
+        });
       default:
         this.context.error(`Provider ${provider} not implemented`, {
           provider,
@@ -2377,7 +2453,7 @@ export default class ReactorConversationService
           response?.choices?.[0]?.message?.tool_calls?.length > 0
         ) {
           const MAX_TOOL_ITERATIONS = (conversation as any).maxToolIterations
-            || parseInt(process.env.REACTOR_MAX_TOOL_ITERATIONS || '25', 10);
+            || parseInt(process.env.REACTOR_MAX_TOOL_ITERATIONS || '100', 10);
           let iteration = 0;
 
           while (
@@ -2459,6 +2535,62 @@ export default class ReactorConversationService
             this.context.warn(`[sendMessage] AUTO tool execution reached max iterations (${MAX_TOOL_ITERATIONS})`, {
               conversationId: effectiveConversationId,
             });
+
+            const partialContent = response?.choices?.[0]?.message?.content || '';
+
+            // Add assistant message so the user sees the pause
+            await ReactorConversationModel.findOneAndUpdate(
+              { _id: effectiveConversationId },
+              {
+                $push: {
+                  history: {
+                    id: new ObjectId(),
+                    role: 'assistant',
+                    content: `I've completed ${iteration} tool call iterations and reached the configured limit of ${MAX_TOOL_ITERATIONS}. You can adjust the limit and continue, or accept the current results.`,
+                    timestamp: new Date(),
+                  },
+                },
+                $set: { updated: new Date() },
+              }
+            ).exec();
+
+            // Signal the client via SSE or flag the response for GraphQL mode
+            if (streamingMode === StreamingMode.SSE) {
+              try {
+                const sseSessionId = this.streamingSessionManager.getSessionId(effectiveConversationId);
+                if (sseSessionId) {
+                  const limitEvent: ToolIterationLimitStreamingEvent = {
+                    type: StreamingEventType.TOOL_ITERATION_LIMIT,
+                    sessionId: effectiveConversationId,
+                    conversationId: effectiveConversationId,
+                    messageId: new ObjectId().toString(),
+                    timestamp: new Date(),
+                    data: {
+                      iterationsCompleted: iteration,
+                      maxIterations: MAX_TOOL_ITERATIONS,
+                      partialContent,
+                    },
+                  };
+                  await this.streamingTransportManager.sendEventToSession(
+                    effectiveConversationId,
+                    limitEvent
+                  );
+                }
+              } catch (sseError: any) {
+                this.context.warn(`[sendMessage] Failed to send tool iteration limit SSE event: ${sseError.message}`, {
+                  conversationId: effectiveConversationId,
+                });
+              }
+              // Skip the normal completion event — the client will handle the limit event
+              return adapter.adaptResponse(response);
+            }
+
+            // For non-streaming mode, flag the response so the client can detect it
+            if (response?.choices?.[0]?.message) {
+              (response.choices[0].message as any).toolIterationLimitReached = true;
+              (response.choices[0].message as any).iterationsCompleted = iteration;
+              (response.choices[0].message as any).maxToolIterations = MAX_TOOL_ITERATIONS;
+            }
           }
 
           // In SSE mode, the GoogleAIService deferred the completion event so
@@ -2569,30 +2701,37 @@ export default class ReactorConversationService
   ): Promise<any> {
     // Add AI response if available
     if (response?.choices && response?.choices?.length > 0) {
-      const aiMessage = response.choices[0].message;
-      // Extract reasoning/thinking from provider response
-      const thinking = response.reasoning || response.__reasoning || undefined;
+      // When the provider streamed tool_calls, it may have already persisted
+      // the assistant message to avoid a race condition with executeMacro
+      // (the client starts executing tools as soon as the SSE completion event
+      // arrives, which can happen before this method runs). Skip the duplicate
+      // persist in that case.
+      if (!(response as any).__persisted) {
+        const aiMessage = response.choices[0].message;
+        // Extract reasoning/thinking from provider response
+        const thinking = response.reasoning || response.__reasoning || undefined;
 
-      // Use findOneAndUpdate for atomic update
-      await ReactorConversationModel.findOneAndUpdate(
-        { _id: conversation._id },
-        {
-          $push: {
-            history: {
-              id: new ObjectId(),
-              response, // add the original response for debugging
-              role: aiMessage.role,
-              content: aiMessage.content,
-              thinking,
-              timestamp: new Date(),
-              tool_calls: aiMessage.tool_calls,
-              tool_results: [],
+        // Use findOneAndUpdate for atomic update
+        await ReactorConversationModel.findOneAndUpdate(
+          { _id: conversation._id },
+          {
+            $push: {
+              history: {
+                id: new ObjectId(),
+                response, // add the original response for debugging
+                role: aiMessage.role,
+                content: aiMessage.content,
+                thinking,
+                timestamp: new Date(),
+                tool_calls: aiMessage.tool_calls,
+                tool_results: [],
+              },
             },
+            $set: { updated: new Date() },
           },
-          $set: { updated: new Date() },
-        },
-        { new: true }
-      ).exec();
+          { new: true }
+        ).exec();
+      }
 
       // Update token count after adding AI response
       await this.updateConversationTokenCount(conversation._id.toString());

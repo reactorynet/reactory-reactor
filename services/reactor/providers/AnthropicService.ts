@@ -22,7 +22,7 @@ import ReactorMacroService from "./ReactorMacroService";
 import {
   MacroToolDefinition,
 } from "modules/reactory-reactor/ai/openai/types/chat";
-import {
+import ReactorConversationModel, {
   ReactorConversationHistory,
   ReactorConversationHistoryItem,
 } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
@@ -196,7 +196,74 @@ class AnthropicService extends AIProviderBase {
     }
 
     // Ensure messages alternate correctly (Anthropic requires user/assistant alternation)
-    return this.ensureMessageAlternation(messages);
+    const alternated = this.ensureMessageAlternation(messages);
+
+    // Strip orphaned tool_result blocks whose tool_use_id doesn't appear
+    // in the immediately preceding assistant message. Anthropic rejects these.
+    return this.sanitizeToolResults(alternated);
+  }
+
+  /**
+   * Remove tool_result content blocks that reference tool_use_ids not present
+   * in the immediately preceding assistant message. Anthropic requires each
+   * tool_result to match a tool_use in the previous message.
+   *
+   * Also handles edge cases:
+   * - tool_results in the very first message (no preceding assistant)
+   * - tool_results merged with text blocks by ensureMessageAlternation
+   * - empty messages after filtering
+   */
+  private sanitizeToolResults(messages: Anthropic.Messages.MessageParam[]): Anthropic.Messages.MessageParam[] {
+    const result: Anthropic.Messages.MessageParam[] = [];
+
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+
+      if (msg.role === "user" && Array.isArray(msg.content)) {
+        const hasToolResults = (msg.content as any[]).some(
+          (block: any) => block.type === "tool_result",
+        );
+
+        if (hasToolResults) {
+          // Collect valid tool_use IDs from the immediately preceding assistant message
+          const prev = result[result.length - 1];
+          const validToolUseIds = new Set<string>();
+          if (prev?.role === "assistant" && Array.isArray(prev.content)) {
+            for (const block of prev.content as any[]) {
+              if (block.type === "tool_use" && block.id) {
+                validToolUseIds.add(block.id);
+              }
+            }
+          }
+
+          // Keep only tool_result blocks with valid IDs, plus any non-tool_result blocks
+          const filtered = (msg.content as any[]).filter((block: any) => {
+            if (block.type === "tool_result") {
+              const valid = validToolUseIds.has(block.tool_use_id);
+              if (!valid) {
+                this.context.log(
+                  `Removing orphaned tool_result block with tool_use_id=${block.tool_use_id} at message index ${i}`,
+                  { validToolUseIds: [...validToolUseIds] },
+                  "AnthropicService.sanitizeToolResults",
+                );
+              }
+              return valid;
+            }
+            return true;
+          });
+
+          // Skip the message entirely if nothing remains after filtering
+          if (filtered.length > 0) {
+            result.push({ ...msg, content: filtered });
+          }
+          continue;
+        }
+      }
+
+      result.push(msg);
+    }
+
+    return result;
   }
 
   /**
@@ -475,8 +542,12 @@ class AnthropicService extends AIProviderBase {
         budget_tokens: persona.modelConfig?.thinkingBudget || 10000,
       };
     } else {
-      params.temperature = persona.modelConfig?.temperature || 0.7;
-      (params as any).top_p = persona.modelConfig?.topP || 1.0;
+      // Anthropic does not allow both temperature and top_p simultaneously
+      if (persona.modelConfig?.topP != null && persona.modelConfig?.temperature == null) {
+        (params as any).top_p = persona.modelConfig.topP;
+      } else {
+        params.temperature = persona.modelConfig?.temperature ?? 0.7;
+      }
     }
 
     if (tools && tools.length > 0) {
@@ -499,7 +570,7 @@ class AnthropicService extends AIProviderBase {
     persona: IAIPersona;
     history: ReactorConversationHistory;
     messageId?: string;
-  }): Promise<{ content: string; finishReason: string; toolCalls: any[]; reasoning?: string }> {
+  }): Promise<{ content: string; finishReason: string; toolCalls: any[]; reasoning?: string; assistantPersisted?: boolean }> {
     const { sessionId, message, persona, history, messageId } = args;
 
     const messages = this.convertHistoryToAnthropicFormat(history);
@@ -636,6 +707,35 @@ class AnthropicService extends AIProviderBase {
 
     totalTokens = promptTokens + completionTokens;
 
+    // When tool_calls are present, the client will receive the completion SSE event
+    // and immediately start executing tools via executeMacro, which persists tool_result
+    // entries to the conversation history. If we don't persist the assistant message
+    // BEFORE the completion event, there's a race condition: executeMacro may persist
+    // tool_results before processAIResponse persists the assistant message, resulting
+    // in orphaned tool_result blocks in the DB.
+    let assistantPersisted = false;
+    if (collectedToolCalls.length > 0 && this.chatState?.id) {
+      await ReactorConversationModel.findOneAndUpdate(
+        { _id: this.chatState.id },
+        {
+          $push: {
+            history: {
+              id: new ObjectId(),
+              role: "assistant",
+              content: accumulatedText,
+              thinking: accumulatedReasoning || undefined,
+              timestamp: new Date(),
+              tool_calls: collectedToolCalls,
+              tool_results: [],
+            },
+          },
+          $set: { updated: new Date() },
+        },
+        { new: true }
+      ).exec();
+      assistantPersisted = true;
+    }
+
     // Send completion event
     const completionEvent = this.createCompletionEvent(
       accumulatedText,
@@ -650,6 +750,7 @@ class AnthropicService extends AIProviderBase {
       finishReason,
       toolCalls: collectedToolCalls,
       reasoning: accumulatedReasoning || undefined,
+      assistantPersisted,
     };
   }
 
@@ -779,9 +880,15 @@ class AnthropicService extends AIProviderBase {
     messageId?: string
   ): Promise<AIChatCompletion> {
     try {
-      const persona: IAIPersona = await this.personaProvider.getPersona(
-        this.chatState.personaId
-      );
+      // Use the persona already resolved and stored in chatState by initialize().
+      // Re-fetching from personaProvider is fragile (may return a different shape
+      // or fail for personas not registered at startup).
+      const persona: IAIPersona = this.chatState.persona;
+      if (!persona) {
+        throw new AIProviderError(
+          `No persona available in chat state for personaId ${this.chatState.personaId}`,
+        );
+      }
 
       // Handle tool results - feed them back into the tool loop
       if (role === "tool") {
@@ -809,46 +916,24 @@ class AnthropicService extends AIProviderBase {
           const streamResult = await this.handleStreamingRequest({
             sessionId: this.chatState.id,
             message,
-            persona: this.chatState.persona,
+            persona,
             history: this.chatState.history,
             messageId,
           });
 
-          // If the stream ended with tool_use, run the tool loop
-          if (streamResult.finishReason === "tool_use" && streamResult.toolCalls.length > 0) {
-            // Add the streamed assistant message to messages context
-            const assistantContent: any[] = [];
-            if (streamResult.content) {
-              assistantContent.push({ type: "text", text: streamResult.content });
-            }
-            for (const tc of streamResult.toolCalls) {
-              assistantContent.push({
-                type: "tool_use",
-                id: tc.id,
-                name: tc.function.name,
-                input: this.safeParseJSON(tc.function.arguments),
-              });
-            }
-            messages.push({ role: "assistant", content: assistantContent });
-
-            // Execute tools and continue loop
-            const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
-            for (const tc of streamResult.toolCalls) {
-              const result = await this.executeToolCall({
-                type: "tool_use",
-                id: tc.id,
-                name: tc.function.name,
-                input: this.safeParseJSON(tc.function.arguments),
-              });
-              toolResults.push(result);
-            }
-            messages.push({ role: "user", content: toolResults });
-
-            const loopResult = await this.runToolLoop(messages, persona, this.chatState.id, messageId);
-            return this.buildCompletion(loopResult.content, loopResult.finishReason, loopResult.toolCalls);
+          // When streaming via SSE, tool_call events have already been sent
+          // to the client. The client will execute the tools and call back
+          // with role='tool' + continueAfterTools. Do NOT execute tools
+          // server-side here — that causes dual execution and corrupted
+          // conversation history.
+          const completion = this.buildCompletion(streamResult.content, streamResult.finishReason, streamResult.toolCalls);
+          // If the assistant message was already persisted before the SSE completion event
+          // (to prevent race conditions with executeMacro), flag the completion so
+          // processAIResponse in ReactorConversationService can skip the duplicate persist.
+          if (streamResult.assistantPersisted) {
+            (completion as any).__persisted = true;
           }
-
-          return this.buildCompletion(streamResult.content, streamResult.finishReason, streamResult.toolCalls);
+          return completion;
         }
 
         // Non-streaming path with tool loop
@@ -926,7 +1011,7 @@ class AnthropicService extends AIProviderBase {
           !this.anthropic ||
           (chatSessionId && this.chatState?.id !== chatSessionId)
         ) {
-          const persona = this.personaProvider.getPersona(personaId);
+          const persona = await this.personaProvider.getPersona(personaId);
           if (!persona) {
             throw new AIProviderError(`Persona ${personaId} not found`);
           }
@@ -972,11 +1057,16 @@ class AnthropicService extends AIProviderBase {
       }
     }
 
-    // Return graceful error response
-    return this.buildCompletion(
-      "I'm experiencing some technical difficulties right now. Please try again in a moment.",
-      "stop",
-      []
+    this.context.error(
+      `Error in chat after ${maxRetries} attempts: ${lastError?.message ?? lastError?.toString()}`,
+      { error: lastError, params },
+      "AnthropicService.chat",
+    );
+
+    // Surface the error to the caller so the conversation service can
+    // return a proper ReactorErrorResponse to the client.
+    throw new AIProviderError(
+      lastError?.message || "AI provider request failed after retries",
     );
   }
 

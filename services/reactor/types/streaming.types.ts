@@ -111,7 +111,8 @@ export enum StreamingEventType {
   TOOL_CALL = 'tool_call',
   REASONING = 'reasoning',
   COMPLETE = 'complete',
-  ERROR = 'error'
+  ERROR = 'error',
+  TOOL_ITERATION_LIMIT = 'tool_iteration_limit'
 }
 /**
  * Base streaming event interface
@@ -137,9 +138,19 @@ export interface StreamingEventBase {
 export interface TokenStreamingEvent extends StreamingEventBase {
   type: StreamingEventType.TOKEN;
   data: {
+    /**
+     * The incremental text produced by this chunk (same as `delta`).
+     * NOTE: This is NOT the accumulated response — it is the per-event
+     * delta.  Both `content` and `delta` carry the same value for
+     * symmetry with the client's `event.data.content || event.data.delta`
+     * fallback pattern.
+     */
     content: string;
+    /** Incremental text produced by this chunk */
     delta: string;
+    /** Byte-offset in the accumulated response so far */
     position: number;
+    /** Whether this is the final token */
     isComplete: boolean;
   };
 }
@@ -190,7 +201,32 @@ export interface ErrorStreamingEvent extends StreamingEventBase {
   };
 }
 
-export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent;
+export interface ToolIterationLimitStreamingEvent extends StreamingEventBase {
+  type: StreamingEventType.TOOL_ITERATION_LIMIT;
+  data: {
+    iterationsCompleted: number;
+    maxIterations: number;
+    partialContent: string;
+  };
+}
+
+export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent | ToolIterationLimitStreamingEvent;
+
+/**
+ * Per-persona token pacing configuration.
+ * Controls how fast streamed tokens are delivered to the client via SSE.
+ * All fields are optional — omitted values use system defaults (~250 WPM).
+ */
+export interface TokenPacerConfig {
+  /** Minimum characters to accumulate before flushing (default: 8) */
+  minChunkSize?: number;
+  /** Maximum characters per flush; large chunks split at word boundaries (default: 80) */
+  maxChunkSize?: number;
+  /** Target interval in ms between flushes (default: 80) */
+  targetIntervalMs?: number;
+  /** Hard deadline: flush no later than this many ms after first un-flushed char (default: 100) */
+  flushTimeoutMs?: number;
+}
 
 /**
  * Arguments for creating a streaming session
