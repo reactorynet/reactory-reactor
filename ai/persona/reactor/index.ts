@@ -32,7 +32,7 @@ const REACTOR_TOOL_INCLUDES = [
   'list_dir'
 ];
 
-const REACTOR_RESOURCES: IAIPersonaResource[] = [
+const REACTOR_RESOURCES: IAIPersonaResource[] = [  
   {
     id: 'reactory-home-folder',
     name: 'Reactory Home Folder',
@@ -100,7 +100,31 @@ const REACTOR_RESOURCES: IAIPersonaResource[] = [
     type: "directory",
     url: path.join(process.env.REACTORY_HOME || process.cwd(), '/reactory-express-server/src/'),
     created: new Date(),
+  },
+  {
+    id: "ai-agent-home-folder",
+    name: "AI Agent Home Folder",
+    description: 'The home folder for you the AI agent, where you can read and write files as needed.',
+    type: 'directory',
+    url: path.join(process.env.REACTORY_DATA || process.cwd(), '/profiles/reactor/personas/reactor'),
+    created: new Date(),
+  },
+  {
+    id: "ai-agent-tasks",
+    name: "AI Agent Tasks Folder",
+    description: 'A folder that has todo, in-progress and completed assignement lists for the AI agent to manage its work.',
+    type: 'directory',
+    url: path.join(process.env.REACTORY_DATA || process.cwd(), '/profiles/reactor/personas/reactor/todo'),
+    created: new Date(),
   },  
+  {
+    id: "ai-agent-workspace",
+    name: "AI Agent Workspace",
+    description: 'The workspace folder for the AI agent, where you can read and write files as needed.',
+    type: 'directory',
+    url: path.join(process.env.REACTORY_DATA || process.cwd(), '/profiles/reactor/personas/reactor/workspace'),
+    created: new Date(),
+  }  
 ];
 
 const REACTOR_MACROS: MacroComponentDefinition<any>[] = [];
