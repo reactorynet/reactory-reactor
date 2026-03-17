@@ -111,7 +111,8 @@ export enum StreamingEventType {
   TOOL_CALL = 'tool_call',
   REASONING = 'reasoning',
   COMPLETE = 'complete',
-  ERROR = 'error'
+  ERROR = 'error',
+  TOOL_ITERATION_LIMIT = 'tool_iteration_limit'
 }
 /**
  * Base streaming event interface
@@ -190,7 +191,16 @@ export interface ErrorStreamingEvent extends StreamingEventBase {
   };
 }
 
-export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent;
+export interface ToolIterationLimitStreamingEvent extends StreamingEventBase {
+  type: StreamingEventType.TOOL_ITERATION_LIMIT;
+  data: {
+    iterationsCompleted: number;
+    maxIterations: number;
+    partialContent: string;
+  };
+}
+
+export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent | ToolIterationLimitStreamingEvent;
 
 /**
  * Arguments for creating a streaming session

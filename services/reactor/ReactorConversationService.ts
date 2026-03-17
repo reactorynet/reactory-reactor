@@ -120,7 +120,7 @@ import {
   ReactoryFileModel,
 } from "modules/reactory-core/models/CoreFile";
 import { id } from "schema/reflection";
-import { CompletionStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
+import { CompletionStreamingEvent, ToolIterationLimitStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
 import Helpers from "authentication/strategies/helpers";
 import { StreamingSessionManager } from "./StreamingSessionManager";
 import { StreamingTransportManager } from "./StreamingTransportManager";
@@ -1267,6 +1267,68 @@ export default class ReactorConversationService
   }
 
   /**
+   * Set the maximum number of auto tool call iterations for a conversation.
+   * When set, the agent will pause after this many iterations and signal the client.
+   */
+  async setChatMaxToolIterations(
+    chatSessionId: string,
+    maxToolIterations: number
+  ): Promise<any> {
+    this.validateChatSessionId(chatSessionId, "setChatMaxToolIterations");
+
+    if (maxToolIterations < 1) {
+      throw new Error("maxToolIterations must be at least 1");
+    }
+
+    const chatState = await ReactorConversationModel.findOneAndUpdate(
+      { _id: chatSessionId, user: this.context.user },
+      { maxToolIterations, updated: new Date() },
+      { new: true }
+    ).exec();
+
+    if (!chatState) {
+      throw new Error(
+        `Chat session with id ${chatSessionId} not found or you do not have permission to modify it.`
+      );
+    }
+
+    return chatState;
+  }
+
+  /**
+   * Continue tool execution after the agent paused due to reaching the max tool iteration limit.
+   * Reloads the conversation, checks for pending tool_calls in the last assistant message,
+   * and re-enters the tool execution loop respecting the (optionally updated) maxToolIterations.
+   */
+  async continueToolExecution(
+    chatSessionId: string,
+    personaId: string,
+    maxToolIterations?: number,
+    streamingMode?: StreamingMode,
+  ): Promise<any> {
+    this.validateChatSessionId(chatSessionId, "continueToolExecution");
+
+    // Optionally update maxToolIterations before resuming
+    if (maxToolIterations != null && maxToolIterations >= 1) {
+      await ReactorConversationModel.findOneAndUpdate(
+        { _id: chatSessionId, user: this.context.user },
+        { maxToolIterations, updated: new Date() },
+      ).exec();
+    }
+
+    // Re-send an empty continuation message. sendMessage already handles
+    // the AUTO tool execution loop and will run another batch of iterations
+    // with the conversation's (potentially updated) maxToolIterations.
+    return this.sendMessage({
+      personaId,
+      chatSessionId,
+      message: 'Continue executing tool calls — the user has approved additional iterations.',
+      role: 'user',
+      streamingMode: streamingMode || StreamingMode.NONE,
+    });
+  }
+
+  /**
    * Set the model and/or provider for an existing conversation.
    * Persists the override so it is used for subsequent messages and tool executions.
    */
@@ -2377,7 +2439,7 @@ export default class ReactorConversationService
           response?.choices?.[0]?.message?.tool_calls?.length > 0
         ) {
           const MAX_TOOL_ITERATIONS = (conversation as any).maxToolIterations
-            || parseInt(process.env.REACTOR_MAX_TOOL_ITERATIONS || '25', 10);
+            || parseInt(process.env.REACTOR_MAX_TOOL_ITERATIONS || '100', 10);
           let iteration = 0;
 
           while (
@@ -2459,6 +2521,62 @@ export default class ReactorConversationService
             this.context.warn(`[sendMessage] AUTO tool execution reached max iterations (${MAX_TOOL_ITERATIONS})`, {
               conversationId: effectiveConversationId,
             });
+
+            const partialContent = response?.choices?.[0]?.message?.content || '';
+
+            // Add assistant message so the user sees the pause
+            await ReactorConversationModel.findOneAndUpdate(
+              { _id: effectiveConversationId },
+              {
+                $push: {
+                  history: {
+                    id: new ObjectId(),
+                    role: 'assistant',
+                    content: `I've completed ${iteration} tool call iterations and reached the configured limit of ${MAX_TOOL_ITERATIONS}. You can adjust the limit and continue, or accept the current results.`,
+                    timestamp: new Date(),
+                  },
+                },
+                $set: { updated: new Date() },
+              }
+            ).exec();
+
+            // Signal the client via SSE or flag the response for GraphQL mode
+            if (streamingMode === StreamingMode.SSE) {
+              try {
+                const sseSessionId = this.streamingSessionManager.getSessionId(effectiveConversationId);
+                if (sseSessionId) {
+                  const limitEvent: ToolIterationLimitStreamingEvent = {
+                    type: StreamingEventType.TOOL_ITERATION_LIMIT,
+                    sessionId: effectiveConversationId,
+                    conversationId: effectiveConversationId,
+                    messageId: new ObjectId().toString(),
+                    timestamp: new Date(),
+                    data: {
+                      iterationsCompleted: iteration,
+                      maxIterations: MAX_TOOL_ITERATIONS,
+                      partialContent,
+                    },
+                  };
+                  await this.streamingTransportManager.sendEventToSession(
+                    effectiveConversationId,
+                    limitEvent
+                  );
+                }
+              } catch (sseError: any) {
+                this.context.warn(`[sendMessage] Failed to send tool iteration limit SSE event: ${sseError.message}`, {
+                  conversationId: effectiveConversationId,
+                });
+              }
+              // Skip the normal completion event — the client will handle the limit event
+              return adapter.adaptResponse(response);
+            }
+
+            // For non-streaming mode, flag the response so the client can detect it
+            if (response?.choices?.[0]?.message) {
+              (response.choices[0].message as any).toolIterationLimitReached = true;
+              (response.choices[0].message as any).iterationsCompleted = iteration;
+              (response.choices[0].message as any).maxToolIterations = MAX_TOOL_ITERATIONS;
+            }
           }
 
           // In SSE mode, the GoogleAIService deferred the completion event so

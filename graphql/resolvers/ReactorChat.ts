@@ -217,6 +217,94 @@ class ReactorChatResolver {
     }
   }
 
+  @mutation("ReactorSetChatMaxToolIterations")
+  async ReactorSetChatMaxToolIterations(
+    _: any,
+    args: { chatSessionId: string; maxToolIterations: number },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!args || !args.chatSessionId || !args.maxToolIterations) {
+      throw new ApiError("InvalidInputError", {
+        message: "chatSessionId and maxToolIterations are required",
+        code: "INVALID_INPUT",
+        timestamp: new Date(),
+        recoverable: true,
+      });
+    }
+
+    if (args.maxToolIterations < 1) {
+      throw new ApiError("InvalidInputError", {
+        message: "maxToolIterations must be at least 1",
+        code: "INVALID_INPUT",
+        timestamp: new Date(),
+        recoverable: true,
+      });
+    }
+
+    const conversationService =
+      context.getService<IReactorConversationsService>(
+        "reactor.ReactorConversationService@1.0.0"
+      );
+    try {
+      return await conversationService.setChatMaxToolIterations(
+        args.chatSessionId,
+        args.maxToolIterations
+      );
+    } catch (error) {
+      throw new ApiError("ChatMaxToolIterationsError", {
+        message: error.message || "Error setting max tool iterations",
+        code: "CHAT_MAX_TOOL_ITERATIONS_ERROR",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion:
+          "Check if the chat session exists and you have permission to modify it",
+      });
+    }
+  }
+
+  @mutation("ReactorContinueToolExecution")
+  async ReactorContinueToolExecution(
+    _: any,
+    args: {
+      chatSessionId: string;
+      personaId: string;
+      maxToolIterations?: number;
+      streamingMode?: StreamingMode;
+    },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!args || !args.chatSessionId || !args.personaId) {
+      throw new ApiError("InvalidInputError", {
+        message: "chatSessionId and personaId are required",
+        code: "INVALID_INPUT",
+        timestamp: new Date(),
+        recoverable: true,
+      });
+    }
+
+    const conversationService =
+      context.getService<IReactorConversationsService>(
+        "reactor.ReactorConversationService@1.0.0"
+      );
+    try {
+      return await conversationService.continueToolExecution(
+        args.chatSessionId,
+        args.personaId,
+        args.maxToolIterations,
+        args.streamingMode
+      );
+    } catch (error) {
+      throw new ApiError("ContinueToolExecutionError", {
+        message: error.message || "Error continuing tool execution",
+        code: "CONTINUE_TOOL_EXECUTION_ERROR",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion:
+          "Check if the chat session has pending tool calls and you have permission",
+      });
+    }
+  }
+
   @property("ReactorChatState", "id")
   async ReactorChatStateId(
     chatState: ReactorConversation | ChatState,
