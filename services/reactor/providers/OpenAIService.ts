@@ -396,8 +396,8 @@ class OpenAIService extends AIProviderBase {
     // Token buffering: accumulate small OpenAI deltas and flush in larger batches
     // to reduce per-token SSE overhead while keeping output feeling responsive.
     const TOKEN_BUFFER_THRESHOLD = 4; // chars (~2 tokens) before flushing
-    const REASONING_BUFFER_THRESHOLD = 4;
-    const BUFFER_FLUSH_TIMEOUT_MS = 8; // ~1 frame at 60fps
+    const REASONING_BUFFER_THRESHOLD = 50;
+    const BUFFER_FLUSH_TIMEOUT_MS = 32; // ~1 frame at 60fps
     let tokenBuffer = "";
     let reasoningBuffer = "";
     let flushTimer: ReturnType<typeof setTimeout> | null = null;
