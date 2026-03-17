@@ -402,6 +402,17 @@ export interface IAIPersona {
     apiEndpoint?: string;
     apiVersion?: string;
     apiBaseURL?: string;
+    /**
+     * Per-persona streaming pace configuration.
+     * Controls how fast streamed tokens are delivered to the client.
+     * Omitted values fall back to system defaults (~250 WPM).
+     */
+    streamingPace?: {
+      minChunkSize?: number;
+      maxChunkSize?: number;
+      targetIntervalMs?: number;
+      flushTimeoutMs?: number;
+    };
     [key: string]: any;
   },
   tools?: MacroToolDefinition[]

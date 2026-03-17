@@ -475,8 +475,12 @@ class AnthropicService extends AIProviderBase {
         budget_tokens: persona.modelConfig?.thinkingBudget || 10000,
       };
     } else {
-      params.temperature = persona.modelConfig?.temperature || 0.7;
-      (params as any).top_p = persona.modelConfig?.topP || 1.0;
+      // Anthropic does not allow both temperature and top_p simultaneously
+      if (persona.modelConfig?.topP != null && persona.modelConfig?.temperature == null) {
+        (params as any).top_p = persona.modelConfig.topP;
+      } else {
+        params.temperature = persona.modelConfig?.temperature ?? 0.7;
+      }
     }
 
     if (tools && tools.length > 0) {
@@ -779,9 +783,15 @@ class AnthropicService extends AIProviderBase {
     messageId?: string
   ): Promise<AIChatCompletion> {
     try {
-      const persona: IAIPersona = await this.personaProvider.getPersona(
-        this.chatState.personaId
-      );
+      // Use the persona already resolved and stored in chatState by initialize().
+      // Re-fetching from personaProvider is fragile (may return a different shape
+      // or fail for personas not registered at startup).
+      const persona: IAIPersona = this.chatState.persona;
+      if (!persona) {
+        throw new AIProviderError(
+          `No persona available in chat state for personaId ${this.chatState.personaId}`,
+        );
+      }
 
       // Handle tool results - feed them back into the tool loop
       if (role === "tool") {
@@ -809,7 +819,7 @@ class AnthropicService extends AIProviderBase {
           const streamResult = await this.handleStreamingRequest({
             sessionId: this.chatState.id,
             message,
-            persona: this.chatState.persona,
+            persona,
             history: this.chatState.history,
             messageId,
           });
@@ -926,7 +936,7 @@ class AnthropicService extends AIProviderBase {
           !this.anthropic ||
           (chatSessionId && this.chatState?.id !== chatSessionId)
         ) {
-          const persona = this.personaProvider.getPersona(personaId);
+          const persona = await this.personaProvider.getPersona(personaId);
           if (!persona) {
             throw new AIProviderError(`Persona ${personaId} not found`);
           }
@@ -972,11 +982,16 @@ class AnthropicService extends AIProviderBase {
       }
     }
 
-    // Return graceful error response
-    return this.buildCompletion(
-      "I'm experiencing some technical difficulties right now. Please try again in a moment.",
-      "stop",
-      []
+    this.context.error(
+      `Error in chat after ${maxRetries} attempts: ${lastError?.message ?? lastError?.toString()}`,
+      { error: lastError, params },
+      "AnthropicService.chat",
+    );
+
+    // Surface the error to the caller so the conversation service can
+    // return a proper ReactorErrorResponse to the client.
+    throw new AIProviderError(
+      lastError?.message || "AI provider request failed after retries",
     );
   }
 

@@ -146,6 +146,18 @@ abstract class AIProviderBase implements IAIProviderService {
       
       // @ts-ignore
       this.chatStateModel = chatSession;
+
+      // Resolve persona — getPersona is async so we must await it
+      let persona;
+      try {
+        persona = this.personaProvider
+          ? await this.personaProvider.getPersona(chatSession.personaId)
+          : undefined;
+      } catch {
+        // Persona lookup can fail for removed or renamed personas;
+        // initialize() will overwrite with the caller-supplied persona.
+        persona = undefined;
+      }
       
       this.chatState = {
         id: chatSession._id.toString(),
@@ -154,7 +166,7 @@ abstract class AIProviderBase implements IAIProviderService {
         started: chatSession.started,
         history: chatSession.history,        
         personaId: chatSession.personaId,
-        persona: this.personaProvider?.getPersona(chatSession.personaId),
+        persona,
         vars: chatSession.vars || {},
         sseSession: chatSession.sseSessionId,
         macros: chatSession.macros || [],
@@ -241,6 +253,13 @@ abstract class AIProviderBase implements IAIProviderService {
         };
 
         await this.persistChatState();
+      }
+
+      // Always ensure the persona is set from the caller's parameter.
+      // loadChatState may have resolved an outdated or undefined persona;
+      // the caller (e.g. executeProviderChat) always passes the authoritative one.
+      if (persona) {
+        this.chatState.persona = persona;
       }
     } catch (error) {
       this.context.error(

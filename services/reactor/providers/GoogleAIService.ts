@@ -14,13 +14,8 @@ import {
   AIChatCompletion,
 } from "../../../types/model.types";
 import {
-  AICompletionStreamingData,
-  AIErrorStreamingData,
   AIStreamingCapabilities,
-  AIStreamingEvent,
   AIStreamingEventType,
-  AITokenStreamingData,
-  AIToolCallStreamingData,
   IAIPersona,
 } from "../../../types/service.types";
 import AIPersonaProvider from "../AIPersonaProvider";
@@ -49,15 +44,11 @@ import {
 } from "openai/resources";
 import path from "path";
 import {
-  CompletionStreamingEvent,
   ErrorStreamingEvent,
-  ReasoningStreamingEvent,
-  StreamingEvent,
-  StreamingEventType,
   StreamingMode,
-  TokenStreamingEvent,
-  ToolCallStreamingEvent,
 } from "../types/streaming.types";
+import { StreamingEventFactory, StreamingEventIds } from "../streaming/StreamingEventFactory";
+import { TokenPacer } from "../streaming/TokenPacer";
 import { StreamingSessionManager } from "../StreamingSessionManager";
 import { StreamingTransportManager } from "../StreamingTransportManager";
 
@@ -796,172 +787,6 @@ class GoogleAIService extends AIProviderBase {
   }
 
   /**
-   * Create a token streaming event
-   */
-  private createTokenEvent(
-    content: string,
-    delta: string,
-    position: number,
-    isComplete: boolean = false,
-    sessionId?: string
-  ): TokenStreamingEvent {
-    const tokenData: AITokenStreamingData = {
-      content,
-      delta,
-      position,
-      isComplete,
-    };
-    return this.createStreamingEvent(
-      StreamingEventType.TOKEN,
-      tokenData,
-      sessionId,
-      sessionId
-    ) as TokenStreamingEvent;
-  }
-
-  /**
-   * Create a reasoning/thinking streaming event
-   */
-  private createReasoningEvent(
-    content: string,
-    delta: string,
-    position: number,
-    isComplete: boolean = false,
-    sessionId?: string
-  ): ReasoningStreamingEvent {
-    const data: AITokenStreamingData = {
-      content,
-      delta,
-      position,
-      isComplete,
-    };
-    return this.createStreamingEvent(
-      StreamingEventType.REASONING,
-      data,
-      sessionId,
-      sessionId
-    ) as ReasoningStreamingEvent;
-  }
-
-  /**
-   * Create a tool call streaming event
-   */
-  private createToolCallEvent(
-    id: string,
-    name: string,
-    toolArguments: string,
-    isComplete: boolean = false,
-    result?: any,
-    sessionId?: string
-  ): ToolCallStreamingEvent {
-    // Ensure we have a valid ID - if none provided, generate one
-    const toolCallId = id || new ObjectId().toString();
-
-    const toolData: AIToolCallStreamingData = {
-      id: toolCallId,
-      name,
-      arguments: toolArguments,
-      isComplete,
-      result,
-    };
-
-    return this.createStreamingEvent(
-      StreamingEventType.TOOL_CALL,
-      toolData,
-      sessionId,
-      sessionId
-    ) as ToolCallStreamingEvent;
-  }
-
-  /**
-   * Create an error streaming event
-   */
-  private createErrorEvent(
-    code: string,
-    message: string,
-    details?: any,
-    sessionId?: string
-  ): ErrorStreamingEvent {
-    const errorData: AIErrorStreamingData = {
-      code,
-      message,
-      details,
-    };
-    return this.createStreamingEvent(
-      StreamingEventType.ERROR,
-      errorData,
-      sessionId
-    ) as ErrorStreamingEvent;
-  }
-
-  /**
-   * Create a completion streaming event
-   */
-  private createCompletionEvent(
-    content: string,
-    metadata: {
-      totalTokens: number;
-      promptTokens: number;
-      completionTokens: number;
-      finishReason: string;
-      model: string;
-    },
-    sessionId?: string
-  ): CompletionStreamingEvent {
-    const completionData: AICompletionStreamingData = {
-      content,
-      metadata,
-    };
-    return this.createStreamingEvent(
-      StreamingEventType.COMPLETE,
-      completionData,
-      sessionId,
-      sessionId
-    ) as CompletionStreamingEvent;
-  }
-
-  /**
-   * Create streaming event with consistent structure
-   */
-  private createStreamingEvent(
-    type: StreamingEventType,
-    data: any,
-    sessionId?: string,
-    conversationId?: string,
-    messageId?: string
-  ): StreamingEvent {
-    return {
-      type,
-      timestamp: new Date(),
-      sessionId,
-      messageId,
-      data,
-      conversationId,
-    };
-  }
-
-  /**
-   * Process function calls and emit tool call events
-   */
-  private async *processFunctionCalls(
-    functionCalls: any[],
-    sessionId?: string
-  ): AsyncIterable<AIStreamingEvent> {
-    for (const functionCall of functionCalls) {
-      const toolCallId = new ObjectId().toString();
-
-      yield this.createToolCallEvent(
-        toolCallId,
-        functionCall.name,
-        JSON.stringify(functionCall.args || {}),
-        true,
-        undefined,
-        sessionId
-      );
-    }
-  }
-
-  /**ß
    * Add assistant message to chat history
    */
   private addAssistantMessageToHistory(content: string): void {
@@ -977,8 +802,13 @@ class GoogleAIService extends AIProviderBase {
     }
   }
 
+  /**
+   * Handles a streaming Google AI request using TokenPacer + StreamingEventFactory,
+   * sending token, reasoning, tool_call, and completion events to the client
+   * at a normalised cadence.
+   */
   private async handleStreamingRequest(args: {
-    sessionId: string; // This is the conversation ID (chatSessionId)
+    sessionId: string;
     message: string;
     persona: IAIPersona;
     history: ReactorConversationHistory;
@@ -988,6 +818,11 @@ class GoogleAIService extends AIProviderBase {
     const { sessionId, message, persona, history, messageId } = args;
     const chat = args.chat;
     const logTag = "GoogleAIService.handleStreamingRequest";
+    const ids: StreamingEventIds = {
+      sessionId,
+      conversationId: sessionId,
+      messageId: messageId ?? "",
+    };
 
     this.context.log(
       `Streaming request started for session ${sessionId}`,
@@ -995,188 +830,174 @@ class GoogleAIService extends AIProviderBase {
       logTag,
     );
 
+    // Resolve per-persona pacing configuration
+    const pacerCfg = persona?.config?.streamingPace ?? {};
+
     let result: GoogleGenAI.GenerateContentResponse = null;
     let accumulatedText = "";
     let accumulatedReasoning = "";
     let accumulatedFunctionCalls: any[] = [];
-    let totalTokens = 0;
-    let promptTokens = 0;
-    let completionTokens = 0;
     let finishReason: GoogleGenAI.FinishReason = GoogleGenAI.FinishReason.STOP;
     let modelName = "";
 
-    const response = await chat.sendMessageStream({
-      message,
-      config: persona.messageConfig,
+    // -- Create pacers for tokens and reasoning --
+    const tokenPacer = new TokenPacer({
+      ...pacerCfg,
+      onFlush: async (text) => {
+        const event = StreamingEventFactory.createTokenEvent(
+          text, accumulatedText.length, ids,
+        );
+        await this.streamingTransportManager.sendEventToSession(sessionId, event);
+      },
     });
 
-    for await (const chunk of response) {
-      let event: StreamingEvent;
-
-      // Initialize result with the first chunk
-      if (result === null) {
-        result = chunk;
-      }
-
-      // Handle thought/reasoning parts
-      if (chunk.candidates?.[0]?.content?.parts) {
-        for (const part of chunk.candidates[0].content.parts) {
-          if ((part as any).thought && part.text) {
-            accumulatedReasoning += part.text;
-            const reasoningEvent = this.createReasoningEvent(
-              accumulatedReasoning,
-              part.text,
-              accumulatedReasoning.length,
-              false,
-              sessionId
-            );
-            reasoningEvent.messageId = messageId ?? "";
-            reasoningEvent.conversationId = sessionId;
-            try {
-              await this.streamingTransportManager.sendEventToSession(
-                sessionId,
-                reasoningEvent
-              );
-            } catch (error) {
-              this.context.error(
-                `Failed to send reasoning event for session ${sessionId}`,
-                { error },
-                logTag,
-              );
-            }
-          }
-        }
-      }
-
-      // Handle text content
-      if (chunk.text) {
-        accumulatedText += chunk.text;
-        event = this.createTokenEvent(
-          chunk.text,
-          chunk.text,
-          accumulatedText.length,
-          false,
-          sessionId
+    const reasoningPacer = new TokenPacer({
+      minChunkSize: pacerCfg.minChunkSize ?? 20,
+      maxChunkSize: pacerCfg.maxChunkSize ?? 120,
+      targetIntervalMs: pacerCfg.targetIntervalMs,
+      flushTimeoutMs: pacerCfg.flushTimeoutMs,
+      onFlush: async (text) => {
+        const event = StreamingEventFactory.createReasoningEvent(
+          text, accumulatedReasoning.length, ids,
         );
-        event.messageId = messageId ?? "";
-        event.conversationId = sessionId;
+        await this.streamingTransportManager.sendEventToSession(sessionId, event);
+      },
+    });
 
-        try {
-          await this.streamingTransportManager.sendEventToSession(
-            sessionId,
-            event as TokenStreamingEvent
-          );
-        } catch (error) {
-          this.context.error(
-            `Failed to send token event for session ${sessionId}`,
-            { error },
-            logTag,
-          );
-          throw error;
+    try {
+      const response = await chat.sendMessageStream({
+        message,
+        config: persona.messageConfig,
+      });
+
+      for await (const chunk of response) {
+        // Initialize result with the first chunk
+        if (result === null) {
+          result = chunk;
         }
-      }
 
-      // Handle function calls — extract from raw parts to preserve thoughtSignature
-      // (chunk.functionCalls strips thoughtSignature, so we read parts directly)
-      const rawParts = chunk.candidates?.[0]?.content?.parts ?? [];
-      const functionCallParts = rawParts.filter((p: any) => p.functionCall);
-      if (functionCallParts.length > 0) {
-        for (const part of functionCallParts) {
-          const functionCall = part.functionCall;
-          const functionCallId = functionCall.id || new ObjectId().toString();
-
-          // Check if we already have this function call
-          const existingCallIndex = accumulatedFunctionCalls.findIndex(
-            (fc) => fc.id === functionCallId
-          );
-          if (existingCallIndex >= 0) {
-            accumulatedFunctionCalls[existingCallIndex] = {
-              ...accumulatedFunctionCalls[existingCallIndex],
-              ...functionCall,
-              id: functionCallId,
-              // Preserve thoughtSignature from the part (required by Gemini thinking models)
-              ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
-            };
-          } else {
-            accumulatedFunctionCalls.push({
-              ...functionCall,
-              id: functionCallId,
-              // Preserve thoughtSignature from the part (required by Gemini thinking models)
-              ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
-            });
+        // Handle thought/reasoning parts
+        if (chunk.candidates?.[0]?.content?.parts) {
+          for (const part of chunk.candidates[0].content.parts) {
+            if ((part as any).thought && part.text) {
+              accumulatedReasoning += part.text;
+              reasoningPacer.add(part.text);
+            }
           }
+        }
 
-          // Only send tool_call events to the client in PROMPT mode.
-          // In AUTO mode, the server will execute tools directly.
-          const toolApprovalMode = this.chatState?.toolApprovalMode;
-          if (toolApprovalMode !== ToolApprovalMode.AUTO) {
-            event = this.createToolCallEvent(
-              functionCallId,
-              functionCall.name,
-              JSON.stringify(functionCall.args || {}),
-              true,
-              undefined,
-              sessionId
+        // Handle text content — feed into pacer
+        if (chunk.text) {
+          accumulatedText += chunk.text;
+          tokenPacer.add(chunk.text);
+        }
+
+        // Handle function calls — extract from raw parts to preserve thoughtSignature
+        const rawParts = chunk.candidates?.[0]?.content?.parts ?? [];
+        const functionCallParts = rawParts.filter((p: any) => p.functionCall);
+        if (functionCallParts.length > 0) {
+          for (const part of functionCallParts) {
+            const functionCall = part.functionCall;
+            const functionCallId = functionCall.id || new ObjectId().toString();
+
+            const existingCallIndex = accumulatedFunctionCalls.findIndex(
+              (fc) => fc.id === functionCallId,
             );
-            event.messageId = messageId ?? "";
-            event.conversationId = sessionId;
+            if (existingCallIndex >= 0) {
+              accumulatedFunctionCalls[existingCallIndex] = {
+                ...accumulatedFunctionCalls[existingCallIndex],
+                ...functionCall,
+                id: functionCallId,
+                ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
+              };
+            } else {
+              accumulatedFunctionCalls.push({
+                ...functionCall,
+                id: functionCallId,
+                ...(part.thoughtSignature ? { thoughtSignature: part.thoughtSignature } : {}),
+              });
+            }
 
-            try {
-              await this.streamingTransportManager.sendEventToSession(
-                sessionId,
-                event as ToolCallStreamingEvent
+            // Only send tool_call events to the client in PROMPT mode.
+            const toolApprovalMode = this.chatState?.toolApprovalMode;
+            if (toolApprovalMode !== ToolApprovalMode.AUTO) {
+              const event = StreamingEventFactory.createToolCallEvent(
+                functionCallId,
+                functionCall.name,
+                JSON.stringify(functionCall.args || {}),
+                true,
+                undefined,
+                ids,
               );
-            } catch (error) {
-              this.context.error(
-                `Failed to send tool call event for ${functionCall.name}`,
-                { error, sessionId },
-                logTag,
-              );
-              throw error;
+              try {
+                await this.streamingTransportManager.sendEventToSession(sessionId, event);
+              } catch (error) {
+                this.context.error(
+                  `Failed to send tool call event for ${functionCall.name}`,
+                  { error, sessionId },
+                  logTag,
+                );
+                throw error;
+              }
+            }
+          }
+        }
+
+        // Handle finish reason from candidates
+        if (chunk.candidates && chunk.candidates.length > 0) {
+          for (const candidate of chunk.candidates) {
+            if (candidate.finishReason) {
+              finishReason = candidate.finishReason;
             }
           }
         }
       }
 
-      // Handle candidates and metadata
-      if (chunk.candidates && chunk.candidates.length > 0) {
-        for (const candidate of chunk.candidates) {
-          if (candidate.finishReason) {
-            finishReason = candidate.finishReason;
-          }
-        }
-      }
+      // Flush remaining buffered tokens after stream ends
+      await tokenPacer.flush();
+      await reasoningPacer.flush();
+    } catch (streamError: any) {
+      tokenPacer.destroy();
+      reasoningPacer.destroy();
+
+      const errorEvent = StreamingEventFactory.createErrorEvent(
+        streamError.code || "STREAM_ERROR",
+        streamError.message || "Stream interrupted",
+        { recoverable: false },
+        ids,
+      );
+      try {
+        await this.streamingTransportManager.sendEventToSession(sessionId, errorEvent);
+      } catch (_) { /* best-effort */ }
+
+      this.context.error(
+        `Streaming failed for session ${sessionId}`,
+        { error: streamError },
+        logTag,
+      );
+      throw new AIProviderError(
+        `AI provider stream interrupted: ${streamError.message || streamError.toString()}`,
+      );
+    } finally {
+      tokenPacer.destroy();
+      reasoningPacer.destroy();
     }
 
-    // In AUTO mode with pending tool calls, defer the completion event —
-    // the server-side tool execution loop in ReactorConversationService will
-    // send the final completion event after all tools have executed.
+    // Defer completion event in AUTO mode with pending tool calls
     const toolApprovalMode = this.chatState?.toolApprovalMode;
     const hasPendingAutoToolCalls =
       toolApprovalMode === ToolApprovalMode.AUTO &&
       accumulatedFunctionCalls.length > 0;
 
     if (!hasPendingAutoToolCalls) {
-      const completionEvent = this.createCompletionEvent(
+      const completionEvent = StreamingEventFactory.createCompletionEvent(
         accumulatedText,
-        {
-          totalTokens,
-          promptTokens,
-          completionTokens,
-          finishReason,
-          model: modelName,
-          thinking: accumulatedReasoning || undefined,
-        },
-        sessionId
+        finishReason || "stop",
+        accumulatedReasoning || undefined,
+        ids,
       );
-      completionEvent.messageId = messageId ?? "";
-      completionEvent.conversationId = sessionId;
-
       try {
-        await this.streamingTransportManager.sendEventToSession(
-          sessionId,
-          completionEvent
-        );
+        await this.streamingTransportManager.sendEventToSession(sessionId, completionEvent);
       } catch (error) {
         this.context.error(
           `Failed to send completion event for session ${sessionId}`,
@@ -1198,10 +1019,6 @@ class GoogleAIService extends AIProviderBase {
         }
 
         for (const functionCall of accumulatedFunctionCalls) {
-          // Separate thoughtSignature and id from the functionCall object — Gemini expects
-          // thoughtSignature as a sibling to functionCall on the part, not inside it.
-          // We preserve id as _toolCallId so buildCompletion can reuse it (avoiding
-          // ID mismatch between SSE events and stored tool_calls).
           const { thoughtSignature, id, ...cleanFunctionCall } = functionCall;
           const part: any = { functionCall: cleanFunctionCall };
           if (thoughtSignature) {
@@ -1269,10 +1086,13 @@ class GoogleAIService extends AIProviderBase {
     messageId?: string
   ): Promise<AIChatCompletion> {
     try {
-      // get the persona from the chat state
-      const persona: IAIPersona = await this.personaProvider.getPersona(
-        this.chatState.personaId
-      );
+      // Use the persona already resolved and stored in chatState by initialize().
+      const persona: IAIPersona = this.chatState.persona;
+      if (!persona) {
+        throw new AIProviderError(
+          `No persona available in chat state for personaId ${this.chatState.personaId}`,
+        );
+      }
 
       // Handle tool results differently - add them to history and get next response
       if (role === "tool") {
@@ -1386,7 +1206,7 @@ class GoogleAIService extends AIProviderBase {
           result = await this.handleStreamingRequest({
             sessionId: this.chatState.id,
             message,
-            persona: this.chatState.persona,
+            persona,
             history: this.chatState.history,
             chat: chat,
             messageId,
@@ -1669,7 +1489,7 @@ class GoogleAIService extends AIProviderBase {
           !this.model ||
           (chatSessionId && this.chatState?.id !== chatSessionId)
         ) {
-          const persona = this.personaProvider.getPersona(personaId);
+          const persona = await this.personaProvider.getPersona(personaId);
           if (!persona) {
             throw new AIProviderError(`Persona ${personaId} not found`);
           }

@@ -3,9 +3,6 @@ import { service } from "@reactory/server-core/application/decorators/service";
 import {
   AIStreamingCapabilities,
   AIStreamingEvent,
-  AITokenStreamingData,
-  AIToolCallStreamingData,
-  AIErrorStreamingData,
   IAIPersona,
   IOpenAIServiceProps,
 } from "../../../types/service.types";
@@ -33,16 +30,12 @@ import {
 import ReactorMacroService from "./ReactorMacroService";
 import {
   StreamingMode,
-  StreamingEventType,
-  StreamingEvent,
-  TokenStreamingEvent,
-  ToolCallStreamingEvent,
-  ReasoningStreamingEvent,
-  CompletionStreamingEvent,
   ErrorStreamingEvent,
 } from "../types/streaming.types";
 import { StreamingSessionManager } from "../StreamingSessionManager";
 import { StreamingTransportManager } from "../StreamingTransportManager";
+import { StreamingEventFactory, StreamingEventIds } from "../streaming/StreamingEventFactory";
+import { TokenPacer } from "../streaming/TokenPacer";
 
 
 @service({
@@ -250,107 +243,12 @@ class OpenAIService extends AIProviderBase {
     };
   }
 
-  // --- Streaming event helpers ---
-
-  private createTokenEvent(
-    content: string,
-    delta: string,
-    position: number,
-    isComplete: boolean = false,
-    sessionId?: string,
-  ): TokenStreamingEvent {
-    const tokenData: AITokenStreamingData = { content, delta, position, isComplete };
-    return this.createStreamingEvent(
-      StreamingEventType.TOKEN, tokenData, sessionId,
-    ) as TokenStreamingEvent;
-  }
-
-  private createReasoningEvent(
-    content: string,
-    delta: string,
-    position: number,
-    isComplete: boolean = false,
-    sessionId?: string,
-  ): ReasoningStreamingEvent {
-    const data: AITokenStreamingData = { content, delta, position, isComplete };
-    return this.createStreamingEvent(
-      StreamingEventType.REASONING, data, sessionId,
-    ) as ReasoningStreamingEvent;
-  }
-
-  private createToolCallEvent(
-    id: string,
-    name: string,
-    toolArguments: string,
-    isComplete: boolean = false,
-    result?: any,
-    sessionId?: string,
-  ): ToolCallStreamingEvent {
-    const toolCallId = id || new ObjectId().toString();
-    const toolData: AIToolCallStreamingData = {
-      id: toolCallId, name, arguments: toolArguments, isComplete, result,
-    };
-    return this.createStreamingEvent(
-      StreamingEventType.TOOL_CALL, toolData, sessionId,
-    ) as ToolCallStreamingEvent;
-  }
-
-  private createErrorEvent(
-    code: string,
-    message: string,
-    details?: any,
-    sessionId?: string,
-  ): ErrorStreamingEvent {
-    const errorData: AIErrorStreamingData = { code, message, details };
-    return this.createStreamingEvent(
-      StreamingEventType.ERROR, errorData, sessionId,
-    ) as ErrorStreamingEvent;
-  }
-
-  private createCompletionEvent(
-    content: string,
-    metadata: {
-      totalTokens: number;
-      promptTokens: number;
-      completionTokens: number;
-      finishReason: string;
-      model: string;
-    },
-    sessionId?: string,
-  ): CompletionStreamingEvent {
-    // The client (useSSE.ts) expects CompletionStreamingEvent.data to be
-    // { content, finishReason, thinking? } — NOT wrapped in a metadata object.
-    const completionData: { content: string; finishReason: string; thinking?: string } = {
-      content,
-      finishReason: metadata.finishReason || "stop",
-    };
-    return this.createStreamingEvent(
-      StreamingEventType.COMPLETE, completionData, sessionId,
-    ) as CompletionStreamingEvent;
-  }
-
-  private createStreamingEvent(
-    type: StreamingEventType,
-    data: any,
-    sessionId?: string,
-    conversationId?: string,
-    messageId?: string,
-  ): StreamingEvent {
-    return {
-      type,
-      timestamp: new Date(),
-      sessionId: sessionId ?? "",
-      conversationId: conversationId ?? "",
-      messageId: messageId ?? "",
-      data,
-    };
-  }
-
   // --- Streaming request handling ---
 
   /**
-   * Handles a streaming AI request using the StreamingTransportManager,
-   * sending token, tool_call, and completion events to the client.
+   * Handles a streaming AI request using TokenPacer + StreamingEventFactory,
+   * sending token, reasoning, tool_call, and completion events to the client
+   * at a normalised cadence.
    */
   private async handleStreamingRequest(args: {
     sessionId: string;
@@ -358,89 +256,66 @@ class OpenAIService extends AIProviderBase {
     messageId?: string;
   }): Promise<OpenAI.Chat.Completions.ChatCompletion> {
     const { sessionId, prompt, messageId } = args;
+    const ids: StreamingEventIds = {
+      sessionId,
+      conversationId: sessionId,
+      messageId: messageId ?? "",
+    };
 
+    // Resolve per-persona pacing configuration
+    const pacerCfg = this.chatState?.persona?.config?.streamingPace ?? {};
+
+    // -- Create pacers for tokens and reasoning --
+    let accumulatedText = "";
+    let accumulatedReasoning = "";
+
+    const tokenPacer = new TokenPacer({
+      ...pacerCfg,
+      onFlush: async (text) => {
+        const event = StreamingEventFactory.createTokenEvent(
+          text, accumulatedText.length, ids,
+        );
+        await this.streamingTransportManager.sendEventToSession(sessionId, event);
+      },
+    });
+
+    const reasoningPacer = new TokenPacer({
+      minChunkSize: pacerCfg.minChunkSize ?? 20,
+      maxChunkSize: pacerCfg.maxChunkSize ?? 120,
+      targetIntervalMs: pacerCfg.targetIntervalMs,
+      flushTimeoutMs: pacerCfg.flushTimeoutMs,
+      onFlush: async (text) => {
+        const event = StreamingEventFactory.createReasoningEvent(
+          text, accumulatedReasoning.length, ids,
+        );
+        await this.streamingTransportManager.sendEventToSession(sessionId, event);
+      },
+    });
+
+    // -- Open the streaming API connection --
     let stream: Awaited<ReturnType<typeof this.ai.chat.completions.create>>;
     try {
       stream = await this.ai.chat.completions.create({ ...prompt, stream: true });
     } catch (error: any) {
-      // Connection/auth errors — send an error event over SSE so the client
-      // sees the failure immediately instead of hanging.
-      const errorEvent = this.createErrorEvent(
+      const errorEvent = StreamingEventFactory.createErrorEvent(
         error.code || error.status || "CONNECTION_ERROR",
         error.message || "Failed to connect to AI provider",
         { recoverable: false },
-        sessionId,
+        ids,
       );
-      errorEvent.messageId = messageId ?? "";
-      errorEvent.conversationId = sessionId;
       try {
-        await this.streamingTransportManager.sendEventToSession(
-          sessionId, errorEvent as ErrorStreamingEvent,
-        );
-      } catch (_) {
-        // Transport may not be available; the throw below still surfaces the error.
-      }
+        await this.streamingTransportManager.sendEventToSession(sessionId, errorEvent);
+      } catch (_) { /* transport may not be available */ }
       throw new AIProviderError(
         `Failed to connect to AI provider: ${error.message || error.toString()}`,
       );
     }
 
-    let accumulatedText = "";
-    let accumulatedReasoning = "";
     const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
     let currentToolCall: { id?: string; name?: string; arguments?: string } | null = null;
     let finishReason: string | null = null;
     let completionId: string | null = null;
     let model = "";
-
-    // Token buffering: accumulate small OpenAI deltas and flush in larger batches
-    // to reduce per-token SSE overhead while keeping output feeling responsive.
-    const TOKEN_BUFFER_THRESHOLD = 4; // chars (~2 tokens) before flushing
-    const REASONING_BUFFER_THRESHOLD = 50;
-    const BUFFER_FLUSH_TIMEOUT_MS = 32; // ~1 frame at 60fps
-    let tokenBuffer = "";
-    let reasoningBuffer = "";
-    let flushTimer: ReturnType<typeof setTimeout> | null = null;
-
-    const flushTokenBuffer = async () => {
-      if (flushTimer !== null) {
-        clearTimeout(flushTimer);
-        flushTimer = null;
-      }
-      if (tokenBuffer) {
-        const content = tokenBuffer;
-        tokenBuffer = "";
-        const event = this.createTokenEvent(
-          content, content, accumulatedText.length, false, sessionId,
-        );
-        event.messageId = messageId ?? "";
-        event.conversationId = sessionId;
-        await this.streamingTransportManager.sendEventToSession(
-          sessionId, event as TokenStreamingEvent,
-        );
-      }
-      if (reasoningBuffer) {
-        const content = reasoningBuffer;
-        reasoningBuffer = "";
-        const event = this.createReasoningEvent(
-          content, content, accumulatedReasoning.length, false, sessionId,
-        );
-        event.messageId = messageId ?? "";
-        event.conversationId = sessionId;
-        await this.streamingTransportManager.sendEventToSession(
-          sessionId, event as ReasoningStreamingEvent,
-        );
-      }
-    };
-
-    const scheduleFlush = () => {
-      if (flushTimer === null) {
-        flushTimer = setTimeout(() => {
-          flushTimer = null;
-          flushTokenBuffer().catch(() => {});
-        }, BUFFER_FLUSH_TIMEOUT_MS);
-      }
-    };
 
     try {
       for await (const chunk of stream) {
@@ -452,34 +327,23 @@ class OpenAIService extends AIProviderBase {
 
         const delta = choice.delta;
 
-        // Buffer content tokens instead of sending immediately
+        // Feed content tokens into the pacer
         if (delta?.content) {
           accumulatedText += delta.content;
-          tokenBuffer += delta.content;
-          if (tokenBuffer.length >= TOKEN_BUFFER_THRESHOLD) {
-            await flushTokenBuffer();
-          } else {
-            scheduleFlush();
-          }
+          tokenPacer.add(delta.content);
         }
 
-        // Buffer reasoning/thinking tokens (OpenAI o1/o3 models)
+        // Feed reasoning/thinking tokens (OpenAI o1/o3 models)
         const reasoningContent = (delta as any)?.reasoning_content;
         if (reasoningContent) {
           accumulatedReasoning += reasoningContent;
-          reasoningBuffer += reasoningContent;
-          if (reasoningBuffer.length >= REASONING_BUFFER_THRESHOLD) {
-            await flushTokenBuffer();
-          } else {
-            scheduleFlush();
-          }
+          reasoningPacer.add(reasoningContent);
         }
 
         // Accumulate tool calls from deltas
         if (delta?.tool_calls) {
           for (const tc of delta.tool_calls) {
             if (tc.id) {
-              // New tool call started — flush previous
               if (currentToolCall?.id && currentToolCall?.name) {
                 toolCalls.push({
                   id: currentToolCall.id,
@@ -503,39 +367,32 @@ class OpenAIService extends AIProviderBase {
           }
         }
 
-        // Capture finish reason
         if (choice.finish_reason) {
           finishReason = choice.finish_reason;
         }
       }
 
-      // Flush any remaining buffered tokens after stream ends
-      await flushTokenBuffer();
+      // Flush remaining buffered tokens after stream ends
+      await tokenPacer.flush();
+      await reasoningPacer.flush();
     } catch (streamError: any) {
-      // Clean up buffer timer on error
-      if (flushTimer !== null) {
-        clearTimeout(flushTimer);
-        flushTimer = null;
-      }
-      // Mid-stream failure — notify the client via SSE before re-throwing
-      const errorEvent = this.createErrorEvent(
+      tokenPacer.destroy();
+      reasoningPacer.destroy();
+      const errorEvent = StreamingEventFactory.createErrorEvent(
         streamError.code || "STREAM_ERROR",
         streamError.message || "Stream interrupted",
         { recoverable: false },
-        sessionId,
+        ids,
       );
-      errorEvent.messageId = messageId ?? "";
-      errorEvent.conversationId = sessionId;
       try {
-        await this.streamingTransportManager.sendEventToSession(
-          sessionId, errorEvent as ErrorStreamingEvent,
-        );
-      } catch (_) {
-        // best-effort
-      }
+        await this.streamingTransportManager.sendEventToSession(sessionId, errorEvent);
+      } catch (_) { /* best-effort */ }
       throw new AIProviderError(
         `AI provider stream interrupted: ${streamError.message || streamError.toString()}`,
       );
+    } finally {
+      tokenPacer.destroy();
+      reasoningPacer.destroy();
     }
 
     // Flush final tool call
@@ -551,14 +408,10 @@ class OpenAIService extends AIProviderBase {
     const toolApprovalMode = this.chatState?.toolApprovalMode;
     if (toolApprovalMode !== ToolApprovalMode.AUTO) {
       for (const tc of toolCalls) {
-        const event = this.createToolCallEvent(
-          tc.id, tc.name, tc.arguments, true, undefined, sessionId,
+        const event = StreamingEventFactory.createToolCallEvent(
+          tc.id, tc.name, tc.arguments, true, undefined, ids,
         );
-        event.messageId = messageId ?? "";
-        event.conversationId = sessionId;
-        await this.streamingTransportManager.sendEventToSession(
-          sessionId, event as ToolCallStreamingEvent,
-        );
+        await this.streamingTransportManager.sendEventToSession(sessionId, event);
       }
     }
 
@@ -567,26 +420,13 @@ class OpenAIService extends AIProviderBase {
       toolApprovalMode === ToolApprovalMode.AUTO && toolCalls.length > 0;
 
     if (!hasPendingAutoToolCalls) {
-      const completionEvent = this.createCompletionEvent(
+      const completionEvent = StreamingEventFactory.createCompletionEvent(
         accumulatedText,
-        {
-          totalTokens: 0,
-          promptTokens: 0,
-          completionTokens: 0,
-          finishReason: finishReason || "stop",
-          model,
-        },
-        sessionId,
+        finishReason || "stop",
+        accumulatedReasoning || undefined,
+        ids,
       );
-      // Include accumulated reasoning in completion metadata
-      if (accumulatedReasoning) {
-        (completionEvent.data as any).thinking = accumulatedReasoning;
-      }
-      completionEvent.messageId = messageId ?? "";
-      completionEvent.conversationId = sessionId;
-      await this.streamingTransportManager.sendEventToSession(
-        sessionId, completionEvent,
-      );
+      await this.streamingTransportManager.sendEventToSession(sessionId, completionEvent);
     }
 
     // Reconstruct a ChatCompletion-shaped result for the caller
@@ -726,7 +566,7 @@ class OpenAIService extends AIProviderBase {
       try {
         // Re-initialize if needed
         if (!this.ai || (chatSessionId && this.chatState?.id !== chatSessionId)) {
-          const persona = this.personaProvider.getPersona(personaId);
+          const persona = await this.personaProvider.getPersona(personaId);
           if (!persona) {
             throw new AIProviderError(`Persona ${personaId} not found`);
           }

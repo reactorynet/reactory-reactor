@@ -1,7 +1,7 @@
 import Reactory from "@reactorynet/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
+import AnthropicService from "./providers/AnthropicService";
 import {
-  IReactorConversationsService,
   IOpenAIService,
   IReactorProviderService,
   IAIPersona,
@@ -19,10 +19,23 @@ import ReactorConversationModel, {
 } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import AIPersonaProvider from "./AIPersonaProvider";
 import ReactorMessageProcessingService from "./ReactorMessageProcessingService";
+import GoogleAIService from "./providers/GoogleAIService";
 import { v4 } from "uuid";
 import { ObjectId } from "mongodb";
 import safeUrl from "@reactory/server-core/utils/url/safeUrl";
-
+import { ChatCompletion, ChatCompletionMessage } from "openai/resources";
+import ReactorMacroService from "./providers/ReactorMacroService";
+import DocumentChunkingService from "./DocumentChunkingService";
+import { ReactorConversationHistoryItem } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
+import {
+  ReactoryFileDocument,
+  ReactoryFileModel,
+} from "@reactory/server-modules/reactory-core/models/CoreFile";
+import { id } from "schema/reflection";
+import { CompletionStreamingEvent, ToolIterationLimitStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
+import Helpers from "authentication/strategies/helpers";
+import { StreamingSessionManager } from "./StreamingSessionManager";
+import { StreamingTransportManager } from "./StreamingTransportManager";
 /**
  * Enhanced error response interface with correlation tracking
  */
@@ -109,21 +122,8 @@ import {
   MacroToolDefinition,
   ToolApprovalMode,
 } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
-// import { MacroRegistry } from "@reactory/server-modules/reactory-reactor/ai/openai/chat/macro";
-import GoogleAIService from "./providers/GoogleAIService";
-import { ChatCompletion, ChatCompletionMessage } from "openai/resources";
-import ReactorMacroService from "./providers/ReactorMacroService";
-import DocumentChunkingService from "./DocumentChunkingService";
-import { ReactorConversationHistoryItem } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
-import {
-  ReactoryFileDocument,
-  ReactoryFileModel,
-} from "modules/reactory-core/models/CoreFile";
-import { id } from "schema/reflection";
-import { CompletionStreamingEvent, ToolIterationLimitStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
-import Helpers from "authentication/strategies/helpers";
-import { StreamingSessionManager } from "./StreamingSessionManager";
-import { StreamingTransportManager } from "./StreamingTransportManager";
+
+
 
 /**
  * ReactorConversationService - Core AI Conversation Management Service
@@ -188,6 +188,7 @@ const DATABASE_CONSTANTS = {
     { id: "core.ReactoryFileService@1.0.0", alias: "fileService" },
     { id: "reactor.OpenAIService@1.0.0", alias: "openaiService" },
     { id: "reactor.GoogleAIService@1.0.0", alias: "googleAIService" },
+    { id: "reactor.AnthropicService@1.0.0", alias: "anthropicService" },
     { id: "reactor.ReactorProviderService@1.0.0", alias: "providerService" },
     {
       id: "reactor.ReactorMessageProcessingService@1.0.0",
@@ -211,6 +212,9 @@ export default class ReactorConversationService
 
   /** Google AI service for Google Gemini interactions */
   private googleAIService: GoogleAIService;
+
+  /** Anthropic service for Anthropic AI interactions */
+  private anthropicService: AnthropicService;
 
   /** Provider service for managing multiple AI providers and adapters */
   private providerService: IReactorProviderService;
@@ -1590,6 +1594,10 @@ export default class ReactorConversationService
     this.openaiService = service;
   }
 
+  setAnthropicsService(service: IAnthropicService) {
+    this.anthropicService = service;
+  }
+
   setProviderService(service: IReactorProviderService) {
     this.providerService = service;
   }
@@ -2033,7 +2041,13 @@ export default class ReactorConversationService
           ...chatArgs,
           persistState: false, // Don't persist here since we handle it in ReactorConversationService
         });
-
+      case "anthropic":
+        // Anthropic service implementation
+        await this.anthropicService.initialize(chatSessionId, persona);
+        return await this.anthropicService.chat({
+          ...chatArgs,
+          persistState: false, // Don't persist here since we handle it in ReactorConversationService
+        });
       default:
         this.context.error(`Provider ${provider} not implemented`, {
           provider,
