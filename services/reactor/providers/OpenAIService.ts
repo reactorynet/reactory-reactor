@@ -6,7 +6,6 @@ import {
   AITokenStreamingData,
   AIToolCallStreamingData,
   AIErrorStreamingData,
-  AICompletionStreamingData,
   IAIPersona,
   IOpenAIServiceProps,
 } from "../../../types/service.types";
@@ -319,7 +318,12 @@ class OpenAIService extends AIProviderBase {
     },
     sessionId?: string,
   ): CompletionStreamingEvent {
-    const completionData: AICompletionStreamingData = { content, metadata };
+    // The client (useSSE.ts) expects CompletionStreamingEvent.data to be
+    // { content, finishReason, thinking? } — NOT wrapped in a metadata object.
+    const completionData: { content: string; finishReason: string; thinking?: string } = {
+      content,
+      finishReason: metadata.finishReason || "stop",
+    };
     return this.createStreamingEvent(
       StreamingEventType.COMPLETE, completionData, sessionId,
     ) as CompletionStreamingEvent;
@@ -362,9 +366,9 @@ class OpenAIService extends AIProviderBase {
       // Connection/auth errors — send an error event over SSE so the client
       // sees the failure immediately instead of hanging.
       const errorEvent = this.createErrorEvent(
-        error.message || "Failed to connect to AI provider",
         error.code || error.status || "CONNECTION_ERROR",
-        false,
+        error.message || "Failed to connect to AI provider",
+        { recoverable: false },
         sessionId,
       );
       errorEvent.messageId = messageId ?? "";
@@ -515,9 +519,9 @@ class OpenAIService extends AIProviderBase {
       }
       // Mid-stream failure — notify the client via SSE before re-throwing
       const errorEvent = this.createErrorEvent(
-        streamError.message || "Stream interrupted",
         streamError.code || "STREAM_ERROR",
-        false,
+        streamError.message || "Stream interrupted",
+        { recoverable: false },
         sessionId,
       );
       errorEvent.messageId = messageId ?? "";
