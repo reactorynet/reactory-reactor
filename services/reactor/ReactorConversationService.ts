@@ -2701,30 +2701,37 @@ export default class ReactorConversationService
   ): Promise<any> {
     // Add AI response if available
     if (response?.choices && response?.choices?.length > 0) {
-      const aiMessage = response.choices[0].message;
-      // Extract reasoning/thinking from provider response
-      const thinking = response.reasoning || response.__reasoning || undefined;
+      // When the provider streamed tool_calls, it may have already persisted
+      // the assistant message to avoid a race condition with executeMacro
+      // (the client starts executing tools as soon as the SSE completion event
+      // arrives, which can happen before this method runs). Skip the duplicate
+      // persist in that case.
+      if (!(response as any).__persisted) {
+        const aiMessage = response.choices[0].message;
+        // Extract reasoning/thinking from provider response
+        const thinking = response.reasoning || response.__reasoning || undefined;
 
-      // Use findOneAndUpdate for atomic update
-      await ReactorConversationModel.findOneAndUpdate(
-        { _id: conversation._id },
-        {
-          $push: {
-            history: {
-              id: new ObjectId(),
-              response, // add the original response for debugging
-              role: aiMessage.role,
-              content: aiMessage.content,
-              thinking,
-              timestamp: new Date(),
-              tool_calls: aiMessage.tool_calls,
-              tool_results: [],
+        // Use findOneAndUpdate for atomic update
+        await ReactorConversationModel.findOneAndUpdate(
+          { _id: conversation._id },
+          {
+            $push: {
+              history: {
+                id: new ObjectId(),
+                response, // add the original response for debugging
+                role: aiMessage.role,
+                content: aiMessage.content,
+                thinking,
+                timestamp: new Date(),
+                tool_calls: aiMessage.tool_calls,
+                tool_results: [],
+              },
             },
+            $set: { updated: new Date() },
           },
-          $set: { updated: new Date() },
-        },
-        { new: true }
-      ).exec();
+          { new: true }
+        ).exec();
+      }
 
       // Update token count after adding AI response
       await this.updateConversationTokenCount(conversation._id.toString());
