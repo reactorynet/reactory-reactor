@@ -105,7 +105,7 @@ class OpenAIService extends AIProviderBase {
         break;
       case "ollama":
         openAIArgs.baseURL = apiBaseURL || process.env.OLLAMA_API_BASE_URL || "http://localhost:11434/v1";
-        openAIArgs.apiKey = "";
+        openAIArgs.apiKey = "ollama";
         openAIArgs.organization = "";
         break;
       case "copilot":
@@ -230,10 +230,16 @@ class OpenAIService extends AIProviderBase {
 
     const tools = await this.getToolsDefinitions();
     if (tools.length > 0) {
+      let parallel_tool_calls = true;
+      // check if the ai is targeting ollama - if so, we need to adjust the tool definitions to match ollama's expected format
+      if (this.chatState.persona?.providerId === "ollama") { 
+        parallel_tool_calls = false;  
+      }
       return {
         model: modelId,
         messages,
         tools,
+        parallel_tool_calls,
         tool_choice: "auto",
       };
     }
