@@ -635,7 +635,7 @@ class AnthropicService extends AIProviderBase {
             const delta = chunk.delta.thinking || "";
             accumulatedReasoning += delta;
             const event = this.createReasoningEvent(
-              accumulatedReasoning,
+              delta,
               delta,
               accumulatedReasoning.length,
               false,
@@ -647,7 +647,7 @@ class AnthropicService extends AIProviderBase {
             const delta = chunk.delta.text || "";
             accumulatedText += delta;
             const event = this.createTokenEvent(
-              accumulatedText,
+              delta,
               delta,
               accumulatedText.length,
               false,
