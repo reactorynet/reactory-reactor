@@ -4177,6 +4177,9 @@ export default class ReactorConversationService
       "gateway timeout",
       "ai provider error",
       "retryable",
+      "overloaded",
+      "throttled",
+      "throttling",
     ];
 
     return retryablePatterns.some(

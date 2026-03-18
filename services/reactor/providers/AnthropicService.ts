@@ -120,6 +120,11 @@ class AnthropicService extends AIProviderBase {
   private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[]): Anthropic.Messages.MessageParam[] {
     const messages: Anthropic.Messages.MessageParam[] = [];
 
+    // Track tool_use_ids that already have a tool_result so we never
+    // send duplicates — Anthropic rejects requests with more than one
+    // tool_result per tool_use_id.
+    const seenToolResultIds = new Set<string>();
+
     for (const msg of history) {
       // Skip system messages - handled via the system parameter
       if (msg.role === "system") continue;
@@ -163,10 +168,15 @@ class AnthropicService extends AIProviderBase {
 
         if ((msg as any).tool_results && (msg as any).tool_results.length > 0) {
           for (const toolResult of (msg as any).tool_results) {
+            const toolUseId = toolResult.tool_call_id || toolResult.id;
+            // Skip duplicate results for the same tool_use_id
+            if (seenToolResultIds.has(toolUseId)) continue;
+            seenToolResultIds.add(toolUseId);
+
             const resultContent = toolResult.content || toolResult.result || "";
             toolResultBlocks.push({
               type: "tool_result",
-              tool_use_id: toolResult.tool_call_id || toolResult.id,
+              tool_use_id: toolUseId,
               content: typeof resultContent === "string" ? resultContent : JSON.stringify(resultContent),
               is_error: toolResult.is_error || false,
             });
@@ -175,11 +185,15 @@ class AnthropicService extends AIProviderBase {
 
         // If this is a tool-role message with direct content (single tool result)
         if (msg.role === "tool" && toolResultBlocks.length === 0) {
-          toolResultBlocks.push({
-            type: "tool_result",
-            tool_use_id: (msg as any).tool_call_id || new ObjectId().toHexString(),
-            content: this.extractTextContent(msg.content) || "",
-          });
+          const toolUseId = (msg as any).tool_call_id || new ObjectId().toHexString();
+          if (!seenToolResultIds.has(toolUseId)) {
+            seenToolResultIds.add(toolUseId);
+            toolResultBlocks.push({
+              type: "tool_result",
+              tool_use_id: toolUseId,
+              content: this.extractTextContent(msg.content) || "",
+            });
+          }
         }
 
         if (toolResultBlocks.length > 0) {
@@ -1021,8 +1035,10 @@ class AnthropicService extends AIProviderBase {
         const messageId = new ObjectId();
         const response = await this.getAIResponse(message, role, messageId.toString());
 
-        // Add AI response to history
-        if (response.choices && response.choices.length > 0) {
+        // Add AI response to history (only when NOT already persisted by
+        // handleStreamingRequest — otherwise we create duplicate entries
+        // that produce duplicate tool_result blocks on the next turn).
+        if (response.choices && response.choices.length > 0 && !(response as any).__persisted) {
           this.chatState.history.push({
             id: messageId,
             timestamp: new Date(),
@@ -1033,7 +1049,12 @@ class AnthropicService extends AIProviderBase {
           } as ReactorConversationHistoryItem);
         }
 
-        if (persistState) {
+        // Skip persistChatState when processAIResponse in the conversation
+        // service will handle persistence.  The full-document overwrite in
+        // persistChatState races with the $push operations done by
+        // processAIResponse and executeMacro, causing duplicate history
+        // entries on the next load.
+        if (persistState && !(response as any).__persisted) {
           await this.persistChatState();
         }
 

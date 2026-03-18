@@ -5,12 +5,6 @@ import { IAIPersona, IAIPersonaResource } from "@reactory/server-modules/reactor
 import { FeatureType } from "@reactorynet/reactory-core";
 import { MacroRegistry } from "@reactory/server-modules/reactory-reactor/ai/macro";
 import { MacroComponentDefinition, MacroToolDefinition } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
-import NewRequestMacroDefinition from "@reactory/server-modules/zepz-engineer/ai/macros/requests/NewRequest.macro";
-import ListRequestsMacroDefinition from "@reactory/server-modules/zepz-engineer/ai/macros/requests/ListRequests.macro";
-import CatalogRequestsMacroDefinition from "@reactory/server-modules/zepz-engineer/ai/macros/requests/CatalogRequests.macro";
-import UpdateRequestEntriesMacroDefinition from "@reactory/server-modules/zepz-engineer/ai/macros/requests/UpdateRequestEntries.macro";
-import UpdateRequestEntryMacroDefinition from "@reactory/server-modules/zepz-engineer/ai/macros/requests/UpdateRequestEntry.macro";
-import ListUnProcessedRequestEntriesMacroDefinition from "@reactory/server-modules/zepz-engineer/ai/macros/requests/ListUnProcessedRequestEntries.macro";
 import { 
   SlackGetChannelInfoRegistry, 
   SlackReadMessagesRegistry,
@@ -23,12 +17,6 @@ const SECURITY_PERSONA_TEXT = ingest(require.resolve('./persona.md'));
 const SECURITY_FEATURES_TEXT = ingest(require.resolve('./features.md'));
 
 const SECURITY_MACROS = [
-  { ...NewRequestMacroDefinition}, 
-  { ...ListRequestsMacroDefinition},
-  { ...CatalogRequestsMacroDefinition},
-  { ...UpdateRequestEntriesMacroDefinition},
-  { ...UpdateRequestEntryMacroDefinition},
-  { ...ListUnProcessedRequestEntriesMacroDefinition},
   { ...SlackReadMessagesRegistry},
   { ...SlackGetChannelInfoRegistry },
   { ...SlackListChannelsRegistry },
