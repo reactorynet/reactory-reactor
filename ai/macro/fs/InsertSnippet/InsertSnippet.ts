@@ -9,16 +9,52 @@ export const InsertSnippet: Macro<string, InsertSnippetProps> = async (
 ) => {
   const { path, start, end, snippet } = props;
   try {
+    if (!path || !path.trim()) {
+      return 'Error: path is required';
+    }
+    if (!start) {
+      return 'Error: start line number is required';
+    }
+    const startLine = parseInt(start, 10);
+    if (isNaN(startLine) || startLine < 1) {
+      return `Error: start must be a positive integer, got "${start}"`;
+    }
+
     const data: string = (await fs.readFile(path.trim(), 'utf-8')).toString();
-    const lines = data.split('\n');
-    const startLine = parseInt(start);
-    const endLine = end ? parseInt(end) : startLine;
+    // Normalise line endings to LF so line-number arithmetic is consistent;
+    // the original ending style is restored on write.
+    const hasCRLF = data.includes('\r\n');
+    const normalised = hasCRLF ? data.replace(/\r\n/g, '\n') : data;
+    const lines = normalised.split('\n');
+
+    if (startLine > lines.length + 1) {
+      return `Error: start line ${startLine} is beyond end of file (${lines.length} lines)`;
+    }
+
+    let endLine: number;
+    if (end) {
+      endLine = parseInt(end, 10);
+      if (isNaN(endLine) || endLine < startLine) {
+        return `Error: end must be an integer >= start (${startLine}), got "${end}"`;
+      }
+      if (endLine > lines.length) {
+        return `Error: end line ${endLine} is beyond end of file (${lines.length} lines)`;
+      }
+    } else {
+      // INSERT mode: no end given — preserve the original line at startLine.
+      // Using startLine - 1 (0-based) so lines.slice(endLine) starts at the
+      // original startLine, keeping it in the output after the snippet.
+      endLine = startLine - 1;
+    }
+
     const modifiedLines = [
       ...lines.slice(0, startLine - 1),
       snippet,
-      ...lines.slice(endLine)
+      ...lines.slice(endLine),
     ];
-    const modifiedData = modifiedLines.join('\n');
+    const modifiedData = hasCRLF
+      ? modifiedLines.join('\r\n')
+      : modifiedLines.join('\n');
     await fs.writeFile(path.trim(), modifiedData, 'utf-8');
     return `Snippet inserted into ${path} successfully.`;
   } catch (err) {
@@ -41,7 +77,9 @@ export const InsertSnippetComponentRegister: MacroComponentDefinition<typeof Ins
     type: "function",
     function: {
       name: "insertText",
-      description: "Inserts or replaces text in a file at specified line positions",
+      description: "Inserts or replaces text in a file at specified line positions. " +
+        "When only 'start' is provided the snippet is inserted BEFORE that line (the original line is preserved). " +
+        "When both 'start' and 'end' are provided the lines in [start, end] are replaced by the snippet.",
       icon: "content_paste",
       parameters: {
         type: "object",
