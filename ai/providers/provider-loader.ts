@@ -12,6 +12,11 @@ export interface ProviderModelConfig {
   costPerToken?: number;
   inputCostPerToken?: number;
   outputCostPerToken?: number;
+  inputCostPerTokenUsdCents?: number | null;
+  outputCostPerTokenUsdCents?: number | null;
+  rpm?: number | null;
+  itpm?: number | null;
+  otpm?: number | null;
   maxParallelRequests?: number;
   supportsStreaming?: boolean;
   supportedTools?: string[];
