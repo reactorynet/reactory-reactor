@@ -32,10 +32,11 @@ import {
   ReactoryFileModel,
 } from "@reactory/server-modules/reactory-core/models/CoreFile";
 import { id } from "schema/reflection";
-import { CompletionStreamingEvent, ToolIterationLimitStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
+import { CompletionStreamingEvent, ToolCallStreamingEvent, ToolIterationLimitStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
 import Helpers from "authentication/strategies/helpers";
 import { StreamingSessionManager } from "./StreamingSessionManager";
 import { StreamingTransportManager } from "./StreamingTransportManager";
+import { StreamingEventFactory } from "./streaming/StreamingEventFactory";
 /**
  * Enhanced error response interface with correlation tracking
  */
@@ -2473,6 +2474,32 @@ export default class ReactorConversationService
               const toolArgs = typeof toolCall.function?.arguments === 'string'
                 ? JSON.parse(toolCall.function.arguments)
                 : toolCall.function?.arguments;
+
+              // Notify the client that a tool is being invoked so it can show progress in AUTO mode
+              if (streamingMode === StreamingMode.SSE) {
+                try {
+                  const toolCallEvent = StreamingEventFactory.createToolCallEvent(
+                    toolCall.id,
+                    toolName,
+                    typeof toolCall.function?.arguments === 'string'
+                      ? toolCall.function.arguments
+                      : JSON.stringify(toolCall.function?.arguments || {}),
+                    false,
+                    undefined,
+                    {
+                      sessionId: effectiveConversationId,
+                      conversationId: effectiveConversationId,
+                      messageId: new ObjectId().toString(),
+                    },
+                  );
+                  await this.streamingTransportManager.sendEventToSession(effectiveConversationId, toolCallEvent);
+                } catch (sseError: any) {
+                  this.context.warn(`[sendMessage] AUTO mode: failed to send tool_call SSE event: ${sseError.message}`, {
+                    toolName,
+                    conversationId: effectiveConversationId,
+                  });
+                }
+              }
 
               try {
                 await this.executeMacro({
