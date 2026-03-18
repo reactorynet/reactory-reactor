@@ -112,7 +112,8 @@ export enum StreamingEventType {
   REASONING = 'reasoning',
   COMPLETE = 'complete',
   ERROR = 'error',
-  TOOL_ITERATION_LIMIT = 'tool_iteration_limit'
+  TOOL_ITERATION_LIMIT = 'tool_iteration_limit',
+  RETRY = 'retry'
 }
 /**
  * Base streaming event interface
@@ -210,7 +211,26 @@ export interface ToolIterationLimitStreamingEvent extends StreamingEventBase {
   };
 }
 
-export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent | ToolIterationLimitStreamingEvent;
+/**
+ * Retry streaming event — emitted when the provider hits a retryable error
+ * (e.g. rate limiting) and will automatically retry after a backoff period.
+ * Allows the client to surface "Retrying in Xs…" feedback to the user.
+ */
+export interface RetryStreamingEvent extends StreamingEventBase {
+  type: StreamingEventType.RETRY;
+  data: {
+    /** Current retry attempt (1-based) */
+    attempt: number;
+    /** Maximum number of retries that will be attempted */
+    maxAttempts: number;
+    /** Backoff delay in milliseconds before the next attempt */
+    retryAfterMs: number;
+    /** Human-readable reason for the retry (e.g. "Rate limited") */
+    reason: string;
+  };
+}
+
+export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent | ToolIterationLimitStreamingEvent | RetryStreamingEvent;
 
 /**
  * Per-persona token pacing configuration.

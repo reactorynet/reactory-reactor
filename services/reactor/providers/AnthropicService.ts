@@ -26,7 +26,7 @@ import ReactorConversationModel, {
   ReactorConversationHistory,
   ReactorConversationHistoryItem,
 } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
-import { CompletionStreamingEvent, ErrorStreamingEvent, ReasoningStreamingEvent, StreamingEvent, StreamingEventType, StreamingMode, TokenStreamingEvent, ToolCallStreamingEvent } from "../types/streaming.types";
+import { CompletionStreamingEvent, ErrorStreamingEvent, ReasoningStreamingEvent, RetryStreamingEvent, StreamingEvent, StreamingEventType, StreamingMode, TokenStreamingEvent, ToolCallStreamingEvent } from "../types/streaming.types";
 import { StreamingSessionManager } from "../StreamingSessionManager";
 import { StreamingTransportManager } from "../StreamingTransportManager";
 
@@ -481,6 +481,68 @@ class AnthropicService extends AIProviderBase {
       details,
     };
     return this.createStreamingEvent(StreamingEventType.ERROR, errorData, sessionId) as ErrorStreamingEvent;
+  }
+
+  /**
+   * Create a retry streaming event to inform the client of an upcoming retry
+   */
+  private createRetryEvent(
+    attempt: number,
+    maxAttempts: number,
+    retryAfterMs: number,
+    reason: string,
+    sessionId?: string
+  ): RetryStreamingEvent {
+    return this.createStreamingEvent(StreamingEventType.RETRY, {
+      attempt,
+      maxAttempts,
+      retryAfterMs,
+      reason,
+    }, sessionId) as RetryStreamingEvent;
+  }
+
+  /**
+   * Extract a backoff delay from an Anthropic error.
+   * Checks for a `retry-after` header (seconds) on 429 responses,
+   * otherwise falls back to exponential backoff with jitter.
+   */
+  private getBackoffDelay(error: any, attempt: number): number {
+    // Anthropic SDK errors expose headers on the error object
+    const retryAfterHeader = error?.headers?.get?.('retry-after')
+      ?? error?.headers?.['retry-after'];
+    if (retryAfterHeader) {
+      const seconds = Number(retryAfterHeader);
+      if (!isNaN(seconds) && seconds > 0) {
+        return seconds * 1000;
+      }
+    }
+    // Exponential backoff: 2s, 4s, 8s, 16s, 32s capped at 60s
+    const baseDelay = Math.min(Math.pow(2, attempt) * 1000, 60_000);
+    // Add jitter: ±25%
+    const jitter = baseDelay * 0.25 * (Math.random() * 2 - 1);
+    return Math.max(1000, Math.round(baseDelay + jitter));
+  }
+
+  /**
+   * Determine max retries based on error type.
+   * Rate-limit errors (429) get more retries than other transient errors.
+   */
+  private getMaxRetries(error: any): number {
+    if (error?.status === 429) return 5;
+    return 2;
+  }
+
+  /**
+   * Human-readable reason string for a retryable error
+   */
+  private getRetryReason(error: any): string {
+    if (error?.status === 429) return 'Rate limited by provider';
+    if (error?.status === 529 || error?.status === 503) return 'Provider overloaded';
+    if (error?.status >= 500) return 'Provider server error';
+    const msg = error?.message?.toLowerCase() || '';
+    if (msg.includes('timeout')) return 'Request timed out';
+    if (msg.includes('network') || msg.includes('connection')) return 'Network error';
+    return 'Transient error';
   }
 
   /**
@@ -1014,8 +1076,8 @@ class AnthropicService extends AIProviderBase {
       streamingMode = StreamingMode.NONE,
     } = params;
 
-    const maxRetries = 2;
     let lastError: any;
+    let maxRetries = 2;
     this.streamingMode = streamingMode;
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -1062,14 +1124,39 @@ class AnthropicService extends AIProviderBase {
       } catch (error: any) {
         lastError = error;
 
+        // On first retryable error, adjust maxRetries based on error type
+        // (rate-limit errors get more retries)
+        if (attempt === 1) {
+          maxRetries = this.getMaxRetries(error);
+        }
+
         if (attempt < maxRetries && this.isRetryableError(error)) {
+          const backoffDelay = this.getBackoffDelay(error, attempt);
+          const reason = this.getRetryReason(error);
+
           this.context.warn(
-            `Retry attempt ${attempt} for Anthropic chat (${error.message})`,
-            { error, attempt, maxRetries },
+            `${reason} — retry ${attempt}/${maxRetries} in ${backoffDelay}ms (${error.message})`,
+            { error, attempt, maxRetries, backoffDelay },
             "AnthropicService.chat"
           );
 
-          const backoffDelay = Math.pow(2, attempt) * 1000;
+          // Send retry event to client via SSE so they see feedback
+          if (this.streamingMode === StreamingMode.SSE && chatSessionId) {
+            const retryEvent = this.createRetryEvent(
+              attempt,
+              maxRetries,
+              backoffDelay,
+              reason,
+              chatSessionId
+            );
+            await this.streamingTransportManager.sendEventToSession(chatSessionId, retryEvent)
+              .catch((err) => this.context.warn(
+                `Failed to send retry SSE event: ${err.message}`,
+                { err },
+                "AnthropicService.chat"
+              ));
+          }
+
           await new Promise((resolve) => setTimeout(resolve, backoffDelay));
           continue;
         }
