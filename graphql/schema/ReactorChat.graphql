@@ -144,7 +144,7 @@ type ReactorChatMessage {
   """
   The content of the message.
   """
-  content: String
+  content: Any
   """
   The component of the message. This will be a Reactory.FQN type that follows the 
   nameSpace.name@version format.
@@ -442,6 +442,11 @@ input ReactorSendMessageInput {
   and you just need the AI to continue processing.
   """
   continueAfterTools: Boolean
+  """
+  Optional base64 image data URLs for vision-capable models (e.g. "data:image/png;base64,...").
+  Only used when the active model supports image input.
+  """
+  images: [String]
 }
 
 """

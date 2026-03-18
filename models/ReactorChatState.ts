@@ -134,7 +134,7 @@ export type ReactorConversation = ReactorConversationDocument & ReactorConversat
 const ReactorConversationHistorySchema = new Schema({
   id: ObjectId,
   response: {},
-  content: String,
+  content: { type: Schema.Types.Mixed, default: null },
   refusal: String,
   thinking: String,
   component: String,

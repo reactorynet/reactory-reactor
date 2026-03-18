@@ -2133,6 +2133,7 @@ export default class ReactorConversationService
     modelId?: string;
     providerId?: string;
     continueAfterTools?: boolean;
+    images?: string[];
   }): Promise<any> {
     const {
       personaId,
@@ -2147,6 +2148,7 @@ export default class ReactorConversationService
       modelId: modelIdOverride,
       providerId: providerIdOverride,
       continueAfterTools = false,
+      images,
     } = args;
     const { user } = this.context;
 
@@ -2261,10 +2263,21 @@ export default class ReactorConversationService
           } else {
             // Use findOneAndUpdate to atomically find and update the conversation
             // This prevents race conditions that could lead to duplicate creation
+            // Build content-parts array when images are provided (vision models)
+            const messageContent: string | any[] =
+              images && images.length > 0 && typeof message === "string"
+                ? [
+                    { type: "text", text: message },
+                    ...images.map((url) => ({
+                      type: "image_url",
+                      image_url: { url },
+                    })),
+                  ]
+                : message;
             const messageToAdd = {
               id: new ObjectId(),
               role: role as any,
-              content: message,
+              content: messageContent,
               timestamp: new Date(),
               tool_name,
               tool_args,
@@ -2428,7 +2441,15 @@ export default class ReactorConversationService
           {
             personaId,
             chatSessionId,
-            message,
+            message: images && images.length > 0 && typeof message === "string"
+              ? [
+                  { type: "text", text: message },
+                  ...images.map((url) => ({
+                    type: "image_url",
+                    image_url: { url },
+                  })),
+                ]
+              : message,
             role: role as "user" | "assistant" | "tool" | "system",
             tool_name,
             tool_args,
