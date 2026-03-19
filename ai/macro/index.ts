@@ -22,7 +22,7 @@ import  {
   WriteFile,
   ExtractTextFromFile,
   ListDirectory,
-  InsertSnippet,
+  //InsertSnippet,
 } from './fs/macro';
 import { FetchMacro } from './web/macro';
 import { QueryGQL, MutationGQL } from './graphql/macro';
@@ -73,8 +73,8 @@ const outputMacros: MacroFunctions = {
   gml: MutationGQL,
   CreateUser,
   createUser: CreateUser,
-  replace: InsertSnippet,
-  insert: InsertSnippet,
+  // replace: InsertSnippet,
+  // insert: InsertSnippet,
 };
 
 

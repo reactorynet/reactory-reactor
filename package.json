@@ -29,6 +29,7 @@
     "@aws-sdk/client-bedrock": "3.864.0",
     "@anthropic-ai/sdk": "0.59.0",
     "@modelcontextprotocol/sdk": "1.26.0",
-    "ollama": "0.6.3"
+    "ollama": "0.6.3",
+    "neo-blessed": "^0.2.0"
   }
 }

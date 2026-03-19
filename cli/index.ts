@@ -1,5 +1,6 @@
 import Reactory from '@reactorynet/reactory-core';
 import ReactorCli from './reactor-cli/ReactorCli';
+import ReactorTuiApp from './reactor-tui/ReactorTui';
 import GraphManagerCLI from './SystemGraphManager/GraphManager';
 type ReactoryCliApp = (vargs: string[], context: Reactory.Server.IReactoryContext) => Promise<void>
 
@@ -37,7 +38,31 @@ const ReactorCliApp: Reactory.IReactoryComponentDefinition<ReactoryCliApp> = {
 
 const ReactoryCliApps: Reactory.IReactoryComponentDefinition<ReactoryCliApp>[] = [
   ReactorCliApp,
-  GraphManagerCLI,  
+  GraphManagerCLI,
+  {
+    nameSpace: 'reactor',
+    name: 'ReactorTui',
+    version: '1.0.0',
+    description: `Reactory Reactor TUI — a blessed-based terminal UI for AI chat with full feature parity to the ReactorChat PWA widget.
+  Supports SSE streaming, personas, tools, voice, file attachments, and more.
+  Usage: reactor-tui [--http --api-url=<url> --token=<jwt>]`,
+    component: ReactorTuiApp,
+    domain: 'cli',
+    features: [{
+      feature: 'tui',
+      featureType: 'ai',
+      action: ["tui", "chat", "interact", "talk", "ai", "assistant", "reactor-tui"],
+      description: 'Interactive TUI chat with the Reactory AI assistant',
+      stem: 'tui',
+    }],
+    overwrite: false,
+    roles: ['USER'],
+    stem: 'reactor-tui',
+    tags: ['reactor', 'cli', 'tui', 'assistant', 'ai', 'blessed'],
+    toString(includeVersion) {
+      return includeVersion ? `${this.nameSpace}.${this.name}@${this.version}` : this.name;
+    },
+  },
 ];
 
 export default ReactoryCliApps;

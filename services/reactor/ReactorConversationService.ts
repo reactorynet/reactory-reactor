@@ -3821,22 +3821,31 @@ export default class ReactorConversationService
       const systemPromptTemplate = persona.prompts["system"];
 
       if (systemPromptTemplate) {
-        // Add system prompt to conversation history
-        const promptText = this.context.utils.lodash.template(
-          systemPromptTemplate.content
-        )({
-          user: {
-            _id: this.context.user._id,
-            name:
-              this.context.user.firstName + " " + this.context.user.lastName,
-            email: this.context.user.email,
-            avatar: this.context.user.avatar,
-            createdAt: this.context.user.createdAt,
-          },
-          persona: persona,
-          macros: macros,
-          tools: tools,
-        });
+        // The prompt content may already be fully compiled (e.g. from buildSystemPrompt()).
+        // Attempt lodash template interpolation for user/persona context, but fall back
+        // to the raw content if it contains literal ${...} patterns that fail to compile.
+        let promptText: string;
+        try {
+          promptText = this.context.utils.lodash.template(
+            systemPromptTemplate.content
+          )({
+            user: {
+              _id: this.context.user._id,
+              name:
+                this.context.user.firstName + " " + this.context.user.lastName,
+              email: this.context.user.email,
+              avatar: this.context.user.avatar,
+              createdAt: this.context.user.createdAt,
+            },
+            persona: persona,
+            macros: macros,
+            tools: tools,
+          });
+        } catch {
+          // Template compilation failed — content likely contains literal
+          // template syntax from code examples. Use as-is.
+          promptText = systemPromptTemplate.content;
+        }
 
         conversation.history.push({
           id: new ObjectId(),
@@ -3904,7 +3913,9 @@ export default class ReactorConversationService
       return conversation as unknown as ReactorInitChatResponse;
     } catch (error) {
       this.context.error("Error starting chat session", {
-        error,
+        error: error instanceof Error ? { message: error.message, stack: error.stack } : error,
+        personaId: args.personaId,
+        userId: this.context.user?._id,
       });
       
       return {
