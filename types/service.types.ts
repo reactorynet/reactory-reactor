@@ -10,7 +10,7 @@ import { ReactoryFileDocument, ReactoryFileModel } from 'modules/reactory-core/m
 import { PromptMergeStrategy, StreamingMode } from '../services/reactor/types/streaming.types';
 
 
-export type KnownAIProviders = "openai" | "google" | "azure" | "xai" | "anthropic" | "cohere" | "mistral" | "meta" | "deepmind" | "copilot" | "azure-openai";
+export type KnownAIProviders = "openai" | "google" | "azure" | "xai" | "anthropic" | "cohere" | "mistral" | "meta" | "deepmind" | "copilot" | "azure-openai" | "ollama";
 
 export type OpenAIModel = {
   id: string
