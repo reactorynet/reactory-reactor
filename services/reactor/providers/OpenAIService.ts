@@ -42,7 +42,7 @@ import { TokenPacer } from "../streaming/TokenPacer";
   id: "reactor.OpenAIService@1.0.0",
   name: "OpenAI Service",
   nameSpace: "reactor",
-  description: "Service for managing OpenAI-compatible API requests (OpenAI, xAI, Ollama)",
+  description: "Service for managing OpenAI-compatible API requests (OpenAI, xAI, GitHub Copilot, Azure OpenAI)",
   serviceType: "ai",
   dependencies: [
     { id: "core.ReactoryFileService@1.0.0", alias: "fileService" },
@@ -102,11 +102,6 @@ class OpenAIService extends AIProviderBase {
         openAIArgs.baseURL = apiBaseURL || process.env.XAI_API_BASE_URL || "https://api.x.ai/v1";
         openAIArgs.apiKey = apiKey || process.env.X_AI_API_KEY;
         delete openAIArgs.organization;
-        break;
-      case "ollama":
-        openAIArgs.baseURL = apiBaseURL || process.env.OLLAMA_API_BASE_URL || "http://localhost:11434/v1";
-        openAIArgs.apiKey = "ollama";
-        openAIArgs.organization = "";
         break;
       case "copilot":
         openAIArgs.baseURL = apiBaseURL || process.env.GITHUB_COPILOT_API_URL || "https://models.inference.ai.azure.com";
@@ -230,16 +225,11 @@ class OpenAIService extends AIProviderBase {
 
     const tools = await this.getToolsDefinitions();
     if (tools.length > 0) {
-      let parallel_tool_calls = true;
-      // check if the ai is targeting ollama - if so, we need to adjust the tool definitions to match ollama's expected format
-      if (this.chatState.persona?.providerId === "ollama") { 
-        parallel_tool_calls = false;  
-      }
       return {
         model: modelId,
         messages,
         tools,
-        parallel_tool_calls,
+        parallel_tool_calls: true,
         tool_choice: "auto",
       };
     }
@@ -645,8 +635,8 @@ class OpenAIService extends AIProviderBase {
     return `OpenAIService${includeVersion ? "@1.0.0" : ""}`;
   }
 
-  description?: string = "OpenAI-compatible AI Service (OpenAI, xAI, Ollama)";
-  tags?: string[] = ["ai", "openai", "xai", "ollama"];
+  description?: string = "OpenAI-compatible AI Service (OpenAI, xAI, GitHub Copilot, Azure OpenAI)";
+  tags?: string[] = ["ai", "openai", "xai", "copilot", "azure-openai"];
   nameSpace: string = "reactor";
   name: string = "OpenAIService";
   version: string = "1.0.0";

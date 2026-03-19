@@ -1,6 +1,7 @@
 import OpenAIService from "./reactor/providers/OpenAIService";
 import GoogleAIService from "./reactor/providers/GoogleAIService";
 import AnthropicService from "./reactor/providers/AnthropicService";
+import OllamaAIService from "./reactor/providers/OllamaAIService";
 import PersonaService from "./reactor/AIPersonaProvider";
 import ReactorConversationService from "./reactor/ReactorConversationService";
 import ReactorCapabilityService from "./reactor/ReactorCapabilityService";
@@ -29,6 +30,7 @@ export default [
   PersonaService,
   GoogleAIService,
   AnthropicService,
+  OllamaAIService,
   ReactorProjectService,
   SystemGraphManager,
   JavaProjectProcessor,

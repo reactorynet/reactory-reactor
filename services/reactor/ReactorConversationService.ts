@@ -1,6 +1,7 @@
 import Reactory from "@reactorynet/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
 import AnthropicService from "./providers/AnthropicService";
+import OllamaAIService from "./providers/OllamaAIService";
 import {
   IOpenAIService,
   IReactorProviderService,
@@ -190,6 +191,7 @@ const DATABASE_CONSTANTS = {
     { id: "reactor.OpenAIService@1.0.0", alias: "openaiService" },
     { id: "reactor.GoogleAIService@1.0.0", alias: "googleAIService" },
     { id: "reactor.AnthropicService@1.0.0", alias: "anthropicService" },
+    { id: "reactor.OllamaAIService@1.0.0", alias: "ollamaService" },
     { id: "reactor.ReactorProviderService@1.0.0", alias: "providerService" },
     {
       id: "reactor.ReactorMessageProcessingService@1.0.0",
@@ -216,6 +218,9 @@ export default class ReactorConversationService
 
   /** Anthropic service for Anthropic AI interactions */
   private anthropicService: AnthropicService;
+
+  /** Ollama service for local Ollama model interactions */
+  private ollamaService: OllamaAIService;
 
   /** Provider service for managing multiple AI providers and adapters */
   private providerService: IReactorProviderService;
@@ -2023,14 +2028,19 @@ export default class ReactorConversationService
     switch (provider) {
       case "xai":
       case "openai":
-      case "ollama":
       case "copilot":
       case "azure-openai":
-        // x-ai, openai, ollama, copilot, and azure-openai use the same service
-        // first we need to initialize the openai service
-        // to use the correct model and connection parameters.
+        // x-ai, openai, copilot, and azure-openai use the same OpenAI-compatible service
         await this.openaiService.initialize(chatSessionId, persona);
         return await this.openaiService.chat({
+          ...chatArgs,
+          persistState: false, // Don't persist here since we handle it in ReactorConversationService
+        });
+
+      case "ollama":
+        // Ollama uses the native Ollama Node SDK via OllamaAIService
+        await this.ollamaService.initialize(chatSessionId, persona);
+        return await this.ollamaService.chat({
           ...chatArgs,
           persistState: false, // Don't persist here since we handle it in ReactorConversationService
         });
