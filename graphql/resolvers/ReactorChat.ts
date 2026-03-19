@@ -572,6 +572,7 @@ class ReactorChatResolver {
         modelId?: string;
         providerId?: string;
         continueAfterTools?: boolean;
+        images?: string[];
       };
     },
     context: Reactory.Server.IReactoryContext
@@ -607,6 +608,7 @@ class ReactorChatResolver {
         modelId: args.message.modelId,
         providerId: args.message.providerId,
         continueAfterTools: args.message.continueAfterTools,
+        images: args.message.images,
       });
     } catch (error) {
       return {

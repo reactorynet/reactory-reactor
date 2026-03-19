@@ -548,6 +548,56 @@ class GoogleAIService extends AIProviderBase {
     return parts;
   }
 
+  /**
+   * Converts an OpenAI-format content item to a Google GenAI Part.
+   * Handles plain text strings, {type:'text'} objects, and {type:'image_url'} objects.
+   */
+  private contentItemToGooglePart(c: any): any | null {
+    if (typeof c === "string") {
+      return { text: c };
+    }
+    if (c && typeof c === "object") {
+      if (c.type === "image_url" && c.image_url?.url) {
+        const url: string = c.image_url.url;
+        if (url.startsWith("data:")) {
+          // data:<mimeType>;base64,<data>
+          const semicolonIdx = url.indexOf(";");
+          const commaIdx = url.indexOf(",");
+          if (semicolonIdx > 0 && commaIdx > semicolonIdx) {
+            const mimeType = url.substring(5, semicolonIdx);
+            const data = url.substring(commaIdx + 1);
+            return { inlineData: { mimeType, data } };
+          }
+        }
+        // Non-data URL images are not supported as inlineData — skip silently
+        return null;
+      }
+      if (typeof c.text === "string") {
+        return { text: c.text };
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Converts a string or OpenAI-format content-parts array to Google GenAI Part[].
+   */
+  private convertMessageToGoogleParts(message: string | any[]): any[] {
+    if (typeof message === "string") {
+      return [{ text: message }];
+    }
+    if (Array.isArray(message)) {
+      const parts: any[] = [];
+      for (const c of message) {
+        const part = this.contentItemToGooglePart(c);
+        if (part !== null) parts.push(part);
+      }
+      if (parts.length === 0) parts.push({ text: "" });
+      return parts;
+    }
+    return [{ text: String(message) }];
+  }
+
   private getPartsForUserMessage(
     msg: ChatCompletionUserMessageParam & {
       id: string | ObjectId;
@@ -561,41 +611,7 @@ class GoogleAIService extends AIProviderBase {
       tool_results?: ReactorToolResult[];
     }
   ): any[] {
-    // For a user message, Google expects an array of parts, each with a "text" property.
-    // We'll handle the most common cases: string content, array of strings, or object with text.
-    const parts: any[] = [];
-
-    if (msg.content) {
-      if (Array.isArray(msg.content)) {
-        for (const c of msg.content) {
-          if (typeof c === "string") {
-            parts.push({ text: c });
-          } else if (
-            c &&
-            typeof c === "object" &&
-            "text" in c &&
-            typeof (c as any).text === "string"
-          ) {
-            parts.push({ text: (c as any).text });
-          }
-        }
-      } else if (typeof msg.content === "string") {
-        parts.push({ text: msg.content });
-      } else if (
-        msg.content &&
-        typeof msg.content === "object" &&
-        "text" in msg.content &&
-        typeof (msg.content as any).text === "string"
-      ) {
-        parts.push({ text: (msg.content as any).text });
-      }
-    }
-
-    // If no parts were added, add an empty text part to avoid Google API errors
-    if (parts.length === 0) {
-      parts.push({ text: "" });
-    }
-
+    const parts = this.convertMessageToGoogleParts(msg.content as string | any[]);
     return parts;
   }
 
@@ -809,7 +825,7 @@ class GoogleAIService extends AIProviderBase {
    */
   private async handleStreamingRequest(args: {
     sessionId: string;
-    message: string;
+    message: string | any[];
     persona: IAIPersona;
     history: ReactorConversationHistory;
     chat: GoogleGenAI.Chat;
@@ -824,9 +840,10 @@ class GoogleAIService extends AIProviderBase {
       messageId: messageId ?? "",
     };
 
+    const messageLength = typeof message === "string" ? message.length : message.length;
     this.context.log(
       `Streaming request started for session ${sessionId}`,
-      { messageLength: message.length, messageId, historyLength: history.length },
+      { messageLength, messageId, historyLength: history.length },
       logTag,
     );
 
@@ -864,9 +881,12 @@ class GoogleAIService extends AIProviderBase {
       },
     });
 
+    // Convert message to Google Parts format (handles strings and OpenAI content-parts arrays)
+    const googleParts = this.convertMessageToGoogleParts(message);
+
     try {
       const response = await chat.sendMessageStream({
-        message,
+        message: googleParts,
         config: persona.messageConfig,
       });
 
@@ -1081,7 +1101,7 @@ class GoogleAIService extends AIProviderBase {
   }
 
   private async getAIResponse(
-    message: string,
+    message: string | any[],
     role: "user" | "assistant" | "tool" | "system" = "user",
     messageId?: string
   ): Promise<AIChatCompletion> {
@@ -1214,7 +1234,7 @@ class GoogleAIService extends AIProviderBase {
         } else {
           result = await chat.sendMessage({
             config: persona.messageConfig,
-            message,
+            message: this.convertMessageToGoogleParts(message as string | any[]),
           });
         }
 
