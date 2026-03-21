@@ -215,4 +215,131 @@ describe('InsertSnippet', () => {
       expect(raw).toBe('line1\r\nNEW2\r\nline3');
     });
   });
+
+  // ── Overlap detection ──────────────────────────────────────────────────
+  describe('overlap detection', () => {
+    it('trims trailing snippet lines that duplicate lines after end', async () => {
+      const original = 'line1\nline2\nline3\nline4\nline5';
+      const filePath = await writeFile('overlap-trailing.txt', original);
+
+      // Snippet replaces lines 2-3 but accidentally includes line4+line5
+      const snippet = 'NEW2\nNEW3\nline4\nline5';
+      await InsertSnippet({ path: filePath, start: '2', end: '3', snippet }, state);
+
+      const content = await readFile(filePath);
+      expect(content.split('\n')).toEqual(['line1', 'NEW2', 'NEW3', 'line4', 'line5']);
+    });
+
+    it('trims leading snippet lines that duplicate lines before start', async () => {
+      const original = 'line1\nline2\nline3\nline4\nline5';
+      const filePath = await writeFile('overlap-leading.txt', original);
+
+      // Snippet replaces lines 3-4 but accidentally starts with line2
+      const snippet = 'line2\nNEW3\nNEW4';
+      await InsertSnippet({ path: filePath, start: '3', end: '4', snippet }, state);
+
+      const content = await readFile(filePath);
+      expect(content.split('\n')).toEqual(['line1', 'line2', 'NEW3', 'NEW4', 'line5']);
+    });
+
+    it('trims overlap on both sides', async () => {
+      const original = 'A\nB\nC\nD\nE';
+      const filePath = await writeFile('overlap-both.txt', original);
+
+      // Snippet replaces line 3 but echoes B at start and D at end
+      const snippet = 'B\nNEW_C\nD';
+      await InsertSnippet({ path: filePath, start: '3', end: '3', snippet }, state);
+
+      const content = await readFile(filePath);
+      expect(content.split('\n')).toEqual(['A', 'B', 'NEW_C', 'D', 'E']);
+    });
+
+    it('does not trim when there is no overlap', async () => {
+      const original = 'line1\nline2\nline3';
+      const filePath = await writeFile('overlap-none.txt', original);
+
+      await InsertSnippet({ path: filePath, start: '2', end: '2', snippet: 'REPLACED' }, state);
+
+      const content = await readFile(filePath);
+      expect(content.split('\n')).toEqual(['line1', 'REPLACED', 'line3']);
+    });
+  });
+
+  // ── Sequential edits with fresh line numbers ──────────────────────────
+  describe('sequential edits (re-read between edits)', () => {
+    it('handles consecutive edits when the AI uses fresh line numbers', async () => {
+      const original = 'line1\nline2\nline3\nline4\nline5';
+      const filePath = await writeFile('seq-edits.txt', original);
+      const seqState = createMockState();
+
+      // First edit: insert 2 lines before line 2 (adds 2 lines)
+      await InsertSnippet(
+        { path: filePath, start: '2', snippet: 'X\nY' },
+        seqState,
+      );
+
+      // AI re-reads: file is now line1, X, Y, line2, line3, line4, line5 (7 lines)
+      // Second edit: replace line 6 (was original "line4", now at position 6)
+      await InsertSnippet(
+        { path: filePath, start: '6', end: '6', snippet: 'REPLACED4' },
+        seqState,
+      );
+
+      const content = await readFile(filePath);
+      expect(content.split('\n')).toEqual([
+        'line1', 'X', 'Y', 'line2', 'line3', 'REPLACED4', 'line5',
+      ]);
+    });
+
+    it('handles edit before a previous edit point without corruption', async () => {
+      // This is the exact pattern that caused the ToolsPanel.tsx corruption:
+      // edit at high line number, then edit at lower line number
+      const original = 'A\nB\nC\nD\nE\nF\nG\nH\nI\nJ';
+      const filePath = await writeFile('seq-before-after.txt', original);
+      const seqState = createMockState();
+
+      // First edit at a high line: replace lines 8-9 with 3 lines (+1 net)
+      await InsertSnippet(
+        { path: filePath, start: '8', end: '9', snippet: 'H2\nI2\nNEW' },
+        seqState,
+      );
+
+      // AI re-reads: A, B, C, D, E, F, G, H2, I2, NEW, J (11 lines)
+      // Second edit at a LOW line: replace lines 2-3 (B, C) with 1 line (-1 net)
+      await InsertSnippet(
+        { path: filePath, start: '2', end: '3', snippet: 'BC' },
+        seqState,
+      );
+
+      const content = await readFile(filePath);
+      expect(content.split('\n')).toEqual([
+        'A', 'BC', 'D', 'E', 'F', 'G', 'H2', 'I2', 'NEW', 'J',
+      ]);
+    });
+
+    it('does not store fileLineOffsets in state.vars', async () => {
+      const original = 'a\nb\nc\nd\ne';
+      const filePath = await writeFile('no-offsets.txt', original);
+      const seqState = createMockState();
+
+      await InsertSnippet(
+        { path: filePath, start: '1', snippet: 'X\nY\nZ' },
+        seqState,
+      );
+
+      expect((seqState.vars as any).fileLineOffsets).toBeUndefined();
+    });
+
+    it('success message includes re-read reminder', async () => {
+      const original = 'a\nb\nc';
+      const filePath = await writeFile('reminder.txt', original);
+
+      const result = await InsertSnippet(
+        { path: filePath, start: '2', end: '2', snippet: 'REPLACED' },
+        state,
+      );
+
+      expect(result).toMatch(/re-read/i);
+    });
+  });
 });

@@ -53,8 +53,25 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
     console.log(`  - chatSessionId (conversation): ${chatSessionId}`);
     console.log(`  - transport type: ${transport.constructor.name}`);
     
-    if (this.transports.has(sessionId)) {
-      throw new Error('Transport already registered for session');
+    // If a transport already exists for this session, close the old one and replace it.
+    // This handles reconnection after errors — the old transport is dead but was never
+    // cleaned up because the SSETransport has no back-channel to notify the manager.
+    const existingTransport = this.transports.get(sessionId);
+    if (existingTransport) {
+      console.log(`[StreamingTransportManager] Replacing existing transport for session ${sessionId} (connected: ${existingTransport.isConnected})`);
+      try {
+        await existingTransport.close();
+      } catch (closeError) {
+        console.warn(`[StreamingTransportManager] Error closing stale transport for session ${sessionId}:`, closeError);
+      }
+      this.transports.delete(sessionId);
+      // Also remove the old chatSessions reverse-mapping entry
+      for (const [chatId, sseId] of this.chatSessions.entries()) {
+        if (sseId === sessionId) {
+          this.chatSessions.delete(chatId);
+          break;
+        }
+      }
     }
     
     try {
@@ -106,6 +123,13 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
       // If transport fails, consider it disconnected
       if (!transport.isConnected) {
         this.transports.delete(sessionId);
+        // Also remove the chatSessions reverse-mapping entry
+        for (const [chatId, sseId] of this.chatSessions.entries()) {
+          if (sseId === sessionId) {
+            this.chatSessions.delete(chatId);
+            break;
+          }
+        }
       }
       throw error;
     }
@@ -128,6 +152,13 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
       console.warn(`Error closing transport for session ${sessionId}:`, error);
     } finally {
       this.transports.delete(sessionId);
+      // Also remove the chatSessions reverse-mapping entry
+      for (const [chatId, sseId] of this.chatSessions.entries()) {
+        if (sseId === sessionId) {
+          this.chatSessions.delete(chatId);
+          break;
+        }
+      }
     }
   }
   
