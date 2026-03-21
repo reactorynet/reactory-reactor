@@ -153,6 +153,18 @@ export class StreamingEndpoints {
             details: errorMessage
           });
         }
+      } else {
+        // Headers already flushed (SSE connection was partially established).
+        // Send an SSE error event and close the response so the client can
+        // detect the failure and trigger its reconnect logic.
+        try {
+          const errorEvent = JSON.stringify({ type: 'error', data: { code: 'CONNECTION_ERROR', message: errorMessage } });
+          res.write(`event: error\ndata: ${errorEvent}\n\n`);
+          res.end();
+        } catch (_) {
+          // Response may already be destroyed — nothing more to do
+          res.end();
+        }
       }
     }
   }
