@@ -896,18 +896,30 @@ class GoogleAIService extends AIProviderBase {
           result = chunk;
         }
 
-        // Handle thought/reasoning parts
+        // Handle thought/reasoning parts and text content from parts
+        let hasThoughtContent = false;
         if (chunk.candidates?.[0]?.content?.parts) {
           for (const part of chunk.candidates[0].content.parts) {
             if ((part as any).thought && part.text) {
+              // Gemini thinking models send thought content as text parts with thought: true
               accumulatedReasoning += part.text;
               reasoningPacer.add(part.text);
+              hasThoughtContent = true;
             }
           }
         }
 
-        // Handle text content — feed into pacer
-        if (chunk.text) {
+        // Handle text content — feed into pacer.
+        // When thought parts are present, extract only non-thought text to
+        // avoid double-counting thought content in the regular text stream.
+        if (hasThoughtContent && chunk.candidates?.[0]?.content?.parts) {
+          for (const part of chunk.candidates[0].content.parts) {
+            if (!(part as any).thought && part.text) {
+              accumulatedText += part.text;
+              tokenPacer.add(part.text);
+            }
+          }
+        } else if (chunk.text) {
           accumulatedText += chunk.text;
           tokenPacer.add(chunk.text);
         }

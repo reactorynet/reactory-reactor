@@ -2542,6 +2542,32 @@ export default class ReactorConversationService
                   callId: toolCall.id,
                   args: toolArgs,
                 });
+
+                // Send tool_call completion event so the client knows this tool finished
+                if (streamingMode === StreamingMode.SSE) {
+                  try {
+                    const toolCompleteEvent = StreamingEventFactory.createToolCallEvent(
+                      toolCall.id,
+                      toolName,
+                      typeof toolCall.function?.arguments === 'string'
+                        ? toolCall.function.arguments
+                        : JSON.stringify(toolCall.function?.arguments || {}),
+                      true, // isComplete: true
+                      undefined,
+                      {
+                        sessionId: effectiveConversationId,
+                        conversationId: effectiveConversationId,
+                        messageId: new ObjectId().toString(),
+                      },
+                    );
+                    await this.streamingTransportManager.sendEventToSession(effectiveConversationId, toolCompleteEvent);
+                  } catch (sseError: any) {
+                    this.context.warn(`[sendMessage] AUTO mode: failed to send tool_call complete SSE event: ${sseError.message}`, {
+                      toolName,
+                      conversationId: effectiveConversationId,
+                    });
+                  }
+                }
               } catch (toolError: any) {
                 this.context.warn(`[sendMessage] AUTO tool execution failed for ${toolName}: ${toolError.message}`, {
                   toolName,

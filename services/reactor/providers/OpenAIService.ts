@@ -329,8 +329,10 @@ class OpenAIService extends AIProviderBase {
           tokenPacer.add(delta.content);
         }
 
-        // Feed reasoning/thinking tokens (OpenAI o1/o3 models)
-        const reasoningContent = (delta as any)?.reasoning_content;
+        // Feed reasoning/thinking tokens
+        // OpenAI o1/o3 uses `reasoning_content`, xAI Grok uses `reasoning`
+        const reasoningContent = (delta as any)?.reasoning_content
+          || (delta as any)?.reasoning;
         if (reasoningContent) {
           accumulatedReasoning += reasoningContent;
           reasoningPacer.add(reasoningContent);
