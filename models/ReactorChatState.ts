@@ -120,6 +120,10 @@ export interface ReactorConversationDocument {
   truncatedHistory?: ReactorConversationHistory
   // The user files attached to this conversation session
   files: Reactory.Models.IReactoryFile[]
+  /**
+   * Folders the user pinned to this session (paths under the user file root or absolute on desktop).
+   */
+  pinnedFolders?: { name: string; path: string }[]
   // Optional reference to a parent session that provided context for this session
   parentSessionId?: string
 }
@@ -232,6 +236,10 @@ const ReactorConversationSchema = new Schema({
   files: {
     type: [ObjectId],
     ref: 'ReactoryFile',
+    default: [],
+  },
+  pinnedFolders: {
+    type: [{ name: String, path: String }],
     default: [],
   },
   // The truncated history - messages removed to stay within token limits

@@ -400,7 +400,7 @@ class OpenAIService extends AIProviderBase {
       });
     }
 
-    // Send tool_call events (suppress in AUTO mode — server handles them)
+    // Send tool_call events to client (suppress only in AUTO mode — server handles those)
     const toolApprovalMode = this.chatState?.toolApprovalMode;
     if (toolApprovalMode !== ToolApprovalMode.AUTO) {
       for (const tc of toolCalls) {
