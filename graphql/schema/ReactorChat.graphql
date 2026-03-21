@@ -509,6 +509,10 @@ input ReactorAttachUserFileParam {
   """
   description: String
   path: String!
+  """
+  When true, register a pointer to an existing path (e.g. desktop absolute path) without copying into managed storage.
+  """
+  referenceOnly: Boolean
 }
 
 """
@@ -548,6 +552,22 @@ Union types for file operations
 """
 union ReactorAttachFileResult = ReactorAttachFileResponse | ReactorErrorResponse
 union ReactorDetachFileResult = ReactorDetachFileResponse | ReactorErrorResponse
+
+input ReactorPinFolderParam {
+  sessionId: String!
+  path: String!
+  name: String!
+}
+
+type ReactorPinFolderResponse {
+  success: Boolean!
+  message: String!
+  sessionId: String!
+  path: String!
+}
+
+union ReactorPinFolderResult = ReactorPinFolderResponse | ReactorErrorResponse
+union ReactorUnpinFolderResult = ReactorPinFolderResponse | ReactorErrorResponse
 
 input ReactorConversationLoadOptions {
   showAllFiles: Boolean
@@ -742,6 +762,16 @@ extend type Mutation {
   Detaches a user file from a chat session.
   """
   ReactorDetachUserFileFromSession(params: ReactorDetachUserFileParam!): ReactorDetachFileResult
+
+  """
+  Pins a folder path to the chat session context for the agent.
+  """
+  ReactorPinFolderToSession(params: ReactorPinFolderParam!): ReactorPinFolderResult
+
+  """
+  Removes a pinned folder from the chat session.
+  """
+  ReactorUnpinFolderFromSession(params: ReactorPinFolderParam!): ReactorUnpinFolderResult
 
   """
   Permanently removes a chat session and all its messages.

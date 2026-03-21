@@ -695,7 +695,12 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
    * @param userFileId - The user file ID
    * @param path - The file path
    */
-  attachUserFileToSession(sessionId: string, userFileId: string, path: string): Promise<any>;
+  attachUserFileToSession(
+    sessionId: string,
+    userFileId: string,
+    path: string,
+    options?: { description?: string; referenceOnly?: boolean }
+  ): Promise<any>;
 
   /**
    * Detaches a user file from the chat session using the file path and user file ID.
@@ -707,6 +712,10 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
     userFileId: string, 
     path: string, 
     deleteFile?: boolean): Promise<any>;
+
+  pinFolderToSession(sessionId: string, folderPath: string, folderName: string): Promise<any>;
+
+  unpinFolderFromSession(sessionId: string, folderPath: string): Promise<any>;
 
   /**
    * Sends a message to the chat session. If no chat session is found then a new one will be created.

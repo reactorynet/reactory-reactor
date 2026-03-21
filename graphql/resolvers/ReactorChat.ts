@@ -93,7 +93,8 @@ class ReactorChatResolver {
         macros: conversation?.macros || [],
         tokenCount: conversation.tokenCount,
         maxTokens: conversation.maxTokens,  
-        files: conversation.files || [],      
+        files: conversation.files || [],
+        pinnedFolders: (conversation as any).pinnedFolders || [],
       };
 
       return chatState;
@@ -550,12 +551,22 @@ class ReactorChatResolver {
     context: Reactory.Server.IReactoryContext
   ) {
     if (!chatState?.id) {
-      return [];    
+      return [];
     }
-    
+
     if (chatState?.files && chatState?.files.length > 0) {
       return chatState.files;
     }
+    return [];
+  }
+
+  @property("ReactorChatState", "folders")
+  async ReactorChatStateFolders(
+    chatState: ChatState & { pinnedFolders?: { name: string; path: string }[] },
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ) {
+    return chatState?.pinnedFolders || [];
   }
 
   @mutation("ReactorSendMessage")
@@ -773,7 +784,15 @@ class ReactorChatResolver {
   @mutation("ReactorAttachUserFileToSession")
   async ReactorAttachUserFileToSession(
     _: any,
-    args: { params: { sessionId: string; fileId: string; path: string } },
+    args: {
+      params: {
+        sessionId: string;
+        fileId: string;
+        path: string;
+        description?: string;
+        referenceOnly?: boolean;
+      };
+    },
     context: Reactory.Server.IReactoryContext
   ) {
     try {
@@ -781,11 +800,15 @@ class ReactorChatResolver {
         context.getService<IReactorConversationsService>(
           "reactor.ReactorConversationService@1.0.0"
         );
-      
+
       return await conversationService.attachUserFileToSession(
         args.params.sessionId,
         args.params.fileId,
-        args.params.path
+        args.params.path,
+        {
+          description: args.params.description,
+          referenceOnly: args.params.referenceOnly,
+        }
       );
     } catch (error) {
       logger.error("Error attaching user file to session", error);
@@ -793,6 +816,63 @@ class ReactorChatResolver {
         __typename: "ReactorErrorResponse",
         code: "FILE_ATTACH_ERROR",
         message: error.message || "Error attaching file to session",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion: "Please try again or contact support",
+      };
+    }
+  }
+
+  @mutation("ReactorPinFolderToSession")
+  async ReactorPinFolderToSession(
+    _: any,
+    args: { params: { sessionId: string; path: string; name: string } },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    try {
+      const conversationService =
+        context.getService<IReactorConversationsService>(
+          "reactor.ReactorConversationService@1.0.0"
+        );
+      return await conversationService.pinFolderToSession(
+        args.params.sessionId,
+        args.params.path,
+        args.params.name
+      );
+    } catch (error) {
+      logger.error("Error pinning folder", error);
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "FOLDER_PIN_ERROR",
+        message: error.message || "Error pinning folder",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion: "Please try again or contact support",
+      };
+    }
+  }
+
+  @mutation("ReactorUnpinFolderFromSession")
+  async ReactorUnpinFolderFromSession(
+    _: any,
+    args: { params: { sessionId: string; path: string; name: string } },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    try {
+      const conversationService =
+        context.getService<IReactorConversationsService>(
+          "reactor.ReactorConversationService@1.0.0"
+        );
+      return await conversationService.unpinFolderFromSession(
+        args.params.sessionId,
+        args.params.path
+      );
+    } catch (error) {
+      logger.error("Error unpinning folder", error);
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "FOLDER_UNPIN_ERROR",
+        message: error.message || "Error unpinning folder",
         timestamp: new Date(),
         recoverable: true,
         suggestion: "Please try again or contact support",

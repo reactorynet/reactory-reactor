@@ -20,6 +20,8 @@ import ReactorConversationModel, {
 } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import AIPersonaProvider from "./AIPersonaProvider";
 import ReactorMessageProcessingService from "./ReactorMessageProcessingService";
+import nodePath from "path";
+import fs from "fs";
 import GoogleAIService from "./providers/GoogleAIService";
 import { v4 } from "uuid";
 import { ObjectId } from "mongodb";
@@ -28,9 +30,8 @@ import { ChatCompletion, ChatCompletionMessage } from "openai/resources";
 import ReactorMacroService from "./providers/ReactorMacroService";
 import DocumentChunkingService from "./DocumentChunkingService";
 import { ReactorConversationHistoryItem } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
-import {
+import ReactoryFile, {
   ReactoryFileDocument,
-  ReactoryFileModel,
 } from "@reactory/server-modules/reactory-core/models/CoreFile";
 import { id } from "schema/reflection";
 import { CompletionStreamingEvent, ToolCallStreamingEvent, ToolIterationLimitStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
@@ -3311,20 +3312,24 @@ export default class ReactorConversationService
     }
   }
 
-  async attachUserFileToSession(sessionId: string, userFileId: string, path: string): Promise<any> {
+  async attachUserFileToSession(
+    sessionId: string,
+    userFileId: string,
+    path: string,
+    options?: { description?: string; referenceOnly?: boolean }
+  ): Promise<any> {
+    const referenceOnly = options?.referenceOnly === true;
     try {
-      // Validate inputs
       this.validateChatSessionId(sessionId, "attachUserFileToSession");
-      
+
       if (!userFileId) {
         throw new Error("User file ID is required");
       }
-      
+
       if (!path) {
         throw new Error("File path is required");
       }
 
-      // Validate conversation exists and user has access
       const conversation = await ReactorConversationModel.findOne({
         _id: sessionId,
         user: this.context.user,
@@ -3336,48 +3341,84 @@ export default class ReactorConversationService
         );
       }
 
-      // use the file service to check if the file exists as a file for the user.
       let fileModel = await this.fileService.getFileModel(userFileId);
+
+      if (!fileModel && referenceOnly) {
+        const fileOid = ObjectId.isValid(userFileId)
+          ? ObjectId.createFromHexString(userFileId)
+          : new ObjectId();
+        const baseName = nodePath.basename(path);
+        let size = 0;
+        try {
+          if (fs.existsSync(path)) {
+            size = fs.statSync(path).size;
+          }
+        } catch {
+          // path may be virtual or inaccessible from server
+        }
+        fileModel = await ReactoryFile.create({
+          _id: fileOid,
+          id: fileOid,
+          path,
+          alias: baseName,
+          filename: baseName,
+          mimetype: "application/octet-stream",
+          size,
+          uploadContext: "desktop_local_reference",
+          status: "reference",
+          tags: ["desktop_local_reference"],
+          owner: this.context.user._id,
+          uploadedBy: this.context.user._id,
+          created: new Date(),
+        });
+      }
+
       if (!fileModel) {
-        // check if the file exists if we load by path
         fileModel = await this.fileService.getUserFileByPath(path);
         if (fileModel === null || fileModel === undefined) {
           throw new Error(`File not found: ${userFileId} or ${path}`);
         }
-        if(fileModel.isNew === true) {
+        if (fileModel.isNew === true) {
           fileModel._id = ObjectId.createFromHexString(userFileId);
           fileModel.id = ObjectId.createFromHexString(userFileId);
-          // let's save the file object.
           await fileModel.save();
         }
-        // this means the file exists but not catalogged and attached to the user.
-        // so we can fix that here.
-
-        fileModel = await this.fileService.catalogFile(fileModel.filename, fileModel.mimetype, fileModel.alias, `chat::${sessionId}`, this.context.partner, this.context.user);
-
+        if (!referenceOnly) {
+          fileModel = await this.fileService.catalogFile(
+            fileModel.filename,
+            fileModel.mimetype,
+            fileModel.alias,
+            `chat::${sessionId}`,
+            this.context.partner,
+            this.context.user
+          );
+        }
       }
 
-      // Check if file is already attached to avoid duplicates
+      const resolvedFileId = fileModel._id.toString();
+
       const existingAttachment = conversation.files?.find(
-        f => f._id.equals(ObjectId.createFromHexString(userFileId)) || f.path === path
+        (f: any) =>
+          f._id?.toString() === resolvedFileId ||
+          (f as any)?.path === path
       );
-     
+
       if (existingAttachment) {
         return {
           __typename: "ReactorAttachFileResponse",
           success: true,
           message: "File is already attached to this session",
           sessionId,
-          userFileId,
-          path
+          fileId: resolvedFileId,
+          path,
         };
       }
-           
 
+      const desc = options?.description?.trim();
       const fileMessage = {
         id: new ObjectId(),
         role: "user" as const,
-        content: `I have attached a file from my files to this chat session:\n- "${fileModel.filename}" (${fileModel.mimetype || 'unknown type'}, path: ${path}, id: ${fileModel._id || userFileId})\n\nYou can read the contents using the readChatFile tool.`,
+        content: `I have attached a file from my files to this chat session:\n- "${fileModel.filename}" (${fileModel.mimetype || "unknown type"}, path: ${path}, id: ${resolvedFileId})${desc ? `\n\nContext: ${desc}` : ""}\n\nYou can read the contents using the readChatFile tool.`,
         timestamp: new Date(),
       };
 
@@ -3387,7 +3428,10 @@ export default class ReactorConversationService
           user: this.context.user._id,
         },
         {
-          $push: { files: ObjectId.createFromHexString(userFileId), history: fileMessage },
+          $push: {
+            files: fileModel._id,
+            history: fileMessage,
+          },
           $set: { updated: new Date() },
         },
         {
@@ -3402,9 +3446,10 @@ export default class ReactorConversationService
 
       this.context.info("User file attached to session", {
         sessionId,
-        userFileId,
+        userFileId: resolvedFileId,
         path,
-        userId: this.context.user._id
+        userId: this.context.user._id,
+        referenceOnly,
       });
 
       return {
@@ -3412,10 +3457,9 @@ export default class ReactorConversationService
         success: true,
         message: "File successfully attached to session",
         sessionId,
-        userFileId,
-        path
+        fileId: resolvedFileId,
+        path,
       };
-
     } catch (error: any) {
       this.context.error(`Error attaching user file to session: ${error.message}`, {
         error,
@@ -3431,6 +3475,153 @@ export default class ReactorConversationService
         {
           details: error,
           operation: "attachUserFileToSession",
+          conversationId: sessionId,
+          recoverable: true,
+        }
+      );
+    }
+  }
+
+  async pinFolderToSession(
+    sessionId: string,
+    folderPath: string,
+    folderName: string
+  ): Promise<any> {
+    try {
+      this.validateChatSessionId(sessionId, "pinFolderToSession");
+      if (!folderPath) {
+        throw new Error("Folder path is required");
+      }
+
+      const conversation = await ReactorConversationModel.findOne({
+        _id: sessionId,
+        user: this.context.user,
+      }).exec();
+
+      if (!conversation) {
+        throw new Error(
+          "Conversation not found or you do not have permission to access it"
+        );
+      }
+
+      const pins = conversation.pinnedFolders || [];
+      if (pins.some((p) => p.path === folderPath)) {
+        return {
+          __typename: "ReactorPinFolderResponse",
+          success: true,
+          message: "Folder is already pinned to this session",
+          sessionId,
+          path: folderPath,
+        };
+      }
+
+      const folderMessage = {
+        id: new ObjectId(),
+        role: "user" as const,
+        content: `I have pinned a folder for this chat session:\n- "${folderName}" (path: ${folderPath})\n\nUse list/read tools with this path when working with files in this folder.`,
+        timestamp: new Date(),
+      };
+
+      const updated = await ReactorConversationModel.findOneAndUpdate(
+        {
+          _id: sessionId,
+          user: this.context.user._id,
+        },
+        {
+          $push: {
+            pinnedFolders: { path: folderPath, name: folderName || folderPath },
+            history: folderMessage,
+          },
+          $set: { updated: new Date() },
+        },
+        { new: true, runValidators: true }
+      ).exec();
+
+      if (!updated) {
+        throw new Error("Failed to pin folder to session");
+      }
+
+      return {
+        __typename: "ReactorPinFolderResponse",
+        success: true,
+        message: "Folder pinned to session",
+        sessionId,
+        path: folderPath,
+      };
+    } catch (error: any) {
+      this.context.error(`Error pinning folder: ${error.message}`, {
+        error,
+        sessionId,
+        folderPath,
+        correlationId: v4(),
+      });
+      return this.createErrorResponse(
+        ReactorErrorCode.FILE_ERROR,
+        error.message || "Error pinning folder to session",
+        {
+          details: error,
+          operation: "pinFolderToSession",
+          conversationId: sessionId,
+          recoverable: true,
+        }
+      );
+    }
+  }
+
+  async unpinFolderFromSession(sessionId: string, folderPath: string): Promise<any> {
+    try {
+      this.validateChatSessionId(sessionId, "unpinFolderFromSession");
+      if (!folderPath) {
+        throw new Error("Folder path is required");
+      }
+
+      const conversation = await ReactorConversationModel.findOne({
+        _id: sessionId,
+        user: this.context.user,
+      }).exec();
+
+      if (!conversation) {
+        throw new Error(
+          "Conversation not found or you do not have permission to access it"
+        );
+      }
+
+      const updated = await ReactorConversationModel.findOneAndUpdate(
+        {
+          _id: sessionId,
+          user: this.context.user._id,
+        },
+        {
+          $pull: { pinnedFolders: { path: folderPath } },
+          $set: { updated: new Date() },
+        },
+        { new: true, runValidators: true }
+      ).exec();
+
+      if (!updated) {
+        throw new Error("Failed to unpin folder from session");
+      }
+
+      return {
+        __typename: "ReactorPinFolderResponse",
+        success: true,
+        message: "Folder unpinned from session",
+        sessionId,
+        path: folderPath,
+      };
+    } catch (error: any) {
+      this.context.error(`Error unpinning folder: ${error.message}`, {
+        error,
+        sessionId,
+        folderPath,
+        correlationId: v4(),
+      });
+      return this.createErrorResponse(
+        ReactorErrorCode.FILE_ERROR,
+        error.message || "Error unpinning folder from session",
+        {
+          details: error,
+          operation: "unpinFolderFromSession",
           conversationId: sessionId,
           recoverable: true,
         }
