@@ -260,8 +260,9 @@ union ReactorChatResponse = ReactorChatMessage | ReactorInitiateSSE | ReactorErr
 
 enum ReactorToolApprovalMode {
   auto
-  prompt
   safe_auto
+  prompt
+  plan
 }
 
 type ReactorSessionVar {

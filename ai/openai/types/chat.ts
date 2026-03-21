@@ -11,9 +11,10 @@ import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/webso
 
 // Tool approval modes
 export enum ToolApprovalMode {
-  AUTO = "auto",      // Execute all tools without asking
-  PROMPT = "prompt",  // Ask for confirmation before executing any tool
-  SAFE_AUTO = "safe_auto" // Auto-approve safe tools, prompt for potentially dangerous ones
+  AUTO = "auto",           // Execute all tools without asking
+  SAFE_AUTO = "safe_auto", // Auto-approve safe tools, prompt for potentially dangerous ones
+  PROMPT = "prompt",       // Ask for confirmation before executing any tool
+  PLAN = "plan"            // Plan mode - read-only tools auto-execute, others require approval
 }
 
 export type Macro<TResult, TParams = any> = (params: TParams, state: ChatState, context?: Reactory.Server.IReactoryContext) => Promise<TResult>
