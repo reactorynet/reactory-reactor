@@ -2481,20 +2481,21 @@ export default class ReactorConversationService
         // When the AI returns tool calls and the conversation is in AUTO mode,
         // execute tools directly on the server instead of round-tripping to the client.
         const effectiveConversationId = chatSessionId || conversation._id.toString();
+        const responseToolCalls = response?.tool_calls || response?.choices?.[0]?.message?.tool_calls || [];
         if (
           conversation.toolApprovalMode === ToolApprovalMode.AUTO &&
-          response?.choices?.[0]?.message?.tool_calls?.length > 0
+          responseToolCalls.length > 0
         ) {
           const MAX_TOOL_ITERATIONS = (conversation as any).maxToolIterations
             || parseInt(process.env.REACTOR_MAX_TOOL_ITERATIONS || '100', 10);
           let iteration = 0;
 
           while (
-            response?.choices?.[0]?.message?.tool_calls?.length > 0 &&
+            (response?.tool_calls?.length > 0 || response?.choices?.[0]?.message?.tool_calls?.length > 0) &&
             iteration < MAX_TOOL_ITERATIONS
           ) {
             iteration++;
-            const toolCalls = response.choices[0].message.tool_calls;
+            const toolCalls = response.tool_calls || response.choices[0].message.tool_calls;
 
             this.context.info(`[sendMessage] AUTO mode: executing ${toolCalls.length} tool(s) server-side (iteration ${iteration})`, {
               tools: toolCalls.map((tc: any) => tc.function?.name),
@@ -2846,9 +2847,32 @@ export default class ReactorConversationService
       await this.updateConversationTokenCount(conversation._id.toString());
     }
 
-    // Add session ID to response
-    // @ts-ignore
-    response.sessionId = conversation._id.toString();
+    // Normalize the response into a flat ReactorChatMessage shape so the
+    // GraphQL union resolver can identify it (it relies on __typename).
+    // Provider responses arrive as { choices: [{ message: {...} }] } but
+    // the GraphQL schema expects { __typename, sessionId, role, content, tool_calls, ... }.
+    const sessionId = conversation._id.toString();
+    if (response?.choices?.[0]?.message && !response.__typename) {
+      const msg = response.choices[0].message;
+      return {
+        __typename: 'ReactorChatMessage',
+        sessionId,
+        id: response.id || new ObjectId().toString(),
+        role: msg.role,
+        content: msg.content,
+        thinking: response.reasoning || response.__reasoning || undefined,
+        timestamp: new Date(),
+        tool_calls: msg.tool_calls || [],
+        tool_results: [],
+        tool_errors: [],
+      };
+    }
+
+    // @ts-ignore — fallback for already-normalized or non-standard responses
+    response.sessionId = sessionId;
+    if (!response.__typename) {
+      response.__typename = 'ReactorChatMessage';
+    }
 
     return response;
   }
