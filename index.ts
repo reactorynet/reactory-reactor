@@ -1,6 +1,6 @@
 import Reactory from '@reactorynet/reactory-core';
 import ReactorGraphql from './graphql';
-import Workflows from './workflow';
+import Workflows, { workflowSteps } from './workflow';
 import ReactorCli from './cli';
 import Services from './services';
 import Models from './models';
@@ -22,6 +22,7 @@ const ReactorModule: Reactory.Server.IReactoryModule = {
   priority: 1,
   graphDefinitions: ReactorGraphql,
   workflows: Workflows,
+  workflowSteps,
   forms: [
     ...Forms
   ],

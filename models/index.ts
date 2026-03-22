@@ -4,6 +4,7 @@ import { ClaudePersonaComponentRegistryEntry } from '../ai/persona/claude';
 import { DataAnalyticsPersonaComponentRegistryEntry } from '../ai/persona/dataanalytics';
 import { InfrastructurePersonaComponentRegistryEntry } from '../ai/persona/infrastructure';
 import { SecurityPersonaComponentRegistryEntry } from '../ai/persona/security';
+import { WorkflowWillPersonaComponentRegistryEntry } from '../ai/persona/workflow';
 import {
   ReactorNodeModelComponentRegistryEntry,
   ReactorNodeMetricTypeModelComponentRegistryEntry,
@@ -20,4 +21,5 @@ export default [
   DataAnalyticsPersonaComponentRegistryEntry,
   InfrastructurePersonaComponentRegistryEntry,
   SecurityPersonaComponentRegistryEntry,
+  WorkflowWillPersonaComponentRegistryEntry,
 ];
