@@ -186,6 +186,18 @@ sequenceDiagram
 6. Provider streams events through `StreamingTransportManager.sendEventToSession(conversationId, event)`
 7. On completion or error, client closes the `EventSource` (or it auto-reconnects on network failure)
 
+### SSE Reconnection on Session Load
+
+When the client loads an existing conversation (e.g. from the chat list), any previous `EventSource` is gone. The client proactively re-establishes SSE:
+
+1. `loadChat()` fetches the conversation via GraphQL and updates `chatState`
+2. If `protocol === 'sse'` and `!sse.connected`, the client sends a lightweight `sendMessage(message: '', streamingMode: 'SSE', continueAfterTools: true)` to the server
+3. Server's `sendMessage` detects the missing transport (no active SSE session or transport for this conversation) and returns `ReactorInitiateSSE` without persisting any message
+4. Client connects a new `EventSource` at the returned endpoint
+5. SSE transport is now active; subsequent `sendMessage` calls will stream correctly
+
+The same pattern applies when the component remounts with an `existingSession` prop (page reload). A fallback path also exists in `sendMessage` itself: if no SSE session is active when a real message is sent, the server returns `ReactorInitiateSSE`, the client connects, and resends the message via the `onConnectionOpened` callback.
+
 Express routes (registered by `StreamingEndpoints.setupRoutes`):
 
 | Route | Method | Purpose |
