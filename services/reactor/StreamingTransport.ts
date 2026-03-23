@@ -30,7 +30,10 @@ export class SSETransport implements StreamingTransport {
   constructor(private readonly response: Response) {}
   
   get isConnected(): boolean {
-    return this._isConnected;
+    if (!this._isConnected || this._isClosed) return false;
+    // Verify the underlying socket is still writable — mirrors how
+    // WebSocketTransport checks readyState === OPEN.
+    return !this.response.writableEnded && !this.response.destroyed;
   }
   
   /**
@@ -63,6 +66,11 @@ export class SSETransport implements StreamingTransport {
       console.log(`[SSETransport] Client disconnected, closing transport`);
       this._isConnected = false;
       this._isClosed = true;
+    });
+    
+    this.response.on('error', (err) => {
+      console.warn(`[SSETransport] Response error, marking transport disconnected:`, err.message);
+      this._isConnected = false;
     });
     
     // Send initial connection event
