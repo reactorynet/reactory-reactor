@@ -38,6 +38,28 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
   private setSessionManager(sessionManager: StreamingSessionManager) {
     this.sessionManager = sessionManager;
   }
+
+  /**
+   * Close and remove a transport + its reverse-mapping entry by SSE session ID.
+   * Safe to call even if the transport is already gone.
+   */
+  private async evictTransport(sseSessionId: string, reason: string): Promise<void> {
+    const transport = this.transports.get(sseSessionId);
+    if (!transport) return;
+    console.log(`[StreamingTransportManager] Evicting transport ${sseSessionId} (${reason}, connected: ${transport.isConnected})`);
+    try {
+      await transport.close();
+    } catch (err) {
+      console.warn(`[StreamingTransportManager] Error closing transport ${sseSessionId}:`, err);
+    }
+    this.transports.delete(sseSessionId);
+    for (const [chatId, sseId] of this.chatSessions.entries()) {
+      if (sseId === sseSessionId) {
+        this.chatSessions.delete(chatId);
+        break;
+      }
+    }
+  }
   
   /**
    * Register a transport for a session and initialize it
@@ -53,25 +75,15 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
     console.log(`  - chatSessionId (conversation): ${chatSessionId}`);
     console.log(`  - transport type: ${transport.constructor.name}`);
     
-    // If a transport already exists for this session, close the old one and replace it.
-    // This handles reconnection after errors — the old transport is dead but was never
-    // cleaned up because the SSETransport has no back-channel to notify the manager.
-    const existingTransport = this.transports.get(sessionId);
-    if (existingTransport) {
-      console.log(`[StreamingTransportManager] Replacing existing transport for session ${sessionId} (connected: ${existingTransport.isConnected})`);
-      try {
-        await existingTransport.close();
-      } catch (closeError) {
-        console.warn(`[StreamingTransportManager] Error closing stale transport for session ${sessionId}:`, closeError);
-      }
-      this.transports.delete(sessionId);
-      // Also remove the old chatSessions reverse-mapping entry
-      for (const [chatId, sseId] of this.chatSessions.entries()) {
-        if (sseId === sessionId) {
-          this.chatSessions.delete(chatId);
-          break;
-        }
-      }
+    // If a transport already exists for this SSE session ID, close and replace it.
+    await this.evictTransport(sessionId, 'same SSE session ID re-registration');
+    
+    // On reconnect the chatSessionId may already map to a DIFFERENT (old) SSE
+    // session whose transport is dead.  Clean that up so the old transport
+    // doesn't leak and the mapping is deterministic.
+    const previousSseId = this.chatSessions.get(chatSessionId);
+    if (previousSseId && previousSseId !== sessionId) {
+      await this.evictTransport(previousSseId, `replaced by new SSE session for chat ${chatSessionId}`);
     }
     
     try {
@@ -84,7 +96,6 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
       console.log(`[StreamingTransportManager] Current transports mapping:`, Array.from(this.transports.keys()));
     } catch (error) {
       console.error(`[StreamingTransportManager] Error registering transport:`, error);
-      // Clean up on initialization failure
       try {
         await transport.close();
       } catch (closeError) {
@@ -112,6 +123,16 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
       throw new Error('No transport registered for session');
     }
     
+    // Pre-validate the transport is still connected before attempting to write.
+    // Without this check a dead-but-not-yet-cleaned-up transport would throw
+    // on write and leave the caller with an opaque error.
+    if (!transport.isConnected) {
+      console.error(`❌ [StreamingTransportManager] Transport for SSE session ${sessionId} is no longer connected — cleaning up`);
+      this.transports.delete(sessionId);
+      this.chatSessions.delete(chatSessionId);
+      throw new Error('Transport is no longer connected');
+    }
+    
     try {
       await transport.sendEvent(event);
       
@@ -120,16 +141,10 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
     } catch (error) {
       console.error(`❌ [StreamingTransportManager] Error sending event:`, error);
       
-      // If transport fails, consider it disconnected
+      // If transport fails, consider it disconnected and clean up
       if (!transport.isConnected) {
         this.transports.delete(sessionId);
-        // Also remove the chatSessions reverse-mapping entry
-        for (const [chatId, sseId] of this.chatSessions.entries()) {
-          if (sseId === sessionId) {
-            this.chatSessions.delete(chatId);
-            break;
-          }
-        }
+        this.chatSessions.delete(chatSessionId);
       }
       throw error;
     }
@@ -181,10 +196,38 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
   }
   
   /**
-   * Check if a transport is registered for a session
+   * Check if an active (connected) transport exists for a session.
+   * Automatically cleans up stale entries where the transport is registered
+   * but the underlying connection has dropped.
    */
   hasTransport(sessionId: string): boolean {
-    return this.transports.has(sessionId);
+    const transport = this.transports.get(sessionId);
+    if (!transport) return false;
+    
+    if (!transport.isConnected) {
+      console.log(`[StreamingTransportManager] hasTransport: transport for ${sessionId} exists but is disconnected — removing stale entry`);
+      this.transports.delete(sessionId);
+      for (const [chatId, sseId] of this.chatSessions.entries()) {
+        if (sseId === sessionId) {
+          this.chatSessions.delete(chatId);
+          break;
+        }
+      }
+      return false;
+    }
+    
+    return true;
+  }
+  
+  /**
+   * Check if an active transport exists for a chat (conversation) session.
+   * Convenience method that resolves the chatSessionId → sseSessionId
+   * mapping internally.
+   */
+  hasActiveTransportForChat(chatSessionId: string): boolean {
+    const sessionId = this.chatSessions.get(chatSessionId);
+    if (!sessionId) return false;
+    return this.hasTransport(sessionId);
   }
   
   /**
