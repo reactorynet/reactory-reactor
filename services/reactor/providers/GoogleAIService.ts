@@ -858,7 +858,13 @@ class GoogleAIService extends AIProviderBase {
     let modelName = "";
 
     // -- Create pacers for tokens and reasoning --
+    // Gemini sends large, infrequent chunks unlike OpenAI's tiny rapid deltas,
+    // so we use aggressive defaults to avoid adding artificial latency.
     const tokenPacer = new TokenPacer({
+      minChunkSize: 1,
+      maxChunkSize: 200,
+      targetIntervalMs: 0,
+      flushTimeoutMs: 30,
       ...pacerCfg,
       onFlush: async (text) => {
         const event = StreamingEventFactory.createTokenEvent(
@@ -869,10 +875,11 @@ class GoogleAIService extends AIProviderBase {
     });
 
     const reasoningPacer = new TokenPacer({
-      minChunkSize: pacerCfg.minChunkSize ?? 20,
-      maxChunkSize: pacerCfg.maxChunkSize ?? 120,
-      targetIntervalMs: pacerCfg.targetIntervalMs,
-      flushTimeoutMs: pacerCfg.flushTimeoutMs,
+      minChunkSize: 1,
+      maxChunkSize: 200,
+      targetIntervalMs: 0,
+      flushTimeoutMs: 30,
+      ...pacerCfg,
       onFlush: async (text) => {
         const event = StreamingEventFactory.createReasoningEvent(
           text, accumulatedReasoning.length, ids,

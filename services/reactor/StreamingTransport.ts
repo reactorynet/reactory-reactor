@@ -88,12 +88,18 @@ export class SSETransport implements StreamingTransport {
       const eventData = JSON.stringify(event);
       const sseMessage = `event: ${event.type}\ndata: ${eventData}\n\n`;
       
+      // Write and flush immediately to prevent Node.js from buffering small
+      // chunks. Without this, tokens accumulate in the write buffer and the
+      // client sees the entire response arrive at once instead of streaming.
+      // NOTE: .flush() is provided by the compression middleware; when it is
+      // absent we call .uncork() to nudge the writable stream to drain its
+      // internal buffer as soon as possible.
       this.response.write(sseMessage);
-      // Flush immediately to prevent Node.js from buffering small chunks.
-      // Without this, tokens accumulate in the write buffer and the client
-      // sees the entire response arrive at once instead of streaming.
       if (typeof (this.response as any).flush === 'function') {
         (this.response as any).flush();
+      } else {
+        this.response.cork();
+        process.nextTick(() => this.response.uncork());
       }
     } catch (error) {
       console.error(`[SSETransport] Error sending SSE event:`, error);
