@@ -216,6 +216,7 @@ export const PathInfoComponentRegister: MacroComponentDefinition<typeof PathInfo
   tags: ['macro', 'file', 'info', 'path', 'pathInfo'],
   tools: [{
     type: "function",
+    safeForAutoExecution: true,
     function: {
       name: "pathInfo",
       description: "Gets detailed information about a file or directory with comprehensive metadata",

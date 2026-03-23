@@ -107,6 +107,7 @@ export const EnvironmentMacroRegistry: MacroComponentDefinition<typeof Environme
   tags: ['env', 'environment', 'variables', 'config'],
   tools: [{
     type: "function",
+    safeForAutoExecution: true,
     function: {
       name: "env",
       description: "Access environment variables",

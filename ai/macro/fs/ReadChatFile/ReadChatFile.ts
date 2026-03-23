@@ -224,6 +224,7 @@ export const ReadChatFileComponentRegister: MacroComponentDefinition<typeof Read
   tags: ['macro', 'file', 'read', 'chat'],
   tools: [{
     type: "function",
+    safeForAutoExecution: true,
     function: {
       name: "readChatFile",
       description: "Reads the contents of a file attached to the current chat session. Use the file id from the attached files list provided in the system context.",

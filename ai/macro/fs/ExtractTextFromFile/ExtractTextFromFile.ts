@@ -203,6 +203,7 @@ export const ExtractFileComponentRegister: MacroComponentDefinition<typeof Extra
   tags: ['macro', 'file', 'extract', 'portion', 'slice', 'snip'],
   tools: [{
     type: "function",
+    safeForAutoExecution: true,
     function: {
       name: "snip",
       description: "Extracts a portion of text from a file between specified line numbers with comprehensive metadata",

@@ -235,6 +235,7 @@ export const QueryMacroComponentRegister: MacroComponentDefinition<typeof QueryG
   roles: ['DEVELOPER', 'ADMIN'],
   tools: [{
     type: "function",
+    safeForAutoExecution: true,
     function: {
       name: "queryGQL",
       description: "Executes a GraphQL query and returns structured results with metadata",
@@ -836,6 +837,7 @@ export const SchemaMacroComponentRegister: MacroComponentDefinition<Macro<string
   roles: ['DEVELOPER', 'ADMIN'],
   tools: [{
     type: "function",
+    safeForAutoExecution: true,
     function: {
       name: "schemaGQL",
       description: "Retrieves and formats GraphQL schema information",

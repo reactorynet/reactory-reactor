@@ -29,6 +29,16 @@ class ReactorToolResolver {
   async getToolRunAt(tool: Partial<MacroToolDefinition>, args: any, context: Reactory.Server.IReactoryContext): Promise<ReactorMacroRunAt | null> {
     return tool.runat || "server";
   }
+
+  @property("ReactorToolDefinition", "modes")
+  async getToolModes(tool: Partial<MacroToolDefinition>): Promise<string[] | null> {
+    return tool.modes || null;
+  }
+
+  @property("ReactorToolDefinition", "safeForAutoExecution")
+  async getToolSafeForAutoExecution(tool: Partial<MacroToolDefinition>): Promise<boolean | null> {
+    return tool.safeForAutoExecution ?? null;
+  }
 }
 
 export default ReactorToolResolver;

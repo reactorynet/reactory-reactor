@@ -187,6 +187,7 @@ export const GetUserRegistry: MacroComponentDefinition<typeof GetUser> = {
   tags: ['user', 'find', 'email', 'lookup'],
   tools: [{
     type: "function",
+    safeForAutoExecution: true,
     function: {
       name: "getUser",
       description: "Retrieve a user by their email address with structured results and metadata",

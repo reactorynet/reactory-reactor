@@ -180,6 +180,7 @@ export const ReadFileComponentRegister: MacroComponentDefinition<typeof ReadFile
   tags: ['macro', 'file', 'read'],
   tools: [{
     type: "function",
+    safeForAutoExecution: true,
     function: {
       name: "readFile",
       description: "Reads a file and returns its content with metadata in a structured format for AI processing",

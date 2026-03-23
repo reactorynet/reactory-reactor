@@ -326,6 +326,7 @@ export const DateTimeMacroRegistry: MacroComponentDefinition<typeof DateTimeMacr
   tags: ['datetime', 'date', 'time', 'format', 'timestamp'],
   tools: [{
     type: "function",
+    safeForAutoExecution: true,
     function: {
       name: "datetime",
       description: "Get formatted date and time information",

@@ -79,6 +79,7 @@ export const ModuleMacroRegistry: MacroComponentDefinition<typeof ModuleMacro> =
   tags: ['list', 'modules', 'installed'],
   tools: [{
     type: "function",
+    safeForAutoExecution: true,
     function: {
       name: "modules",
       description: "Lists modules installed in the Reactory system",

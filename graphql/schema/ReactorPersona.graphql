@@ -157,7 +157,18 @@ type ReactorToolDefinition {
   propsMap: Any
   function: ReactorFunction
   roles: [String]
-  runat: ReactorMacroRunAt    
+  runat: ReactorMacroRunAt
+  """
+  Which tool-approval modes this tool is available in.
+  When null/empty the tool is available in every mode.
+  Valid values: auto, safe_auto, prompt, plan
+  """
+  modes: [String]
+  """
+  When true the tool is read-only / side-effect free and can be
+  auto-executed in safe_auto and plan modes without user approval.
+  """
+  safeForAutoExecution: Boolean
 }
 
 type ReactorPersonaResource {

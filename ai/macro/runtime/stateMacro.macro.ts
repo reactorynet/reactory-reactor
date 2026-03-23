@@ -95,6 +95,7 @@ export const StateMacroRegistry: MacroComponentDefinition<typeof StateMacro> = {
   tags: ['state', 'chat', 'session', 'context'],
   tools: [{
     type: "function",
+    safeForAutoExecution: true,
     function: {
       name: "state",
       description: "Access the current chat state object",

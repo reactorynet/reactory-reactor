@@ -88,13 +88,21 @@ export type MacroToolDefinition = {
   runat?: "server" | "client",
   enabled?: boolean,
   roles?: string[],
+  /**
+   * Which tool-approval modes this tool is available in.
+   * Omit (or pass all four) to make the tool available in every mode.
+   */
+  modes?: ToolApprovalMode[],
+  /**
+   * When true the tool is considered read-only / side-effect free and can
+   * be auto-executed in `safe_auto` and `plan` modes without user approval.
+   */
+  safeForAutoExecution?: boolean,
   function: {
     icon?: string;
     name: string;
     description?: string;
     parameters: Schema
-    // The fully qualified name of the component that is used to 
-    // gather the input parameters for the tool.
     componentFqn?: string
   }
 };

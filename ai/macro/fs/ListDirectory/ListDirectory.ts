@@ -244,6 +244,7 @@ export const ListDirectoryComponentRegister: MacroComponentDefinition<typeof Lis
   tags: ['macro', 'file', 'list', 'ls', 'dir'],
   tools: [{
     type: "function",
+    safeForAutoExecution: true,
     function: {
       name: "listDirectory",
       description: "Lists files and directories in a specified path with comprehensive metadata",

@@ -681,6 +681,7 @@ const SearchContentMacroDefinition: MacroComponentDefinition<typeof SearchConten
     {
       type: "function",
       roles: ["USER"],
+      safeForAutoExecution: true,
       function: {
         icon: "search",
         name: "searchContent",
