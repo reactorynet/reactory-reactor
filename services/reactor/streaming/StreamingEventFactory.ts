@@ -83,7 +83,10 @@ export class StreamingEventFactory {
    * @param id            Tool call identifier (from the AI provider)
    * @param name          Function/tool name
    * @param toolArguments JSON-stringified arguments
-   * @param isComplete    Whether the tool call is fully assembled
+   * @param isComplete    Whether the tool has been executed. false = pending
+   *                      client-side approval/execution (PROMPT/PLAN/SAFE_AUTO).
+   *                      true = already executed by the server (AUTO mode) or
+   *                      signalling completion of a previously started tool.
    * @param result        Optional execution result (set after macro runs)
    */
   static createToolCallEvent(

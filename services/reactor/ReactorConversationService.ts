@@ -39,6 +39,7 @@ import Helpers from "authentication/strategies/helpers";
 import { StreamingSessionManager } from "./StreamingSessionManager";
 import { StreamingTransportManager } from "./StreamingTransportManager";
 import { StreamingEventFactory } from "./streaming/StreamingEventFactory";
+import { ChatSessionLogger } from "./ChatSessionLogger";
 /**
  * Enhanced error response interface with correlation tracking
  */
@@ -247,6 +248,9 @@ export default class ReactorConversationService
   /** Streaming transport manager for managing streaming transports */
   private streamingTransportManager: StreamingTransportManager;
 
+  /** Per-conversation file loggers keyed by conversationId */
+  private sessionLoggers: Map<string, ChatSessionLogger> = new Map();
+
   /**
    * Initialize the ReactorConversationService with dependencies
    *
@@ -259,11 +263,69 @@ export default class ReactorConversationService
   ) {
     this.context = context;
     this.chunkingService = (props.dependencies as any)
-      ?.chunkingService as DocumentChunkingService;  
+      ?.chunkingService as DocumentChunkingService;
     this.streamingSessionManager = (props.dependencies as any)
       ?.streamingSessionManager as StreamingSessionManager;
     this.streamingTransportManager = (props.dependencies as any)
       ?.streamingTransportManager as StreamingTransportManager;
+  }
+
+  /**
+   * Get or create a ChatSessionLogger for a given conversation.
+   * Logs are written to REACTORY_DATA/profiles/{userId}/chats/{personaId}/{conversationId}/
+   */
+  private getSessionLogger(
+    conversationId: string,
+    personaId: string
+  ): ChatSessionLogger | null {
+    if (!conversationId || !personaId) return null;
+
+    const existing = this.sessionLoggers.get(conversationId);
+    if (existing) return existing;
+
+    const userId = this.context.user?._id?.toString();
+    if (!userId) return null;
+
+    try {
+      const logger = new ChatSessionLogger(userId, personaId, conversationId);
+      this.sessionLoggers.set(conversationId, logger);
+      // Register globally so other services (StreamingTransportManager, etc.) can find it
+      ChatSessionLogger.register(conversationId, logger);
+      return logger;
+    } catch (e: any) {
+      this.context.warn(`Failed to create session logger: ${e.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Log to both the global context logger and the session-specific file logger.
+   * Falls back to context-only logging when no session logger is available.
+   *
+   * If personaId is omitted but conversationId is provided and a logger
+   * was already created for that conversation, the cached logger is used.
+   */
+  private sessionLog(
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+    meta?: Record<string, unknown>,
+    conversationId?: string,
+    personaId?: string
+  ): void {
+    // Always log to the global context logger
+    this.context[level](message, meta);
+
+    // Additionally log to the session-specific file if available
+    if (conversationId) {
+      // Try cached logger first (avoids requiring personaId for internal helpers)
+      let sessionLogger = this.sessionLoggers.get(conversationId) || null;
+      if (!sessionLogger && personaId) {
+        sessionLogger = this.getSessionLogger(conversationId, personaId);
+      }
+      if (sessionLogger) {
+        sessionLogger[level](message, meta);
+      }
+    }
   }
 
   /**
@@ -606,11 +668,11 @@ export default class ReactorConversationService
   private async updateConversationTokenCount(
     conversationId: string
   ): Promise<number> {
-    this.context.debug("Updating conversation token count", {
+    this.sessionLog("debug", "Updating conversation token count", {
       conversationId,
       userId: this.context.user?._id,
       timestamp: new Date().toISOString(),
-    });
+    }, conversationId);
 
     if (
       conversationId === null ||
@@ -663,10 +725,10 @@ export default class ReactorConversationService
       ]).exec();
 
       if (!result || result.length === 0) {
-        this.context.error("Conversation not found during token count update", {
+        this.sessionLog("error", "Conversation not found during token count update", {
           conversationId,
           userId: this.context.user?._id,
-        });
+        }, conversationId);
         throw new Error("Conversation not found");
       }
 
@@ -711,20 +773,20 @@ export default class ReactorConversationService
         "after_update"
       );
 
-      this.context.debug("Token count updated successfully", {
+      this.sessionLog("debug", "Token count updated successfully", {
         conversationId,
         oldTokenCount: result[0].tokenCount,
         newTokenCount: calculatedTokens,
         userId: this.context.user?._id,
-      });
+      }, conversationId);
 
       return calculatedTokens;
     } catch (error: any) {
-      this.context.error("Error updating conversation token count", {
+      this.sessionLog("error", "Error updating conversation token count", {
         conversationId,
         userId: this.context.user?._id,
         error: error.message,
-      });
+      }, conversationId);
       throw new Error(`Failed to update token count: ${error.message}`);
     }
   }
@@ -738,11 +800,11 @@ export default class ReactorConversationService
     maxTokens: number;
     shouldTruncate: boolean;
   }> {
-    this.context.debug("Checking token limit", {
+    this.sessionLog("debug", "Checking token limit", {
       conversationId,
       userId: this.context.user?._id,
       timestamp: new Date().toISOString(),
-    });
+    }, conversationId);
 
     const conversation = await ReactorConversationModel.findOne({
       _id: conversationId,
@@ -752,10 +814,10 @@ export default class ReactorConversationService
       .exec();
 
     if (!conversation) {
-      this.context.error("Conversation not found during token limit check", {
+      this.sessionLog("error", "Conversation not found during token limit check", {
         conversationId,
         userId: this.context.user?._id,
-      });
+      }, conversationId);
       throw new Error("Conversation not found");
     }
 
@@ -804,11 +866,11 @@ export default class ReactorConversationService
     shouldTruncate: boolean;
     percentageUsed: number;
   }> {
-    this.context.debug("Updating token count and checking limits atomically", {
+    this.sessionLog("debug", "Updating token count and checking limits atomically", {
       conversationId,
       userId: this.context.user?._id,
       timestamp: new Date().toISOString(),
-    });
+    }, conversationId);
 
     try {
       // Use aggregation pipeline to calculate tokens and check limits atomically
@@ -887,7 +949,7 @@ export default class ReactorConversationService
         }
       ).exec();
 
-      this.context.debug("Token count and limits updated successfully", {
+      this.sessionLog("debug", "Token count and limits updated successfully", {
         conversationId,
         calculatedTokens,
         maxTokens,
@@ -895,7 +957,7 @@ export default class ReactorConversationService
         shouldTruncate,
         percentageUsed,
         userId: this.context.user?._id,
-      });
+      }, conversationId);
 
       return {
         currentTokens: calculatedTokens,
@@ -905,11 +967,11 @@ export default class ReactorConversationService
         percentageUsed,
       };
     } catch (error: any) {
-      this.context.error("Error updating token count and checking limits", {
+      this.sessionLog("error", "Error updating token count and checking limits", {
         conversationId,
         userId: this.context.user?._id,
         error: error.message,
-      });
+      }, conversationId);
       throw new Error(
         `Failed to update token count and check limits: ${error.message}`
       );
@@ -929,12 +991,12 @@ export default class ReactorConversationService
     remainingTokens: number;
     movedToTruncated: number;
   }> {
-    this.context.debug("Truncating conversation history", {
+    this.sessionLog("debug", "Truncating conversation history", {
       conversationId,
       targetTokens,
       userId: this.context.user?._id,
       timestamp: new Date().toISOString(),
-    });
+    }, conversationId);
 
     const conversation = await ReactorConversationModel.findOne({
       _id: conversationId,
@@ -944,10 +1006,10 @@ export default class ReactorConversationService
       .exec();
 
     if (!conversation) {
-      this.context.error("Conversation not found during history truncation", {
+      this.sessionLog("error", "Conversation not found during history truncation", {
         conversationId,
         userId: this.context.user?._id,
-      });
+      }, conversationId);
       throw new Error("Conversation not found");
     }
 
@@ -1034,14 +1096,14 @@ export default class ReactorConversationService
       { new: true }
     ).exec();
 
-    this.context.info(`Truncated conversation ${conversationId}`, {
+    this.sessionLog("info", `Truncated conversation ${conversationId}`, {
       originalTokens: currentTokens,
       remainingTokens: tokensUsed,
       removedMessages,
       movedToTruncated,
       totalTruncatedMessages: updatedTruncatedHistory.length,
       targetTokens,
-    });
+    }, conversationId);
 
     return {
       removedMessages,
@@ -1888,12 +1950,12 @@ export default class ReactorConversationService
         await lastConversation.save();
       }
 
-      this.context.info("Reusing existing empty conversation", {
+      this.sessionLog("info", "Reusing existing empty conversation", {
         conversationId: lastConversation._id?.toString(),
         personaId: persona.id,
         userId: this.context.user._id,
         historyLength: lastConversation.history?.length || 0,
-      });
+      }, lastConversation._id?.toString(), persona.id);
 
       return lastConversation;
     }
@@ -1942,12 +2004,12 @@ export default class ReactorConversationService
         updated: new Date(),
       };
 
-      this.context.debug("Creating new conversation with pre-set IDs", {
+      this.sessionLog("debug", "Creating new conversation with pre-set IDs", {
         sessionId: sessionId.toString(),
         personaId: conversationData.personaId,
         userId: conversationData.user?.toString(),
         timestamp: new Date().toISOString(),
-      });
+      }, sessionId.toString(), persona.id);
 
       // Create and save conversation in single atomic operation
       const conversation = (await ReactorConversationModel.create(
@@ -2061,9 +2123,9 @@ export default class ReactorConversationService
           persistState: false, // Don't persist here since we handle it in ReactorConversationService
         });
       default:
-        this.context.error(`Provider ${provider} not implemented`, {
+        this.sessionLog("error", `Provider ${provider} not implemented`, {
           provider,
-        });
+        }, chatSessionId, persona?.id);
         throw new Error(`Provider ${provider} not implemented`);
     }
   }
@@ -2168,14 +2230,14 @@ export default class ReactorConversationService
       this.validateChatSessionId(chatSessionId, "sendMessage");
     }
 
-    this.context.debug("Sending message", {
+    this.sessionLog("debug", "Sending message", {
       personaId,
       chatSessionId,
       messageLength: typeof message === "string" ? message.length : "object",
       role,
       userId: user?._id,
       timestamp: new Date().toISOString(),
-    });
+    }, chatSessionId, personaId);
 
     const maxRetries = 3;
     let lastError: any;
@@ -2258,12 +2320,12 @@ export default class ReactorConversationService
             }
           }
 
-          this.context.debug("Finding existing conversation", {
+          this.sessionLog("debug", "Finding existing conversation", {
             chatSessionId,
             userId: this.context.user?._id,
             timestamp: new Date().toISOString(),
             continueAfterTools,
-          });
+          }, chatSessionId, personaId);
 
           if (continueAfterTools) {
             // Tool results were already persisted by executeMacro — just load
@@ -2338,7 +2400,7 @@ export default class ReactorConversationService
 
           // Check if truncation is needed based on updated token count
           if (tokenStatus.shouldTruncate) {
-            this.context.warn(
+            this.sessionLog("warn",
               "Token limit exceeded, truncating conversation history",
               {
                 conversationId: conversation._id.toString(),
@@ -2346,7 +2408,7 @@ export default class ReactorConversationService
                 maxTokens: tokenStatus.maxTokens,
                 exceedsBy:
                   tokenStatus.currentTokens - (tokenStatus.maxTokens || 0),
-              }
+              }, conversation._id.toString(), personaId
             );
 
             await this.truncateConversationHistory(
@@ -2386,12 +2448,12 @@ export default class ReactorConversationService
             toolApprovalMode: ToolApprovalMode.PROMPT,
           });
 
-          this.context.debug("Saving new conversation in sendMessage", {
+          this.sessionLog("debug", "Saving new conversation in sendMessage", {
             sessionId: sessionId.toString(),
             personaId: conversation.personaId,
             userId: conversation.user?.toString(),
             timestamp: new Date().toISOString(),
-          });
+          }, sessionId.toString(), personaId);
 
           await conversation.save();
 
@@ -2497,10 +2559,10 @@ export default class ReactorConversationService
             iteration++;
             const toolCalls = response.tool_calls || response.choices[0].message.tool_calls;
 
-            this.context.info(`[sendMessage] AUTO mode: executing ${toolCalls.length} tool(s) server-side (iteration ${iteration})`, {
+            this.sessionLog("info", `[sendMessage] AUTO mode: executing ${toolCalls.length} tool(s) server-side (iteration ${iteration})`, {
               tools: toolCalls.map((tc: any) => tc.function?.name),
               conversationId: effectiveConversationId,
-            });
+            }, effectiveConversationId, personaId);
 
             for (const toolCall of toolCalls) {
               const toolName = toolCall.function?.name;
@@ -2527,10 +2589,10 @@ export default class ReactorConversationService
                   );
                   await this.streamingTransportManager.sendEventToSession(effectiveConversationId, toolCallEvent);
                 } catch (sseError: any) {
-                  this.context.warn(`[sendMessage] AUTO mode: failed to send tool_call SSE event: ${sseError.message}`, {
+                  this.sessionLog("warn", `[sendMessage] AUTO mode: failed to send tool_call SSE event: ${sseError.message}`, {
                     toolName,
                     conversationId: effectiveConversationId,
-                  });
+                  }, effectiveConversationId, personaId);
                 }
               }
 
@@ -2563,14 +2625,14 @@ export default class ReactorConversationService
                     );
                     await this.streamingTransportManager.sendEventToSession(effectiveConversationId, toolCompleteEvent);
                   } catch (sseError: any) {
-                    this.context.warn(`[sendMessage] AUTO mode: failed to send tool_call complete SSE event: ${sseError.message}`, {
+                    this.sessionLog("warn", `[sendMessage] AUTO mode: failed to send tool_call complete SSE event: ${sseError.message}`, {
                       toolName,
                       conversationId: effectiveConversationId,
-                    });
+                    }, effectiveConversationId, personaId);
                   }
                 }
               } catch (toolError: any) {
-                this.context.warn(`[sendMessage] AUTO tool execution failed for ${toolName}: ${toolError.message}`, {
+                this.sessionLog("warn", `[sendMessage] AUTO tool execution failed for ${toolName}: ${toolError.message}`, {
                   toolName,
                   conversationId: effectiveConversationId,
                 });
@@ -2618,9 +2680,9 @@ export default class ReactorConversationService
           }
 
           if (iteration >= MAX_TOOL_ITERATIONS) {
-            this.context.warn(`[sendMessage] AUTO tool execution reached max iterations (${MAX_TOOL_ITERATIONS})`, {
+            this.sessionLog("warn", `[sendMessage] AUTO tool execution reached max iterations (${MAX_TOOL_ITERATIONS})`, {
               conversationId: effectiveConversationId,
-            });
+            }, effectiveConversationId, personaId);
 
             const partialContent = response?.choices?.[0]?.message?.content || '';
 
@@ -2663,9 +2725,9 @@ export default class ReactorConversationService
                   );
                 }
               } catch (sseError: any) {
-                this.context.warn(`[sendMessage] Failed to send tool iteration limit SSE event: ${sseError.message}`, {
+                this.sessionLog("warn", `[sendMessage] Failed to send tool iteration limit SSE event: ${sseError.message}`, {
                   conversationId: effectiveConversationId,
-                });
+                }, effectiveConversationId, personaId);
               }
               // Skip the normal completion event — the client will handle the limit event
               return adapter.adaptResponse(response);
@@ -2702,15 +2764,15 @@ export default class ReactorConversationService
                   effectiveConversationId,
                   completionEvent
                 );
-                this.context.info(`[sendMessage] AUTO mode: sent final completion event via SSE`, {
+                this.sessionLog("info", `[sendMessage] AUTO mode: sent final completion event via SSE`, {
                   conversationId: effectiveConversationId,
                   contentLength: finalContent.length,
-                });
+                }, effectiveConversationId, personaId);
               }
             } catch (sseError: any) {
-              this.context.warn(`[sendMessage] AUTO mode: failed to send final SSE completion event: ${sseError.message}`, {
+              this.sessionLog("warn", `[sendMessage] AUTO mode: failed to send final SSE completion event: ${sseError.message}`, {
                 conversationId: effectiveConversationId,
-              });
+              }, effectiveConversationId, personaId);
             }
           }
         }
@@ -2723,7 +2785,7 @@ export default class ReactorConversationService
         // Check if this is a retryable error
         const isRetryable = this.isRetryableError(error);
 
-        this.context.warn(
+        this.sessionLog("warn",
           `SendMessage attempt ${attempt} failed: ${error.message}`,
           {
             error: error.message,
@@ -2732,15 +2794,16 @@ export default class ReactorConversationService
             isRetryable,
             personaId,
             chatSessionId,
-          }
+          }, chatSessionId, personaId
         );
 
         if (attempt < maxRetries && isRetryable) {
           // Wait before retry with exponential backoff
           const backoffDelay = Math.pow(2, attempt) * 1000;
-          this.context.log(
+          this.sessionLog("debug",
             `Waiting ${backoffDelay}ms before retry attempt ${attempt + 1}`,
-            { backoffDelay, attempt }
+            { backoffDelay, attempt },
+            chatSessionId, personaId
           );
           await new Promise((resolve) => setTimeout(resolve, backoffDelay));
           continue;
@@ -2752,11 +2815,12 @@ export default class ReactorConversationService
     }
 
     // If we get here, all retries failed
-    this.context.error(
+    this.sessionLog("error",
       `Error sending message after ${maxRetries} attempts: ${
         lastError?.message ?? lastError?.toString()
       }`,
-      { error: lastError, args }
+      { error: lastError, args },
+      chatSessionId, personaId
     );
 
     return this.createErrorResponse(
@@ -2822,9 +2886,9 @@ export default class ReactorConversationService
       // Update token count after adding AI response
       await this.updateConversationTokenCount(conversation._id.toString());
     } else {
-      this.context.warn(`No AI response received for message: ${message}`, {
+      this.sessionLog("warn", `No AI response received for message: ${message}`, {
         response,
-      });
+      }, conversation._id?.toString(), conversation.personaId);
 
       await ReactorConversationModel.findOneAndUpdate(
         { _id: conversation._id },
@@ -3105,13 +3169,13 @@ export default class ReactorConversationService
 
       return adapter.adaptResponse(toolResult);
     } catch (error: any) {
-      this.context.error(`Error executing macro: ${error.message}`, {
-        error,
+      this.sessionLog("error", `Error executing macro: ${error.message}`, {
+        error: error.message,
         macro,
         personaId,
         chatSessionId,
         correlationId: v4(),
-      });
+      }, chatSessionId, personaId);
 
       return this.createErrorResponse(
         ReactorErrorCode.MACRO_ERROR,
@@ -3239,12 +3303,12 @@ export default class ReactorConversationService
         };
       }
     } catch (error: any) {
-      this.context.error(`Error attaching image: ${error.message}`, {
-        error,
+      this.sessionLog("error", `Error attaching image: ${error.message}`, {
+        error: error.message,
         personaId,
         chatSessionId,
         correlationId: v4(),
-      });
+      }, chatSessionId, personaId);
 
       return this.createErrorResponse(
         ReactorErrorCode.IMAGE_ERROR,
@@ -3811,11 +3875,11 @@ export default class ReactorConversationService
   async loadChatSession(
     chatSessionId: string
   ): Promise<TReactorConversationDocument | null> {
-    this.context.debug("Loading chat session", {
+    this.sessionLog("debug", "Loading chat session", {
       chatSessionId,
       userId: this.context.user?._id,
       timestamp: new Date().toISOString(),
-    });
+    }, chatSessionId);
 
     if (!chatSessionId) {
       const errorResponse = this.createErrorResponse(
@@ -3838,10 +3902,10 @@ export default class ReactorConversationService
       .exec();
 
     if (!chatSession) {
-      this.context.error("Chat session not found during loadChatSession", {
+      this.sessionLog("error", "Chat session not found during loadChatSession", {
         chatSessionId,
         userId: this.context.user?._id,
-      });
+      }, chatSessionId);
       throw new Error(
         `Chat session with ID ${chatSessionId} not found or you do not have permission to access it.`
       );
@@ -3854,14 +3918,14 @@ export default class ReactorConversationService
       "loaded_session"
     );
 
-    this.context.info("Successfully loaded chat session", {
+    this.sessionLog("info", "Successfully loaded chat session", {
       chatSessionId: chatSession._id?.toString(),
       personaId: chatSession.personaId,
       userId: chatSession.user?.toString(),
       historyLength: chatSession.history?.length || 0,
       tokenCount: chatSession.tokenCount,
       maxTokens: chatSession.maxTokens,
-    });
+    }, chatSession._id?.toString(), chatSession.personaId);
 
     return chatSession;
   }
@@ -4016,7 +4080,7 @@ export default class ReactorConversationService
     modelId?: string;
     providerId?: string;
   }): Promise<ReactorInitChatResponse> {
-    this.context.debug("Starting chat session", {
+    this.sessionLog("debug", "Starting chat session", {
       personaId: args.personaId,
       userId: this.context.user?._id,
       macrosCount: args.macros?.length || 0,
@@ -4028,7 +4092,7 @@ export default class ReactorConversationService
       //
       const persona = await this.personaProvider.getPersona(args.personaId);
       if (!persona) {
-        this.context.error("Persona not found during startChatSession", {
+        this.sessionLog("error", "Persona not found during startChatSession", {
           personaId: args.personaId,
           userId: this.context.user?._id,
         });
@@ -4037,12 +4101,11 @@ export default class ReactorConversationService
 
       const conversation = await this.getNewConversation(persona);
       if (!conversation || !conversation._id) {
-        this.context.error(
+        this.sessionLog("error",
           "Failed to create new conversation in startChatSession",
           {
             personaId: args.personaId,
             userId: this.context.user?._id,
-            conversation: conversation,
           }
         );
         throw new Error("Failed to create new conversation");
@@ -4120,16 +4183,16 @@ export default class ReactorConversationService
               timestamp: new Date(),
               tool_results: [],
             });
-            this.context.info("Loaded context from previous session", {
+            this.sessionLog("info", "Loaded context from previous session", {
               parentSessionId: args.contextFromSessionId,
               newSessionId: conversation._id?.toString(),
-            });
+            }, conversation._id?.toString(), args.personaId);
           }
         } catch (contextError) {
-          this.context.warn("Failed to load context from previous session, continuing without it", {
+          this.sessionLog("warn", "Failed to load context from previous session, continuing without it", {
             contextFromSessionId: args.contextFromSessionId,
             error: contextError?.message || contextError,
-          });
+          }, conversation._id?.toString(), args.personaId);
         }
       }
 
@@ -4143,7 +4206,7 @@ export default class ReactorConversationService
         "final_conversation"
       );
 
-      this.context.info("Successfully started chat session", {
+      this.sessionLog("info", "Successfully started chat session", {
         conversationId: conversation._id?.toString(),
         personaId: conversation.personaId,
         userId: conversation.user?.toString(),
@@ -4152,7 +4215,7 @@ export default class ReactorConversationService
         historyLength: conversation.history?.length || 0,
         tokenCount: conversation.tokenCount,
         maxTokens: conversation.maxTokens,
-      });
+      }, conversation._id?.toString(), conversation.personaId);
 
       // Fix: StreamingMode is a type, not a value. Use the string literal instead.
       if (args.streamingMode === StreamingMode.SSE) {
@@ -4163,11 +4226,11 @@ export default class ReactorConversationService
 
       return conversation as unknown as ReactorInitChatResponse;
     } catch (error) {
-      this.context.error("Error starting chat session", {
+      this.sessionLog("error", "Error starting chat session", {
         error: error instanceof Error ? { message: error.message, stack: error.stack } : error,
         personaId: args.personaId,
         userId: this.context.user?._id,
-      });
+      }, undefined, args.personaId);
       
       return {
         __typename: "ReactorErrorResponse",
@@ -4296,9 +4359,10 @@ export default class ReactorConversationService
             ).exec();
 
             // Continue with next tool even if one fails
-            this.context.warn(
+            this.sessionLog("warn",
               `Tool execution failed: ${toolCalls[i].function?.name}`,
-              { error }
+              { error: error?.message },
+              chatSessionId, personaId
             );
           }
         }
@@ -4326,9 +4390,9 @@ export default class ReactorConversationService
 
       return { results, errors };
     } catch (error) {
-      this.context.error(`Error processing tool calls: ${error.message}`, {
-        error,
-      });
+      this.sessionLog("error", `Error processing tool calls: ${error.message}`, {
+        error: error?.message,
+      }, chatSessionId, personaId);
       throw error;
     }
   }
@@ -4379,9 +4443,10 @@ export default class ReactorConversationService
         };
       } catch (error) {
         lastError = error;
-        this.context.warn(
+        this.sessionLog("warn",
           `Tool execution attempt ${attempt} failed: ${toolCall.function?.name}`,
-          { error }
+          { error: error?.message },
+          conversation._id?.toString(), conversation.personaId
         );
 
         if (attempt < maxRetries) {
@@ -4527,13 +4592,12 @@ export default class ReactorConversationService
     // Monitor document size first
     const sizeInfo = this.chunkingService.monitorDocumentSize(content);
     if (sizeInfo.warnings.length > 0) {
-      this.context.warn(
+      this.sessionLog("warn",
         "Large document detected",
         {
           warnings: sizeInfo.warnings,
           recommendations: sizeInfo.recommendations,
-        },
-        "ReactorConversationService.processLargeDocument"
+        }, chatSessionId, personaId
       );
     }
 

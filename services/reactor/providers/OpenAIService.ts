@@ -402,12 +402,14 @@ class OpenAIService extends AIProviderBase {
       });
     }
 
-    // Send tool_call events to client (suppress only in AUTO mode — server handles those)
+    // Send tool_call events to client (suppress only in AUTO mode — server handles those).
+    // isComplete is false because the tool has not been executed yet — the client will
+    // prompt the user (PROMPT/PLAN) or auto-execute (SAFE_AUTO) based on the approval mode.
     const toolApprovalMode = this.chatState?.toolApprovalMode;
     if (toolApprovalMode !== ToolApprovalMode.AUTO) {
       for (const tc of toolCalls) {
         const event = StreamingEventFactory.createToolCallEvent(
-          tc.id, tc.name, tc.arguments, true, undefined, ids,
+          tc.id, tc.name, tc.arguments, false, undefined, ids,
         );
         await this.streamingTransportManager.sendEventToSession(sessionId, event);
       }

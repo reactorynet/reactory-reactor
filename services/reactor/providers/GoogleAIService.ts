@@ -957,14 +957,19 @@ class GoogleAIService extends AIProviderBase {
               });
             }
 
-            // Only send tool_call events to the client in PROMPT mode.
+            // Send tool_call events to the client in non-AUTO modes so the
+            // client can prompt the user or auto-execute based on approval mode.
+            // isComplete must be false here — the tool call data is fully assembled
+            // but the tool has NOT been executed yet. The client uses isComplete to
+            // distinguish "pending approval/execution" (false) from "already executed
+            // by the server" (true, used in AUTO mode).
             const toolApprovalMode = this.chatState?.toolApprovalMode;
             if (toolApprovalMode !== ToolApprovalMode.AUTO) {
               const event = StreamingEventFactory.createToolCallEvent(
                 functionCallId,
                 functionCall.name,
                 JSON.stringify(functionCall.args || {}),
-                true,
+                false,
                 undefined,
                 ids,
               );

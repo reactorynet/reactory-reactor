@@ -281,7 +281,8 @@ class OllamaAIService extends AIProviderBase {
       return { id, name: tc.name, arguments: tc.arguments };
     });
 
-    // Send tool_call events if not in AUTO mode
+    // Send tool_call events if not in AUTO mode.
+    // isComplete is false — the tool data is assembled but not yet executed.
     const toolApprovalMode = this.chatState?.toolApprovalMode;
     if (toolApprovalMode !== ToolApprovalMode.AUTO) {
       for (const tc of resolvedToolCalls) {
@@ -289,7 +290,7 @@ class OllamaAIService extends AIProviderBase {
           tc.id,
           tc.name,
           tc.arguments,
-          true,
+          false,
           undefined,
           ids
         );
