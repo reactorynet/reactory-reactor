@@ -2684,7 +2684,7 @@ export default class ReactorConversationService
               conversationId: effectiveConversationId,
             }, effectiveConversationId, personaId);
 
-            const partialContent = response?.choices?.[0]?.message?.content || '';
+            const partialContent = response?.choices?.[0]?.message?.content || response?.content || '';
 
             // Add assistant message so the user sees the pause
             await ReactorConversationModel.findOneAndUpdate(
@@ -2741,11 +2741,24 @@ export default class ReactorConversationService
             }
           }
 
-          // In SSE mode, the GoogleAIService deferred the completion event so
-          // the client stays in streaming state while tools execute. Now that
-          // the tool loop is done, send the final content via SSE.
+          // In SSE mode, the provider deferred the completion event so the
+          // client stays in streaming state while tools execute. Now that the
+          // tool loop is done, send the final content via SSE.
+          //
+          // The response object may have empty content when the provider
+          // streamed tokens directly via SSE (the accumulated text is in the
+          // DB but not in the response). Fall back to the persisted last
+          // assistant message so the client always receives the final text.
           if (streamingMode === StreamingMode.SSE) {
-            const finalContent = response?.choices?.[0]?.message?.content || '';
+            // processAIResponse normalizes the response to { __typename, content, ... }
+            // so response.choices no longer exists. Read content from both formats.
+            let finalContent = response?.choices?.[0]?.message?.content
+              || response?.content
+              || '';
+            this.sessionLog("debug", `[sendMessage] AUTO final response content`, {
+              contentLength: finalContent.length,
+              contentPreview: finalContent ? `${finalContent.substring(0, 100)}...` : '(empty)',
+            }, effectiveConversationId, personaId);
             try {
               const sseSessionId = this.streamingSessionManager.getSessionId(effectiveConversationId);
               if (sseSessionId) {

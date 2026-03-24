@@ -101,7 +101,7 @@ const WORKFLOW_RESOURCES: IAIPersonaResource[] = [
     name: 'AI Agent Home Folder',
     description: 'The home folder for WorkflowWill, where you can read and write files as needed.',
     type: 'directory',
-    url: path.join(REACTORY_DATA, '/profiles/reactor/personas/workflow'),
+    url: path.join(REACTORY_DATA, '/profiles/reactor/personas/workflowwill'),
     created: new Date(),
   },
   {
@@ -117,7 +117,7 @@ const WORKFLOW_RESOURCES: IAIPersonaResource[] = [
     name: 'AI Agent Workspace',
     description: 'The workspace folder for WorkflowWill, where you can read and write draft workflows and working files.',
     type: 'directory',
-    url: path.join(REACTORY_DATA, '/profiles/reactor/personas/workflow/workspace'),
+    url: path.join(REACTORY_DATA, '/profiles/reactor/personas/workflowwill/workspace'),
     created: new Date(),
   },
 ];

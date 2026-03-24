@@ -48,6 +48,7 @@ import {
   StreamingMode,
 } from "../types/streaming.types";
 import { StreamingEventFactory, StreamingEventIds } from "../streaming/StreamingEventFactory";
+import { ChatSessionLogger } from "../ChatSessionLogger";
 import { TokenPacer } from "../streaming/TokenPacer";
 import { StreamingSessionManager } from "../StreamingSessionManager";
 import { StreamingTransportManager } from "../StreamingTransportManager";
@@ -89,6 +90,21 @@ class GoogleAIService extends AIProviderBase {
   constructor(props: any, context: Reactory.Server.IReactoryContext) {
     super(props, context);
     this.streamingMode = props.streamingMode || StreamingMode.NONE;
+  }
+
+  /**
+   * Log to both the context logger and the per-session file logger.
+   */
+  private slog(
+    level: "debug" | "info" | "warn" | "error",
+    message: string,
+    meta?: Record<string, unknown>,
+  ): void {
+    this.context[level](`[GoogleAI] ${message}`, meta);
+    const chatId = this.chatState?.id?.toString?.() || (this.chatState as any)?._id?.toString?.();
+    if (chatId) {
+      ChatSessionLogger.forSession(chatId)?.[level](`[GoogleAI] ${message}`, meta);
+    }
   }
 
   /**
@@ -841,11 +857,9 @@ class GoogleAIService extends AIProviderBase {
     };
 
     const messageLength = typeof message === "string" ? message.length : message.length;
-    this.context.log(
-      `Streaming request started for session ${sessionId}`,
-      { messageLength, messageId, historyLength: history.length },
-      logTag,
-    );
+    this.slog("info", `Streaming request started for session ${sessionId}`, {
+      messageLength, messageId, historyLength: history.length,
+    });
 
     // Resolve per-persona pacing configuration
     const pacerCfg = persona?.config?.streamingPace ?? {};
@@ -1032,6 +1046,16 @@ class GoogleAIService extends AIProviderBase {
     const hasPendingAutoToolCalls =
       toolApprovalMode === ToolApprovalMode.AUTO &&
       accumulatedFunctionCalls.length > 0;
+          
+    this.slog("debug", `Streaming completion decision`, {
+      toolApprovalMode,
+      hasPendingAutoToolCalls,
+      accumulatedTextLength: accumulatedText.length,
+      accumulatedTextPreview: accumulatedText ? accumulatedText.substring(0, 100) : '(empty)',
+      accumulatedFunctionCallsCount: accumulatedFunctionCalls.length,
+      finishReason,
+      sessionId,
+    });
 
     if (!hasPendingAutoToolCalls) {
       const completionEvent = StreamingEventFactory.createCompletionEvent(
@@ -1082,6 +1106,14 @@ class GoogleAIService extends AIProviderBase {
     if (accumulatedReasoning) {
       (result as any).__reasoning = accumulatedReasoning;
     }
+
+    this.slog("info", `Streaming request completed`, {
+      accumulatedTextLength: accumulatedText.length,
+      accumulatedTextPreview: accumulatedText ? accumulatedText.substring(0, 150) : '(empty)',
+      accumulatedFunctionCallsCount: accumulatedFunctionCalls.length,
+      finishReason,
+      hasCandidateParts: result?.candidates?.[0]?.content?.parts?.length || 0,
+    });
 
     return result;
   }
@@ -1324,6 +1356,13 @@ class GoogleAIService extends AIProviderBase {
 
           // Add user message to history
           this.chatState.history.push(userConversationHistoryItem);
+
+          this.slog("info", `buildCompletion result`, {
+            responseTextLength: responseText.length,
+            responseTextPreview: responseText ? responseText.substring(0, 150) : '(empty)',
+            functionCallsCount: functionCalls.length,
+            streamingMode: this.streamingMode,
+          });
 
           return this.buildCompletion(responseText, functionCalls);
         } catch (extractError) {
