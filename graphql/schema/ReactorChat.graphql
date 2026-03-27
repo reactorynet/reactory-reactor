@@ -801,5 +801,58 @@ extend type Mutation {
   response is optionally synthesized back to speech.
   """
   ReactorSendVoiceMessage(audio: Upload!, input: ReactorVoiceMessageInput!): ReactorVoiceChatResult
+
+  """
+  Sends client-side log entries to the server's ChatSessionLogger for a given session.
+  Entries are written to the same session log file used by the server, prefixed with [CLIENT].
+  Returns the number of accepted/dropped entries. Max 100 entries per call.
+  """
+  ReactorSessionLog(input: ReactorSessionLogInput!): ReactorSessionLogResult
+}
+
+"""
+Log level for client-side session log entries.
+"""
+enum ReactorLogLevel {
+  debug
+  info
+  warn
+  error
+}
+
+"""
+A single log entry sent from the client to be appended to the server session log.
+"""
+input ReactorSessionLogEntry {
+  """The severity level of the log entry"""
+  level: ReactorLogLevel!
+  """The log message (max 2000 characters)"""
+  message: String!
+  """Optional structured metadata to attach to the entry"""
+  meta: Any
+  """Client-side timestamp when the log entry was created"""
+  timestamp: Date!
+  """Source identifier (e.g. hook or component name) for the log entry"""
+  source: String
+}
+
+"""
+Input for sending a batch of client log entries to the server session logger.
+"""
+input ReactorSessionLogInput {
+  """The chat session ID to log against"""
+  chatSessionId: String!
+  """Batch of log entries to write (max 100 per call)"""
+  entries: [ReactorSessionLogEntry!]!
+}
+
+"""
+Result of a client session log submission.
+"""
+type ReactorSessionLogResult {
+  """Number of entries successfully written to the session log"""
+  accepted: Int!
+  """Number of entries that were dropped (e.g. session not found, over limit)"""
+  dropped: Int!
 }
 

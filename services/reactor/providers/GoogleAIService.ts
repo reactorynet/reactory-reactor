@@ -659,10 +659,10 @@ class GoogleAIService extends AIProviderBase {
         systemInstruction = `
       ${systemInstruction}
       ## User Information
-      name: ${user.firstName} ${user.lastName}.
-      email: ${user.email}.
-      id: ${user._id}.
-      homeFolder: ${path.join(
+      *name*: ${user.firstName}.
+      *email*: ${user.email}.
+      *id*: ${user._id}.
+      *user home folder*: ${path.join(
         process.env.APP_DATA_ROOT || process.cwd(),
         "profiles",
         user._id.toString(),
@@ -777,6 +777,8 @@ class GoogleAIService extends AIProviderBase {
 
       const tools = await this.getAITools();
 
+      
+
       // Create chat session with generation config
       return this.ai.chats.create({
         model: this.model.name,
@@ -794,7 +796,9 @@ class GoogleAIService extends AIProviderBase {
           topP: 1.0,
           frequencyPenalty: 0.0,
           presencePenalty: 0.0,
-          includeThoughts: true,
+          thinkingConfig: {
+              includeThoughts: true, // Enable thought content in responses              
+          }
         },
       });
     } catch (error) {
@@ -846,8 +850,12 @@ class GoogleAIService extends AIProviderBase {
     history: ReactorConversationHistory;
     chat: GoogleGenAI.Chat;
     messageId?: string;
+    /** When true, `message` already contains Google-native Part objects
+     *  (e.g. functionResponse parts) and should NOT be run through
+     *  convertMessageToGoogleParts. */
+    rawParts?: boolean;
   }): Promise<GoogleGenAI.GenerateContentResponse> {
-    const { sessionId, message, persona, history, messageId } = args;
+    const { sessionId, message, persona, history, messageId, rawParts } = args;
     const chat = args.chat;
     const logTag = "GoogleAIService.handleStreamingRequest";
     const ids: StreamingEventIds = {
@@ -902,8 +910,11 @@ class GoogleAIService extends AIProviderBase {
       },
     });
 
-    // Convert message to Google Parts format (handles strings and OpenAI content-parts arrays)
-    const googleParts = this.convertMessageToGoogleParts(message);
+    // Convert message to Google Parts format unless the caller already
+    // provided native Google parts (e.g. functionResponse parts from tool results).
+    const googleParts = rawParts
+      ? (Array.isArray(message) ? message : [message])
+      : this.convertMessageToGoogleParts(message);
 
     try {
       const response = await chat.sendMessageStream({
@@ -1131,8 +1142,9 @@ class GoogleAIService extends AIProviderBase {
     responseText: string,
     functionCalls: any[],
     finishReason: string = "stop",
+    reasoning?: string,
   ): AIChatCompletion {
-    return {
+    const completion: any = {
       id: new ObjectId(),
       object: "chat.completion",
       choices: [{
@@ -1150,6 +1162,10 @@ class GoogleAIService extends AIProviderBase {
                     ? func.args
                     : JSON.stringify(func.args ?? {}),
                 },
+                // GraphQL schema requires status: ReactorToolCallStatus! (non-nullable).
+                // Without this default the entire ReactorToolCall is nullified in the
+                // mutation response, causing the client to receive [null] for tool_calls.
+                status: "pending",
                 // Preserve thoughtSignature for Gemini thinking models — needed when
                 // rebuilding history to send back to the API
                 ...(func.thoughtSignature ? { thought_signature: func.thoughtSignature } : {}),
@@ -1160,6 +1176,10 @@ class GoogleAIService extends AIProviderBase {
       }],
       created: new Date(),
     };
+    if (reasoning) {
+      completion.__reasoning = reasoning;
+    }
+    return completion;
   }
 
   private async getAIResponse(
@@ -1237,11 +1257,29 @@ class GoogleAIService extends AIProviderBase {
           }
         }
 
-        // Send the tool results as the next user message
-        const result = await chat.sendMessage({
-          config: persona.messageConfig,
-          message: functionResponseParts.length > 0 ? functionResponseParts : "",
-        });
+        // Send the tool results as the next user message.
+        // Use streaming when in SSE mode so the client receives token events
+        // for the AI's follow-up response (e.g. in AUTO mode after server-side
+        // tool execution). Without streaming, the client only gets a single
+        // completion event and may not render the content.
+        const toolMessage = functionResponseParts.length > 0 ? functionResponseParts : "";
+        let result: GoogleGenAI.GenerateContentResponse;
+        if (this.streamingMode === StreamingMode.SSE) {
+          result = await this.handleStreamingRequest({
+            sessionId: this.chatState.id,
+            message: toolMessage,
+            persona,
+            history: historyForSession,
+            chat,
+            messageId,
+            rawParts: true, // functionResponseParts are already Google-native
+          });
+        } else {
+          result = await chat.sendMessage({
+            config: persona.messageConfig,
+            message: toolMessage,
+          });
+        }
 
         this.context.log(
           `Received response from Google AI after tool result`,
@@ -1262,10 +1300,10 @@ class GoogleAIService extends AIProviderBase {
           throw new AIProviderError("No candidates returned from Google AI");
         }
         const candidate = result.candidates[0];
-        const { responseText, functionCalls } =
+        const { responseText, functionCalls, reasoning } =
           this.extractGeminiCandidate(candidate);
 
-        return this.buildCompletion(responseText, functionCalls);
+        return this.buildCompletion(responseText, functionCalls, undefined, reasoning);
       }
 
       // Handle user messages
@@ -1335,7 +1373,7 @@ class GoogleAIService extends AIProviderBase {
         const candidate = result.candidates[0];
 
         try {
-          const { responseText, functionCalls } =
+          const { responseText, functionCalls, reasoning } =
             this.extractGeminiCandidate(candidate);
 
           if (functionCalls.length > 0) {
@@ -1370,7 +1408,7 @@ class GoogleAIService extends AIProviderBase {
             streamingMode: this.streamingMode,
           });
 
-          return this.buildCompletion(responseText, functionCalls);
+          return this.buildCompletion(responseText, functionCalls, undefined, reasoning);
         } catch (extractError) {
           this.context.error(
             `Error extracting Gemini candidate: ${extractError.message}`,
@@ -1422,6 +1460,7 @@ class GoogleAIService extends AIProviderBase {
   private extractGeminiCandidate(candidate: any): {
     responseText: string;
     functionCalls: any[];
+    reasoning: string;
   } {
     if (!candidate || typeof candidate !== "object") {
       throw new AIProviderError("Invalid candidate in Google AI response");
@@ -1458,6 +1497,7 @@ class GoogleAIService extends AIProviderBase {
             responseText:
               "I'm unable to provide a response due to safety considerations. Please try rephrasing your question.",
             functionCalls: [],
+            reasoning: "",
           };
 
         case "RECITATION":
@@ -1470,6 +1510,7 @@ class GoogleAIService extends AIProviderBase {
             responseText:
               "I'm unable to provide that specific information. Let me help you with a different approach.",
             functionCalls: [],
+            reasoning: "",
           };
 
         case "OTHER":
@@ -1505,6 +1546,7 @@ class GoogleAIService extends AIProviderBase {
     }
 
     let responseText = "";
+    let reasoning = "";
     let functionCalls: any[] = [];
 
     // Extract content from parts
@@ -1527,17 +1569,22 @@ class GoogleAIService extends AIProviderBase {
           functionCalls.push(fc);
         }
         if (part.text) {
-          responseText += part.text;
+          if ((part as any).thought) {
+            // Gemini thinking models return thought parts — keep them separate
+            reasoning += part.text;
+          } else {
+            responseText += part.text;
+          }
         }
       }
     }
 
     // If no content was extracted, check if this is a valid terminal response
-    if (functionCalls.length === 0 && !responseText.trim()) {
+    if (functionCalls.length === 0 && !responseText.trim() && !reasoning.trim()) {
       // A STOP finish reason with empty text is valid — the model is done
       // (e.g. after processing tool results with nothing more to say)
       if (candidate.finishReason === "STOP") {
-        return { responseText: "", functionCalls: [] };
+        return { responseText: "", functionCalls: [], reasoning: "" };
       }
 
       this.context.warn(
@@ -1549,7 +1596,7 @@ class GoogleAIService extends AIProviderBase {
       throw new AIProviderError("EMPTY_RESPONSE");
     }
 
-    return { responseText: responseText.trim(), functionCalls };
+    return { responseText: responseText.trim(), functionCalls, reasoning: reasoning.trim() };
   }
 
   async chat(

@@ -146,7 +146,7 @@ export class StreamingConversationService extends ReactorConversationService {
             accumulatedContent += tokenData.delta || tokenData.content || '';
             tokenPosition += tokenData.delta?.length || tokenData.content?.length || 0;
             
-            // TODO: Emit token event to client via SSE/WebSocket
+            // TODO: Emit token event to client via WebSocket
             this.emitStreamingEvent(streamingSession, {
               type: 'token',
               sessionId: streamingSession.sessionId,

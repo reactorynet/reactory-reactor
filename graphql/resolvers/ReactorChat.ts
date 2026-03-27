@@ -7,6 +7,7 @@ import {
 import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
 import { IReactorConversationsService } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { ObjectId } from "mongodb";
+import { ChatSessionLogger } from "@reactory/server-modules/reactory-reactor/services/reactor/ChatSessionLogger";
 import {
   ChatState,
   MacroComponentDefinition,
@@ -1061,6 +1062,71 @@ class ReactorChatResolver {
         suggestion: "Try a clearer audio recording or type your message instead",
       };
     }
+  }
+
+  @mutation("ReactorSessionLog")
+  async ReactorSessionLog(
+    _: any,
+    args: {
+      input: {
+        chatSessionId: string;
+        entries: Array<{
+          level: "debug" | "info" | "warn" | "error";
+          message: string;
+          meta?: Record<string, unknown>;
+          timestamp: Date;
+          source?: string;
+        }>;
+      };
+    },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    const { chatSessionId, entries } = args.input;
+
+    if (!chatSessionId || !entries || !Array.isArray(entries)) {
+      return { accepted: 0, dropped: 0 };
+    }
+
+    const sessionLogger = ChatSessionLogger.forSession(chatSessionId);
+    if (!sessionLogger) {
+      return { accepted: 0, dropped: entries.length };
+    }
+
+    const VALID_LEVELS = new Set(["debug", "info", "warn", "error"]);
+    const MAX_ENTRIES = 100;
+    const MAX_MESSAGE_LENGTH = 2000;
+    const MAX_META_LENGTH = 4000;
+
+    const batch = entries.slice(0, MAX_ENTRIES);
+    let accepted = 0;
+
+    for (const entry of batch) {
+      const level = VALID_LEVELS.has(entry.level) ? entry.level : "info";
+      const source = (entry.source || "client").slice(0, 100);
+      const prefix = `[CLIENT:${source}]`;
+      const message = `${prefix} ${(entry.message || "").slice(0, MAX_MESSAGE_LENGTH)}`;
+
+      let meta: Record<string, unknown> = {
+        clientTimestamp: entry.timestamp,
+        userId: context.user?.id,
+      };
+
+      if (entry.meta) {
+        try {
+          const serialized = JSON.stringify(entry.meta);
+          if (serialized.length <= MAX_META_LENGTH) {
+            meta = { ...meta, ...entry.meta };
+          }
+        } catch {
+          // Skip meta that can't be serialized
+        }
+      }
+
+      sessionLogger[level](message, meta);
+      accepted++;
+    }
+
+    return { accepted, dropped: entries.length - accepted };
   }
 }
 
