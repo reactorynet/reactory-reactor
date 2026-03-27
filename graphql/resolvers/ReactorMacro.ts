@@ -31,12 +31,17 @@ class ReactorMacroResolver {
       try {
         const transportManager: StreamingTransportManager = context.getService<StreamingTransportManager>("reactor.StreamingTransportManager@1.0.0");
         if (transportManager.hasActiveTransportForChat(chatSessionId)) {
+          // Extract a displayable result for the SSE event
+          const toolResultContent = result?.tool_results?.[0]?.content
+            ?? result?.tool_results?.[0]?.result
+            ?? result?.content
+            ?? undefined;
           const toolCompleteEvent = StreamingEventFactory.createToolCallEvent(
             callId,
             macroName,
             JSON.stringify(args.macroInput.args || {}),
             true, // isComplete
-            undefined,
+            toolResultContent,
             {
               sessionId: chatSessionId,
               conversationId: chatSessionId,

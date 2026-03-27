@@ -2653,7 +2653,7 @@ export default class ReactorConversationService
               }
 
               try {
-                await this.executeMacro({
+                const macroResult = await this.executeMacro({
                   macro: toolName,
                   personaId,
                   chatSessionId: effectiveConversationId,
@@ -2665,6 +2665,12 @@ export default class ReactorConversationService
                 // Send tool_call completion event so the client knows this tool finished
                 if (streamingMode === StreamingMode.SSE) {
                   try {
+                    // Extract a displayable result from the macro response.
+                    // The adapted response may wrap the actual output in tool_results.
+                    const toolResultContent = macroResult?.tool_results?.[0]?.content
+                      ?? macroResult?.tool_results?.[0]?.result
+                      ?? macroResult?.content
+                      ?? undefined;
                     const toolCompleteEvent = StreamingEventFactory.createToolCallEvent(
                       toolCall.id,
                       toolName,
@@ -2672,7 +2678,7 @@ export default class ReactorConversationService
                         ? toolCall.function.arguments
                         : JSON.stringify(toolCall.function?.arguments || {}),
                       true, // isComplete: true
-                      undefined,
+                      toolResultContent,
                       {
                         sessionId: effectiveConversationId,
                         conversationId: effectiveConversationId,
