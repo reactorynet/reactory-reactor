@@ -916,7 +916,13 @@ class GoogleAIService extends AIProviderBase {
         if (result === null) {
           result = chunk;
         }
-
+        this.slog("debug", `Received chunk from Google AI stream`, {
+          chunkPreview: JSON.stringify(chunk).substring(0, 200),
+          accumulatedTextLength: accumulatedText.length,
+          accumulatedReasoningLength: accumulatedReasoning.length,
+          accumulatedFunctionCallsCount: accumulatedFunctionCalls.length,
+          finishReason,
+        });
         // Handle thought/reasoning parts and text content from parts
         let hasThoughtContent = false;
         if (chunk.candidates?.[0]?.content?.parts) {
