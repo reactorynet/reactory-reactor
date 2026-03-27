@@ -267,6 +267,21 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
   }
 
   /**
+   * Send a keepalive heartbeat to prevent proxy/browser timeouts during
+   * long-running server-side operations (e.g. AUTO tool execution loops).
+   * Best-effort — failures are silently ignored.
+   */
+  sendHeartbeatToSession(chatSessionId: string): void {
+    const sessionId = this.chatSessions.get(chatSessionId);
+    if (!sessionId) return;
+    const transport = this.transports.get(sessionId);
+    if (!transport || !transport.isConnected) return;
+    if ('sendHeartbeat' in transport && typeof (transport as any).sendHeartbeat === 'function') {
+      (transport as any).sendHeartbeat();
+    }
+  }
+
+  /**
    * Get the number of active transports
    */
   getTransportCount(): number {

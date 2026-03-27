@@ -130,6 +130,25 @@ export class SSETransport implements StreamingTransport {
   }
 
   /**
+   * Send a keepalive comment to prevent proxies/browsers from closing
+   * the connection during long-running operations (e.g. server-side
+   * tool execution in AUTO mode).
+   */
+  sendHeartbeat(): void {
+    if (!this._isConnected || this._isClosed) return;
+    try {
+      // SSE comment lines (prefixed with ':') are ignored by EventSource
+      // but keep the TCP connection alive.
+      this.response.write(': heartbeat\n\n');
+      if (typeof (this.response as any).flush === 'function') {
+        (this.response as any).flush();
+      }
+    } catch {
+      // Best-effort — don't break the caller if the connection dropped.
+    }
+  }
+
+  /**
    * Close SSE connection
    */
   async close(): Promise<void> {

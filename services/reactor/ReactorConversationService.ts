@@ -2598,7 +2598,17 @@ export default class ReactorConversationService
             || parseInt(process.env.REACTOR_MAX_TOOL_ITERATIONS || '100', 10);
           let iteration = 0;
 
-          while (
+          // Send periodic SSE heartbeats to keep the connection alive while
+          // the server executes tools. Without this, proxies/browsers may
+          // close idle connections before the tool loop finishes.
+          const heartbeatInterval = streamingMode === StreamingMode.SSE
+            ? setInterval(() => {
+                this.streamingTransportManager.sendHeartbeatToSession(effectiveConversationId);
+              }, 15_000)
+            : null;
+
+          try {
+            while (
             (response?.tool_calls?.length > 0 || response?.choices?.[0]?.message?.tool_calls?.length > 0) &&
             iteration < MAX_TOOL_ITERATIONS
           ) {
@@ -2787,15 +2797,18 @@ export default class ReactorConversationService
             }
           }
 
-          // In SSE mode, the provider deferred the completion event so the
-          // client stays in streaming state while tools execute. Now that the
-          // tool loop is done, send the final content via SSE.
+          // In SSE mode, the provider may have already streamed the final
+          // response (including a completion event) if the last executeProviderChat
+          // call used streaming and the response had no tool calls. In that case,
+          // skip sending a duplicate completion event — the client already has it.
           //
-          // The response object may have empty content when the provider
-          // streamed tokens directly via SSE (the accumulated text is in the
-          // DB but not in the response). Fall back to the persisted last
-          // assistant message so the client always receives the final text.
-          if (streamingMode === StreamingMode.SSE) {
+          // We detect this by checking whether the final response has no tool
+          // calls (meaning the provider sent its own completion) AND has content
+          // (meaning tokens were streamed).
+          const lastResponseToolCalls = response?.tool_calls || response?.choices?.[0]?.message?.tool_calls || [];
+          const providerAlreadySentCompletion = lastResponseToolCalls.length === 0
+            && (response?.content || response?.choices?.[0]?.message?.content);
+          if (streamingMode === StreamingMode.SSE && !providerAlreadySentCompletion) {
             // processAIResponse normalizes the response to { __typename, content, ... }
             // so response.choices no longer exists. Read content from both formats.
             let finalContent = response?.choices?.[0]?.message?.content
@@ -2869,10 +2882,14 @@ export default class ReactorConversationService
               }, effectiveConversationId, personaId);
             }
           }
+          } finally {
+            // Always clear the heartbeat interval when the tool loop exits
+            if (heartbeatInterval) clearInterval(heartbeatInterval);
+          }
         }
 
         // Return adapted response
-        return adapter.adaptResponse(response);        
+        return adapter.adaptResponse(response);
       } catch (error: any) {
         lastError = error;
 
@@ -3020,7 +3037,12 @@ export default class ReactorConversationService
         content: msg.content,
         thinking: response.reasoning || response.__reasoning || undefined,
         timestamp: new Date(),
-        tool_calls: msg.tool_calls || [],
+        tool_calls: (msg.tool_calls || []).map((tc: any) => ({
+          ...tc,
+          // Ensure every tool_call has a status so GraphQL's non-nullable
+          // ReactorToolCallStatus! field doesn't nullify the entry.
+          status: tc.status || 'pending',
+        })),
         tool_results: [],
         tool_errors: [],
       };

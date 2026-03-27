@@ -850,8 +850,12 @@ class GoogleAIService extends AIProviderBase {
     history: ReactorConversationHistory;
     chat: GoogleGenAI.Chat;
     messageId?: string;
+    /** When true, `message` already contains Google-native Part objects
+     *  (e.g. functionResponse parts) and should NOT be run through
+     *  convertMessageToGoogleParts. */
+    rawParts?: boolean;
   }): Promise<GoogleGenAI.GenerateContentResponse> {
-    const { sessionId, message, persona, history, messageId } = args;
+    const { sessionId, message, persona, history, messageId, rawParts } = args;
     const chat = args.chat;
     const logTag = "GoogleAIService.handleStreamingRequest";
     const ids: StreamingEventIds = {
@@ -906,8 +910,11 @@ class GoogleAIService extends AIProviderBase {
       },
     });
 
-    // Convert message to Google Parts format (handles strings and OpenAI content-parts arrays)
-    const googleParts = this.convertMessageToGoogleParts(message);
+    // Convert message to Google Parts format unless the caller already
+    // provided native Google parts (e.g. functionResponse parts from tool results).
+    const googleParts = rawParts
+      ? (Array.isArray(message) ? message : [message])
+      : this.convertMessageToGoogleParts(message);
 
     try {
       const response = await chat.sendMessageStream({
@@ -1149,6 +1156,10 @@ class GoogleAIService extends AIProviderBase {
                     ? func.args
                     : JSON.stringify(func.args ?? {}),
                 },
+                // GraphQL schema requires status: ReactorToolCallStatus! (non-nullable).
+                // Without this default the entire ReactorToolCall is nullified in the
+                // mutation response, causing the client to receive [null] for tool_calls.
+                status: "pending",
                 // Preserve thoughtSignature for Gemini thinking models — needed when
                 // rebuilding history to send back to the API
                 ...(func.thoughtSignature ? { thought_signature: func.thoughtSignature } : {}),
@@ -1240,11 +1251,29 @@ class GoogleAIService extends AIProviderBase {
           }
         }
 
-        // Send the tool results as the next user message
-        const result = await chat.sendMessage({
-          config: persona.messageConfig,
-          message: functionResponseParts.length > 0 ? functionResponseParts : "",
-        });
+        // Send the tool results as the next user message.
+        // Use streaming when in SSE mode so the client receives token events
+        // for the AI's follow-up response (e.g. in AUTO mode after server-side
+        // tool execution). Without streaming, the client only gets a single
+        // completion event and may not render the content.
+        const toolMessage = functionResponseParts.length > 0 ? functionResponseParts : "";
+        let result: GoogleGenAI.GenerateContentResponse;
+        if (this.streamingMode === StreamingMode.SSE) {
+          result = await this.handleStreamingRequest({
+            sessionId: this.chatState.id,
+            message: toolMessage,
+            persona,
+            history: historyForSession,
+            chat,
+            messageId,
+            rawParts: true, // functionResponseParts are already Google-native
+          });
+        } else {
+          result = await chat.sendMessage({
+            config: persona.messageConfig,
+            message: toolMessage,
+          });
+        }
 
         this.context.log(
           `Received response from Google AI after tool result`,
