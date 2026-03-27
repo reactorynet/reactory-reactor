@@ -11,6 +11,7 @@ import {
   ReactorInitChatResponse,
   ReactorInitiateSSEResponse,
   ReactorChatState,
+  IReactorConversationsService,
 } from "../../types/service.types";
 import ReactorConversationModel, {
   ReactorConversationDocument,
@@ -126,6 +127,7 @@ import {
   MacroToolDefinition,
   ToolApprovalMode,
 } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
+import { session } from "passport";
 
 
 
@@ -213,33 +215,42 @@ export default class ReactorConversationService
   private context: Reactory.Server.IReactoryContext;
 
   /** OpenAI service for OpenAI and xAI provider interactions */
+  // @ts-ignore - injected via service dependencies
   private openaiService: IOpenAIService;
 
   /** Google AI service for Google Gemini interactions */
+  // @ts-ignore - injected via service dependencies
   private googleAIService: GoogleAIService;
 
   /** Anthropic service for Anthropic AI interactions */
+  // @ts-ignore - injected via service dependencies
   private anthropicService: AnthropicService;
 
   /** Ollama service for local Ollama model interactions */
+  // @ts-ignore - injected via service dependencies
   private ollamaService: OllamaAIService;
 
   /** Provider service for managing multiple AI providers and adapters */
+  // @ts-ignore - injected via service dependencies
   private providerService: IReactorProviderService;
 
   /** AI persona provider for persona definitions and configurations */
+  // @ts-ignore - injected via service dependencies
   private personaProvider: AIPersonaProvider;
 
   /** Message processing service for advanced message handling */
+  // @ts-ignore - injected via service dependencies
   private messageProcessingService: ReactorMessageProcessingService;
 
   /** Macro service for executing custom macros and tools */
+  // @ts-ignore - injected via service dependencies
   private macroService: ReactorMacroService;
 
   /** Document chunking service for token estimation and text processing */
   private chunkingService: DocumentChunkingService;
 
   /** File service for handling file uploads and attachments */
+  // @ts-ignore - injected via service dependencies
   private fileService: Reactory.Service.IReactoryFileService;
 
   /** Streaming session manager for managing streaming sessions */
@@ -1323,6 +1334,12 @@ export default class ReactorConversationService
     // Validate chatSessionId
     this.validateChatSessionId(chatSessionId, "setChatToolApprovalMode");
 
+    this.sessionLog("info", "Setting tool approval mode", {
+      chatSessionId,
+      toolApprovalMode,
+      userId: this.context.user?._id,
+    }, chatSessionId);
+
     // load the chat session
     const chatState = await ReactorConversationModel.findOneAndUpdate(
       { _id: chatSessionId, user: this.context.user },
@@ -1348,6 +1365,12 @@ export default class ReactorConversationService
     maxToolIterations: number
   ): Promise<any> {
     this.validateChatSessionId(chatSessionId, "setChatMaxToolIterations");
+
+    this.sessionLog("info", "Setting max tool iterations", {
+      chatSessionId,
+      maxToolIterations,
+      userId: this.context.user?._id,
+    }, chatSessionId);
 
     if (maxToolIterations < 1) {
       throw new Error("maxToolIterations must be at least 1");
@@ -1381,6 +1404,14 @@ export default class ReactorConversationService
   ): Promise<any> {
     this.validateChatSessionId(chatSessionId, "continueToolExecution");
 
+    this.sessionLog("info", "Continuing tool execution", {
+      chatSessionId,
+      personaId,
+      maxToolIterations,
+      streamingMode,
+      userId: this.context.user?._id,
+    }, chatSessionId, personaId);
+
     // Optionally update maxToolIterations before resuming
     if (maxToolIterations != null && maxToolIterations >= 1) {
       await ReactorConversationModel.findOneAndUpdate(
@@ -1411,6 +1442,13 @@ export default class ReactorConversationService
     providerId?: string
   ): Promise<any> {
     this.validateChatSessionId(chatSessionId, "setChatModelProvider");
+
+    this.sessionLog("info", "Setting chat model/provider", {
+      chatSessionId,
+      modelId,
+      providerId,
+      userId: this.context.user?._id,
+    }, chatSessionId);
 
     if (!modelId && !providerId) {
       throw new Error("At least one of modelId or providerId must be provided.");
@@ -1501,12 +1539,11 @@ export default class ReactorConversationService
     chatSessionId: string,
     maxTokens: number
   ): Promise<any> {
-    this.context.debug("Setting chat max tokens", {
+    this.sessionLog("info", "Setting chat max tokens", {
       chatSessionId,
       maxTokens,
       userId: this.context.user?._id,
-      timestamp: new Date().toISOString(),
-    });
+    }, chatSessionId);
 
     // Validate input parameters
     if (!chatSessionId) {
@@ -1616,11 +1653,10 @@ export default class ReactorConversationService
     // Validate chatSessionId
     this.validateChatSessionId(chatSessionId, "getChatTokenCount");
 
-    this.context.debug("Getting chat token count", {
+    this.sessionLog("debug", "Getting chat token count", {
       chatSessionId,
       userId: this.context.user?._id,
-      timestamp: new Date().toISOString(),
-    });
+    }, chatSessionId);
 
     const conversation = await ReactorConversationModel.findOne({
       _id: chatSessionId,
@@ -1716,6 +1752,11 @@ export default class ReactorConversationService
    * @since 1.0.0
    */
   async getConversations(filter: any): Promise<TReactorConversationDocument[]> {
+    this.sessionLog("debug", "Fetching conversations", {
+      filter,
+      userId: this.context.user?._id,
+    });
+
     const { personaId, userId, modelId } = filter || {};
     const query: any = {};
 
@@ -1772,6 +1813,11 @@ export default class ReactorConversationService
     }
   > {
     const { id } = args;
+
+    this.sessionLog("debug", "Retrieving chat session", {
+      chatSessionId: id,
+      userId: this.context.user?._id,
+    }, id);
 
     // Validate that the ID is a valid ObjectId
     if (!ObjectId.isValid(id)) {
@@ -2755,9 +2801,39 @@ export default class ReactorConversationService
             let finalContent = response?.choices?.[0]?.message?.content
               || response?.content
               || '';
+            let finalThinking = response?.thinking || response?.__reasoning || undefined;
+
+            // DB fallback: if the in-memory response has empty content,
+            // read the last assistant message from MongoDB. This handles
+            // edge cases where the content was persisted by processAIResponse
+            // but the response object lost it during normalization.
+            if (!finalContent) {
+              this.sessionLog("warn", `[sendMessage] AUTO final response content is empty — falling back to DB`, {
+                conversationId: effectiveConversationId,
+              }, effectiveConversationId, personaId);
+              try {
+                const conv = await ReactorConversationModel.findById(effectiveConversationId).lean();
+                if (conv?.history?.length) {
+                  for (let hi = conv.history.length - 1; hi >= 0; hi--) {
+                    const entry = conv.history[hi] as any;
+                    if (entry.role === 'assistant' && entry.content) {
+                      finalContent = entry.content;
+                      if (!finalThinking && entry.thinking) finalThinking = entry.thinking;
+                      break;
+                    }
+                  }
+                }
+              } catch (dbErr: any) {
+                this.sessionLog("error", `[sendMessage] DB fallback failed: ${dbErr.message}`, {
+                  conversationId: effectiveConversationId,
+                }, effectiveConversationId, personaId);
+              }
+            }
+
             this.sessionLog("debug", `[sendMessage] AUTO final response content`, {
               contentLength: finalContent.length,
               contentPreview: finalContent ? `${finalContent.substring(0, 100)}...` : '(empty)',
+              hasThinking: !!finalThinking,
             }, effectiveConversationId, personaId);
             try {
               const sseSessionId = this.streamingSessionManager.getSessionId(effectiveConversationId);
@@ -2771,6 +2847,7 @@ export default class ReactorConversationService
                   data: {
                     content: finalContent,
                     finishReason: 'stop',
+                    thinking: finalThinking,
                   },
                 };
                 await this.streamingTransportManager.sendEventToSession(
@@ -2780,6 +2857,10 @@ export default class ReactorConversationService
                 this.sessionLog("info", `[sendMessage] AUTO mode: sent final completion event via SSE`, {
                   conversationId: effectiveConversationId,
                   contentLength: finalContent.length,
+                }, effectiveConversationId, personaId);
+              } else {
+                this.sessionLog("warn", `[sendMessage] AUTO mode: no SSE session found for conversation ${effectiveConversationId}`, {
+                  conversationId: effectiveConversationId,
                 }, effectiveConversationId, personaId);
               }
             } catch (sseError: any) {
@@ -3342,6 +3423,12 @@ export default class ReactorConversationService
   }): Promise<any> {
     const { files, chatSessionId } = args;
 
+    this.sessionLog("info", "Attaching files to chat session", {
+      chatSessionId,
+      filesCount: files?.length || 0,
+      userId: this.context.user?._id,
+    }, chatSessionId);
+
     try {
       // Validate chatSessionId
       this.validateChatSessionId(chatSessionId, "attachFiles");
@@ -3446,6 +3533,15 @@ export default class ReactorConversationService
     options?: { description?: string; referenceOnly?: boolean }
   ): Promise<any> {
     const referenceOnly = options?.referenceOnly === true;
+
+    this.sessionLog("info", "Attaching user file to session", {
+      sessionId,
+      userFileId,
+      path,
+      referenceOnly,
+      userId: this.context.user?._id,
+    }, sessionId);
+
     try {
       this.validateChatSessionId(sessionId, "attachUserFileToSession");
 
@@ -3614,6 +3710,13 @@ export default class ReactorConversationService
     folderPath: string,
     folderName: string
   ): Promise<any> {
+    this.sessionLog("info", "Pinning folder to session", {
+      sessionId,
+      folderPath,
+      folderName,
+      userId: this.context.user?._id,
+    }, sessionId);
+
     try {
       this.validateChatSessionId(sessionId, "pinFolderToSession");
       if (!folderPath) {
@@ -3696,6 +3799,12 @@ export default class ReactorConversationService
   }
 
   async unpinFolderFromSession(sessionId: string, folderPath: string): Promise<any> {
+    this.sessionLog("info", "Unpinning folder from session", {
+      sessionId,
+      folderPath,
+      userId: this.context.user?._id,
+    }, sessionId);
+
     try {
       this.validateChatSessionId(sessionId, "unpinFolderFromSession");
       if (!folderPath) {
@@ -3760,6 +3869,14 @@ export default class ReactorConversationService
     userFileId: string, 
     path: string, 
     deleteFile?: boolean): Promise<any> {
+    this.sessionLog("info", "Detaching user file from session", {
+      sessionId,
+      userFileId,
+      path,
+      deleteFile,
+      userId: this.context.user?._id,
+    }, sessionId);
+
     try {
       // Validate inputs
       this.validateChatSessionId(sessionId, "detachUserFileFromSession");
@@ -3871,16 +3988,27 @@ export default class ReactorConversationService
   async deleteChatSession(args: { id: string }): Promise<boolean> {
     const { id } = args;
 
+    this.sessionLog("info", "Deleting chat session", {
+      chatSessionId: id,
+      userId: this.context.user?._id,
+    }, id);
+
     try {
       const result = await ReactorConversationModel.deleteOne({
         _id: id,
         user: this.context.user,
       }).exec();
+
+      this.sessionLog(result.deletedCount > 0 ? "info" : "warn",
+        result.deletedCount > 0 ? "Chat session deleted" : "Chat session not found for deletion",
+        { chatSessionId: id, deletedCount: result.deletedCount }, id);
+
       return result.deletedCount > 0;
     } catch (error) {
-      this.context.error(`Error deleting chat session: ${error.message}`, {
-        error,
-      });
+      this.sessionLog("error", `Error deleting chat session: ${(error as Error).message}`, {
+        error: (error as Error).message,
+        chatSessionId: id,
+      }, id);
       return false;
     }
   }
@@ -4145,7 +4273,7 @@ export default class ReactorConversationService
       conversation.tools = tools;
 
       // Get the system prompt from the persona.
-      const systemPromptTemplate = persona.prompts["system"];
+      const systemPromptTemplate = persona?.prompts?.["system"];
 
       if (systemPromptTemplate) {
         // The prompt content may already be fully compiled (e.g. from buildSystemPrompt()).
@@ -4157,13 +4285,16 @@ export default class ReactorConversationService
             systemPromptTemplate.content
           )({
             user: {
-              _id: this.context.user._id,
+              _id: this.context?.user?._id?.toString() || "unknown_user",
               name:
-                this.context.user.firstName + " " + this.context.user.lastName,
-              email: this.context.user.email,
-              avatar: this.context.user.avatar,
-              createdAt: this.context.user.createdAt,
+                (this.context?.user?.firstName || "") + " " + (this.context?.user?.lastName || ""),
+              email: this.context?.user?.email || "unknown_email",
+              avatar: this.context?.user?.avatar || "unknown_avatar",
+              createdAt: this.context?.user?.createdAt || new Date(0),
             },
+            session_id: conversation._id?.toString() || "unknown_session",
+            user_id: this.context?.user?._id?.toString() || "unknown_user",
+            persona_id: persona?.id || "unknown_persona",
             persona: persona,
             macros: macros,
             tools: tools,
@@ -4171,6 +4302,11 @@ export default class ReactorConversationService
         } catch {
           // Template compilation failed — content likely contains literal
           // template syntax from code examples. Use as-is.
+          this.sessionLog("warn", "System prompt template interpolation failed, using raw content", {
+            personaId: args.personaId,
+            userId: this.context?.user?._id?.toString() || "unknown_user",
+            systemPromptContent: systemPromptTemplate.content,
+          }, conversation._id?.toString(), args.personaId);
           promptText = systemPromptTemplate.content;
         }
 

@@ -101,6 +101,11 @@ If you are not capable of performing a particular development function, you can 
 - Monitor code complexity and maintainability metrics
 - Provide insights into development efficiency and productivity improvements
 
+## Debugging chat
+You may need to debug / check failures during a chat session.
+See the following resources for details:
+- Chat session logs are stored per user chat in `REACTORY_DATA/profiles/user_id/chats/persona_id/session_id/session.log`
+
 ## User Role: ${userRole}
 ${roleSpecificCapabilities}
 
@@ -108,6 +113,8 @@ Today's date: ${date}
 
 ## Available Resources: 
 ${resourceDescription}
+
+
 
 Use any of your available tools which are appropriate to access the resources.
 
