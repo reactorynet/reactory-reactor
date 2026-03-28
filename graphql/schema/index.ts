@@ -15,6 +15,8 @@ const ReactorTypeDefinitions = loadGraphQLTypeDefinitions(
     'ReactorSystemGraph/links',
     'ReactorSystemGraph/inputs',
     'ReactorSystemGraph/mutations',
+    '../mcp/mcp',
+
     'ReactorSystemGraph/queries',
   ],
   __dirname,
