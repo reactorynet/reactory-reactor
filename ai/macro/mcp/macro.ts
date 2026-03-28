@@ -1,5 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { 
   InitializedNotification,
   InitializedNotificationSchema,
@@ -10,17 +10,13 @@ import Reactory from "@reactorynet/reactory-core";
 import { v4 as uuidv4 } from "uuid";
 import { URL } from "url";
 import path from "path";
-import fs from "fs";
-import yaml from "js-yaml";
-import { McpCliProps } from './types';
-import uuid from "uuid";
-import { McpCliProps } from './types';
 import {
   addConnectionToSession,
   updateConnectionStatus,
   removeConnectionFromSession,
   McpConnectionEntry,
 } from './session-config';
+import { loadClientsFromSession } from './load-clients';
 
 // Command handler functions
 const getCapabilities = async (params: string[], state: ChatState): Promise<unknown> => {
@@ -90,6 +86,10 @@ const getResources = async (params: string[], state: ChatState): Promise<unknown
 const addConnection = async (params: string[], state: ChatState): Promise<unknown> => {
   try {
     const [id, url, transport = 'sse'] = params;
+    
+    if (!state.mcpClients) {
+      state.mcpClients = [];
+    }
     const { mcpClients } = state;
     
     if (!id || !url) {
@@ -113,7 +113,7 @@ const addConnection = async (params: string[], state: ChatState): Promise<unknow
         'x-client-pwd': state.clientSecret || ''
       }
     };
-    const connectionId = uuidv4();
+    
     mcpClients.push({
       id: connectionId,
       client,
@@ -225,7 +225,7 @@ const connectClient = async (params: string[], state: ChatState): Promise<unknow
 
     try {
       // on connect the client sends an initializer message.
-      let transportInstance = new SSEClientTransport(transport.url, {
+      let transportInstance = new StreamableHTTPClientTransport(new URL(transport.url), {
         eventSourceInit: transport?.eventSourceInit,
         requestInit: transport.requestInit,
       });
@@ -235,7 +235,6 @@ const connectClient = async (params: string[], state: ChatState): Promise<unknow
         // Handle the message
         const parsedMessage = JSON.parse(message.data);
       };
-
       client.onclose = () => {
         context.log(`Client ${mcpClientDefinition.id} closed`);
         if (client.transport) {
@@ -437,7 +436,8 @@ export const McpCli: Macro<unknown, McpCliProps> = async (
   state: ChatState
 ): Promise<unknown> => {
   try {
-    const { 
+    loadClientsFromSession(state);
+    const {
       command = 'connections', 
       id, 
       url, 

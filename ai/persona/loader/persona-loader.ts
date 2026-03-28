@@ -2,7 +2,7 @@
 import * as yaml from 'js-yaml';
 import * as fs from 'fs';
 import * as path from 'path';
-
+import logger from "@reactory/server-core/logging";
 // Local interface definitions to avoid import issues
 interface IAIPersona {
   id: string;
@@ -116,6 +116,7 @@ export class PersonaLoader {
       const fileContent = fs.readFileSync(filePath, 'utf8');
       return this.loadFromString(fileContent, options);
     } catch (error) {
+      logger.error(`Failed to load persona from file ${filePath}: ${error}`);
       throw new Error(`Failed to load persona from file ${filePath}: ${error}`);
     }
   }
@@ -128,6 +129,7 @@ export class PersonaLoader {
       const config = yaml.load(yamlContent) as IAIPersonaConfig;
       return this.processConfig(config, options);
     } catch (error) {
+      logger.error(`Failed to parse YAML content: ${error}`);
       throw new Error(`Failed to parse YAML content: ${error}`);
     }
   }
@@ -150,10 +152,11 @@ export class PersonaLoader {
           const persona = this.loadFromFile(filePath, options);
           personas.push(persona);
         } catch (error) {
-          console.warn(`Failed to load persona from ${file}: ${error}`);
+          logger.error(`Failed to load persona from ${file}: ${error}`);
         }
       }
     } catch (error) {
+      logger.error(`Failed to load personas from directory ${dirPath}: ${error}`);
       throw new Error(`Failed to load personas from directory ${dirPath}: ${error}`);
     }
 
@@ -337,17 +340,24 @@ export class PersonaLoader {
   private resolveTools(toolsConfig?: { includes?: string[]; custom?: any[] }): any[] {
     const tools: any[] = [];
 
-    // Add included tools from registry
     if (toolsConfig?.includes) {
       for (const toolName of toolsConfig.includes) {
+        // Primary: look up by tool function name (e.g. "readFile", "shell")
         const tool = this.toolRegistry.get(toolName);
         if (tool) {
           tools.push(tool);
+        } else {
+          // Secondary: check if this name matches a macro, and if so pull all its tools
+          const macro = this.macroRegistry.get(toolName);
+          if (macro && macro.tools) {
+            tools.push(...macro.tools);
+          } else {
+            logger.warn(`PersonaLoader: Tool "${toolName}" not found in registry (${this.toolRegistry.size} tools registered)`);
+          }
         }
       }
     }
 
-    // Add custom tools
     if (toolsConfig?.custom) {
       tools.push(...toolsConfig.custom);
     }
@@ -358,17 +368,31 @@ export class PersonaLoader {
   private resolveMacros(macrosConfig?: { includes?: string[]; custom?: any[] }): any[] {
     const macros: any[] = [];
 
-    // Add included macros from registry
     if (macrosConfig?.includes) {
       for (const macroName of macrosConfig.includes) {
+        // Primary: look up by macro component name (e.g. "readFile", "shell")
         const macro = this.macroRegistry.get(macroName);
         if (macro) {
           macros.push(macro);
+        } else {
+          // Secondary: find macros that contain a tool with this function name
+          let found = false;
+          for (const [, registeredMacro] of this.macroRegistry) {
+            if (registeredMacro.tools?.some((t: any) =>
+              t.type === "function" && t.function?.name === macroName
+            )) {
+              macros.push(registeredMacro);
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            logger.warn(`PersonaLoader: Macro "${macroName}" not found in registry (${this.macroRegistry.size} macros registered)`);
+          }
         }
       }
     }
 
-    // Add custom macros
     if (macrosConfig?.custom) {
       macros.push(...macrosConfig.custom);
     }

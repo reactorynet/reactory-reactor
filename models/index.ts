@@ -39,7 +39,6 @@ export default [
   InfrastructurePersonaComponentRegistryEntry,
   MCPRegistryModelComponentRegistryEntry,
   MCPInstalledConnectorModelComponentRegistryEntry,
-
   SecurityPersonaComponentRegistryEntry,
   WorkflowWillPersonaComponentRegistryEntry,
 ];

@@ -681,10 +681,28 @@ extend type Query {
 
 extend type Mutation {
   """
+  Rate a specific message in a chat session.
+  """
+  ReactorRateMessage(
+    chatSessionId: String!
+    messageId: String!
+    rating: String!
+  ): ReactorChatState
+
+  """
   Creates a new chat session with a specified persona and provides
   the initial message to start the conversation using the persona's default greeting.
   """
   ReactorStartChatSession(initSession: ReactorInitSession!): ReactorInitChatResponse
+
+
+  """
+  Patch the system prompt for a specific chat session.
+  """
+  ReactorSystemPromptPatch(
+    chatSessionId: String!
+    systemPrompt: String!
+  ): ReactorChatState
 
   """
   Set the tool approval mode for a chat session.

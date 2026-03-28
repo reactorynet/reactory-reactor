@@ -43,6 +43,7 @@ class ReactorMacroService implements Reactory.Service.IReactoryService {
     (this.context.modules as ModuleWithReactor[]).forEach(module => { 
       if (Array.isArray(module.reactor?.macros)) {
         module.reactor?.macros.forEach((macro: MacroComponentDefinition<unknown>) => {
+          this.context.log(`Registering macro ${macro.name} from module ${module.name}`, { macro, module: module.name }, "ReactorMacroService.collectMacros");
           if (macro && macro.name && macro.component) {
             this.addMacro(macro);
           } else {

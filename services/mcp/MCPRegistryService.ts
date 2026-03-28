@@ -9,7 +9,17 @@ import {
 import MCPRegistryModel from '../../models/MCPRegistry';
 import MCPInstalledConnectorModel from '../../models/MCPInstalledConnector';
 import CommunityRegistryAdapter from './adapters/CommunityRegistryAdapter';
+import { service } from '@reactory/server-core/application/decorators';
 
+
+@service({
+  id: "reactor.MCPRegistryService@1.0.0",
+  nameSpace: "reactor",
+  name: "MCPRegistryService",
+  version: "1.0.0",
+  description: "Manages MCP Registries and Connectors",
+  serviceType: "mcp",
+})
 export default class MCPRegistryService {
   name: string = 'MCPRegistryService';
   nameSpace: string = 'reactory';

@@ -7,6 +7,7 @@ import {
   IAIPersonaProviderService,
 } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { personaLoader } from "@reactory/server-modules/reactory-reactor/ai/persona/loader/persona-loader";
+import { MacroRegistry } from "@reactory/server-modules/reactory-reactor/ai/macro";
 
 export type PersonaProviderProps = {};
 export type PersonaProviderContext = Reactory.Server.IReactoryContext & {};
@@ -22,7 +23,7 @@ export type PersonaProviderContext = Reactory.Server.IReactoryContext & {};
     { id: "core.ReactoryModelRegistry@1.0.0", alias: "modelRegistry" },    
   ],
 })
-export default class AIPersonaProvider
+class AIPersonaProvider
   implements Reactory.Service.IReactoryDefaultService, IAIPersonaProviderService
 {
 
@@ -96,6 +97,31 @@ export default class AIPersonaProvider
     const modules = this.context.modules || [];
     let totalLoaded = 0;
 
+    // Populate the PersonaLoader's tool and macro registries from the global MacroRegistry.
+    // Without this, YAML-based personas that reference tools/macros by name via
+    // `tools.includes` and `macros.includes` would resolve to empty arrays because
+    // the PersonaLoader's internal registries would be empty.
+    let toolCount = 0;
+    let macroCount = 0;
+    for (const macro of MacroRegistry) {
+      // Register the macro by its component name (e.g. "FsMacroRegistry", "shell")
+      personaLoader.registerMacro(macro.name, macro);
+      macroCount++;
+
+      // Register each tool by its function name (e.g. "readFile", "writeFile", "http")
+      if (macro.tools) {
+        for (const tool of macro.tools) {
+          if (tool.type === "function" && tool.function?.name) {
+            personaLoader.registerTool(tool.function.name, tool);
+            toolCount++;
+          }
+        }
+      }
+    }
+    log(`AIPersonaProvider: Registered ${toolCount} tools and ${macroCount} macros in PersonaLoader registry`, {}, "debug", "reactor.AIPersonaProvider");
+
+    log(`AIPersonaProvider starting up — scanning ${modules.length} module(s) for AI personas...`, {}, "info", "reactor.AIPersonaProvider");
+
     for (const mod of modules) {
       if (!mod.id) continue;
 
@@ -105,7 +131,7 @@ export default class AIPersonaProvider
       const personaDir = path.join(modulePath, "ai", "persona");
       if (!fs.existsSync(personaDir)) continue;
 
-
+      log(`Found persona directory for module ${mod.id}: ${personaDir}`, {}, "debug", "reactor.AIPersonaProvider");
 
       // Check in subdirectories of personaDir for any additional persona YAML files
       if (fs.existsSync(personaDir)) {
@@ -219,3 +245,6 @@ export default class AIPersonaProvider
     throw new Error("Method not implemented.");
   }
 }
+
+
+export default AIPersonaProvider;
