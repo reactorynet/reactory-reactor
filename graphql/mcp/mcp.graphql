@@ -29,6 +29,37 @@ type MCPRegistrySearchResult {
   requiredEnvVars: [String]
 }
 
+input MCPEnvVarInput {
+  key: String!
+  value: String!
+}
+
+input InstallMCPConnectorInput {
+  registryType: String!
+  connectorId: String!
+  organizationId: String!
+  env: [MCPEnvVarInput]
+}
+
+type MCPInstalledConnectorConfig {
+  command: String
+  args: [String]
+  url: String
+}
+
+type MCPInstalledConnector {
+  id: String!
+  name: String!
+  description: String
+  transport: String!
+  config: MCPInstalledConnectorConfig
+  status: String!
+  version: String
+  organizationId: String
+  createdAt: String
+  updatedAt: String
+}
+
 extend type Query {
   """
   List all configured MCP registries
@@ -49,4 +80,11 @@ extend type Query {
   Get detailed information about a specific connector from a registry
   """
   mcpRegistryConnectorDetails(connectorId: String!, type: String!): Any
+}
+
+extend type Mutation {
+  """
+  Install an MCP connector from a registry into the Reactory environment
+  """
+  installMCPConnector(input: InstallMCPConnectorInput!): MCPInstalledConnector
 }

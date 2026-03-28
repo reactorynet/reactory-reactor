@@ -18,5 +18,22 @@ export default {
       const service = context.reactory.getService('reactory.MCPRegistryService@1.0.0');
       return service.getDetails(connectorId, type as MCPRegistryType);
     }
+  },
+  Mutation: {
+    installMCPConnector: async (parent: any, { input }: any, context: any) => {
+      const service = context.reactory.getService('reactory.MCPRegistryService@1.0.0');
+      const envMap: Record<string, string> = {};
+      if (input.env) {
+        input.env.forEach((e: any) => {
+          envMap[e.key] = e.value;
+        });
+      }
+      return service.installConnector(
+        input.registryType as MCPRegistryType,
+        input.connectorId,
+        input.organizationId,
+        envMap
+      );
+    }
   }
 };
