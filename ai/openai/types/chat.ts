@@ -274,6 +274,12 @@ export type ChatState = {
   truncatedHistory?: ReactorConversationHistory
 
   files?: Reactory.Models.IReactoryFile[]
+
+  /**
+   * Resolved path to the session folder on disk.
+   * Populated from the conversation document's virtual property.
+   */
+  sessionFolder?: string
 }
   
 export interface QuestionHandlerResponse {

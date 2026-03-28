@@ -41,6 +41,7 @@ import { StreamingSessionManager } from "./StreamingSessionManager";
 import { StreamingTransportManager } from "./StreamingTransportManager";
 import { StreamingEventFactory } from "./streaming/StreamingEventFactory";
 import { ChatSessionLogger } from "./ChatSessionLogger";
+import { loadSessionMcpConfig } from "../../ai/macro/mcp/session-config";
 /**
  * Enhanced error response interface with correlation tracking
  */
@@ -4086,6 +4087,30 @@ export default class ReactorConversationService
       "loadChatSession",
       "loaded_session"
     );
+
+    // Hydrate persisted MCP connections from session mcp.yaml
+    const sessionFolder = (chatSession as any).sessionFolder;
+    if (sessionFolder) {
+      try {
+        const mcpConfig = loadSessionMcpConfig(sessionFolder);
+        if (mcpConfig.connections.length > 0) {
+          const hydratedSessions = mcpConfig.connections.map((conn) => ({
+            ...conn,
+            status: 'inactive' as const,
+          }));
+          chatSession.mcpSessions = hydratedSessions;
+          this.sessionLog("info", "Hydrated MCP sessions from mcp.yaml", {
+            sessionFolder,
+            connectionCount: hydratedSessions.length,
+          }, chatSession._id?.toString(), chatSession.personaId);
+        }
+      } catch (err) {
+        this.sessionLog("warn", "Failed to hydrate MCP sessions from mcp.yaml", {
+          sessionFolder,
+          error: err?.message || err,
+        }, chatSession._id?.toString(), chatSession.personaId);
+      }
+    }
 
     this.sessionLog("info", "Successfully loaded chat session", {
       chatSessionId: chatSession._id?.toString(),

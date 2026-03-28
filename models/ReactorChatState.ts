@@ -2,6 +2,7 @@ import mongoose, { Schema } from 'mongoose';
 import Reactory from '@reactorynet/reactory-core';
 import { ObjectId } from 'mongodb';
 import OpenAI from "openai"
+import path from 'path';
 import { MetaSchema } from '@reactory/server-modules/reactory-core/models/shared';
 import { id } from 'schema/reflection';
 import { MacroComponentDefinition, MacroToolDefinition, ToolApprovalMode } from '../ai/openai/types/chat';
@@ -126,6 +127,8 @@ export interface ReactorConversationDocument {
   pinnedFolders?: { name: string; path: string }[]
   // Optional reference to a parent session that provided context for this session
   parentSessionId?: string
+  // Virtual: resolved session folder path (not persisted to DB)
+  readonly sessionFolder?: string
 }
 
 
@@ -254,6 +257,27 @@ const ReactorConversationSchema = new Schema({
     index: true,
   },
 });
+
+ReactorConversationSchema.virtual('sessionFolder').get(function () {
+  const dataRoot = process.env.REACTORY_DATA || process.env.APP_DATA_ROOT;
+  if (!dataRoot) return undefined;
+
+  const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, '_');
+
+  const rawUser = this.user;
+  const userId = sanitize(
+    (rawUser?._id ?? rawUser)?.toString() || ''
+  );
+  const personaId = sanitize(this.personaId || '');
+  const conversationId = sanitize(this._id?.toString() || '');
+
+  if (!userId || !personaId || !conversationId) return undefined;
+
+  return path.join(dataRoot, 'profiles', userId, 'chats', personaId, conversationId);
+});
+
+ReactorConversationSchema.set('toJSON', { virtuals: true });
+ReactorConversationSchema.set('toObject', { virtuals: true });
 
 const ReactorConversationModelName = 'ReactorConversation';
 const ReactorConversationModel = mongoose.model<ReactorConversationDocument>(ReactorConversationModelName, ReactorConversationSchema, 'reactor_conversations');
