@@ -16,16 +16,19 @@ import AIPersonaProvider from "../AIPersonaProvider";
   version: "1.0.0",
   description: "Service for managing and executing macros",
   serviceType: "macro",
+  lifeCycle: "singleton"
 })
 class ReactorMacroService implements Reactory.Service.IReactoryService {
   private macroRegistry: MacroComponentDefinition<unknown>[];
   private context: Reactory.Server.IReactoryContext;
+  
   constructor(props, context) {
-    // Clone the default registry to allow runtime extension
+    // Clone the default registry to allow runtime extension    
     this.macroRegistry = [];
     this.context = context;
     this.collectMacros();
   }
+
   description?: string = "Service for managing and executing macros";
   tags?: string[];
   toString?(includeVersion?: boolean): string {
@@ -42,8 +45,8 @@ class ReactorMacroService implements Reactory.Service.IReactoryService {
     type ModuleWithReactor = typeof this.context.modules[number] & { reactor?: { macros?: MacroComponentDefinition<unknown>[] } };
     (this.context.modules as ModuleWithReactor[]).forEach(module => { 
       if (Array.isArray(module.reactor?.macros)) {
+        this.context.log(`Registering ${module.reactor?.macros?.length} macros & ${module.reactor?.tools?.length || 0} tools from module ${module.name}`, null , "debug", "ReactorMacroService.collectMacros");
         module.reactor?.macros.forEach((macro: MacroComponentDefinition<unknown>) => {
-          this.context.log(`Registering macro ${macro.name} from module ${module.name}`, { macro, module: module.name }, "ReactorMacroService.collectMacros");
           if (macro && macro.name && macro.component) {
             this.addMacro(macro);
           } else {
@@ -70,6 +73,15 @@ class ReactorMacroService implements Reactory.Service.IReactoryService {
     });
 
     return filtered;
+  }
+
+  /**
+   * Returns all macros in the registry without role-based filtering.
+   * Used by internal services (e.g. PersonaLoaderService) that need
+   * the full registry to resolve persona tool/macro references at startup.
+   */
+  listAllMacros(): MacroComponentDefinition<unknown>[] {
+    return [...this.macroRegistry];
   }
 
   async listMacrosForPersona(personaId: string): Promise<MacroComponentDefinition<unknown>[]> {
