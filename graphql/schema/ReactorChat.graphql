@@ -380,6 +380,11 @@ type ReactorChatState {
   """
   parentSessionId: String
   """
+  Child conversations spawned from this session (sub-agent delegations).
+  Populated via the parentSessionId relationship.
+  """
+  chats: [ReactorChatState]
+  """
   The currently active model ID for this session. When set, overrides the persona default.
   """
   modelId: String

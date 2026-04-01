@@ -2313,6 +2313,8 @@ export default class ReactorConversationService
     providerId?: string;
     continueAfterTools?: boolean;
     images?: string[];
+    toolApprovalMode?: ToolApprovalMode;
+    parentSessionId?: string;
   }): Promise<any> {
     const {
       personaId,
@@ -2328,6 +2330,8 @@ export default class ReactorConversationService
       providerId: providerIdOverride,
       continueAfterTools = false,
       images,
+      toolApprovalMode: toolApprovalModeOverride,
+      parentSessionId,
     } = args;
     const { user } = this.context;
 
@@ -2551,7 +2555,8 @@ export default class ReactorConversationService
             tools: persona.tools || [],
             started: new Date(),
             sseSessionId: sessionId,
-            toolApprovalMode: ToolApprovalMode.PROMPT,
+            toolApprovalMode: toolApprovalModeOverride || ToolApprovalMode.PROMPT,
+            parentSessionId: parentSessionId || null,
           });
 
           this.sessionLog("debug", "Saving new conversation in sendMessage", {

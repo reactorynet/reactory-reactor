@@ -17,7 +17,7 @@ import {
 import ApiError from "exceptions";
 import Reactory from "@reactorynet/reactory-core";
 import logger from "@reactory/server-core/logging";
-import { ReactorConversation, ReactorConversationDocument } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
+import ReactorConversationModel, { ReactorConversation, ReactorConversationDocument } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import { PromptMergeStrategy, StreamingMode } from "modules/reactory-reactor/services/reactor/types/streaming.types";
 import ReactorConversationService from "@reactory/server-modules/reactory-reactor/services/reactor/ReactorConversationService";
 
@@ -595,6 +595,23 @@ class ReactorChatResolver {
     context: Reactory.Server.IReactoryContext
   ) {
     return chatState?.pinnedFolders || [];
+  }
+
+  @property("ReactorChatState", "chats")
+  async ReactorChatStateChats(
+    chatState: ChatState,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!chatState?.id) return [];
+    const children = await ReactorConversationModel.find({
+      parentSessionId: chatState.id.toString(),
+    }).lean().exec();
+    return children.map(c => ({
+      __typename: "ReactorChatState" as const,
+      ...c,
+      id: c._id?.toString(),
+    }));
   }
 
   @mutation("ReactorSendMessage")

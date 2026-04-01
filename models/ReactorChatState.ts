@@ -129,6 +129,8 @@ export interface ReactorConversationDocument {
   parentSessionId?: string
   // Virtual: resolved session folder path (not persisted to DB)
   readonly sessionFolder?: string
+  // Virtual: child conversations spawned from this session (sub-agent delegations)
+  readonly chats?: ReactorConversationDocument[]
 }
 
 
@@ -274,6 +276,13 @@ ReactorConversationSchema.virtual('sessionFolder').get(function () {
   if (!userId || !personaId || !conversationId) return undefined;
 
   return path.join(dataRoot, 'profiles', userId, 'chats', personaId, conversationId);
+});
+
+ReactorConversationSchema.virtual('chats', {
+  ref: 'ReactorConversation',
+  localField: '_id',
+  foreignField: 'parentSessionId',
+  justOne: false,
 });
 
 ReactorConversationSchema.set('toJSON', { virtuals: true });
