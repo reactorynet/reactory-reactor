@@ -6,7 +6,7 @@ import {
   IAIPersona,
   IAIPersonaProviderService,
 } from "@reactory/server-modules/reactory-reactor/types/service.types";
-import { personaLoader } from "@reactory/server-modules/reactory-reactor/ai/persona/loader/persona-loader";
+import PersonaLoaderService from "@reactory/server-modules/reactory-reactor/ai/persona/loader/persona-loader";
 
 export type PersonaProviderProps = {};
 export type PersonaProviderContext = Reactory.Server.IReactoryContext & {};
@@ -19,10 +19,11 @@ export type PersonaProviderContext = Reactory.Server.IReactoryContext & {};
   description: "Service for managing AI Personas",
   serviceType: "ai",
   dependencies: [
-    { id: "core.ReactoryModelRegistry@1.0.0", alias: "modelRegistry" },    
+    { id: "core.ReactoryModelRegistry@1.0.0", alias: "modelRegistry" },
+    { id: "reactor.PersonaLoaderService@1.0.0", alias: "personaLoader" },
   ],
 })
-export default class AIPersonaProvider
+class AIPersonaProvider
   implements Reactory.Service.IReactoryDefaultService, IAIPersonaProviderService
 {
 
@@ -37,11 +38,14 @@ export default class AIPersonaProvider
   //@ts-ignore
   private modelRegistry: Reactory.Service.TReactoryModelRegistryService;
 
+  //@ts-ignore - injected via dependency autowiring
+  private personaLoader: PersonaLoaderService;
+
   constructor(
     props: Reactory.Service.IReactoryServiceProps,
     context: PersonaProviderContext
   ) {
-    this.context = context;    
+    this.context = context;
   }
 
   toString?(includeVersion?: boolean): string {
@@ -85,16 +89,26 @@ export default class AIPersonaProvider
 
   private resolveModulePath(moduleId: string): string | null {
     try {
-      return path.join(process.env.REACTORY_SERVER as string, process.env.NODE_ENV === "production" ? "app" : "src", "modules", moduleId);      
+      return path.join(process.env.REACTORY_SERVER as string, process.env.NODE_ENV === "production" ? "app" : "src", "modules", moduleId);
     } catch {
       return null;
     }
+  }
+
+  setModelRegistry(modelRegistry: Reactory.Service.TReactoryModelRegistryService): void {
+    this.modelRegistry = modelRegistry;
+  }
+
+  setPersonaLoader(personaLoader: PersonaLoaderService): void {
+    this.personaLoader = personaLoader;
   }
 
   async onStartup(): Promise<void> {
     const { log } = this.context;
     const modules = this.context.modules || [];
     let totalLoaded = 0;
+
+    log(`AIPersonaProvider starting up — scanning ${modules.length} module(s) for AI personas...`, {}, "info", "reactor.AIPersonaProvider");
 
     for (const mod of modules) {
       if (!mod.id) continue;
@@ -105,54 +119,51 @@ export default class AIPersonaProvider
       const personaDir = path.join(modulePath, "ai", "persona");
       if (!fs.existsSync(personaDir)) continue;
 
+      log(`Found persona directory for module ${mod.id}: ${personaDir}`, {}, "debug", "reactor.AIPersonaProvider");
 
-
-      // Check in subdirectories of personaDir for any additional persona YAML files
-      if (fs.existsSync(personaDir)) {
-        const subdirs = fs.readdirSync(personaDir, { withFileTypes: true }).filter((d) => d.isDirectory());
-        for (const subdir of subdirs) {
-          const subdirPath = path.join(personaDir, subdir.name);
-          try {
-            const personas = personaLoader.loadFromDirectory(subdirPath, { targetModule: mod }) as unknown as IAIPersona[];
-            for (const persona of personas) {
-              try {
-                this.registerPersona(persona, mod);
-                totalLoaded++;
-                log(
-                  `Registered AI persona "${persona.name}" (${persona.id}) from module ${mod.id} (subdirectory ${subdir.name})`,
-                  {},
-                  "debug",
-                  "reactor.AIPersonaProvider",
-                );
-              } catch (regErr) {
-                log(
-                  `Failed to register persona "${persona.id}" from module ${mod.id} (subdirectory ${subdir.name}): ${regErr}`,
-                  { error: regErr },
-                  "error",
-                  "reactor.AIPersonaProvider",
-                );
-              }
+      const subdirs = fs.readdirSync(personaDir, { withFileTypes: true }).filter((d) => d.isDirectory());
+      for (const subdir of subdirs) {
+        const subdirPath = path.join(personaDir, subdir.name);
+        try {
+          const personas = this.personaLoader.loadFromDirectory(subdirPath) as unknown as IAIPersona[];
+          for (const persona of personas) {
+            try {
+              this.registerPersona(persona, mod);
+              totalLoaded++;
+              log(
+                `Registered AI persona "${persona.name}" (${persona.id}) from module ${mod.id} (subdirectory ${subdir.name})`,
+                {},
+                "debug",
+                "reactor.AIPersonaProvider",
+              );
+            } catch (regErr) {
+              log(
+                `Failed to register persona "${persona.id}" from module ${mod.id} (subdirectory ${subdir.name}): ${regErr}`,
+                { error: regErr },
+                "error",
+                "reactor.AIPersonaProvider",
+              );
             }
-
-            // check if the subdir has an avatar.png and if so, copy it to the public/avatars directory with the name {persona.id}.png
-            const avatarPath = path.join(subdirPath, "avatar.png");
-            if (fs.existsSync(avatarPath)) {
-              const personaName = subdirPath.split(path.sep).pop(); // get the name of the subdir as the persona name
-              const publicAvatarDir = path.join(process.env.REACTORY_DATA as string, "profiles", "reactor", "personas", personaName);
-              if (!fs.existsSync(publicAvatarDir)) {
-                fs.mkdirSync(publicAvatarDir, { recursive: true });
-              }
-              const targetAvatarPath = path.join(publicAvatarDir, "avatar.png");
-              fs.copyFileSync(avatarPath, targetAvatarPath);
-            }
-          } catch (subdirErr) {
-            log(
-              `Failed to load personas from ${subdirPath}: ${subdirErr}`,
-              { error: subdirErr },
-              "warning",
-              "reactor.AIPersonaProvider",
-            );
           }
+
+          // copy avatar.png to public storage if present
+          const avatarPath = path.join(subdirPath, "avatar.png");
+          if (fs.existsSync(avatarPath)) {
+            const personaName = subdirPath.split(path.sep).pop();
+            const publicAvatarDir = path.join(process.env.REACTORY_DATA as string, "profiles", "reactor", "personas", personaName);
+            if (!fs.existsSync(publicAvatarDir)) {
+              fs.mkdirSync(publicAvatarDir, { recursive: true });
+            }
+            const targetAvatarPath = path.join(publicAvatarDir, "avatar.png");
+            fs.copyFileSync(avatarPath, targetAvatarPath);
+          }
+        } catch (subdirErr) {
+          log(
+            `Failed to load personas from ${subdirPath}: ${subdirErr}`,
+            { error: subdirErr },
+            "warning",
+            "reactor.AIPersonaProvider",
+          );
         }
       }
     }
@@ -166,7 +177,6 @@ export default class AIPersonaProvider
   }
 
   async listPersonas(): Promise<IAIPersona[]> {
-    // collect all 
     let personas: IAIPersona[] = await this.modelRegistry.getModels<IAIPersona>({
       name: "*aipersona",
     });
@@ -183,17 +193,13 @@ export default class AIPersonaProvider
     return persona;
   }
 
-  setModelRegistry(modelRegistry: Reactory.Service.TReactoryModelRegistryService): void { 
-    this.modelRegistry = modelRegistry;
-  }
-
   async loadPersonaYaml(
     yamlContentOrFilePath: string,
     options: { fromFile?: boolean, targetModule: Reactory.Server.IReactoryModule },
   ): Promise<IAIPersona> {
     const persona = (options?.fromFile
-      ? personaLoader.loadFromFile(yamlContentOrFilePath)
-      : personaLoader.loadFromString(yamlContentOrFilePath)) as unknown as IAIPersona;
+      ? this.personaLoader.loadFromFile(yamlContentOrFilePath)
+      : this.personaLoader.loadFromString(yamlContentOrFilePath)) as unknown as IAIPersona;
 
     this.registerPersona(persona, options?.targetModule);
 
@@ -219,3 +225,6 @@ export default class AIPersonaProvider
     throw new Error("Method not implemented.");
   }
 }
+
+
+export default AIPersonaProvider;

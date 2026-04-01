@@ -1,0 +1,90 @@
+type MCPRegistryCredentials {
+  type: String
+  token: String
+  username: String
+}
+
+type MCPRegistry {
+  id: String!
+  name: String!
+  type: String!
+  url: String!
+  description: String
+  credentials: MCPRegistryCredentials
+  enabled: Boolean
+  createdAt: String
+  updatedAt: String
+}
+
+type MCPRegistrySearchResult {
+  id: String!
+  name: String!
+  description: String
+  version: String
+  author: String
+  transport: String!
+  registryType: String!
+  githubUrl: String
+  npmPackage: String
+  requiredEnvVars: [String]
+}
+
+input MCPEnvVarInput {
+  key: String!
+  value: String!
+}
+
+input InstallMCPConnectorInput {
+  registryType: String!
+  connectorId: String!
+  organizationId: String!
+  env: [MCPEnvVarInput]
+}
+
+type MCPInstalledConnectorConfig {
+  command: String
+  args: [String]
+  url: String
+}
+
+type MCPInstalledConnector {
+  id: String!
+  name: String!
+  description: String
+  transport: String!
+  config: MCPInstalledConnectorConfig
+  status: String!
+  version: String
+  organizationId: String
+  createdAt: String
+  updatedAt: String
+}
+
+extend type Query {
+  """
+  List all configured MCP registries
+  """
+  mcpRegistries: [MCPRegistry]
+
+  """
+  Search for MCP connectors across registered registries
+  """
+  mcpRegistrySearch(query: String!): [MCPRegistrySearchResult]
+
+  """
+  List all available connectors in a specific registry (or all if type is omitted)
+  """
+  mcpRegistryList(type: String): [MCPRegistrySearchResult]
+  
+  """
+  Get detailed information about a specific connector from a registry
+  """
+  mcpRegistryConnectorDetails(connectorId: String!, type: String!): Any
+}
+
+extend type Mutation {
+  """
+  Install an MCP connector from a registry into the Reactory environment
+  """
+  installMCPConnector(input: InstallMCPConnectorInput!): MCPInstalledConnector
+}

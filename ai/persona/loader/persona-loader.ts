@@ -2,38 +2,19 @@
 import * as yaml from 'js-yaml';
 import * as fs from 'fs';
 import * as path from 'path';
+import Reactory from '@reactorynet/reactory-core';
+import { service } from '@reactory/server-core/application/decorators/service';
+import {
+  IAIPersona,
+  IAIPersonaResource,
+} from '@reactory/server-modules/reactory-reactor/types/service.types';
+import {
+  MacroComponentDefinition,
+  MacroToolDefinition,
+} from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
+import ReactorMacroService from '@reactory/server-modules/reactory-reactor/services/reactor/providers/ReactorMacroService';
 
-// Local interface definitions to avoid import issues
-interface IAIPersona {
-  id: string;
-  name: string;
-  description?: string;
-  persona: string;
-  features: string;
-  modelId?: string;
-  providerId?: string;
-  defaultGreeting?: string;
-  config?: {
-    apiKey?: string;
-    apiBaseURL?: string;
-    project?: string;
-  };
-  tools?: any[];
-  macros?: any[];
-  resources?: IAIPersonaResource[];
-  prompts?: any;
-}
-
-interface IAIPersonaResource {
-  id: string;
-  name: string;
-  description?: string;
-  type: string;
-  url?: string;
-  created: Date;
-}
-
-interface IAIPersonaConfig {
+export interface IAIPersonaConfig {
   id: string;
   name: string;
   description?: string;
@@ -88,25 +69,99 @@ interface IAIPersonaConfig {
   environment?: Record<string, string>;
 }
 
-interface PersonaLoaderOptions {
+export interface PersonaLoaderOptions {
   validateOnLoad?: boolean;
   processEnvironmentVars?: boolean;
   mergeMode?: 'merge' | 'replace' | 'create';
 }
 
-export class PersonaLoader {
-  private static instance: PersonaLoader;
-  private macroRegistry: Map<string, any> = new Map();
-  private toolRegistry: Map<string, any> = new Map();
+@service({
+  id: 'reactor.PersonaLoaderService@1.0.0',
+  nameSpace: 'reactor',
+  name: 'PersonaLoaderService',
+  version: '1.0.0',
+  description: 'Service for loading and resolving AI persona configurations from YAML files',
+  serviceType: 'ai',
+  lifeCycle: 'singleton',
+  dependencies: [
+    { id: 'reactor.ReactorMacroService@1.0.0', alias: 'macroService' },
+  ],
+})
+class PersonaLoaderService implements Reactory.Service.IReactoryService {
 
-  private constructor() {}
+  nameSpace: string = 'reactor';
+  name: string = 'PersonaLoaderService';
+  version: string = '1.0.0';
+  description?: string = 'Service for loading and resolving AI persona configurations from YAML files';
 
-  static getInstance(): PersonaLoader {
-    if (!PersonaLoader.instance) {
-      PersonaLoader.instance = new PersonaLoader();
-    }
-    return PersonaLoader.instance;
+  context: Reactory.Server.IReactoryContext;
+
+  //@ts-ignore - injected via dependency autowiring
+  private macroService: ReactorMacroService;
+
+  private macroRegistry: Map<string, MacroComponentDefinition<unknown>> = new Map();
+  private toolRegistry: Map<string, MacroToolDefinition> = new Map();
+  private registriesPopulated: boolean = false;
+
+  constructor(props: Reactory.Service.IReactoryServiceProps, context: Reactory.Server.IReactoryContext) {
+    this.context = context;
   }
+
+  toString?(includeVersion?: boolean): string {
+    return `${this.nameSpace}.${this.name}${includeVersion ? `@${this.version}` : ''}`;
+  }
+
+  getExecutionContext(): Reactory.Server.IReactoryContext {
+    return this.context;
+  }
+
+  setExecutionContext(context: Reactory.Server.IReactoryContext): void {
+    this.context = context;
+  }
+
+  setMacroService(macroService: ReactorMacroService): void {
+    this.macroService = macroService;
+  }
+
+  async onStartup(): Promise<void> {
+    this.populateRegistries();
+    this.context.log(
+      `PersonaLoaderService ${this.context.colors.green('STARTUP OKAY')} — ` +
+      `${this.toolRegistry.size} tools, ${this.macroRegistry.size} macros registered`,
+      null, 'info', 'reactor.PersonaLoaderService'
+    );
+  }
+
+  /**
+   * Populate the internal tool and macro registries from the ReactorMacroService.
+   * Called on startup and can be re-invoked if macros are added at runtime.
+   */
+  populateRegistries(): void {
+    if (!this.macroService) {
+      this.context.warn(
+        'PersonaLoaderService: macroService dependency not available, registries will be empty',
+        null, 'reactor.PersonaLoaderService'
+      );
+      return;
+    }
+
+    const allMacros = this.macroService.listAllMacros();
+    for (const macro of allMacros) {
+      this.macroRegistry.set(macro.name, macro);
+
+      if (macro.tools) {
+        for (const tool of macro.tools) {
+          if (tool.type === 'function' && tool.function?.name) {
+            this.toolRegistry.set(tool.function.name, tool);
+          }
+        }
+      }
+    }
+
+    this.registriesPopulated = true;
+  }
+
+  // ─── YAML Loading ────────────────────────────────────────────────────
 
   /**
    * Load a persona configuration from a YAML file
@@ -116,6 +171,7 @@ export class PersonaLoader {
       const fileContent = fs.readFileSync(filePath, 'utf8');
       return this.loadFromString(fileContent, options);
     } catch (error) {
+      this.context.error(`Failed to load persona from file ${filePath}: ${error}`, null, 'reactor.PersonaLoaderService');
       throw new Error(`Failed to load persona from file ${filePath}: ${error}`);
     }
   }
@@ -128,19 +184,21 @@ export class PersonaLoader {
       const config = yaml.load(yamlContent) as IAIPersonaConfig;
       return this.processConfig(config, options);
     } catch (error) {
+      this.context.error(`Failed to parse YAML content: ${error}`, null, 'reactor.PersonaLoaderService');
       throw new Error(`Failed to parse YAML content: ${error}`);
     }
   }
 
   /**
-   * Load multiple personas from a directory
+   * Load multiple personas from a directory.
+   * Scans for files ending in `agent.yaml` or `agent.yml`.
    */
   loadFromDirectory(dirPath: string, options: PersonaLoaderOptions = {}): IAIPersona[] {
     const personas: IAIPersona[] = [];
-    
+
     try {
       const files = fs.readdirSync(dirPath);
-      const yamlFiles = files.filter(file => 
+      const yamlFiles = files.filter(file =>
         file.endsWith('agent.yaml') || file.endsWith('agent.yml')
       );
 
@@ -150,30 +208,33 @@ export class PersonaLoader {
           const persona = this.loadFromFile(filePath, options);
           personas.push(persona);
         } catch (error) {
-          console.warn(`Failed to load persona from ${file}: ${error}`);
+          this.context.error(`Failed to load persona from ${file}: ${error}`, null, 'reactor.PersonaLoaderService');
         }
       }
     } catch (error) {
+      this.context.error(`Failed to load personas from directory ${dirPath}: ${error}`, null, 'reactor.PersonaLoaderService');
       throw new Error(`Failed to load personas from directory ${dirPath}: ${error}`);
     }
 
     return personas;
   }
 
+  // ─── Merge & Save ────────────────────────────────────────────────────
+
   /**
    * Merge a YAML configuration with an existing IAIPersona
    */
   mergeWithExisting(
-    existingPersona: IAIPersona, 
-    yamlConfig: string | IAIPersonaConfig, 
+    existingPersona: IAIPersona,
+    yamlConfig: string | IAIPersonaConfig,
     options: PersonaLoaderOptions = {}
   ): IAIPersona {
-    const config = typeof yamlConfig === 'string' 
-      ? yaml.load(yamlConfig) as IAIPersonaConfig 
+    const config = typeof yamlConfig === 'string'
+      ? yaml.load(yamlConfig) as IAIPersonaConfig
       : yamlConfig;
 
     const mergeMode = config.merge?.mode || options.mergeMode || 'merge';
-    
+
     switch (mergeMode) {
       case 'replace':
         return this.processConfig(config, options);
@@ -202,6 +263,8 @@ export class PersonaLoader {
     }
   }
 
+  // ─── Validation ──────────────────────────────────────────────────────
+
   /**
    * Validate a persona configuration
    */
@@ -209,14 +272,12 @@ export class PersonaLoader {
     const errors: string[] = [];
     const required = config.validation?.required || ['id', 'name'];
 
-    // Check required fields
     for (const field of required) {
       if (!config[field as keyof IAIPersonaConfig]) {
         errors.push(`Missing required field: ${field}`);
       }
     }
 
-    // Check field types
     const types = config.validation?.types || {};
     for (const [field, expectedType] of Object.entries(types)) {
       const value = config[field as keyof IAIPersonaConfig];
@@ -228,28 +289,33 @@ export class PersonaLoader {
       }
     }
 
-    return {
-      isValid: errors.length === 0,
-      errors
-    };
+    return { isValid: errors.length === 0, errors };
   }
 
   /**
    * Get role capabilities for a specific role
    */
   getRoleCapabilities(persona: IAIPersona, userRoles: string[]): string {
-    // This would need to be implemented based on the actual persona structure
-    // For now, returning a default message
     return `You have access to ${persona.tools?.length || 0} tools and ${persona.resources?.length || 0} resources.`;
   }
 
+  // ─── Registry Access ─────────────────────────────────────────────────
+
+  getRegisteredTools(): Map<string, MacroToolDefinition> {
+    return new Map(this.toolRegistry);
+  }
+
+  getRegisteredMacros(): Map<string, MacroComponentDefinition<unknown>> {
+    return new Map(this.macroRegistry);
+  }
+
+  // ─── Internal Processing ─────────────────────────────────────────────
+
   private processConfig(config: IAIPersonaConfig, options: PersonaLoaderOptions): IAIPersona {
-    // Process environment variables if enabled
     if (options.processEnvironmentVars !== false) {
       config = this.processEnvironmentVariables(config);
     }
 
-    // Validate configuration if enabled
     if (options.validateOnLoad !== false) {
       const validation = this.validateConfig(config);
       if (!validation.isValid) {
@@ -257,13 +323,12 @@ export class PersonaLoader {
       }
     }
 
-    // Convert config to IAIPersona
     return this.convertConfigToPersona(config);
   }
 
   private processEnvironmentVariables(config: IAIPersonaConfig): IAIPersonaConfig {
     const processedConfig = JSON.parse(JSON.stringify(config));
-    
+
     const processValue = (value: any): any => {
       if (typeof value === 'string') {
         return value.replace(/\$\{([^}]+)\}/g, (match, envVar) => {
@@ -286,9 +351,16 @@ export class PersonaLoader {
   }
 
   private convertConfigToPersona(config: IAIPersonaConfig): IAIPersona {
+    // Ensure registries are populated before resolving
+    if (!this.registriesPopulated) {
+      this.populateRegistries();
+    }
+
     const persona: IAIPersona = {
       id: config.id,
       name: config.name,
+      nameSpace: 'reactor',
+      version: '1.0.0',
       description: config.description || '',
       persona: config.persona || '',
       features: config.features || '',
@@ -297,7 +369,7 @@ export class PersonaLoader {
       defaultGreeting: config.defaultGreeting || '',
       config: config.config || {},
       tools: this.resolveTools(config.tools),
-      macros: this.resolveMacros(config.macros),
+      macros: this.resolveMacros(config.tools, config.macros),
       resources: config.resources || [],
       prompts: config.prompts || {}
     };
@@ -334,20 +406,34 @@ export class PersonaLoader {
     };
   }
 
-  private resolveTools(toolsConfig?: { includes?: string[]; custom?: any[] }): any[] {
-    const tools: any[] = [];
+  /**
+   * Resolves tool references from the YAML `tools.includes` array
+   * into actual MacroToolDefinition objects using the tool registry.
+   */
+  private resolveTools(toolsConfig?: { includes?: string[]; custom?: any[] }): MacroToolDefinition[] {
+    const tools: MacroToolDefinition[] = [];
 
-    // Add included tools from registry
     if (toolsConfig?.includes) {
       for (const toolName of toolsConfig.includes) {
+        // Primary: look up by tool function name (e.g. "readFile", "shell")
         const tool = this.toolRegistry.get(toolName);
         if (tool) {
           tools.push(tool);
+        } else {
+          // Secondary: check if this name matches a macro, and if so pull all its tools
+          const macro = this.macroRegistry.get(toolName);
+          if (macro && macro.tools) {
+            tools.push(...macro.tools);
+          } else {
+            this.context.warn(
+              `PersonaLoaderService: Tool "${toolName}" not found in registry (${this.toolRegistry.size} tools registered)`,
+              null, 'reactor.PersonaLoaderService'
+            );
+          }
         }
       }
     }
 
-    // Add custom tools
     if (toolsConfig?.custom) {
       tools.push(...toolsConfig.custom);
     }
@@ -355,20 +441,68 @@ export class PersonaLoader {
     return tools;
   }
 
-  private resolveMacros(macrosConfig?: { includes?: string[]; custom?: any[] }): any[] {
-    const macros: any[] = [];
+  /**
+   * Resolves macro references from both `tools.includes` and `macros.includes` arrays.
+   * For each tool that was resolved, its parent macro is also included so that
+   * the conversation has the macro metadata needed for server-side execution.
+   */
+  private resolveMacros(
+    toolsConfig?: { includes?: string[]; custom?: any[] },
+    macrosConfig?: { includes?: string[]; custom?: any[] },
+  ): MacroComponentDefinition<unknown>[] {
+    const macros: MacroComponentDefinition<unknown>[] = [];
+    const addedNames = new Set<string>();
 
-    // Add included macros from registry
-    if (macrosConfig?.includes) {
-      for (const macroName of macrosConfig.includes) {
-        const macro = this.macroRegistry.get(macroName);
-        if (macro) {
-          macros.push(macro);
+    const addMacro = (macro: MacroComponentDefinition<unknown>) => {
+      if (!addedNames.has(macro.name)) {
+        macros.push(macro);
+        addedNames.add(macro.name);
+      }
+    };
+
+    // Collect macros for every resolved tool from tools.includes.
+    // This ensures the conversation stores the macro metadata needed
+    // for the server-side executeMacro lookup.
+    if (toolsConfig?.includes) {
+      for (const toolName of toolsConfig.includes) {
+        // Find macro that owns this tool
+        for (const [, macro] of this.macroRegistry) {
+          if (macro.tools?.some(t => t.type === 'function' && t.function?.name === toolName)) {
+            addMacro(macro);
+            break;
+          }
         }
       }
     }
 
-    // Add custom macros
+    // Also resolve explicit macros.includes entries
+    if (macrosConfig?.includes) {
+      for (const macroName of macrosConfig.includes) {
+        const macro = this.macroRegistry.get(macroName);
+        if (macro) {
+          addMacro(macro);
+        } else {
+          // Secondary: find macros that contain a tool with this function name
+          let found = false;
+          for (const [, registeredMacro] of this.macroRegistry) {
+            if (registeredMacro.tools?.some((t: any) =>
+              t.type === 'function' && t.function?.name === macroName
+            )) {
+              addMacro(registeredMacro);
+              found = true;
+              break;
+            }
+          }
+          if (!found) {
+            this.context.warn(
+              `PersonaLoaderService: Macro "${macroName}" not found in registry (${this.macroRegistry.size} macros registered)`,
+              null, 'reactor.PersonaLoaderService'
+            );
+          }
+        }
+      }
+    }
+
     if (macrosConfig?.custom) {
       macros.push(...macrosConfig.custom);
     }
@@ -378,34 +512,23 @@ export class PersonaLoader {
 
   private mergeConfigs(existing: IAIPersona, config: IAIPersonaConfig, options: PersonaLoaderOptions): IAIPersona {
     const mergeOptions = config.merge?.options || {};
-    
+
     const merged: IAIPersona = {
       ...existing,
-      ...(mergeOptions.overwriteExisting ? {
-        name: config.name || existing.name,
-        description: config.description || existing.description,
-        persona: config.persona || existing.persona,
-        features: config.features || existing.features,
-        modelId: config.modelId || existing.modelId,
-        providerId: config.providerId || existing.providerId,
-        defaultGreeting: config.defaultGreeting || existing.defaultGreeting,
-        config: { ...existing.config, ...config.config }
-      } : {
-        name: config.name || existing.name,
-        description: config.description || existing.description,
-        persona: config.persona || existing.persona,
-        features: config.features || existing.features,
-        modelId: config.modelId || existing.modelId,
-        providerId: config.providerId || existing.providerId,
-        defaultGreeting: config.defaultGreeting || existing.defaultGreeting,
-        config: { ...existing.config, ...config.config }
-      }),
-      tools: mergeOptions.preserveExistingTools 
+      name: config.name || existing.name,
+      description: config.description || existing.description,
+      persona: config.persona || existing.persona,
+      features: config.features || existing.features,
+      modelId: config.modelId || existing.modelId,
+      providerId: config.providerId || existing.providerId,
+      defaultGreeting: config.defaultGreeting || existing.defaultGreeting,
+      config: { ...existing.config, ...config.config },
+      tools: mergeOptions.preserveExistingTools
         ? [...(existing.tools || []), ...this.resolveTools(config.tools)]
         : this.resolveTools(config.tools),
       macros: mergeOptions.preserveExistingMacros
-        ? [...(existing.macros || []), ...this.resolveMacros(config.macros)]
-        : this.resolveMacros(config.macros),
+        ? [...(existing.macros || []), ...this.resolveMacros(config.tools, config.macros)]
+        : this.resolveMacros(config.tools, config.macros),
       resources: mergeOptions.preserveExistingResources
         ? [...(existing.resources || []), ...(config.resources || [])]
         : config.resources || [],
@@ -416,64 +539,11 @@ export class PersonaLoader {
   }
 
   private createNewFromConfig(config: IAIPersonaConfig, options: PersonaLoaderOptions): IAIPersona {
-    // Generate a new ID if not provided
     if (!config.id) {
       config.id = `persona-${Date.now()}`;
     }
-
     return this.processConfig(config, options);
-  }
-
-  /**
-   * Register a tool in the tool registry
-   */
-  registerTool(name: string, tool: any): void {
-    this.toolRegistry.set(name, tool);
-  }
-
-  /**
-   * Register a macro in the macro registry
-   */
-  registerMacro(name: string, macro: any): void {
-    this.macroRegistry.set(name, macro);
-  }
-
-  /**
-   * Get all registered tools
-   */
-  getRegisteredTools(): Map<string, any> {
-    return new Map(this.toolRegistry);
-  }
-
-  /**
-   * Get all registered macros
-   */
-  getRegisteredMacros(): Map<string, any> {
-    return new Map(this.macroRegistry);
   }
 }
 
-// Export a singleton instance
-export const personaLoader = PersonaLoader.getInstance();
-
-// Export utility functions
-export const loadPersonaFromFile = (filePath: string, options?: PersonaLoaderOptions) => 
-  personaLoader.loadFromFile(filePath, options);
-
-export const loadPersonaFromString = (yamlContent: string, options?: PersonaLoaderOptions) => 
-  personaLoader.loadFromString(yamlContent, options);
-
-export const loadPersonasFromDirectory = (dirPath: string, options?: PersonaLoaderOptions) => 
-  personaLoader.loadFromDirectory(dirPath, options);
-
-export const mergePersonaWithConfig = (
-  existingPersona: IAIPersona, 
-  yamlConfig: string | IAIPersonaConfig, 
-  options?: PersonaLoaderOptions
-) => personaLoader.mergeWithExisting(existingPersona, yamlConfig, options);
-
-export const savePersonaToFile = (persona: IAIPersona, filePath: string) => 
-  personaLoader.saveToFile(persona, filePath);
-
-export const validatePersonaConfig = (config: IAIPersonaConfig) => 
-  personaLoader.validateConfig(config); 
+export default PersonaLoaderService;

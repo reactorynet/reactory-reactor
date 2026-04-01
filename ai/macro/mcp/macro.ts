@@ -1,15 +1,22 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { 
   InitializedNotification,
   InitializedNotificationSchema,
   InitializeRequestSchema
 } from "@modelcontextprotocol/sdk/types.js";
-import { ChatState, Macro, MacroComponentDefinition } from "../../../types/chat";
+import { ChatState, Macro, MacroComponentDefinition } from "../../openai/types/chat";
 import Reactory from "@reactorynet/reactory-core";
+import { v4 as uuidv4 } from "uuid";
 import { URL } from "url";
-import uuid from "uuid";
-import { McpCliProps } from './types';
+import path from "path";
+import {
+  addConnectionToSession,
+  updateConnectionStatus,
+  removeConnectionFromSession,
+  McpConnectionEntry,
+} from './session-config';
+import { loadClientsFromSession } from './load-clients';
 
 // Command handler functions
 const getCapabilities = async (params: string[], state: ChatState): Promise<unknown> => {
@@ -79,6 +86,10 @@ const getResources = async (params: string[], state: ChatState): Promise<unknown
 const addConnection = async (params: string[], state: ChatState): Promise<unknown> => {
   try {
     const [id, url, transport = 'sse'] = params;
+    
+    if (!state.mcpClients) {
+      state.mcpClients = [];
+    }
     const { mcpClients } = state;
     
     if (!id || !url) {
@@ -90,11 +101,10 @@ const addConnection = async (params: string[], state: ChatState): Promise<unknow
       version: '1.0.0',        
     });
     
-    // Create actual URL object with proper URL and ensure trailing slash for base URL
     const baseUrl = url.endsWith('/') ? url : `${url}/`;
-    const sseTransport = new SSEClientTransport(new URL(baseUrl));
+    const connectionId = uuidv4();
+    const sseTransport = new StreamableHTTPClientTransport(new URL(baseUrl));
     
-    // Add request options to handle auth if needed
     sseTransport.requestInit = {
       credentials: 'include',
       headers: {
@@ -105,7 +115,7 @@ const addConnection = async (params: string[], state: ChatState): Promise<unknow
     };
     
     mcpClients.push({
-      id: uuid.v4(),
+      id: connectionId,
       client,
       name: id,
       description: `MCP Client for ${id}`,  
@@ -113,6 +123,16 @@ const addConnection = async (params: string[], state: ChatState): Promise<unknow
         sse: sseTransport
       }
     });
+    if (state.sessionFolder) {
+      addConnectionToSession(state.sessionFolder, {
+        id: connectionId,
+        serverName: id,
+        description: `MCP Client for ${id}`,
+        url,
+        transport: transport as McpConnectionEntry['transport'],
+        status: 'inactive',
+      });
+    }
     
     return `Added connection ${id} with url ${url}`;
   } catch (error) {
@@ -205,7 +225,7 @@ const connectClient = async (params: string[], state: ChatState): Promise<unknow
 
     try {
       // on connect the client sends an initializer message.
-      let transportInstance = new SSEClientTransport(transport.url, {
+      let transportInstance = new StreamableHTTPClientTransport(new URL(transport.url), {
         eventSourceInit: transport?.eventSourceInit,
         requestInit: transport.requestInit,
       });
@@ -215,7 +235,6 @@ const connectClient = async (params: string[], state: ChatState): Promise<unknow
         // Handle the message
         const parsedMessage = JSON.parse(message.data);
       };
-
       client.onclose = () => {
         context.log(`Client ${mcpClientDefinition.id} closed`);
         if (client.transport) {
@@ -249,11 +268,13 @@ const connectClient = async (params: string[], state: ChatState): Promise<unknow
 
       await mcpClientDefinition.client.connect(transportInstance);
       console.log(`Connected to ${mcpClientDefinition.id} with transport: ${transport.type}`);
-      // Wait a moment for the connection to fully establish
       await new Promise(resolve => setTimeout(resolve, 1000));
+
+      if (state.sessionFolder) {
+        updateConnectionStatus(state.sessionFolder, mcpClientDefinition.id, 'active');
+      }
       
       console.log(`Getting capabilities for ${mcpClientDefinition.id}`);
-      // Get the server capabilities
       const capabilities = await mcpClientDefinition.client.getServerCapabilities();
       const toolsList = await mcpClientDefinition.client.listTools();
       const promptsList = await mcpClientDefinition.client.listPrompts();
@@ -302,6 +323,10 @@ const disconnectClient = async (params: string[], state: ChatState): Promise<unk
 
     client.client.transport.close();
 
+    if (state.sessionFolder) {
+      updateConnectionStatus(state.sessionFolder, client.id, 'inactive');
+    }
+
     return `Disconnected from ${client.id}`;
   } catch (error) {
     return `Failed to disconnect: ${error.message}`;
@@ -334,6 +359,65 @@ const listConnections = async (params: string[], state: ChatState): Promise<unkn
   }
 };
 
+interface AvailableServiceEntry {
+  id: string;
+  name: string;
+  description: string;
+  url?: string;
+  transport: string;
+  connectorRef?: string;
+  tags?: string[];
+  requiredEnvVars?: string[];
+  autoConnect?: boolean;
+}
+
+const resolveEnvTemplate = (value: string): string =>
+  value.replace(/\$\{([^:}]+)(?::([^}]*))?\}/g, (_match, envKey, fallback) =>
+    process.env[envKey] || fallback || ''
+  );
+
+const getAvailable = async (params: string[], state: ChatState): Promise<unknown> => {
+  const dataRoot = process.env.REACTORY_DATA || process.env.APP_DATA_ROOT;
+  if (!dataRoot) {
+    return { success: false, data: null, instructions: 'REACTORY_DATA not configured' };
+  }
+
+  const availablePath = path.join(dataRoot, 'profiles', 'reactor', 'mcp', 'available.yaml');
+  if (!fs.existsSync(availablePath)) {
+    return { success: false, data: null, instructions: `No available.yaml found at ${availablePath}` };
+  }
+
+  try {
+    const raw = fs.readFileSync(availablePath, 'utf8');
+    const catalog = yaml.load(raw) as { version?: string; services?: AvailableServiceEntry[] } | undefined;
+    const services = catalog?.services ?? [];
+
+    const connectedIds = new Set((state.mcpClients ?? []).map((c) => c.name));
+
+    const [format = 'text'] = params;
+    const enriched = services.map((svc) => ({
+      ...svc,
+      url: svc.url ? resolveEnvTemplate(svc.url) : undefined,
+      connected: connectedIds.has(svc.id),
+    }));
+
+    if (format === 'json') {
+      return JSON.stringify(enriched, null, 2);
+    }
+
+    const lines = enriched.map((svc) => {
+      const status = svc.connected ? '(connected)' : '';
+      return `- **${svc.name}** [${svc.id}] ${status}\n  ${svc.description}\n  Transport: ${svc.transport}${svc.url ? ` | URL: ${svc.url}` : ''}`;
+    });
+
+    return lines.length > 0
+      ? `Available MCP services:\n\n${lines.join('\n\n')}\n\nUse @mcp(add-connection, <id>, <url>) to register a connection.`
+      : 'No MCP services are defined in available.yaml.';
+  } catch (err) {
+    return { success: false, data: null, instructions: `Error reading available.yaml: ${err.message}` };
+  }
+};
+
 // Command map
 const commandHandlers: Record<string, (params: string[], state: ChatState) => Promise<unknown>> = {
   'capabilities': getCapabilities,
@@ -344,6 +428,7 @@ const commandHandlers: Record<string, (params: string[], state: ChatState) => Pr
   'connect': connectClient,
   'disconnect': disconnectClient,
   'connections': listConnections,
+  'available': getAvailable,
 };
 
 export const McpCli: Macro<unknown, McpCliProps> = async (
@@ -351,7 +436,8 @@ export const McpCli: Macro<unknown, McpCliProps> = async (
   state: ChatState
 ): Promise<unknown> => {
   try {
-    const { 
+    loadClientsFromSession(state);
+    const {
       command = 'connections', 
       id, 
       url, 
@@ -362,7 +448,7 @@ export const McpCli: Macro<unknown, McpCliProps> = async (
     } = props;
 
     const clientCount = state.mcpClients?.length || 0;
-    const availableCommands = 'capabilities, prompts, tools, resources, add-connection, connect, disconnect, connections, call-tool';
+    const availableCommands = 'capabilities, prompts, tools, resources, add-connection, connect, disconnect, connections, call-tool, available';
 
     // Map command to appropriate handler
     switch (command) {
@@ -479,6 +565,17 @@ export const McpCli: Macro<unknown, McpCliProps> = async (
             : `## MCP Tool Executed\n\nTool **${toolName}** on client **${id}** returned successfully.\n\n### Suggested Next Steps:\n- Inspect the returned data\n- Call another tool if needed\n- Use \`var\` to store the result for later use`
         };
       }
+      case 'available': {
+        const result = await getAvailable(format ? [format] : [], state);
+        const hasError = typeof result === 'object' && result !== null && 'success' in result && !(result as any).success;
+        return {
+          success: !hasError,
+          data: result,
+          instructions: hasError
+            ? `## MCP Available — Error\n\n${(result as any)?.instructions || 'Unknown error'}`
+            : `## Available MCP Services\n\n${typeof result === 'string' ? result : JSON.stringify(result, null, 2)}\n\n### Suggested Next Steps:\n- Use \`mcp\` with command="add-connection", id="<service_id>", url="<url>" to register\n- Use \`mcp\` with command="connect", id="<client_id>" to establish connection`
+        };
+      }
       case 'connections':
       default: {
         const result = await listConnections([], state);
@@ -519,11 +616,16 @@ export const McpClientMacroRegistry: MacroComponentDefinition<typeof McpCli> = {
   @mcp(connect, url) - returns a json object with the connection status of the MCP Client
   @mcp(disconnect, id) - returns a json object with the disconnection status of the MCP Client
   @mcp(connections) - returns a json object with the connections of the MCP Client
+  @mcp(available) - returns a list of available MCP services from the catalog
   `,
   features: [{
     feature: 'capabilities',
     featureType: Reactory.FeatureType.function,
     action: ['get', 'fetch', 'retrieve'],
+  }, {
+    feature: 'available',
+    featureType: Reactory.FeatureType.function,
+    action: ['list', 'get'],
   }],
   stem: 'mcp',
   tags: ['mcp', 'chat', 'session', 'context'],
@@ -538,7 +640,7 @@ export const McpClientMacroRegistry: MacroComponentDefinition<typeof McpCli> = {
         properties: {
           command: {
             type: "string",
-            enum: ["capabilities", "prompts", "tools", "resources", "add-connection", "connect", "disconnect", "connections", "call-tool"],
+            enum: ["capabilities", "prompts", "tools", "resources", "add-connection", "connect", "disconnect", "connections", "call-tool", "available"],
             description: "The MCP command to execute"
           },
           id: {

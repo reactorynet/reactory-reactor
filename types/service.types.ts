@@ -721,12 +721,14 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
    * Sends a message to the chat session. If no chat session is found then a new one will be created.
    * @param args 
    */
-  sendMessage(args: { 
-    message: string, 
-    personaId: string, 
+  sendMessage(args: {
+    message: string,
+    personaId: string,
     chatSessionId?: string,
     tool_results?: Record<string, any>,
-    streamingMode: StreamingMode
+    streamingMode: StreamingMode,
+    toolApprovalMode?: ToolApprovalMode,
+    parentSessionId?: string,
   }): Promise<any>;
 }
 

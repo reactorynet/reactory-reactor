@@ -1,5 +1,5 @@
 import Reactory from "@reactorynet/reactory-core";
-import { ChatState, Macro, MacroComponentDefinition } from "../../../types/chat";
+import { ChatState, Macro, MacroComponentDefinition, ToolApprovalMode } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import {
   getInitializerMessage
 } from '@reactory/server-modules/reactory-reactor/ai/openai/chat/questions/factory';
@@ -51,7 +51,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
             let summary = "";
             chat.history.forEach((message) => {
               if (message.role === "user" && !summary) {
-                summary = message?.content && message.content.length > 30 ? message.content.substring(0, 30) : message.content;
+                summary = message?.content && message.content.length > ToolApprovalMode.SAFE_AUTO0 ? message.content.substring(0, ToolApprovalMode.SAFE_AUTO0) : message.content;
               }
             });
             return { id: chat.id, summary };
@@ -183,18 +183,44 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
           const conversationService = state.context.getService<IReactorConversationsService>(
             "reactor.ReactorConversationService@1.0.0"
           );
+
+          // Check for an existing sub-agent conversation to resume
+          if (!state.vars) state.vars = {};
+          const existingChatId = state.vars[`subagent_chat_${persona.id}`] as string | undefined;
+
+          // Inherit tool approval mode: auto if primary is auto, otherwise safe_auto
+          const subagentToolMode = state.toolApprovalMode === ToolApprovalMode.AUTO
+            ? ToolApprovalMode.AUTO
+            : ToolApprovalMode.SAFE_AUTO;
+
           const response = await conversationService.sendMessage({
             personaId: persona.id,
             message,
-            chatSessionId: undefined,
+            chatSessionId: existingChatId || undefined,
             streamingMode: StreamingMode.NONE,
             tool_results: undefined,
+            toolApprovalMode: existingChatId ? undefined : subagentToolMode,
+            parentSessionId: existingChatId ? undefined : state.id,
           });
+
+          // Store the sub-agent conversation ID in vars for future follow-ups
+          const subagentConversationId = response?.sessionId || existingChatId;
+          if (subagentConversationId) {
+            state.vars[`subagent_chat_${persona.id}`] = subagentConversationId;
+          }
+
           const content = response?.content || response?.message || JSON.stringify(response);
+          const isResumed = !!existingChatId;
           return {
             success: true,
-            data: { agentId: persona.id, agentName: persona.name, response: content },
-            instructions: `## Response from ${persona.name}\n\n${content}\n\n### Suggested Next Steps:\n- Send another message to \`chats\` with action="speakto", id="${persona.id}" for follow-up\n- Use the response data to continue your task`
+            data: {
+              agentId: persona.id,
+              agentName: persona.name,
+              response: content,
+              conversationId: subagentConversationId,
+              resumed: isResumed,
+            },
+            instructions: `## Response from ${persona.name}\n\n${content}\n\n### Sub-Agent Conversation\n- **Conversation ID**: ${subagentConversationId}\n- **Stored in var**: \`subagent_chat_${persona.id}\`\n- **Resumed**: ${isResumed}\n\n### Suggested Next Steps:\n- Send another message with action="speakto", id="${persona.id}" (auto-resumes this conversation)\n- Use action="followup", id="${persona.id}" to inspect recent history without sending a message\n- Use action="followup", id="${persona.id}", message="..." for a follow-up with history context\n- Use the response data to continue your task`
           };
         } else {
           // Original behavior: switch persona context in-place (CLI mode)
@@ -208,6 +234,108 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
             instructions: `## Persona Switched\n\nNow speaking to **${persona.name}** (${persona.id}).\nNew session: ${state.id}\n\n### Suggested Next Steps:\n- Start conversing with ${persona.name}\n- Use \`chats\` with action="personas" to see all agents\n- Use \`state\` to verify the active persona`
           };
         }
+      }
+      case "followup": {
+        if (!id) {
+          return {
+            success: false,
+            error: "The 'followup' action requires an id (persona ID or conversation ID).",
+            instructions: `## Missing ID\n\nProvide a persona ID or direct conversation ID.\n\n### Recovery Options:\n- Use \`var\` to check stored sub-agent conversation IDs (keys starting with \`subagent_chat_\`)\n- Use \`chats\` with action="personas" to list available agent IDs`
+          };
+        }
+
+        const historyCount = props.historyCount || 2;
+
+        // Resolve conversation ID: check if id is a persona ID with a stored conversation
+        let conversationId = state.vars?.[`subagent_chat_${id}`] as string | undefined;
+        if (!conversationId) {
+          // Treat id as a direct conversation ID
+          conversationId = id;
+        }
+
+        if (message) {
+          // Send a follow-up message to the existing sub-agent conversation
+          const existingConv = await ReactorConversationModel.findOne({
+            _id: conversationId,
+            user: state.context.user,
+          });
+          if (!existingConv) {
+            return {
+              success: false,
+              error: `Conversation ${conversationId} not found.`,
+              instructions: `## Conversation Not Found\n\nThe referenced conversation does not exist or you don't have access.\n\n### Recovery Options:\n- Use \`chats\` with action="speakto" to start a new delegation\n- Use \`var\` to check stored conversation IDs`
+            };
+          }
+
+          const conversationService = state.context.getService<IReactorConversationsService>(
+            "reactor.ReactorConversationService@1.0.0"
+          );
+          const response = await conversationService.sendMessage({
+            personaId: existingConv.personaId,
+            message,
+            chatSessionId: conversationId,
+            streamingMode: StreamingMode.NONE,
+          });
+
+          const content = response?.content || response?.message || JSON.stringify(response);
+
+          // Reload conversation to get updated history including the new response
+          const reloadedConv = await ReactorConversationModel.findById(conversationId);
+          const recentHistory = (reloadedConv?.history || [])
+            .slice(-historyCount)
+            .map(item => ({
+              role: item.role,
+              content: item.content,
+              tool_calls: item.tool_calls,
+              tool_results: item.tool_results,
+              timestamp: item.timestamp,
+            }));
+
+          return {
+            success: true,
+            data: {
+              conversationId,
+              personaId: existingConv.personaId,
+              response: content,
+              recentHistory,
+            },
+            instructions: `## Follow-Up Response\n\n**Agent**: ${existingConv.personaId}\n**Conversation**: ${conversationId}\n\n${content}\n\n### Recent History (${recentHistory.length} items)\nIncluded in data.recentHistory\n\n### Suggested Next Steps:\n- Send another follow-up with action="followup", id="${id}", message="..."\n- Use the response to continue your task`
+          };
+        }
+
+        // No message: retrieve recent history from the sub-agent conversation (read-only)
+        const existingConv = await ReactorConversationModel.findOne({
+          _id: conversationId,
+          user: state.context.user,
+        });
+        if (!existingConv) {
+          return {
+            success: false,
+            error: `Conversation ${conversationId} not found.`,
+            instructions: `## Conversation Not Found\n\n### Recovery Options:\n- Use \`chats\` with action="speakto" to start a new delegation`
+          };
+        }
+
+        const recentHistory = (existingConv.history || [])
+          .slice(-historyCount)
+          .map(item => ({
+            role: item.role,
+            content: item.content,
+            tool_calls: item.tool_calls,
+            tool_results: item.tool_results,
+            timestamp: item.timestamp,
+          }));
+
+        return {
+          success: true,
+          data: {
+            conversationId,
+            personaId: existingConv.personaId,
+            messageCount: existingConv.history?.length || 0,
+            recentHistory,
+          },
+          instructions: `## Sub-Agent Conversation Status\n\n**Agent**: ${existingConv.personaId}\n**Conversation**: ${conversationId}\n**Total Messages**: ${existingConv.history?.length || 0}\n\n### Recent History (${recentHistory.length} items)\nAvailable in data.recentHistory\n\n### Suggested Next Steps:\n- Use action="followup", id="${id}", message="..." to send a follow-up\n- Use action="followup", id="${id}", historyCount=ToolApprovalMode.AUTO0 for more history`
+        };
       }
       case "clear": {
         const chats = await ReactorConversationModel.find({
@@ -229,7 +357,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
         return {
           success: false,
           error: `Unknown action: ${action}`,
-          instructions: `## Unknown Action\n\n"${action}" is not a valid chats action.\n\n### Valid Actions:\nlist, new, size, cont, del, exp, train, personas, speakto, clear`
+          instructions: `## Unknown Action\n\n"${action}" is not a valid chats action.\n\n### Valid Actions:\nlist, new, size, cont, del, exp, train, personas, speakto, followup, clear`
         };
     }
   } catch (err) {
@@ -262,8 +390,15 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
     `| exp       | optional | —        | Export a chat session to the data folder for training |`,
     `| train     | —        | —        | Upload training data (also set files and model params) |`,
     `| personas  | —        | —        | List all registered AI agent personas with their ids |`,
-    `| speakto   | required | optional | Delegate to another agent. If message is provided, sends the message to that agent and returns their response. If message is omitted, switches the active persona for the remainder of the conversation |`,
+    `| speakto   | required | optional | Delegate to another agent. If message is provided, sends it and returns the response. Automatically resumes previous conversation with the same persona. If message is omitted, switches the active persona. |`,
+    `| followup  | required | optional | Follow up on a sub-agent conversation. id can be a persona ID (auto-resolves stored conversation) or a direct conversation ID. If message is provided, sends it to the sub-agent. Returns recent history. Use historyCount to control how mToolApprovalMode items (default: 2). |`,
     `| clear     | —        | —        | Delete all chat sessions for the current user |`,
+    ``,
+    `## How sub-agent conversations work`,
+    `- When you use \`speakto\` with a message, the sub-agent's conversation ID is stored in vars as \`subagent_chat_{personaId}\`.`,
+    `- Subsequent \`speakto\` calls to the same persona automatically resume the same conversation.`,
+    `- Use \`followup\` to inspect history or send follow-up messages without switching context.`,
+    `- Sub-agents default to safe_auto tool approval mode (auto if primary agent is in auto mode).`,
     ``,
     `## Important notes for the speakto action`,
     `- The id must be a valid persona id. Call with action "personas" first to get available ids.`,
@@ -298,9 +433,16 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
       description: "Switch to another persona or delegate a question to another agent",
       stem: "speakto",
     },
+    {
+      feature: "followup",
+      featureType: Reactory.FeatureType.function,
+      action: ["followup"],
+      description: "Follow up on a sub-agent conversation or inspect its recent history",
+      stem: "followup",
+    },
   ],
   stem: "chats",
-  tags: ["chats", "continue", "delete", "export", "train", "personas", "speakto", "delegation"],
+  tags: ["chats", "continue", "delete", "export", "train", "personas", "speakto", "followup", "delegation"],
   tools: [
     {
       type: "function",
@@ -313,16 +455,16 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
           properties: {
             action: {
               type: "string",
-              enum: ["list", "new", "size", "cont", "del", "exp", "train", "personas", "speakto", "clear"],
-              description: "The action to perform. Use 'personas' to list available agents before 'speakto'.",
+              enum: ["list", "new", "size", "cont", "del", "exp", "train", "personas", "speakto", "followup", "clear"],
+              description: "The action to perform. Use 'personas' to list available agents before 'speakto'. Use 'followup' to inspect or continue a sub-agent conversation.",
             },
             id: {
               type: "string",
-              description: "A chat session id (for cont, del, exp) or an agent persona id (for speakto). Required for del and speakto; optional for cont and exp.",
+              description: "A chat session id (for cont, del, exp), an agent persona id (for speakto, followup), or a direct conversation id (for followup). Required for del, speakto, and followup; optional for cont and exp.",
             },
             message: {
               type: "string",
-              description: "Only used with action 'speakto'. The message to send to the target agent. If omitted, the active persona is switched instead of delegating a single question.",
+              description: "Used with 'speakto' and 'followup'. The message to send to the target agent. For speakto: if omitted, switches the active persona. For followup: if omitted, returns recent history without sending a message.",
             },
             files: {
               type: "array",
@@ -332,6 +474,10 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
             model: {
               type: "string",
               description: "Model identifier for the 'train' action.",
+            },
+            historyCount: {
+              type: "number",
+              description: "Number of recent history items to return for the 'followup' action (default: 2).",
             },
           },
           required: ["action"],

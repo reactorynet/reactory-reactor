@@ -41,6 +41,7 @@ import { StreamingSessionManager } from "./StreamingSessionManager";
 import { StreamingTransportManager } from "./StreamingTransportManager";
 import { StreamingEventFactory } from "./streaming/StreamingEventFactory";
 import { ChatSessionLogger } from "./ChatSessionLogger";
+import { loadSessionMcpConfig } from "../../ai/macro/mcp/session-config";
 /**
  * Enhanced error response interface with correlation tracking
  */
@@ -1327,6 +1328,65 @@ export default class ReactorConversationService
     };
   }
 
+
+
+  async rateMessage(chatSessionId: string, messageId: string, rating: string): Promise<any> {
+    const session = await this.storage.loadSession(chatSessionId);
+    if (!session) {
+      throw new Error(`Session ${chatSessionId} not found`);
+    }
+    
+    let messageFound = false;
+    if (session.history && session.history.length > 0) {
+      const messageIndex = session.history.findIndex((msg: any) => msg.id?.toString() === messageId || msg.id === messageId);
+      if (messageIndex >= 0) {
+        session.history[messageIndex].rating = rating;
+        messageFound = true;
+      }
+    }
+    
+    if (!messageFound) {
+      throw new Error(`Message ${messageId} not found in session ${chatSessionId}`);
+    }
+    
+    await this.storage.saveSession(session);
+    return session;
+  }
+
+  async patchSystemPrompt(chatSessionId: string, systemPrompt: string): Promise<any> {
+    const session = await this.storage.loadSession(chatSessionId);
+    if (!session) {
+      throw new Error(`Session ${chatSessionId} not found`);
+    }
+    
+    // Update the persona in the session state
+    if (!session.persona) {
+      session.persona = {} as any;
+    }
+    session.persona.persona = systemPrompt;
+
+    // Update the system message in the history if it exists
+    if (session.history && session.history.length > 0) {
+      const systemMessageIndex = session.history.findIndex((msg: any) => msg.role === 'system');
+      if (systemMessageIndex >= 0) {
+        session.history[systemMessageIndex].content = systemPrompt;
+      } else {
+        // If no system message exists, unshift it to the beginning
+        session.history.unshift({
+          id: new ObjectId(),
+          role: 'system',
+          content: systemPrompt,
+          timestamp: new Date(),
+          tool_results: [],
+        } as any);
+      }
+    }
+    
+    await this.storage.saveSession(session);
+    
+    return session;
+  }
+
   async setChatToolApprovalMode(
     chatSessionId: string,
     toolApprovalMode: ToolApprovalMode
@@ -2253,6 +2313,8 @@ export default class ReactorConversationService
     providerId?: string;
     continueAfterTools?: boolean;
     images?: string[];
+    toolApprovalMode?: ToolApprovalMode;
+    parentSessionId?: string;
   }): Promise<any> {
     const {
       personaId,
@@ -2268,6 +2330,8 @@ export default class ReactorConversationService
       providerId: providerIdOverride,
       continueAfterTools = false,
       images,
+      toolApprovalMode: toolApprovalModeOverride,
+      parentSessionId,
     } = args;
     const { user } = this.context;
 
@@ -2491,7 +2555,8 @@ export default class ReactorConversationService
             tools: persona.tools || [],
             started: new Date(),
             sseSessionId: sessionId,
-            toolApprovalMode: ToolApprovalMode.PROMPT,
+            toolApprovalMode: toolApprovalModeOverride || ToolApprovalMode.PROMPT,
+            parentSessionId: parentSessionId || null,
           });
 
           this.sessionLog("debug", "Saving new conversation in sendMessage", {
@@ -3157,18 +3222,27 @@ export default class ReactorConversationService
 
       // check if the macro is available on the chat session
       let macroDef = conversation.macros.find((m) => m.name === macro);
-      if (macroDef === undefined || macroDef === null) {
+      if (!macroDef) {
         // check using the alias
-        macroDef ??= (conversation as TReactorConversationDocument).macros.find(
+        macroDef = (conversation as TReactorConversationDocument).macros.find(
           (m: { alias: string }) => m.alias === macro
         );
+      }
 
-        if (!macroDef) {
-          // check the macro registry for the macro
-          if (!macroDef) {
-            throw new Error(`Macro ${macro} not found in chat session`);
-          }
+      // Fallback: if the macro isn't on the conversation (e.g. YAML-defined personas
+      // where macros weren't fully resolved), check the global macro service registry.
+      // Also check if a matching tool exists on the conversation to authorize execution.
+      if (!macroDef) {
+        const hasMatchingTool = conversation.tools?.some(
+          (t: any) => t.function?.name === macro && t.runat === 'server'
+        );
+        if (hasMatchingTool && this.macroService.getMacro(macro)) {
+          macroDef = { name: macro, runat: 'server', roles: [] } as any;
         }
+      }
+
+      if (!macroDef) {
+        throw new Error(`Macro ${macro} not found in chat session`);
       }
 
       // check if the macro has roles and if the user has permission to execute
@@ -4086,6 +4160,30 @@ export default class ReactorConversationService
       "loadChatSession",
       "loaded_session"
     );
+
+    // Hydrate persisted MCP connections from session mcp.yaml
+    const sessionFolder = (chatSession as any).sessionFolder;
+    if (sessionFolder) {
+      try {
+        const mcpConfig = loadSessionMcpConfig(sessionFolder);
+        if (mcpConfig.connections.length > 0) {
+          const hydratedSessions = mcpConfig.connections.map((conn) => ({
+            ...conn,
+            status: 'inactive' as const,
+          }));
+          chatSession.mcpSessions = hydratedSessions;
+          this.sessionLog("info", "Hydrated MCP sessions from mcp.yaml", {
+            sessionFolder,
+            connectionCount: hydratedSessions.length,
+          }, chatSession._id?.toString(), chatSession.personaId);
+        }
+      } catch (err) {
+        this.sessionLog("warn", "Failed to hydrate MCP sessions from mcp.yaml", {
+          sessionFolder,
+          error: err?.message || err,
+        }, chatSession._id?.toString(), chatSession.personaId);
+      }
+    }
 
     this.sessionLog("info", "Successfully loaded chat session", {
       chatSessionId: chatSession._id?.toString(),

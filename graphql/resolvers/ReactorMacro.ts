@@ -1,5 +1,5 @@
 import { mutation, property, resolver } from "@reactory/server-core/models/graphql/decorators/resolver";
-import { MacroComponentDefinition } from "modules/reactory-reactor/ai/openai/types/chat";
+import { MacroComponentDefinition, MacroToolDefinition } from "modules/reactory-reactor/ai/openai/types/chat";
 import ReactorConversationService from "modules/reactory-reactor/services/reactor/ReactorConversationService";
 import { StreamingTransportManager } from "modules/reactory-reactor/services/reactor/StreamingTransportManager";
 import { StreamingEventFactory } from "modules/reactory-reactor/services/reactor/streaming/StreamingEventFactory";
@@ -68,6 +68,17 @@ class ReactorMacroResolver {
       context.utils.hash(
         `${macro.nameSpace || "reactory-commons"}.${macro.name}@${macro.version || "1.0.0"}`
       )).toString();
+  }
+
+  @property("ReactorMacro", "runat")
+  getMacroRunat(macro: Partial<MacroComponentDefinition<unknown>>, args: any, context: Reactory.Server.IReactoryContext): string {
+    if (!macro) return "server";
+    return macro.runat || "server"
+  }
+
+  @property("ReactorTool", "runat") 
+  getToolRunat(tool: Partial<MacroToolDefinition>): string {
+    return tool.runat || "server"
   }
 }
 

@@ -8,7 +8,7 @@
  */
 export interface McpCliProps {
   /** The command to execute */
-  command: 'capabilities' | 'prompts' | 'tools' | 'resources' | 'add-connection' | 'connect' | 'disconnect' | 'connections' | 'call-tool';
+  command: 'capabilities' | 'prompts' | 'tools' | 'resources' | 'add-connection' | 'connect' | 'disconnect' | 'connections' | 'call-tool' | 'available';
   /** Client ID for operations that require it */
   id?: string;
   /** URL for connection operations */

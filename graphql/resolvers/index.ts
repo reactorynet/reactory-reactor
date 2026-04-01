@@ -6,6 +6,8 @@ import ReactorTool from './ReactorTool';
 import ReactorSystemGraph from './ReactorSystemGraph';
 import ReactorSystem from './Platform/ReactorSystem';
 import ReactorProviders from './ReactorProviders';
+import MCPRegistryResolvers from '../mcp/resolvers';
+
 import ReactorProviderAuth from './ReactorProviderAuth';
 
 export default mergeGraphResolver([
@@ -15,6 +17,8 @@ export default mergeGraphResolver([
   ReactorMacro,
   ReactorTool,
   ReactorSystem,
+  MCPRegistryResolvers,
+
   ReactorProviders,
   ReactorProviderAuth
 ]);

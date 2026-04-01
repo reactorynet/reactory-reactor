@@ -27,6 +27,7 @@ const WORKFLOW_TOOL_INCLUDES = [
   'http',
   'httpGet',
   'httpPost',
+  'executeYamlWorkflow'
 ];
 
 const REACTORY_HOME = process.env.REACTORY_HOME || process.cwd();

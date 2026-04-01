@@ -20,8 +20,12 @@ import {
 import DocumentChunkingService from "./reactor/DocumentChunkingService";
 import { StreamingSessionManager } from "./reactor/StreamingSessionManager";
 import { StreamingTransportManager } from "./reactor/StreamingTransportManager";
+import MCPRegistryService from "./mcp/MCPRegistryService";
+import PersonaLoaderService from "@reactory/server-modules/reactory-reactor/ai/persona/loader/persona-loader";
+
 export default [
   ReactorMacroService,
+  PersonaLoaderService,
   ReactorConversationService,
   ReactorCapabilityService,
   ReactorMessageProcessingService,
@@ -39,6 +43,7 @@ export default [
   NodeJSProjectProcessor,
   ReactNativeProjectProcessor,
   DocumentChunkingService,
+  MCPRegistryService,
   StreamingSessionManager,  
   StreamingTransportManager,
 ];

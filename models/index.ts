@@ -10,6 +10,23 @@ import {
   ReactorNodeMetricTypeModelComponentRegistryEntry,
   ReactorNodeCategoryModelComponentRegistryEntry
 } from './ReactorGraphNode';
+import MCPRegistryModel from './MCPRegistry';
+import MCPInstalledConnectorModel from './MCPInstalledConnector';
+
+export const MCPRegistryModelComponentRegistryEntry = {
+  nameSpace: 'reactory',
+  name: 'MCPRegistry',
+  version: '1.0.0',
+  component: MCPRegistryModel,
+};
+
+export const MCPInstalledConnectorModelComponentRegistryEntry = {
+  nameSpace: 'reactory',
+  name: 'MCPInstalledConnector',
+  version: '1.0.0',
+  component: MCPInstalledConnectorModel,
+};
+
 
 export default [
   ReactoryPersonaComponentRegistryEntry,
@@ -20,6 +37,8 @@ export default [
   ClaudePersonaComponentRegistryEntry,
   DataAnalyticsPersonaComponentRegistryEntry,
   InfrastructurePersonaComponentRegistryEntry,
+  MCPRegistryModelComponentRegistryEntry,
+  MCPInstalledConnectorModelComponentRegistryEntry,
   SecurityPersonaComponentRegistryEntry,
   WorkflowWillPersonaComponentRegistryEntry,
 ];

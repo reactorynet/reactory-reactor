@@ -17,8 +17,9 @@ import {
 import ApiError from "exceptions";
 import Reactory from "@reactorynet/reactory-core";
 import logger from "@reactory/server-core/logging";
-import { ReactorConversation, ReactorConversationDocument } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
+import ReactorConversationModel, { ReactorConversation, ReactorConversationDocument } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import { PromptMergeStrategy, StreamingMode } from "modules/reactory-reactor/services/reactor/types/streaming.types";
+import ReactorConversationService from "@reactory/server-modules/reactory-reactor/services/reactor/ReactorConversationService";
 
 @resolver
 class ReactorChatResolver {
@@ -112,6 +113,19 @@ class ReactorChatResolver {
     }
   }
 
+
+  @mutation("ReactorRateMessage")
+  async ReactorRateMessage(
+    _: any,
+    args: { chatSessionId: string; messageId: string; rating: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<any> {
+    const conversationService = context.getService(
+      "core.ReactorConversationService@1.0.0"
+    ) as unknown as ReactorConversationService;
+    return await conversationService.rateMessage(args.chatSessionId, args.messageId, args.rating);
+  }
+
   @mutation("ReactorStartChatSession")
   async ReactorStartChatSession(
     _: any,
@@ -135,6 +149,19 @@ class ReactorChatResolver {
         "reactor.ReactorConversationService@1.0.0"
       );
     return await conversationService.startChatSession(args.initSession);
+  }
+
+
+  @mutation("ReactorSystemPromptPatch")
+  async ReactorSystemPromptPatch(
+    _: any,
+    args: { chatSessionId: string; systemPrompt: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<any> {
+    const conversationService = context.getService(
+      "core.ReactorConversationService@1.0.0"
+    ) as unknown as ReactorConversationService;
+    return await conversationService.patchSystemPrompt(args.chatSessionId, args.systemPrompt);
   }
 
   @mutation("ReactorSetChatToolApprovalMode")
@@ -568,6 +595,23 @@ class ReactorChatResolver {
     context: Reactory.Server.IReactoryContext
   ) {
     return chatState?.pinnedFolders || [];
+  }
+
+  @property("ReactorChatState", "chats")
+  async ReactorChatStateChats(
+    chatState: ChatState,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!chatState?.id) return [];
+    const children = await ReactorConversationModel.find({
+      parentSessionId: chatState.id.toString(),
+    }).lean().exec();
+    return children.map(c => ({
+      __typename: "ReactorChatState" as const,
+      ...c,
+      id: c._id?.toString(),
+    }));
   }
 
   @mutation("ReactorSendMessage")
