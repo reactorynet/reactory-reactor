@@ -19,6 +19,34 @@ class ReactorToolResolver {
     });
   }
 
+  @mutation("ReactorCompleteClientToolCalls")
+  async ReactorCompleteClientToolCalls(
+    _: any,
+    args: {
+      chatSessionId: string;
+      personaId: string;
+      results: Array<{
+        toolCallId: string;
+        toolName: string;
+        result?: any;
+        isError?: boolean;
+        error?: string;
+      }>;
+      continueProcessing?: boolean;
+      streamingMode?: string;
+    },
+    context: Reactory.Server.IReactoryContext,
+  ) {
+    const conversationService = context.getService<ReactorConversationService>("reactor.ReactorConversationService@1.0.0");
+    return await conversationService.completeClientToolCalls({
+      chatSessionId: args.chatSessionId,
+      personaId: args.personaId,
+      results: args.results,
+      continueProcessing: args.continueProcessing,
+      streamingMode: args.streamingMode as any,
+    });
+  }
+
   @property("ReactorToolDefinition", "id")
   async getToolId(tool: Partial<MacroToolDefinition>, args: any, context: Reactory.Server.IReactoryContext): Promise<string | null> {
     if (!tool?.function?.name) return null;

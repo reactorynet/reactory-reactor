@@ -498,6 +498,22 @@ input ReactorToolExecuteInput {
 }
 
 """
+A single client-side tool execution result reported back to the server.
+"""
+input ReactorClientToolResultInput {
+  """The tool_call ID from the AI that this result responds to"""
+  toolCallId: String!
+  """The name of the tool/macro that was executed"""
+  toolName: String!
+  """The result data returned by the client-side tool execution"""
+  result: Any
+  """Whether the tool execution failed"""
+  isError: Boolean
+  """Error message when isError is true"""
+  error: String
+}
+
+"""
 Response type for file attachment operations.
 """
 union ReactorAttachFileResponse = ReactorChatResponse | ReactorErrorResponse
@@ -770,6 +786,22 @@ extend type Mutation {
     chatSessionId: String!
     callId: String
     args: Any
+  ): ReactorChatResponse
+
+  """
+  Reports the completion of client-side tool executions back to the server.
+  The server persists the actual results (replacing any placeholders) and,
+  when continueProcessing is true, re-enters the AI processing loop so the
+  agent can see the real tool outputs and continue.
+  """
+  ReactorCompleteClientToolCalls(
+    chatSessionId: String!
+    personaId: String!
+    results: [ReactorClientToolResultInput!]!
+    """When true, the server sends tool results to the AI and continues the conversation"""
+    continueProcessing: Boolean
+    """Streaming mode for the AI continuation response"""
+    streamingMode: StreamingMode
   ): ReactorChatResponse
   
   """

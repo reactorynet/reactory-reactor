@@ -672,6 +672,25 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
     args?: any 
   }): Promise<any>;
 
+  /**
+   * Reports the completion of client-side tool executions.
+   * Persists the real results (replacing placeholders) and optionally
+   * continues the AI processing loop.
+   */
+  completeClientToolCalls(args: {
+    chatSessionId: string;
+    personaId: string;
+    results: Array<{
+      toolCallId: string;
+      toolName: string;
+      result?: any;
+      isError?: boolean;
+      error?: string;
+    }>;
+    continueProcessing?: boolean;
+    streamingMode?: StreamingMode;
+  }): Promise<any>;
+
   attachImage(args: { 
     image: string, 
     personaId: string, 
