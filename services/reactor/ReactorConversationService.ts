@@ -1417,6 +1417,41 @@ export default class ReactorConversationService
   }
 
   /**
+   * Persist the side panel state for a chat session.
+   * Only serializable metadata is stored (props are excluded).
+   */
+  async setSidePanelState(
+    chatSessionId: string,
+    sidePanelState: {
+      items: { id: string; componentFqn: string; title: string; type: string; addedAt?: Date; addedBy?: string }[];
+      activeItemId?: string;
+      isOpen: boolean;
+    }
+  ): Promise<any> {
+    this.validateChatSessionId(chatSessionId, "setSidePanelState");
+
+    this.sessionLog("info", "Saving side panel state", {
+      chatSessionId,
+      itemCount: sidePanelState.items.length,
+      userId: this.context.user?._id,
+    }, chatSessionId);
+
+    const chatState = await ReactorConversationModel.findOneAndUpdate(
+      { _id: chatSessionId, user: this.context.user },
+      { sidePanelState, updated: new Date() },
+      { new: true }
+    ).exec();
+
+    if (!chatState) {
+      throw new Error(
+        `Chat session with id ${chatSessionId} not found or you do not have permission to modify it.`
+      );
+    }
+
+    return chatState;
+  }
+
+  /**
    * Set the maximum number of auto tool call iterations for a conversation.
    * When set, the agent will pause after this many iterations and signal the client.
    */

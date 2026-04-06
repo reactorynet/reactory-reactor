@@ -555,6 +555,11 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
   setChatToolApprovalMode(chatSessionId: string, toolApprovalMode: ToolApprovalMode): Promise<any>;
 
   /**
+   * Persist the side panel state for a chat session.
+   */
+  setSidePanelState(chatSessionId: string, sidePanelState: any): Promise<any>;
+
+  /**
    * Sets the maximum number of auto tool call iterations before pausing for user confirmation.
    * When null, the server default is used.
    * @param chatSessionId
