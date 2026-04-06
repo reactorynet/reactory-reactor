@@ -97,6 +97,7 @@ class ReactorChatResolver {
         maxTokens: conversation.maxTokens,  
         files: conversation.files || [],
         pinnedFolders: (conversation as any).pinnedFolders || [],
+        sidePanelState: conversation.sidePanelState || null,
       };
 
       return chatState;
@@ -243,6 +244,42 @@ class ReactorChatResolver {
         suggestion:
           "Check if the chat session exists and you have permission to modify it",
       };
+    }
+  }
+
+  @mutation("ReactorSetSidePanelState")
+  async ReactorSetSidePanelState(
+    _: any,
+    args: { chatSessionId: string; sidePanelState: any },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!args || !args.chatSessionId || !args.sidePanelState) {
+      throw new ApiError("InvalidInputError", {
+        message: "chatSessionId and sidePanelState are required",
+        code: "INVALID_INPUT",
+        timestamp: new Date(),
+        recoverable: true,
+      });
+    }
+
+    const conversationService =
+      context.getService<IReactorConversationsService>(
+        "reactor.ReactorConversationService@1.0.0"
+      );
+    try {
+      return await conversationService.setSidePanelState(
+        args.chatSessionId,
+        args.sidePanelState
+      );
+    } catch (error) {
+      throw new ApiError("SidePanelStateError", {
+        message: error.message || "Error saving side panel state",
+        code: "SIDE_PANEL_STATE_ERROR",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion:
+          "Check if the chat session exists and you have permission to modify it",
+      });
     }
   }
 

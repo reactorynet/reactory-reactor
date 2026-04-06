@@ -125,6 +125,20 @@ export interface ReactorConversationDocument {
    * Folders the user pinned to this session (paths under the user file root or absolute on desktop).
    */
   pinnedFolders?: { name: string; path: string }[]
+  // The persisted side panel state for this conversation
+  sidePanelState?: {
+    items: {
+      id: string;
+      componentFqn: string;
+      title: string;
+      type: 'component' | 'form';
+      props?: Record<string, any>;
+      addedAt: Date;
+      addedBy?: string;
+    }[];
+    activeItemId?: string;
+    isOpen: boolean;
+  } | null;
   // Optional reference to a parent session that provided context for this session
   parentSessionId?: string
   // Virtual: resolved session folder path (not persisted to DB)
@@ -246,6 +260,23 @@ const ReactorConversationSchema = new Schema({
   pinnedFolders: {
     type: [{ name: String, path: String }],
     default: [],
+  },
+  // The persisted side panel state for this conversation
+  sidePanelState: {
+    type: {
+      items: [{
+        id: String,
+        componentFqn: String,
+        title: String,
+        type: { type: String, enum: ['component', 'form'] },
+        props: { type: Schema.Types.Mixed, default: null },
+        addedAt: Date,
+        addedBy: String,
+      }],
+      activeItemId: String,
+      isOpen: { type: Boolean, default: false },
+    },
+    default: null,
   },
   // The truncated history - messages removed to stay within token limits
   truncatedHistory: {

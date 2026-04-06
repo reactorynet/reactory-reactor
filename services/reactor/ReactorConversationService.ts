@@ -1417,6 +1417,41 @@ export default class ReactorConversationService
   }
 
   /**
+   * Persist the side panel state for a chat session.
+   * Only serializable metadata is stored (props are excluded).
+   */
+  async setSidePanelState(
+    chatSessionId: string,
+    sidePanelState: {
+      items: { id: string; componentFqn: string; title: string; type: string; addedAt?: Date; addedBy?: string }[];
+      activeItemId?: string;
+      isOpen: boolean;
+    }
+  ): Promise<any> {
+    this.validateChatSessionId(chatSessionId, "setSidePanelState");
+
+    this.sessionLog("info", "Saving side panel state", {
+      chatSessionId,
+      itemCount: sidePanelState.items.length,
+      userId: this.context.user?._id,
+    }, chatSessionId);
+
+    const chatState = await ReactorConversationModel.findOneAndUpdate(
+      { _id: chatSessionId, user: this.context.user },
+      { sidePanelState, updated: new Date() },
+      { new: true }
+    ).exec();
+
+    if (!chatState) {
+      throw new Error(
+        `Chat session with id ${chatSessionId} not found or you do not have permission to modify it.`
+      );
+    }
+
+    return chatState;
+  }
+
+  /**
    * Set the maximum number of auto tool call iterations for a conversation.
    * When set, the agent will pause after this many iterations and signal the client.
    */
@@ -2685,11 +2720,92 @@ export default class ReactorConversationService
               conversationId: effectiveConversationId,
             }, effectiveConversationId, personaId);
 
+            // Partition tool calls into server-executable and client-only.
+            // Client tools (runat: 'client') cannot be executed on the server —
+            // persist a placeholder and forward to the client via SSE.
+            // If any client tools are present in this batch, the AUTO loop will
+            // pause after executing server tools, waiting for the client to
+            // report results via ReactorCompleteClientToolCalls.
+            const clientToolNames = new Set<string>();
+            for (const t of (conversation.tools || [])) {
+              if ((t as any).runat === 'client' || (t as any).function?.runat === 'client') {
+                const name = (t as any).function?.name || (t as any).name;
+                if (name) clientToolNames.add(name);
+              }
+            }
+            // Also check conversation.macros for client-only entries
+            for (const m of (conversation.macros || [])) {
+              if ((m as any).runat === 'client') {
+                const name = (m as any).alias || (m as any).name;
+                if (name) clientToolNames.add(name);
+              }
+            }
+
+            let hasClientToolsPending = false;
+
             for (const toolCall of toolCalls) {
               const toolName = toolCall.function?.name;
               const toolArgs = typeof toolCall.function?.arguments === 'string'
                 ? JSON.parse(toolCall.function.arguments)
                 : toolCall.function?.arguments;
+
+              // Skip client-only tools — they can only run in the browser.
+              // Store a placeholder tool result so the AI provider receives a
+              // response for this tool_call_id and the conversation can proceed.
+              if (clientToolNames.has(toolName)) {
+                hasClientToolsPending = true;
+                this.sessionLog("info", `[sendMessage] AUTO mode: skipping client-side tool "${toolName}" — will be forwarded to client`, {
+                  toolName,
+                  conversationId: effectiveConversationId,
+                }, effectiveConversationId, personaId);
+
+                // Persist a placeholder tool result in conversation history
+                await ReactorConversationModel.findOneAndUpdate(
+                  { _id: effectiveConversationId },
+                  {
+                    $push: {
+                      history: {
+                        id: new ObjectId(),
+                        role: 'tool',
+                        content: `[Client-side tool "${toolName}" will be executed in the user\'s browser. The result is not available server-side.]`,
+                        tool_call_id: toolCall.id,
+                        tool_name: toolName,
+                        timestamp: new Date(),
+                        tool_results: [],
+                      },
+                    },
+                    $set: { updated: new Date() },
+                  },
+                  { new: true }
+                ).exec();
+
+                // Forward the tool call to the client via SSE so the client can execute it
+                if (streamingMode === StreamingMode.SSE) {
+                  try {
+                    const clientToolEvent = StreamingEventFactory.createToolCallEvent(
+                      toolCall.id,
+                      toolName,
+                      typeof toolCall.function?.arguments === 'string'
+                        ? toolCall.function.arguments
+                        : JSON.stringify(toolCall.function?.arguments || {}),
+                      false,
+                      undefined,
+                      {
+                        sessionId: effectiveConversationId,
+                        conversationId: effectiveConversationId,
+                        messageId: new ObjectId().toString(),
+                      },
+                    );
+                    await this.streamingTransportManager.sendEventToSession(effectiveConversationId, clientToolEvent);
+                  } catch (sseError: any) {
+                    this.sessionLog("warn", `[sendMessage] AUTO mode: failed to forward client tool via SSE: ${sseError.message}`, {
+                      toolName,
+                      conversationId: effectiveConversationId,
+                    }, effectiveConversationId, personaId);
+                  }
+                }
+                continue; // Skip to next tool call
+              }
 
               // Notify the client that a tool is being invoked so it can show progress in AUTO mode
               if (streamingMode === StreamingMode.SSE) {
@@ -2783,6 +2899,17 @@ export default class ReactorConversationService
                   { new: true }
                 ).exec();
               }
+            }
+
+            // If any client tools are pending, pause the AUTO loop.
+            // The client will execute these tools and call
+            // ReactorCompleteClientToolCalls to persist results and
+            // continue the AI processing loop.
+            if (hasClientToolsPending) {
+              this.sessionLog("info", `[sendMessage] AUTO mode: pausing — client-side tool(s) pending. Server will resume when client reports results via ReactorCompleteClientToolCalls.`, {
+                conversationId: effectiveConversationId,
+              }, effectiveConversationId, personaId);
+              break;
             }
 
             // Send tool results back to AI to get the next response
@@ -3245,6 +3372,13 @@ export default class ReactorConversationService
         throw new Error(`Macro ${macro} not found in chat session`);
       }
 
+      // Guard: client-side macros cannot be executed on the server
+      if ((macroDef as any).runat === 'client') {
+        throw new Error(
+          `Macro ${macro} is a client-side macro (runat: 'client') and cannot be executed on the server`
+        );
+      }
+
       // check if the macro has roles and if the user has permission to execute
       // in theory this should not be needed as only macros that the user has access to should be available
       // to the user in the first place.
@@ -3405,6 +3539,226 @@ export default class ReactorConversationService
       args: args.toolArgs,
       callId: args.callId,
     });
+  }
+
+  /**
+   * Reports the completion of client-side tool executions.
+   * Replaces placeholder tool results in the conversation history with
+   * the real results, then optionally continues the AI processing loop.
+   */
+  async completeClientToolCalls(args: {
+    chatSessionId: string;
+    personaId: string;
+    results: Array<{
+      toolCallId: string;
+      toolName: string;
+      result?: any;
+      isError?: boolean;
+      error?: string;
+    }>;
+    continueProcessing?: boolean;
+    streamingMode?: StreamingMode;
+  }): Promise<any> {
+    const {
+      chatSessionId,
+      personaId,
+      results,
+      continueProcessing = true,
+      streamingMode = StreamingMode.NONE,
+    } = args;
+
+    this.validateChatSessionId(chatSessionId, "completeClientToolCalls");
+
+    const conversation = await ReactorConversationModel.findOne({
+      _id: chatSessionId,
+      user: this.context.user,
+    }).populate("user").exec();
+
+    if (!conversation) {
+      throw new Error("Conversation not found or you do not have permission to access it");
+    }
+
+    this.sessionLog("info", `[completeClientToolCalls] Receiving ${results.length} client tool result(s)`, {
+      toolNames: results.map(r => r.toolName),
+      conversationId: chatSessionId,
+    }, chatSessionId, personaId);
+
+    // Persist each tool result: replace the placeholder history entry (if one
+    // exists from the AUTO+SSE path) or insert a new tool message (for
+    // PROMPT/SAFE_AUTO paths where no placeholder was created).
+    // Also backfill into the assistant message's tool_results array.
+    for (const toolResult of results) {
+      const content = toolResult.isError
+        ? `Error executing client tool ${toolResult.toolName}: ${toolResult.error}`
+        : typeof toolResult.result === 'string'
+          ? toolResult.result
+          : JSON.stringify(toolResult.result ?? 'No result');
+
+      // 1. Try to replace the placeholder tool message in history
+      const updateResult = await ReactorConversationModel.findOneAndUpdate(
+        {
+          _id: chatSessionId,
+          "history.tool_call_id": toolResult.toolCallId,
+          "history.role": "tool",
+        },
+        {
+          $set: {
+            "history.$.content": content,
+            "history.$.tool_results": [{
+              id: toolResult.toolCallId,
+              name: toolResult.toolName,
+              content: toolResult.isError ? toolResult.error : toolResult.result,
+              timestamp: new Date(),
+            }],
+            "history.$.timestamp": new Date(),
+            updated: new Date(),
+          },
+        },
+      ).exec();
+
+      // If no placeholder was found (e.g. client tool executed via PROMPT mode
+      // where the server never created a placeholder), insert a new tool message.
+      if (!updateResult) {
+        await ReactorConversationModel.findOneAndUpdate(
+          { _id: chatSessionId },
+          {
+            $push: {
+              history: {
+                id: new ObjectId(),
+                role: 'tool',
+                content,
+                tool_call_id: toolResult.toolCallId,
+                tool_name: toolResult.toolName,
+                timestamp: new Date(),
+                tool_results: [{
+                  id: toolResult.toolCallId,
+                  name: toolResult.toolName,
+                  content: toolResult.isError ? toolResult.error : toolResult.result,
+                  timestamp: new Date(),
+                }],
+              },
+            },
+            $set: { updated: new Date() },
+          },
+          { new: true },
+        ).exec();
+      }
+
+      // 2. Backfill tool_results in the original assistant message that had tool_calls
+      await ReactorConversationModel.findOneAndUpdate(
+        {
+          _id: chatSessionId,
+          "history.tool_calls.id": toolResult.toolCallId,
+        },
+        {
+          $push: {
+            "history.$.tool_results": {
+              id: toolResult.toolCallId,
+              name: toolResult.toolName,
+              content: toolResult.isError ? toolResult.error : toolResult.result,
+              timestamp: new Date(),
+            },
+          },
+        },
+      ).exec();
+
+      this.sessionLog("debug", `[completeClientToolCalls] Persisted result for tool "${toolResult.toolName}" (callId: ${toolResult.toolCallId})`, {
+        isError: toolResult.isError,
+        hasPlaceholder: !!updateResult,
+        conversationId: chatSessionId,
+      }, chatSessionId, personaId);
+    }
+
+    if (!continueProcessing) {
+      // Return the last assistant message from the conversation
+      const updated = await ReactorConversationModel.findById(chatSessionId).lean().exec();
+      const lastAssistant = [...(updated?.history || [])].reverse().find((h: any) => h.role === 'assistant');
+      return {
+        __typename: "ReactorChatMessage",
+        id: lastAssistant?.id?.toString() || new ObjectId().toString(),
+        role: lastAssistant?.role || "assistant",
+        content: lastAssistant?.content || "Client tool results received.",
+        timestamp: lastAssistant?.timestamp || new Date(),
+        tool_calls: lastAssistant?.tool_calls || [],
+        tool_results: lastAssistant?.tool_results || [],
+        tool_errors: [],
+        sessionId: chatSessionId,
+      };
+    }
+
+    // Continue the AI processing loop: send the tool results to the provider
+    // so the agent can see the real outputs and respond.
+    const persona = await this.context
+      .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0")
+      .getPersona(personaId);
+    const provider = persona.providerId || "openai";
+    const adapter = await this.providerService.getAdapter(provider);
+
+    if (streamingMode === StreamingMode.SSE) {
+      // Initiate SSE and run the continuation in the background
+      const updatedConversation = await ReactorConversationModel.findById(chatSessionId)
+        .populate("user").exec();
+
+      // Fire-and-forget: execute the provider chat and stream results
+      (async () => {
+        try {
+          let response = await this.executeProviderChat(
+            provider,
+            chatSessionId,
+            persona,
+            {
+              personaId,
+              chatSessionId,
+              message: '',
+              role: 'tool',
+              streamingMode,
+            }
+          );
+          response = await this.processAIResponse(
+            response,
+            updatedConversation,
+            '',
+            streamingMode,
+          );
+        } catch (err: any) {
+          this.sessionLog("error", `[completeClientToolCalls] SSE continuation failed: ${err.message}`, {
+            conversationId: chatSessionId,
+          }, chatSessionId, personaId);
+        }
+      })();
+
+      return this.createInitiateSSEResponse(
+        chatSessionId,
+        updatedConversation as unknown as ReactorConversationDocument,
+      );
+    }
+
+    // Non-streaming: execute provider chat synchronously
+    let response = await this.executeProviderChat(
+      provider,
+      chatSessionId,
+      persona,
+      {
+        personaId,
+        chatSessionId,
+        message: '',
+        role: 'tool',
+        streamingMode: StreamingMode.NONE,
+      }
+    );
+
+    // Reload conversation to get the updated history
+    const updatedConversation = await ReactorConversationModel.findById(chatSessionId)
+      .populate("user").exec();
+
+    response = await this.processAIResponse(
+      response,
+      updatedConversation,
+      '',
+      StreamingMode.NONE,
+    );
+
+    return adapter.adaptResponse(response);
   }
 
   async attachImage(args: {

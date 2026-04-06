@@ -555,6 +555,11 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
   setChatToolApprovalMode(chatSessionId: string, toolApprovalMode: ToolApprovalMode): Promise<any>;
 
   /**
+   * Persist the side panel state for a chat session.
+   */
+  setSidePanelState(chatSessionId: string, sidePanelState: any): Promise<any>;
+
+  /**
    * Sets the maximum number of auto tool call iterations before pausing for user confirmation.
    * When null, the server default is used.
    * @param chatSessionId
@@ -670,6 +675,25 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
     chatSessionId: string,
     // The arguments to pass to the macro
     args?: any 
+  }): Promise<any>;
+
+  /**
+   * Reports the completion of client-side tool executions.
+   * Persists the real results (replacing placeholders) and optionally
+   * continues the AI processing loop.
+   */
+  completeClientToolCalls(args: {
+    chatSessionId: string;
+    personaId: string;
+    results: Array<{
+      toolCallId: string;
+      toolName: string;
+      result?: any;
+      isError?: boolean;
+      error?: string;
+    }>;
+    continueProcessing?: boolean;
+    streamingMode?: StreamingMode;
   }): Promise<any>;
 
   attachImage(args: { 

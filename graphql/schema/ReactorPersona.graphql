@@ -265,6 +265,7 @@ input ReactorMacroInput {
   roles: [String]
   params: [String]
   icon: String
+  runat: ReactorMacroRunAt
 }
 
 input ReactorFunctionInput { 
@@ -281,6 +282,7 @@ input ReactorToolDefinitionInput {
   propsMap: Any
   roles: [String]
   function: ReactorFunctionInput
+  runat: ReactorMacroRunAt
 }
 
 enum ReactorPromptMergeStrategy {

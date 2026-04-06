@@ -392,6 +392,10 @@ type ReactorChatState {
   The currently active provider ID for this session. When set, overrides the persona default.
   """
   providerId: String
+  """
+  The persisted side panel state for the conversation.
+  """
+  sidePanelState: ReactorSidePanelState
 }
 
 """
@@ -498,6 +502,22 @@ input ReactorToolExecuteInput {
 }
 
 """
+A single client-side tool execution result reported back to the server.
+"""
+input ReactorClientToolResultInput {
+  """The tool_call ID from the AI that this result responds to"""
+  toolCallId: String!
+  """The name of the tool/macro that was executed"""
+  toolName: String!
+  """The result data returned by the client-side tool execution"""
+  result: Any
+  """Whether the tool execution failed"""
+  isError: Boolean
+  """Error message when isError is true"""
+  error: String
+}
+
+"""
 Response type for file attachment operations.
 """
 union ReactorAttachFileResponse = ReactorChatResponse | ReactorErrorResponse
@@ -574,6 +594,52 @@ type ReactorPinFolderResponse {
 
 union ReactorPinFolderResult = ReactorPinFolderResponse | ReactorErrorResponse
 union ReactorUnpinFolderResult = ReactorPinFolderResponse | ReactorErrorResponse
+
+"""
+A single persisted side panel item.
+"""
+type ReactorSidePanelItem {
+  id: String!
+  componentFqn: String!
+  title: String!
+  type: String!
+  """Serializable component props (reactory SDK excluded — re-injected on restore)."""
+  props: Any
+  addedAt: Date
+  addedBy: String
+}
+
+"""
+Persisted side panel state for a conversation.
+"""
+type ReactorSidePanelState {
+  items: [ReactorSidePanelItem!]!
+  activeItemId: String
+  isOpen: Boolean!
+}
+
+"""
+Input for a single side panel item.
+"""
+input ReactorSidePanelItemInput {
+  id: String!
+  componentFqn: String!
+  title: String!
+  type: String!
+  """Serializable component props to persist."""
+  props: Any
+  addedAt: Date
+  addedBy: String
+}
+
+"""
+Input for persisting side panel state.
+"""
+input ReactorSidePanelStateInput {
+  items: [ReactorSidePanelItemInput!]!
+  activeItemId: String
+  isOpen: Boolean!
+}
 
 input ReactorConversationLoadOptions {
   showAllFiles: Boolean
@@ -728,6 +794,15 @@ extend type Mutation {
   ): ReactorChatState
 
   """
+  Persist the current side panel state for a chat session.
+  Only serializable item metadata is stored (props are excluded).
+  """
+  ReactorSetSidePanelState(
+    chatSessionId: String!
+    sidePanelState: ReactorSidePanelStateInput!
+  ): ReactorChatState
+
+  """
   Continue tool execution after the agent paused due to reaching the max tool iteration limit.
   Optionally accepts a new max iterations value to apply before resuming.
   """
@@ -770,6 +845,22 @@ extend type Mutation {
     chatSessionId: String!
     callId: String
     args: Any
+  ): ReactorChatResponse
+
+  """
+  Reports the completion of client-side tool executions back to the server.
+  The server persists the actual results (replacing any placeholders) and,
+  when continueProcessing is true, re-enters the AI processing loop so the
+  agent can see the real tool outputs and continue.
+  """
+  ReactorCompleteClientToolCalls(
+    chatSessionId: String!
+    personaId: String!
+    results: [ReactorClientToolResultInput!]!
+    """When true, the server sends tool results to the AI and continues the conversation"""
+    continueProcessing: Boolean
+    """Streaming mode for the AI continuation response"""
+    streamingMode: StreamingMode
   ): ReactorChatResponse
   
   """
