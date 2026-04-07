@@ -2465,6 +2465,40 @@ export default class ReactorConversationService
             }
           }
 
+          // Guard: an empty user message is a lightweight SSE re-establishment probe
+          // sent by the client to (re)connect the SSE transport.  We must NOT add
+          // it to history or call the AI provider — doing so causes the AI to
+          // "hallucinate" a response with no real user input.
+          const isEmptyProbe =
+            role === "user" &&
+            !continueAfterTools &&
+            (!message || (typeof message === "string" && message.trim() === ""));
+
+          if (isEmptyProbe) {
+            const probeConv = await ReactorConversationModel.findOne(
+              { _id: chatSessionId, user: this.context.user },
+            ).populate("user").exec();
+
+            if (!probeConv) {
+              throw new Error(
+                `Chat session with id ${chatSessionId} not found or you do not have permission to access it.`
+              );
+            }
+
+            this.sessionLog(
+              "debug",
+              "Empty user-message probe — returning SSE init without calling AI",
+              { chatSessionId, streamingMode },
+              chatSessionId,
+              personaId,
+            );
+
+            return this.createInitiateSSEResponse(
+              chatSessionId,
+              probeConv as unknown as ReactorConversationDocument,
+            );
+          }
+
           this.sessionLog("debug", "Finding existing conversation", {
             chatSessionId,
             userId: this.context.user?._id,

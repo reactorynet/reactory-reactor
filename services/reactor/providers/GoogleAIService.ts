@@ -277,6 +277,24 @@ class GoogleAIService extends AIProviderBase {
   }
 
   private handleObjectProperties(value: any): GoogleGenAI.Schema {
+    // Gemini function calling does not support freeform/unstructured objects.
+    // When a parameter is typed as "object" but has no "properties" defined,
+    // convert it to a STRING type so the model emits a JSON string instead.
+    // The consuming code already handles JSON-string-to-object parsing.
+    if (
+      value.type &&
+      this.getTypeEnum(value.type) === Type.OBJECT &&
+      !value.properties
+    ) {
+      const desc = value.description ?? "";
+      return {
+        type: Type.STRING,
+        description: desc
+          ? `${desc} (Provide as a JSON string)`
+          : "A JSON object provided as a string",
+      };
+    }
+
     const schema: GoogleGenAI.Schema = {
       type: this.getTypeEnum(value.type),
       description: value.description ?? "",
@@ -306,24 +324,40 @@ class GoogleAIService extends AIProviderBase {
       return items.map((item: any) => {
         if (
           item.type &&
-          this.getTypeEnum(item.type) === Type.OBJECT &&
-          item.properties
+          this.getTypeEnum(item.type) === Type.OBJECT
         ) {
+          if (item.properties) {
+            return {
+              ...item,
+              properties: this.toPropertiesRecord(item.properties),
+            };
+          }
+          // Freeform object items without properties — convert to string
           return {
-            ...item,
-            properties: this.toPropertiesRecord(item.properties),
+            type: Type.STRING,
+            description: item.description
+              ? `${item.description} (Provide as a JSON string)`
+              : "A JSON object provided as a string",
           };
         }
         return item;
       });
     } else if (
       items.type &&
-      this.getTypeEnum(items.type) === Type.OBJECT &&
-      items.properties
+      this.getTypeEnum(items.type) === Type.OBJECT
     ) {
+      if (items.properties) {
+        return {
+          ...items,
+          properties: this.toPropertiesRecord(items.properties),
+        };
+      }
+      // Freeform object items without properties — convert to string
       return {
-        ...items,
-        properties: this.toPropertiesRecord(items.properties),
+        type: Type.STRING,
+        description: items.description
+          ? `${items.description} (Provide as a JSON string)`
+          : "A JSON object provided as a string",
       };
     } else {
       return items;
@@ -368,9 +402,9 @@ class GoogleAIService extends AIProviderBase {
     tools.forEach((tool: MacroToolDefinition) => {
       const functionDeclaration: FunctionDeclaration = {
         name: tool.function.name,
+        description: tool.function.description,
         parameters: {
           type: Type.OBJECT,
-          description: tool.function.description,
           properties: this.toPropertiesRecord(
             tool.function.parameters.properties
           ),
