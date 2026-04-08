@@ -127,13 +127,17 @@ export class StreamingEventFactory {
     finishReason: string = "stop",
     thinking?: string,
     opts: StreamingEventIds = {},
+    images?: Array<{ b64_json?: string; url?: string; mimeType?: string }>,
   ): CompletionStreamingEvent {
-    const data: { content: string; finishReason: string; thinking?: string } = {
+    const data: { content: string; finishReason: string; thinking?: string; images?: Array<{ b64_json?: string; url?: string; mimeType?: string }> } = {
       content,
       finishReason,
     };
     if (thinking) {
       data.thinking = thinking;
+    }
+    if (images && images.length > 0) {
+      data.images = images;
     }
     return StreamingEventFactory.base(
       StreamingEventType.COMPLETE,

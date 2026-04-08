@@ -115,7 +115,7 @@ export class SSETransport implements StreamingTransport {
       const sseMessage = `event: ${event.type}\ndata: ${eventData}\n\n`;
 
       this.response.write(sseMessage);
-      this.slog("debug", `Sent SSE event: ${event.type}`, { event });
+      this.slog("debug", `Sent SSE event: ${event.type}`, { eventType: event.type, hasImages: !!(event as any).data?.images?.length });
       if (typeof (this.response as any).flush === 'function') {
         (this.response as any).flush();
       } else {

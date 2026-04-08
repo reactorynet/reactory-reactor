@@ -396,6 +396,11 @@ type ReactorChatState {
   The persisted side panel state for the conversation.
   """
   sidePanelState: ReactorSidePanelState
+  """
+  Whether image generation mode (creative mode) is enabled for this session.
+  When enabled and the active model supports it, responses may include generated images.
+  """
+  imageGenerationEnabled: Boolean
 }
 
 """

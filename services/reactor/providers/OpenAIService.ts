@@ -9,6 +9,9 @@ import {
 import {
   AIChatParams,
   AIChatCompletion,
+  AIImage,
+  AIImageGenerationParams,
+  AIListResponse,
 } from "../../../types/model.types";
 import OpenAI, { ClientOptions } from "openai";
 import AIPersonaProvider from "../AIPersonaProvider";
@@ -36,6 +39,7 @@ import { StreamingSessionManager } from "../StreamingSessionManager";
 import { StreamingTransportManager } from "../StreamingTransportManager";
 import { StreamingEventFactory, StreamingEventIds } from "../streaming/StreamingEventFactory";
 import { TokenPacer } from "../streaming/TokenPacer";
+import { IReactorProviderService } from "../../../types/service.types";
 
 
 @service({
@@ -52,6 +56,7 @@ import { TokenPacer } from "../streaming/TokenPacer";
     { id: "reactor.ReactorMacroService@1.0.0", alias: "macroService" },
     { id: "reactor.StreamingTransportManager@1.0.0", alias: "streamingTransportManager" },
     { id: "reactor.StreamingSessionManager@1.0.0", alias: "streamingSessionManager" },
+    { id: "reactor.ReactorProviderService@1.0.0", alias: "providerService" },
   ],
 })
 class OpenAIService extends AIProviderBase {
@@ -64,10 +69,47 @@ class OpenAIService extends AIProviderBase {
   streamingMode: StreamingMode = StreamingMode.NONE;
   streamingSessionManager!: StreamingSessionManager;
   streamingTransportManager!: StreamingTransportManager;
+  providerService!: IReactorProviderService;
+
+  /** Cached model config from the provider registry */
+  private _resolvedModelConfig: { supportedTools?: string[]; capabilities?: string[] } | null = null;
 
   constructor(props: IOpenAIServiceProps, context: Reactory.Server.IReactoryContext) {
     super(props, context);
     this.streamingMode = props.streamingMode || StreamingMode.NONE;
+  }
+
+  /**
+   * Resolve the model config from the provider registry.
+   */
+  private async resolveModelConfig(): Promise<{ supportedTools?: string[]; capabilities?: string[] }> {
+    if (this._resolvedModelConfig) return this._resolvedModelConfig;
+    const modelId = this.chatState?.modelId || "";
+    if (!modelId || !this.providerService) return {};
+    try {
+      const providers = await this.providerService.getProviders();
+      for (const p of providers) {
+        const model = p.models?.find((m: any) => m.id === modelId);
+        if (model) {
+          this._resolvedModelConfig = {
+            supportedTools: model.supportedTools || [],
+            capabilities: model.capabilities || [],
+          };
+          return this._resolvedModelConfig;
+        }
+      }
+    } catch {
+      // Fall through — assume function calling is supported
+    }
+    return {};
+  }
+
+  /** Check if the active model supports function calling based on provider config */
+  private async modelSupportsFunctionCalling(): Promise<boolean> {
+    const config = await this.resolveModelConfig();
+    // If no config found (model not in registry), default to true for backward compatibility
+    if (!config.supportedTools) return true;
+    return config.supportedTools.includes("function-calling");
   }
 
   /**
@@ -88,6 +130,8 @@ class OpenAIService extends AIProviderBase {
    * Supports OpenAI, xAI, and Ollama endpoints.
    */
   protected async initializeClient(persona: IAIPersona): Promise<void> {
+    // Reset cached model config for the new session/model
+    this._resolvedModelConfig = null;
     const { apiKey, apiOrganizationId, apiBaseURL } = this.props;
     const { providerId } = persona;
 
@@ -224,7 +268,8 @@ class OpenAIService extends AIProviderBase {
     });
 
     const tools = await this.getToolsDefinitions();
-    if (tools.length > 0) {
+    const supportsFunctionCalling = await this.modelSupportsFunctionCalling();
+    if (supportsFunctionCalling && tools.length > 0) {
       return {
         model: modelId,
         messages,
@@ -631,6 +676,28 @@ class OpenAIService extends AIProviderBase {
 
   setStreamingTransportManager(streamingTransportManager: StreamingTransportManager) {
     this.streamingTransportManager = streamingTransportManager;
+  }
+
+  async generateImage(params: AIImageGenerationParams): Promise<AIListResponse<AIImage>> {
+    const persona = this.chatState?.persona;
+    if (!this.ai) {
+      await this.initializeClient(persona);
+    }
+
+    const response = await this.ai.images.generate({
+      model: params.model || "dall-e-3",
+      prompt: params.prompt,
+      n: params.n || 1,
+      size: (params.size as any) || "1024x1024",
+      response_format: (params.response_format as any) || "b64_json",
+    });
+
+    const images: AIImage[] = (response.data || []).map((img) => ({
+      b64_json: img.b64_json,
+      url: img.url,
+    }));
+
+    return { data: images };
   }
 
   // --- IReactoryService interface ---

@@ -27,6 +27,7 @@ import GoogleAIService from "./providers/GoogleAIService";
 import { v4 } from "uuid";
 import { ObjectId } from "mongodb";
 import safeUrl from "@reactory/server-core/utils/url/safeUrl";
+import resolveImageUrls from "@reactory/server-modules/reactory-reactor/utils/resolveImageUrls";
 import { ChatCompletion, ChatCompletionMessage } from "openai/resources";
 import ReactorMacroService from "./providers/ReactorMacroService";
 import DocumentChunkingService from "./DocumentChunkingService";
@@ -3203,6 +3204,24 @@ export default class ReactorConversationService
         const aiMessage = response.choices[0].message;
         // Extract reasoning/thinking from provider response
         const thinking = response.reasoning || response.__reasoning || undefined;
+        // Extract generated images from provider response
+        let images = response.images || response.__images || undefined;
+
+        // Save base64 images to the session folder and replace with CDN URLs
+        if (images && Array.isArray(images) && images.length > 0) {
+          const conversationId = conversation._id?.toString();
+          const personaId = conversation.personaId;
+          const sessionLogger = conversationId && personaId
+            ? this.getSessionLogger(conversationId, personaId)
+            : null;
+          if (sessionLogger) {
+            const saved = sessionLogger.saveImages(images);
+            images = saved;
+            // Update the response so downstream consumers (GraphQL, SSE) see URLs
+            if (response.images) response.images = saved;
+            if (response.__images) response.__images = saved;
+          }
+        }
 
         // Use findOneAndUpdate for atomic update
         await ReactorConversationModel.findOneAndUpdate(
@@ -3215,6 +3234,7 @@ export default class ReactorConversationService
                 role: aiMessage.role,
                 content: aiMessage.content,
                 thinking,
+                images,
                 timestamp: new Date(),
                 tool_calls: aiMessage.tool_calls,
                 tool_results: [],
@@ -3268,11 +3288,10 @@ export default class ReactorConversationService
         role: msg.role,
         content: msg.content,
         thinking: response.reasoning || response.__reasoning || undefined,
+        images: resolveImageUrls(response.images || response.__images) || undefined,
         timestamp: new Date(),
         tool_calls: (msg.tool_calls || []).map((tc: any) => ({
           ...tc,
-          // Ensure every tool_call has a status so GraphQL's non-nullable
-          // ReactorToolCallStatus! field doesn't nullify the entry.
           status: tc.status || 'pending',
         })),
         tool_results: [],

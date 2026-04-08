@@ -1,6 +1,12 @@
 import * as winston from "winston";
 import * as path from "path";
 import * as fs from "fs";
+import * as crypto from "crypto";
+
+interface SavedImage {
+  url: string;
+  mimeType?: string;
+}
 
 /**
  * ChatSessionLogger creates a dedicated file-based logger for each chat session.
@@ -114,6 +120,51 @@ export class ChatSessionLogger {
     return this.logDir;
   }
 
+  /**
+   * Save base64-encoded images to the session's images/ subfolder.
+   * Returns an array of objects with the CDN-relative URL and mimeType.
+   *
+   * Images that already have a `url` and no `b64_json` are passed through unchanged.
+   */
+  saveImages(images: Array<{ b64_json?: string; url?: string; mimeType?: string }>): SavedImage[] {
+    const imageDir = path.join(this.logDir, "images");
+    if (!fs.existsSync(imageDir)) {
+      fs.mkdirSync(imageDir, { recursive: true });
+    }
+
+    // Derive the CDN-relative path from the logDir.
+    // logDir = <dataRoot>/profiles/<userId>/chats/<personaId>/<conversationId>
+    // CDN serves <dataRoot> at /cdn, so the relative root starts at "profiles/..."
+    const dataRoot = process.env.REACTORY_DATA || process.env.APP_DATA_ROOT || "";
+    const relativeDirFromRoot = path.relative(dataRoot, imageDir);
+
+    const results: SavedImage[] = [];
+    for (const img of images) {
+      if (!img.b64_json) {
+        // Already a URL-based image — pass through
+        results.push({ url: img.url || "", mimeType: img.mimeType });
+        continue;
+      }
+
+      const ext = mimeToExt(img.mimeType || "image/png");
+      const hash = crypto.createHash("sha256").update(img.b64_json).digest("hex").substring(0, 16);
+      const filename = `${hash}.${ext}`;
+      const filePath = path.join(imageDir, filename);
+
+      // Only write if the file doesn't already exist (idempotent)
+      if (!fs.existsSync(filePath)) {
+        fs.writeFileSync(filePath, Buffer.from(img.b64_json, "base64"));
+      }
+
+      results.push({
+        url: `/cdn/${relativeDirFromRoot}/${filename}`,
+        mimeType: img.mimeType,
+      });
+    }
+
+    return results;
+  }
+
   debug(message: string, meta?: Record<string, unknown>): void {
     this.logger.debug(message, meta);
   }
@@ -147,4 +198,16 @@ export class ChatSessionLogger {
       this.logger.end();
     });
   }
+}
+
+/** Map common image MIME types to file extensions */
+function mimeToExt(mime: string): string {
+  const map: Record<string, string> = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+    "image/svg+xml": "svg",
+  };
+  return map[mime] || "png";
 }

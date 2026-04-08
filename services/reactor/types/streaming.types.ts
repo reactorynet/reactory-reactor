@@ -193,6 +193,8 @@ export interface CompletionStreamingEvent extends StreamingEventBase {
     finishReason: 'stop' | 'error';
     /** Full reasoning/thinking content accumulated during streaming (if any) */
     thinking?: string;
+    /** Generated images (base64 or URL) returned by image generation models */
+    images?: Array<{ b64_json?: string; url?: string; mimeType?: string }>;
   };
 }
 
