@@ -1,7 +1,7 @@
 import Reactory from "@reactorynet/reactory-core";
 import fs from 'fs';
 import yaml from 'js-yaml';
-import { ChatState, Macro } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
+import { ChatState, Macro, MacroComponentDefinition } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import { IWorkflowDefinitionInput } from "@reactory/server-modules/reactory-core/services/Workflow/types";
 
 
@@ -13,8 +13,10 @@ export interface ExecuteYamlWorkflowProps {
 
 export const executeYamlWorkflow: Macro<unknown, ExecuteYamlWorkflowProps> = async (
   props: ExecuteYamlWorkflowProps,
-  state: ChatState
+  state: ChatState,
+  context?: Reactory.Server.IReactoryContext
 ): Promise<unknown> => {
+  const ctx = context || state.context;
   const { filePath, inputs = {}, timeout = 30000 } = props;
 
   try {
@@ -33,7 +35,7 @@ export const executeYamlWorkflow: Macro<unknown, ExecuteYamlWorkflowProps> = asy
     let definition: IWorkflowDefinitionInput;
     try {
       definition = yaml.load(yamlContent) as IWorkflowDefinitionInput;
-    } catch (e) {
+    } catch (e: any) {
       return { success: false, error: `Failed to parse YAML: ${e.message}` };
     }
 
@@ -44,7 +46,8 @@ export const executeYamlWorkflow: Macro<unknown, ExecuteYamlWorkflowProps> = asy
     const fqn = `${definition.nameSpace}.${definition.name}@${definition.version}`;
 
     // 3. Get the Workflow Service
-    const workflowService = state.context.getService('core.ReactoryWorkflowService@1.0.0') as any;
+    if (!ctx) return { success: false, error: "No execution context available." };
+    const workflowService = ctx.getService('core.ReactoryWorkflowService@1.0.0') as any;
     if (!workflowService) {
       return { success: false, error: "core.ReactoryWorkflowService@1.0.0 is not available in the context." };
     }
@@ -72,7 +75,7 @@ export const executeYamlWorkflow: Macro<unknown, ExecuteYamlWorkflowProps> = asy
     };
 
   } catch (err: any) {
-    state.context.log(`executeYamlWorkflow Macro Error: ${err.message}`, 'error');
+    ctx?.log(`executeYamlWorkflow Macro Error: ${err.message}`, 'error');
     return {
       success: false,
       error: err.message,

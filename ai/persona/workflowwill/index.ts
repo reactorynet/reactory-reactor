@@ -27,7 +27,18 @@ const WORKFLOW_TOOL_INCLUDES = [
   'http',
   'httpGet',
   'httpPost',
-  'executeYamlWorkflow'
+  'executeYamlWorkflow',
+  'listWorkflows',
+  'getWorkflow',
+  'getWorkflowYaml',
+  'listWorkflowInstances',
+  'getWorkflowHistory',
+  'getWorkflowStats',
+  'listWorkflowSchedules',
+  'getWorkflowErrors',
+  'getRecentExecutions',
+  'controlWorkflowInstance',
+  'listWorkflowSteps',
 ];
 
 const REACTORY_HOME = process.env.REACTORY_HOME || process.cwd();
