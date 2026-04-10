@@ -227,7 +227,7 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
       metadata: {
         executionTime: Date.now() - startTime,
         timestamp: new Date(),
-        user: state.user?.id,
+        user: state.user?.id.toString(),
         command: shellCommand,
         workingDir,
         shell,
@@ -263,7 +263,7 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
   // Get shell command text
   try {
     shellCommandText = await getShellCommandText(templateId, shellCommand, state);
-  } catch (error) {
+  } catch (error: any) {
     logger.error(`Error getting shell command text: ${error.message}`);
     return {
       success: false,
@@ -286,7 +286,7 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
   // Write shell command to file
   try {
     fs.writeFileSync(shFilePath, shellCommandText, { encoding: 'utf8' });
-  } catch (fsError) {
+  } catch (fsError: any) {
     logger.error(`Error writing shell command to file: ${fsError.message}`);
     return {
       success: false,
@@ -309,7 +309,7 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
   // Make the file executable
   try {
     fs.chmodSync(shFilePath, 0o700);
-  } catch (fsError) {
+  } catch (fsError: any) {
     logger.error(`Error setting file permissions: ${fsError.message}`);
     return {
       success: false,
@@ -408,7 +408,7 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
         });
 
         ["close", "exit", "error", "disconnect"].forEach((evt) => childProcess.on(evt, exitHandler));
-      } catch (err) {
+      } catch (err: any) {
         shellErr.push(err.message);
         cleanExit();
       }
@@ -463,7 +463,7 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
       metadata: {
         executionTime: totalExecutionTime,
         timestamp: new Date(),
-        user: state.user?.id,
+        user: state.user?.id.toString(),
         command: shellCommand,
         workingDir,
         shell,
@@ -512,7 +512,7 @@ Successfully executed shell command: **${shellCommand}**
       `
     };
 
-  } catch (error) {
+  } catch (error: any) {
     const totalExecutionTime = Date.now() - startTime;
     logger.error(`Command execution failed: ${error.message}`);
     
@@ -524,7 +524,7 @@ Successfully executed shell command: **${shellCommand}**
       metadata: {
         executionTime: totalExecutionTime,
         timestamp: new Date(),
-        user: state.user?.id,
+        user: state.user?.id.toString(),
         command: shellCommand,
         workingDir,
         shell,

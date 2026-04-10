@@ -284,6 +284,218 @@ export default class ReactorConversationService
   }
 
   /**
+   * Estimates the token count for a single conversation history item,
+   * including content, tool_calls arguments, tool_results, tool_errors, and thinking.
+   * Uses the same chars/4 heuristic as the chunking service.
+   */
+  private estimateHistoryItemTokens(msg: ReactorConversationHistoryItem): number {
+    let tokens = 0;
+
+    // 1. Content field (the only thing the old code counted)
+    if (msg.content) {
+      if (typeof msg.content === 'string') {
+        tokens += Math.ceil(msg.content.length / TOKEN_LIMITS.CHARS_PER_TOKEN_ESTIMATE);
+      } else {
+        // content can be an object/array (e.g. multimodal parts)
+        const serialized = JSON.stringify(msg.content);
+        tokens += Math.ceil(serialized.length / TOKEN_LIMITS.CHARS_PER_TOKEN_ESTIMATE);
+      }
+    }
+
+    // 2. Tool calls — each has function.name + function.arguments
+    if (msg.tool_calls && msg.tool_calls.length > 0) {
+      for (const tc of msg.tool_calls) {
+        if (tc.function?.name) {
+          tokens += Math.ceil(tc.function.name.length / TOKEN_LIMITS.CHARS_PER_TOKEN_ESTIMATE);
+        }
+        if (tc.function?.arguments) {
+          const args = typeof tc.function.arguments === 'string'
+            ? tc.function.arguments
+            : JSON.stringify(tc.function.arguments);
+          tokens += Math.ceil(args.length / TOKEN_LIMITS.CHARS_PER_TOKEN_ESTIMATE);
+        }
+      }
+    }
+
+    // 3. Tool results — each has content and/or result
+    if (msg.tool_results && msg.tool_results.length > 0) {
+      for (const tr of msg.tool_results) {
+        const resultPayload = tr.content ?? tr.result;
+        if (resultPayload) {
+          const text = typeof resultPayload === 'string'
+            ? resultPayload
+            : JSON.stringify(resultPayload);
+          tokens += Math.ceil(text.length / TOKEN_LIMITS.CHARS_PER_TOKEN_ESTIMATE);
+        }
+      }
+    }
+
+    // 4. Tool errors
+    if (msg.tool_errors && msg.tool_errors.length > 0) {
+      for (const te of msg.tool_errors) {
+        if (te.error) {
+          tokens += Math.ceil(te.error.length / TOKEN_LIMITS.CHARS_PER_TOKEN_ESTIMATE);
+        }
+      }
+    }
+
+    // 5. Thinking/reasoning content
+    if (msg.thinking && typeof msg.thinking === 'string') {
+      tokens += Math.ceil(msg.thinking.length / TOKEN_LIMITS.CHARS_PER_TOKEN_ESTIMATE);
+    }
+
+    return tokens;
+  }
+
+  /**
+   * MongoDB aggregation expression that estimates the total token count for a
+   * history array field. Accounts for content (string or object), tool_calls
+   * arguments, tool_results content/result, tool_errors, and thinking.
+   *
+   * Returns a $reduce expression to use inside $addFields.
+   */
+  private static get tokenCountAggregationExpression() {
+    const charsPerToken = TOKEN_LIMITS.CHARS_PER_TOKEN_ESTIMATE;
+
+    // Helper: estimate tokens for a value — if string, use strLenCP; otherwise 0
+    const strTokens = (field: string) => ({
+      $cond: {
+        if: { $eq: [{ $type: field }, "string"] },
+        then: { $divide: [{ $strLenCP: field }, charsPerToken] },
+        else: {
+          $cond: {
+            if: { $in: [{ $type: field }, ["object", "array"]] },
+            then: {
+              $let: {
+                vars: { serialized: { $toString: field } },
+                in: {
+                  $cond: {
+                    if: { $eq: [{ $type: "$$serialized" }, "string"] },
+                    then: { $divide: [{ $strLenCP: "$$serialized" }, charsPerToken] },
+                    else: 0,
+                  },
+                },
+              },
+            },
+            else: 0,
+          },
+        },
+      },
+    });
+
+    return {
+      $reduce: {
+        input: "$history",
+        initialValue: 0,
+        in: {
+          $add: [
+            "$$value",
+            // ── content field ──
+            {
+              $cond: {
+                if: { $ne: ["$$this.content", null] },
+                then: strTokens("$$this.content"),
+                else: 0,
+              },
+            },
+            // ── tool_calls: sum function.arguments lengths ──
+            {
+              $cond: {
+                if: {
+                  $and: [
+                    { $ne: ["$$this.tool_calls", null] },
+                    { $isArray: "$$this.tool_calls" },
+                    { $gt: [{ $size: "$$this.tool_calls" }, 0] },
+                  ],
+                },
+                then: {
+                  $reduce: {
+                    input: "$$this.tool_calls",
+                    initialValue: 0,
+                    in: {
+                      $add: [
+                        "$$value",
+                        {
+                          $cond: {
+                            if: { $eq: [{ $type: "$$this.function.arguments" }, "string"] },
+                            then: { $divide: [{ $strLenCP: "$$this.function.arguments" }, charsPerToken] },
+                            else: 0,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+                else: 0,
+              },
+            },
+            // ── tool_results: sum content/result lengths ──
+            {
+              $cond: {
+                if: {
+                  $and: [
+                    { $ne: ["$$this.tool_results", null] },
+                    { $isArray: "$$this.tool_results" },
+                    { $gt: [{ $size: "$$this.tool_results" }, 0] },
+                  ],
+                },
+                then: {
+                  $reduce: {
+                    input: "$$this.tool_results",
+                    initialValue: 0,
+                    in: {
+                      $add: [
+                        "$$value",
+                        {
+                          $cond: {
+                            if: {
+                              $and: [
+                                { $ne: ["$$this.content", null] },
+                                { $eq: [{ $type: "$$this.content" }, "string"] },
+                              ],
+                            },
+                            then: { $divide: [{ $strLenCP: "$$this.content" }, charsPerToken] },
+                            else: {
+                              $cond: {
+                                if: {
+                                  $and: [
+                                    { $ne: ["$$this.result", null] },
+                                    { $eq: [{ $type: "$$this.result" }, "string"] },
+                                  ],
+                                },
+                                then: { $divide: [{ $strLenCP: "$$this.result" }, charsPerToken] },
+                                else: 0,
+                              },
+                            },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                },
+                else: 0,
+              },
+            },
+            // ── thinking field ──
+            {
+              $cond: {
+                if: {
+                  $and: [
+                    { $ne: ["$$this.thinking", null] },
+                    { $eq: [{ $type: "$$this.thinking" }, "string"] },
+                  ],
+                },
+                then: { $divide: [{ $strLenCP: "$$this.thinking" }, charsPerToken] },
+                else: 0,
+              },
+            },
+          ],
+        },
+      },
+    };
+  }
+
+  /**
    * Get or create a ChatSessionResourceManager for a given conversation.
    * Logs are written to REACTORY_DATA/profiles/{userId}/chats/{personaId}/{conversationId}/
    */
@@ -709,30 +921,9 @@ export default class ReactorConversationService
         {
           $addFields: {
             // Calculate total tokens for all messages in history
-            calculatedTokenCount: {
-              $reduce: {
-                input: "$history",
-                initialValue: 0,
-                in: {
-                  $cond: {
-                    if: {
-                      $and: [
-                        { $ne: ["$$this.content", null] },
-                        { $eq: [{ $type: "$$this.content" }, "string"] },
-                      ],
-                    },
-                    then: {
-                      $add: [
-                        "$$value",
-                        // Rough token estimation: content.length / 4 (average)
-                        { $divide: [{ $strLenCP: "$$this.content" }, 4] },
-                      ],
-                    },
-                    else: "$$value",
-                  },
-                },
-              },
-            },
+            // Includes content, tool_calls arguments, tool_results, thinking
+            calculatedTokenCount:
+              ReactorConversationService.tokenCountAggregationExpression,
           },
         },
       ]).exec();
@@ -897,30 +1088,9 @@ export default class ReactorConversationService
         {
           $addFields: {
             // Calculate total tokens for all messages in history
-            calculatedTokenCount: {
-              $reduce: {
-                input: "$history",
-                initialValue: 0,
-                in: {
-                  $cond: {
-                    if: {
-                      $and: [
-                        { $ne: ["$$this.content", null] },
-                        { $eq: [{ $type: "$$this.content" }, "string"] },
-                      ],
-                    },
-                    then: {
-                      $add: [
-                        "$$value",
-                        // Rough token estimation: content.length / 4 (average)
-                        { $divide: [{ $strLenCP: "$$this.content" }, 4] },
-                      ],
-                    },
-                    else: "$$value",
-                  },
-                },
-              },
-            },
+            // Includes content, tool_calls arguments, tool_results, thinking
+            calculatedTokenCount:
+              ReactorConversationService.tokenCountAggregationExpression,
           },
         },
       ]).exec();
@@ -1046,9 +1216,7 @@ export default class ReactorConversationService
     // Calculate tokens for system messages
     let systemTokens = 0;
     systemMessages.forEach((msg) => {
-      if (msg.content && typeof msg.content === "string") {
-        systemTokens += this.chunkingService.estimateTokenCount(msg.content);
-      }
+      systemTokens += this.estimateHistoryItemTokens(msg as ReactorConversationHistoryItem);
     });
 
     // If system messages alone exceed the limit, we have a problem
@@ -1075,10 +1243,9 @@ export default class ReactorConversationService
     // Add recent messages, working backwards
     for (let i = nonSystemMessages.length - 1; i >= 0; i--) {
       const message = nonSystemMessages[i];
-      const messageTokens =
-        message.content && typeof message.content === "string"
-          ? this.chunkingService.estimateTokenCount(message.content)
-          : 0;
+      const messageTokens = this.estimateHistoryItemTokens(
+        message as ReactorConversationHistoryItem
+      );
 
       if (tokensUsed + messageTokens <= targetTokens) {
         messagesToKeep.unshift(message); // Add to beginning to maintain order
@@ -1228,10 +1395,7 @@ export default class ReactorConversationService
       messages: ReactorConversationHistoryItem[]
     ): number => {
       return messages.reduce((total, msg) => {
-        if (msg.content && typeof msg.content === "string") {
-          return total + this.chunkingService.estimateTokenCount(msg.content);
-        }
-        return total;
+        return total + this.estimateHistoryItemTokens(msg);
       }, 0);
     };
 
@@ -1300,10 +1464,9 @@ export default class ReactorConversationService
 
     const truncatedHistory = conversation.truncatedHistory || [];
     const clearedTokens = truncatedHistory.reduce((total, msg) => {
-      if (msg.content && typeof msg.content === "string") {
-        return total + this.chunkingService.estimateTokenCount(msg.content);
-      }
-      return total;
+      return total + this.estimateHistoryItemTokens(
+        msg as ReactorConversationHistoryItem
+      );
     }, 0);
 
     await ReactorConversationModel.findOneAndUpdate(
