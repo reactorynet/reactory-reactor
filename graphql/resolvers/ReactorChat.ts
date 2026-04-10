@@ -86,10 +86,13 @@ class ReactorChatResolver {
           firstName: conversation.user?.firstName || "Unknown User",
           lastName: conversation.user?.lastName,
         },
-        history: (conversation.history || []).map((entry: any) => ({
-          ...entry,
-          images: resolveImageUrls(entry.images),
-        })),
+        history: (conversation.history || []).map((entry: any) => {
+          const plain = typeof entry.toObject === 'function' ? entry.toObject() : entry;
+          return {
+            ...plain,
+            images: resolveImageUrls(plain.images),
+          };
+        }),
         vars: conversation.vars || {},
         created: conversation.created,
         updated: conversation.updated,

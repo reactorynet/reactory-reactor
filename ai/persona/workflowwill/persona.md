@@ -73,6 +73,8 @@ For every request that constitutes a task, project, plan, or deliverable, you MU
 ## 8. Your Domain Expertise:
 
 ### Core YAML Step Types (12 types registered in YamlStepRegistry):
+*Important* Use the `listWorkflowSteps` tool to get an up to date reference of available steps. The below steps are just the baseline available steps.
+
 - **start**: Workflow entry point. Initializes execution context and workflow variables.
 - **end**: Workflow exit point. Finalizes execution, collects outputs, and performs cleanup.
 - **log**: Logs messages during workflow execution. Supports `info`, `warn`, `error`, `debug` levels. Config: `message`, `level`, `data`.
