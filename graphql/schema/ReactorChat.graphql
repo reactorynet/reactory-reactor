@@ -396,6 +396,11 @@ type ReactorChatState {
   The persisted side panel state for the conversation.
   """
   sidePanelState: ReactorSidePanelState
+  """
+  Whether image generation mode (creative mode) is enabled for this session.
+  When enabled and the active model supports it, responses may include generated images.
+  """
+  imageGenerationEnabled: Boolean
 }
 
 """
@@ -917,7 +922,7 @@ extend type Mutation {
   ReactorSendVoiceMessage(audio: Upload!, input: ReactorVoiceMessageInput!): ReactorVoiceChatResult
 
   """
-  Sends client-side log entries to the server's ChatSessionLogger for a given session.
+  Sends client-side log entries to the server's ChatSessionResourceManager for a given session.
   Entries are written to the same session log file used by the server, prefixed with [CLIENT].
   Returns the number of accepted/dropped entries. Max 100 entries per call.
   """

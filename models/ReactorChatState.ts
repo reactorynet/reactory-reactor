@@ -73,6 +73,8 @@ export type ReactorConversationHistoryItem = ChatHistoryItem & {
   tool_errors?: ReactorToolError[]
   /** Reasoning/thinking content from models with extended thinking (OpenAI o1/o3, Anthropic, Gemini) */
   thinking?: string
+  /** Generated images from image-capable models */
+  images?: Array<{ url?: string; b64_json?: string; mimeType?: string }>
 }
 
 export type ReactorConversationHistory = ReactorConversationHistoryItem[];
@@ -160,6 +162,7 @@ const ReactorConversationHistorySchema = new Schema({
   content: { type: Schema.Types.Mixed, default: null },
   refusal: String,
   thinking: String,
+  images: { type: [Schema.Types.Mixed], default: undefined },
   component: String,
   rating: Number,
   role: String,

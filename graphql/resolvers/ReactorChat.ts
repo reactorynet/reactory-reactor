@@ -7,7 +7,7 @@ import {
 import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
 import { IReactorConversationsService } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { ObjectId } from "mongodb";
-import { ChatSessionLogger } from "@reactory/server-modules/reactory-reactor/services/reactor/ChatSessionLogger";
+import { ChatSessionResourceManager } from "@reactory/server-modules/reactory-reactor/services/reactor/ChatSessionResourceManager";
 import {
   ChatState,
   MacroComponentDefinition,
@@ -20,6 +20,7 @@ import logger from "@reactory/server-core/logging";
 import ReactorConversationModel, { ReactorConversation, ReactorConversationDocument } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import { PromptMergeStrategy, StreamingMode } from "modules/reactory-reactor/services/reactor/types/streaming.types";
 import ReactorConversationService from "@reactory/server-modules/reactory-reactor/services/reactor/ReactorConversationService";
+import resolveImageUrls from "@reactory/server-modules/reactory-reactor/utils/resolveImageUrls";
 
 @resolver
 class ReactorChatResolver {
@@ -85,7 +86,10 @@ class ReactorChatResolver {
           firstName: conversation.user?.firstName || "Unknown User",
           lastName: conversation.user?.lastName,
         },
-        history: conversation.history,
+        history: (conversation.history || []).map((entry: any) => ({
+          ...entry,
+          images: resolveImageUrls(entry.images),
+        })),
         vars: conversation.vars || {},
         created: conversation.created,
         updated: conversation.updated,
@@ -1168,7 +1172,7 @@ class ReactorChatResolver {
       return { accepted: 0, dropped: 0 };
     }
 
-    const sessionLogger = ChatSessionLogger.forSession(chatSessionId);
+    const sessionLogger = ChatSessionResourceManager.forSession(chatSessionId);
     if (!sessionLogger) {
       return { accepted: 0, dropped: entries.length };
     }

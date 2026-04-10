@@ -3,7 +3,7 @@ import { StreamingTransportManager } from './StreamingTransportManager';
 import { StreamingSessionManager } from './StreamingSessionManager';
 import { SSETransport } from './StreamingTransport';
 import { StreamingEvent, StreamingSession } from './types/streaming.types';
-import { ChatSessionLogger } from './ChatSessionLogger';
+import { ChatSessionResourceManager } from './ChatSessionResourceManager';
 
 /**
  * Helper: log to both context and the chat session file logger.
@@ -18,7 +18,7 @@ function slog(
   const prefixed = `[StreamingEndpoints] ${message}`;
   context[level](prefixed, meta);
   if (chatSessionId) {
-    ChatSessionLogger.forSession(chatSessionId)?.[level](prefixed, meta);
+    ChatSessionResourceManager.forSession(chatSessionId)?.[level](prefixed, meta);
   }
 }
 

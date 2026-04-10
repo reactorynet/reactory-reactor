@@ -252,6 +252,7 @@ export interface AIChatCompletion {
   object: string;
   created: Date;
   choices: AIChatChoice[];
+  images?: AIImage[];
   [key: string]: any;
 }
 

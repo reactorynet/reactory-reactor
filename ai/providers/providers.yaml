@@ -221,6 +221,38 @@ providers:
           - function-calling
         supportedMediaTypes:
           - text
+      # Image generation models
+      - id: gpt-image-1
+        name: GPT Image 1
+        version: "1"
+        capabilities:
+          - image-generation
+        contextLength: null
+        rpm: null
+        itpm: null
+        otpm: null
+        inputCostPerTokenUsdCents: null
+        outputCostPerTokenUsdCents: null
+        supportsStreaming: false
+        supportedTools: []
+        supportedMediaTypes:
+          - text
+          - image
+      - id: dall-e-3
+        name: DALL-E 3
+        version: "3"
+        capabilities:
+          - image-generation
+        contextLength: null
+        rpm: null
+        itpm: null
+        otpm: null
+        inputCostPerTokenUsdCents: null
+        outputCostPerTokenUsdCents: null
+        supportsStreaming: false
+        supportedTools: []
+        supportedMediaTypes:
+          - text
 
   - id: xai
     name: xAI
@@ -444,6 +476,7 @@ providers:
       - code-generation
       - reasoning
       - image-understanding
+      - image-generation
     credentialRequirements:
       - apiKey
     credentialEnvVars:
@@ -614,6 +647,63 @@ providers:
         supportsStreaming: true
         supportedTools:
           - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      # Image generation models
+      - id: gemini-3.1-pro-image-preview
+        name: Gemini Pro Image Preview
+        version: "3.1"
+        capabilities:
+          - text-generation
+          - image-generation
+          - image-understanding
+        contextLength: 131072
+        rpm: null
+        itpm: null
+        otpm: null
+        inputCostPerTokenUsdCents: 0.00001
+        outputCostPerTokenUsdCents: 0.00004
+        supportsStreaming: false
+        supportedTools: []
+        supportedMediaTypes:
+          - text
+          - image
+
+      - id: gemini-3-pro-image-preview
+        name: Gemini Pro Image Preview
+        version: "3.0"
+        capabilities:
+          - text-generation
+          - image-generation
+          - image-understanding
+        contextLength: 65536
+        rpm: null
+        itpm: null
+        otpm: null
+        inputCostPerTokenUsdCents: 0.00001
+        outputCostPerTokenUsdCents: 0.00004
+        supportsStreaming: false
+        supportedTools: []
+        supportedMediaTypes:
+          - text
+          - image
+
+      - id: gemini-2.5-flash-image
+        name: Gemini 2.5 Flash Image Generation
+        version: "2.5"
+        capabilities:
+          - text-generation
+          - image-generation
+          - image-understanding
+        contextLength: 32769
+        rpm: null
+        itpm: null
+        otpm: null
+        inputCostPerTokenUsdCents: 0.00001
+        outputCostPerTokenUsdCents: 0.00004
+        supportsStreaming: false
+        supportedTools: []
         supportedMediaTypes:
           - text
           - image

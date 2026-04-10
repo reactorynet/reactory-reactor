@@ -4,6 +4,7 @@ import GoogleGenAI, {
   FunctionCallingConfigMode,
   FunctionDeclaration,
   FunctionResponse,
+  Modality,
   Type,
 } from "@google/genai";
 import https from "https";
@@ -12,6 +13,9 @@ import {
   AIChatParams,
   AIAudioChatParams,
   AIChatCompletion,
+  AIImage,
+  AIImageGenerationParams,
+  AIListResponse,
 } from "../../../types/model.types";
 import {
   AIStreamingCapabilities,
@@ -48,10 +52,12 @@ import {
   StreamingMode,
 } from "../types/streaming.types";
 import { StreamingEventFactory, StreamingEventIds } from "../streaming/StreamingEventFactory";
-import { ChatSessionLogger } from "../ChatSessionLogger";
+import { ChatSessionResourceManager } from "../ChatSessionResourceManager";
+import resolveImageUrls from "@reactory/server-modules/reactory-reactor/utils/resolveImageUrls";
 import { TokenPacer } from "../streaming/TokenPacer";
 import { StreamingSessionManager } from "../StreamingSessionManager";
 import { StreamingTransportManager } from "../StreamingTransportManager";
+import { IReactorProviderService } from "../../../types/service.types";
 
 @service({
   id: "reactor.GoogleAIService@1.0.0",
@@ -73,6 +79,10 @@ import { StreamingTransportManager } from "../StreamingTransportManager";
       id: "reactor.StreamingSessionManager@1.0.0",
       alias: "streamingSessionManager",
     },
+    {
+      id: "reactor.ReactorProviderService@1.0.0",
+      alias: "providerService",
+    },
   ],
 })
 class GoogleAIService extends AIProviderBase {
@@ -85,6 +95,7 @@ class GoogleAIService extends AIProviderBase {
   streamingMode: StreamingMode = StreamingMode.NONE;
   streamingSessionManager!: StreamingSessionManager;
   streamingTransportManager!: StreamingTransportManager;
+  providerService!: IReactorProviderService;
   models: GoogleGenAI.Pager<GoogleGenAI.Model> | null = null;
 
   constructor(props: any, context: Reactory.Server.IReactoryContext) {
@@ -103,7 +114,7 @@ class GoogleAIService extends AIProviderBase {
     this.context[level](`[GoogleAI] ${message}`, meta);
     const chatId = this.chatState?.id?.toString?.() || (this.chatState as any)?._id?.toString?.();
     if (chatId) {
-      ChatSessionLogger.forSession(chatId)?.[level](`[GoogleAI] ${message}`, meta);
+      ChatSessionResourceManager.forSession(chatId)?.[level](`[GoogleAI] ${message}`, meta);
     }
   }
 
@@ -120,7 +131,50 @@ class GoogleAIService extends AIProviderBase {
     };
   }
 
+  /** Cached model config from the provider registry, resolved during createChatSession */
+  private _resolvedModelConfig: { supportedTools?: string[]; capabilities?: string[] } | null = null;
+
+  /**
+   * Resolve the model config from the provider registry.
+   * Uses chatState.modelId + persona.providerId to look up the YAML config.
+   */
+  private async resolveModelConfig(): Promise<{ supportedTools?: string[]; capabilities?: string[] }> {
+    if (this._resolvedModelConfig) return this._resolvedModelConfig;
+    const modelId = this.chatState?.modelId || this.model?.name || "";
+    if (!modelId || !this.providerService) return {};
+    try {
+      const providers = await this.providerService.getProviders();
+      for (const p of providers) {
+        const model = p.models?.find((m: any) => m.id === modelId);
+        if (model) {
+          this._resolvedModelConfig = {
+            supportedTools: model.supportedTools || [],
+            capabilities: model.capabilities || [],
+          };
+          return this._resolvedModelConfig;
+        }
+      }
+    } catch (err) {
+      this.slog("warn", `Failed to resolve model config for ${modelId}`, { error: err });
+    }
+    return {};
+  }
+
+  /** Check if the active model supports function calling based on provider config */
+  private async modelSupportsFunctionCalling(): Promise<boolean> {
+    const config = await this.resolveModelConfig();
+    return config.supportedTools?.includes("function-calling") ?? false;
+  }
+
+  /** Check if the active model supports image generation via responseModalities */
+  private async isImageGenerationModel(): Promise<boolean> {
+    const config = await this.resolveModelConfig();
+    return config.capabilities?.includes("image-generation") ?? false;
+  }
+
   protected async initializeClient(persona: IAIPersona): Promise<void> {
+    // Reset cached model config for the new session/model
+    this._resolvedModelConfig = null;
     const apiKey = persona.config?.apiKey || process.env.GOOGLE_AI_API_KEY;
     const project = persona.config?.project || process.env.GOOGLE_AI_PROJECT_ID;
     if (!apiKey) {
@@ -809,31 +863,45 @@ class GoogleAIService extends AIProviderBase {
         }
       });
 
-      const tools = await this.getAITools();
-
-      
-
       // Create chat session with generation config
+      const isImageModel = await this.isImageGenerationModel();
+      const chatConfig: any = {
+        candidateCount: 1,
+        systemInstruction,
+        temperature: 0.7,
+        topP: 1.0,
+        frequencyPenalty: 0.0,
+        presencePenalty: 0.0,
+      };
+
+      // Thinking is not supported on image generation models
+      if (!isImageModel) {
+        chatConfig.thinkingConfig = {
+          includeThoughts: true,
+        };
+      }
+
+      // Only add tools if the model supports function calling
+      const supportsFunctionCalling = await this.modelSupportsFunctionCalling();
+      if (supportsFunctionCalling) {
+        const tools = await this.getAITools();
+        chatConfig.tools = tools;
+        chatConfig.toolConfig = {
+          functionCallingConfig: {
+            mode: FunctionCallingConfigMode.AUTO,
+          },
+        };
+      }
+
+      // Enable image output for image generation models
+      if (isImageModel) {
+        chatConfig.responseModalities = [Modality.TEXT, Modality.IMAGE];
+      }
+
       return this.ai.chats.create({
         model: this.model.name,
         history: googleHistory,
-        config: {
-          candidateCount: 1,
-          tools: tools,
-          toolConfig: {
-            functionCallingConfig: {
-              mode: FunctionCallingConfigMode.AUTO, // Automatically determine when to call functions
-            },
-          },
-          systemInstruction,
-          temperature: 0.7,
-          topP: 1.0,
-          frequencyPenalty: 0.0,
-          presencePenalty: 0.0,
-          thinkingConfig: {
-              includeThoughts: true, // Enable thought content in responses              
-          }
-        },
+        config: chatConfig,
       });
     } catch (error) {
       this.context.error(
@@ -910,6 +978,7 @@ class GoogleAIService extends AIProviderBase {
     let accumulatedText = "";
     let accumulatedReasoning = "";
     let accumulatedFunctionCalls: any[] = [];
+    let accumulatedImages: AIImage[] = [];
     let finishReason: GoogleGenAI.FinishReason = GoogleGenAI.FinishReason.STOP;
     let modelName = "";
 
@@ -994,6 +1063,18 @@ class GoogleAIService extends AIProviderBase {
         } else if (chunk.text) {
           accumulatedText += chunk.text;
           tokenPacer.add(chunk.text);
+        }
+
+        // Handle inline image data from image generation models
+        if (chunk.candidates?.[0]?.content?.parts) {
+          for (const part of chunk.candidates[0].content.parts) {
+            if (part.inlineData && part.inlineData.mimeType?.startsWith("image/")) {
+              accumulatedImages.push({
+                b64_json: part.inlineData.data,
+                mimeType: part.inlineData.mimeType,
+              });
+            }
+          }
         }
 
         // Handle function calls — extract from raw parts to preserve thoughtSignature
@@ -1109,11 +1190,22 @@ class GoogleAIService extends AIProviderBase {
     });
 
     if (!hasPendingAutoToolCalls) {
+      // Save any accumulated images to disk and replace base64 with CDN URLs
+      let completionImages: typeof accumulatedImages | undefined =
+        accumulatedImages.length > 0 ? accumulatedImages : undefined;
+      if (completionImages && completionImages.length > 0) {
+        const logger = ChatSessionResourceManager.forSession(sessionId);
+        if (logger) {
+          completionImages = logger.saveImages(completionImages);
+        }
+      }
+
       const completionEvent = StreamingEventFactory.createCompletionEvent(
         accumulatedText,
         finishReason || "stop",
         accumulatedReasoning || undefined,
         ids,
+        resolveImageUrls(completionImages),
       );
       try {
         await this.streamingTransportManager.sendEventToSession(sessionId, completionEvent);
@@ -1137,6 +1229,12 @@ class GoogleAIService extends AIProviderBase {
           candidate.content.parts.push({ text: accumulatedText });
         }
 
+        for (const img of accumulatedImages) {
+          candidate.content.parts.push({
+            inlineData: { data: img.b64_json, mimeType: img.mimeType || "image/png" },
+          });
+        }
+
         for (const functionCall of accumulatedFunctionCalls) {
           const { thoughtSignature, id, ...cleanFunctionCall } = functionCall;
           const part: any = { functionCall: cleanFunctionCall };
@@ -1158,6 +1256,11 @@ class GoogleAIService extends AIProviderBase {
       (result as any).__reasoning = accumulatedReasoning;
     }
 
+    // Attach accumulated images for persistence by the caller
+    if (accumulatedImages.length > 0) {
+      (result as any).__images = accumulatedImages;
+    }
+
     this.slog("info", `Streaming request completed`, {
       accumulatedTextLength: accumulatedText.length,
       accumulatedTextPreview: accumulatedText ? accumulatedText.substring(0, 150) : '(empty)',
@@ -1177,6 +1280,7 @@ class GoogleAIService extends AIProviderBase {
     functionCalls: any[],
     finishReason: string = "stop",
     reasoning?: string,
+    images?: AIImage[],
   ): AIChatCompletion {
     const completion: any = {
       id: new ObjectId(),
@@ -1196,12 +1300,7 @@ class GoogleAIService extends AIProviderBase {
                     ? func.args
                     : JSON.stringify(func.args ?? {}),
                 },
-                // GraphQL schema requires status: ReactorToolCallStatus! (non-nullable).
-                // Without this default the entire ReactorToolCall is nullified in the
-                // mutation response, causing the client to receive [null] for tool_calls.
                 status: "pending",
-                // Preserve thoughtSignature for Gemini thinking models — needed when
-                // rebuilding history to send back to the API
                 ...(func.thoughtSignature ? { thought_signature: func.thoughtSignature } : {}),
               }))
             : [],
@@ -1212,6 +1311,9 @@ class GoogleAIService extends AIProviderBase {
     };
     if (reasoning) {
       completion.__reasoning = reasoning;
+    }
+    if (images && images.length > 0) {
+      completion.images = images;
     }
     return completion;
   }
@@ -1317,7 +1419,7 @@ class GoogleAIService extends AIProviderBase {
 
         this.context.log(
           `Received response from Google AI after tool result`,
-          { result: JSON.stringify(result, null, 2) },
+          { resultPreview: JSON.stringify(result, null, 2).substring(0, 500) },
           "GoogleAIService.getAIResponse"
         );
 
@@ -1334,10 +1436,10 @@ class GoogleAIService extends AIProviderBase {
           throw new AIProviderError("No candidates returned from Google AI");
         }
         const candidate = result.candidates[0];
-        const { responseText, functionCalls, reasoning } =
+        const { responseText, functionCalls, reasoning, images } =
           this.extractGeminiCandidate(candidate);
 
-        return this.buildCompletion(responseText, functionCalls, undefined, reasoning);
+        return this.buildCompletion(responseText, functionCalls, undefined, reasoning, images);
       }
 
       // Handle user messages
@@ -1356,7 +1458,8 @@ class GoogleAIService extends AIProviderBase {
         );
 
         let result: GoogleGenAI.GenerateContentResponse;
-        if (this.streamingMode === StreamingMode.SSE) {
+        const isImageModel = await this.isImageGenerationModel();
+        if (this.streamingMode === StreamingMode.SSE && !isImageModel) {
           result = await this.handleStreamingRequest({
             sessionId: this.chatState.id,
             message,
@@ -1366,15 +1469,48 @@ class GoogleAIService extends AIProviderBase {
             messageId,
           });
         } else {
+          // Image generation models do not support streaming — use sendMessage
+          // and emit SSE events manually so the client receives the result.
           result = await chat.sendMessage({
             config: persona.messageConfig,
             message: this.convertMessageToGoogleParts(message as string | any[]),
           });
+
+          if (this.streamingMode === StreamingMode.SSE && isImageModel) {
+            const sessionId = this.chatState.id!;
+            const ids: StreamingEventIds = {
+              sessionId,
+              conversationId: sessionId,
+              messageId: messageId ?? "",
+            };
+            const candidate = result.candidates?.[0];
+            const extracted = candidate ? this.extractGeminiCandidate(candidate) : null;
+
+            // Save images to disk and replace base64 with CDN URLs
+            let sseImages = extracted?.images && extracted.images.length > 0
+              ? extracted.images
+              : undefined;
+            if (sseImages && sseImages.length > 0) {
+              const logger = ChatSessionResourceManager.forSession(sessionId);
+              if (logger) {
+                sseImages = logger.saveImages(sseImages);
+              }
+            }
+
+            const completionEvent = StreamingEventFactory.createCompletionEvent(
+              extracted?.responseText || "",
+              candidate?.finishReason || "stop",
+              extracted?.reasoning || undefined,
+              ids,
+              resolveImageUrls(sseImages),
+            );
+            await this.streamingTransportManager.sendEventToSession(sessionId, completionEvent);
+          }
         }
 
         this.context.log(
           `Received response from Google AI`,
-          { result: JSON.stringify(result, null, 2) },
+          { resultPreview: JSON.stringify(result, null, 2).substring(0, 500) },
           "GoogleAIService.getAIResponse"
         );
 
@@ -1407,7 +1543,7 @@ class GoogleAIService extends AIProviderBase {
         const candidate = result.candidates[0];
 
         try {
-          const { responseText, functionCalls, reasoning } =
+          const { responseText, functionCalls, reasoning, images } =
             this.extractGeminiCandidate(candidate);
 
           if (functionCalls.length > 0) {
@@ -1439,10 +1575,11 @@ class GoogleAIService extends AIProviderBase {
             responseTextLength: responseText.length,
             responseTextPreview: responseText ? responseText.substring(0, 150) : '(empty)',
             functionCallsCount: functionCalls.length,
+            imagesCount: images.length,
             streamingMode: this.streamingMode,
           });
 
-          return this.buildCompletion(responseText, functionCalls, undefined, reasoning);
+          return this.buildCompletion(responseText, functionCalls, undefined, reasoning, images);
         } catch (extractError) {
           this.context.error(
             `Error extracting Gemini candidate: ${extractError.message}`,
@@ -1495,6 +1632,7 @@ class GoogleAIService extends AIProviderBase {
     responseText: string;
     functionCalls: any[];
     reasoning: string;
+    images: AIImage[];
   } {
     if (!candidate || typeof candidate !== "object") {
       throw new AIProviderError("Invalid candidate in Google AI response");
@@ -1532,6 +1670,7 @@ class GoogleAIService extends AIProviderBase {
               "I'm unable to provide a response due to safety considerations. Please try rephrasing your question.",
             functionCalls: [],
             reasoning: "",
+            images: [],
           };
 
         case "RECITATION":
@@ -1545,6 +1684,7 @@ class GoogleAIService extends AIProviderBase {
               "I'm unable to provide that specific information. Let me help you with a different approach.",
             functionCalls: [],
             reasoning: "",
+            images: [],
           };
 
         case "OTHER":
@@ -1582,6 +1722,7 @@ class GoogleAIService extends AIProviderBase {
     let responseText = "";
     let reasoning = "";
     let functionCalls: any[] = [];
+    let images: AIImage[] = [];
 
     // Extract content from parts
     if (
@@ -1602,6 +1743,12 @@ class GoogleAIService extends AIProviderBase {
           }
           functionCalls.push(fc);
         }
+        if (part.inlineData && part.inlineData.mimeType?.startsWith("image/")) {
+          images.push({
+            b64_json: part.inlineData.data,
+            mimeType: part.inlineData.mimeType,
+          });
+        }
         if (part.text) {
           if ((part as any).thought) {
             // Gemini thinking models return thought parts — keep them separate
@@ -1614,11 +1761,11 @@ class GoogleAIService extends AIProviderBase {
     }
 
     // If no content was extracted, check if this is a valid terminal response
-    if (functionCalls.length === 0 && !responseText.trim() && !reasoning.trim()) {
+    if (functionCalls.length === 0 && !responseText.trim() && !reasoning.trim() && images.length === 0) {
       // A STOP finish reason with empty text is valid — the model is done
       // (e.g. after processing tool results with nothing more to say)
       if (candidate.finishReason === "STOP") {
-        return { responseText: "", functionCalls: [], reasoning: "" };
+        return { responseText: "", functionCalls: [], reasoning: "", images: [] };
       }
 
       this.context.warn(
@@ -1630,7 +1777,7 @@ class GoogleAIService extends AIProviderBase {
       throw new AIProviderError("EMPTY_RESPONSE");
     }
 
-    return { responseText: responseText.trim(), functionCalls, reasoning: reasoning.trim() };
+    return { responseText: responseText.trim(), functionCalls, reasoning: reasoning.trim(), images };
   }
 
   async chat(
@@ -1848,6 +1995,36 @@ class GoogleAIService extends AIProviderBase {
     streamingTransportManager: StreamingTransportManager
   ) {
     this.streamingTransportManager = streamingTransportManager;
+  }
+
+  async generateImage(params: AIImageGenerationParams): Promise<AIListResponse<AIImage>> {
+    const persona = this.chatState?.persona;
+    if (!this.ai) {
+      await this.initializeClient(persona);
+    }
+
+    const modelId = "gemini-2.0-flash-image-generation";
+    const response = await this.ai.models.generateContent({
+      model: modelId,
+      contents: [{ role: "user", parts: [{ text: params.prompt }] }],
+      config: {
+        responseModalities: [Modality.IMAGE, Modality.TEXT],
+      },
+    });
+
+    const images: AIImage[] = [];
+    if (response.candidates?.[0]?.content?.parts) {
+      for (const part of response.candidates[0].content.parts) {
+        if (part.inlineData && part.inlineData.mimeType?.startsWith("image/")) {
+          images.push({
+            b64_json: part.inlineData.data,
+            mimeType: part.inlineData.mimeType,
+          });
+        }
+      }
+    }
+
+    return { data: images };
   }
 
   toString(includeVersion?: boolean): string {
