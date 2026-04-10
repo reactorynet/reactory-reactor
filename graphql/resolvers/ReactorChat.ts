@@ -7,7 +7,7 @@ import {
 import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
 import { IReactorConversationsService } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { ObjectId } from "mongodb";
-import { ChatSessionLogger } from "@reactory/server-modules/reactory-reactor/services/reactor/ChatSessionLogger";
+import { ChatSessionResourceManager } from "@reactory/server-modules/reactory-reactor/services/reactor/ChatSessionResourceManager";
 import {
   ChatState,
   MacroComponentDefinition,
@@ -1172,7 +1172,7 @@ class ReactorChatResolver {
       return { accepted: 0, dropped: 0 };
     }
 
-    const sessionLogger = ChatSessionLogger.forSession(chatSessionId);
+    const sessionLogger = ChatSessionResourceManager.forSession(chatSessionId);
     if (!sessionLogger) {
       return { accepted: 0, dropped: entries.length };
     }

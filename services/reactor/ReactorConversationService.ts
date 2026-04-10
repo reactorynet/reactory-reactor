@@ -41,7 +41,7 @@ import Helpers from "authentication/strategies/helpers";
 import { StreamingSessionManager } from "./StreamingSessionManager";
 import { StreamingTransportManager } from "./StreamingTransportManager";
 import { StreamingEventFactory } from "./streaming/StreamingEventFactory";
-import { ChatSessionLogger } from "./ChatSessionLogger";
+import { ChatSessionResourceManager } from "./ChatSessionResourceManager";
 import { loadSessionMcpConfig } from "../../ai/macro/mcp/session-config";
 /**
  * Enhanced error response interface with correlation tracking
@@ -262,7 +262,7 @@ export default class ReactorConversationService
   private streamingTransportManager: StreamingTransportManager;
 
   /** Per-conversation file loggers keyed by conversationId */
-  private sessionLoggers: Map<string, ChatSessionLogger> = new Map();
+  private sessionLoggers: Map<string, ChatSessionResourceManager> = new Map();
 
   /**
    * Initialize the ReactorConversationService with dependencies
@@ -284,13 +284,13 @@ export default class ReactorConversationService
   }
 
   /**
-   * Get or create a ChatSessionLogger for a given conversation.
+   * Get or create a ChatSessionResourceManager for a given conversation.
    * Logs are written to REACTORY_DATA/profiles/{userId}/chats/{personaId}/{conversationId}/
    */
   private getSessionLogger(
     conversationId: string,
     personaId: string
-  ): ChatSessionLogger | null {
+  ): ChatSessionResourceManager | null {
     if (!conversationId || !personaId) return null;
 
     const existing = this.sessionLoggers.get(conversationId);
@@ -300,10 +300,10 @@ export default class ReactorConversationService
     if (!userId) return null;
 
     try {
-      const logger = new ChatSessionLogger(userId, personaId, conversationId);
+      const logger = new ChatSessionResourceManager(userId, personaId, conversationId);
       this.sessionLoggers.set(conversationId, logger);
       // Register globally so other services (StreamingTransportManager, etc.) can find it
-      ChatSessionLogger.register(conversationId, logger);
+      ChatSessionResourceManager.register(conversationId, logger);
       return logger;
     } catch (e: any) {
       this.context.warn(`Failed to create session logger: ${e.message}`);

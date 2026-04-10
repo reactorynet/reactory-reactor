@@ -52,7 +52,7 @@ import {
   StreamingMode,
 } from "../types/streaming.types";
 import { StreamingEventFactory, StreamingEventIds } from "../streaming/StreamingEventFactory";
-import { ChatSessionLogger } from "../ChatSessionLogger";
+import { ChatSessionResourceManager } from "../ChatSessionResourceManager";
 import resolveImageUrls from "@reactory/server-modules/reactory-reactor/utils/resolveImageUrls";
 import { TokenPacer } from "../streaming/TokenPacer";
 import { StreamingSessionManager } from "../StreamingSessionManager";
@@ -114,7 +114,7 @@ class GoogleAIService extends AIProviderBase {
     this.context[level](`[GoogleAI] ${message}`, meta);
     const chatId = this.chatState?.id?.toString?.() || (this.chatState as any)?._id?.toString?.();
     if (chatId) {
-      ChatSessionLogger.forSession(chatId)?.[level](`[GoogleAI] ${message}`, meta);
+      ChatSessionResourceManager.forSession(chatId)?.[level](`[GoogleAI] ${message}`, meta);
     }
   }
 
@@ -1194,7 +1194,7 @@ class GoogleAIService extends AIProviderBase {
       let completionImages: typeof accumulatedImages | undefined =
         accumulatedImages.length > 0 ? accumulatedImages : undefined;
       if (completionImages && completionImages.length > 0) {
-        const logger = ChatSessionLogger.forSession(sessionId);
+        const logger = ChatSessionResourceManager.forSession(sessionId);
         if (logger) {
           completionImages = logger.saveImages(completionImages);
         }
@@ -1491,7 +1491,7 @@ class GoogleAIService extends AIProviderBase {
               ? extracted.images
               : undefined;
             if (sseImages && sseImages.length > 0) {
-              const logger = ChatSessionLogger.forSession(sessionId);
+              const logger = ChatSessionResourceManager.forSession(sessionId);
               if (logger) {
                 sseImages = logger.saveImages(sseImages);
               }

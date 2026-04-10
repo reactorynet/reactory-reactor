@@ -2,7 +2,7 @@ import { service } from '@reactory/server-core/application/decorators/service';
 import { StreamingSessionManager } from './StreamingSessionManager';
 import { StreamingTransport } from './StreamingTransport';
 import { StreamingEvent } from './types/streaming.types';
-import { ChatSessionLogger } from './ChatSessionLogger';
+import { ChatSessionResourceManager } from './ChatSessionResourceManager';
 
 /**
  * Manages streaming transports for active sessions
@@ -47,7 +47,7 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
   ): void {
     this.context[level](`[StreamingTransportManager] ${message}`, meta);
     if (chatSessionId) {
-      ChatSessionLogger.forSession(chatSessionId)?.[level](
+      ChatSessionResourceManager.forSession(chatSessionId)?.[level](
         `[StreamingTransportManager] ${message}`, meta
       );
     }

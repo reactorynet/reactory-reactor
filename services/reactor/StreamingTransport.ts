@@ -1,7 +1,7 @@
 import { Response } from 'express';
 import { WebSocket } from 'ws';
 import { StreamingEvent } from './types/streaming.types';
-import { ChatSessionLogger } from './ChatSessionLogger';
+import { ChatSessionResourceManager } from './ChatSessionResourceManager';
 
 /**
  * Abstract transport interface for streaming events
@@ -42,7 +42,7 @@ export class SSETransport implements StreamingTransport {
    */
   private slog(level: "debug" | "info" | "warn" | "error", message: string, meta?: Record<string, unknown>): void {
     if (this._chatSessionId) {
-      ChatSessionLogger.forSession(this._chatSessionId)?.[level](
+      ChatSessionResourceManager.forSession(this._chatSessionId)?.[level](
         `[SSETransport] ${message}`, meta
       );
     }
