@@ -286,6 +286,11 @@ const ReactorConversationSchema = new Schema({
     type: [ReactorConversationHistorySchema],
     default: [],
   },
+  // A short title for the conversation, generated from the user's first message
+  title: {
+    type: String,
+    default: null,
+  },
   // Optional reference to a parent session that provided context for this session
   parentSessionId: {
     type: String,

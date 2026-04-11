@@ -818,6 +818,81 @@ export default class ReactorConversationService
    *
    * @since 1.0.0
    */
+  /**
+   * Generates a short conversation title from the user's first message using NLP.
+   * Extracts the first sentence and trims it to a concise label.
+   * Runs as fire-and-forget so it never blocks the chat response.
+   */
+  private generateConversationTitle(
+    conversationId: string,
+    messageContent: string | any[],
+  ): void {
+    // Extract the text portion from the message content
+    let text: string;
+    if (typeof messageContent === "string") {
+      text = messageContent;
+    } else if (Array.isArray(messageContent)) {
+      const textPart = messageContent.find((p: any) => p.type === "text");
+      text = textPart?.text || "";
+    } else {
+      text = String(messageContent || "");
+    }
+
+    if (!text.trim()) return;
+
+    // Fire-and-forget: generate title asynchronously
+    (async () => {
+      try {
+        let title: string;
+
+        // For short messages, use the text directly
+        if (text.length <= 80) {
+          title = text.trim();
+        } else {
+          // Extract the first sentence
+          const firstSentence = text.split(/[.?!\n]/)[0]?.trim() || text;
+
+          if (firstSentence.length <= 80) {
+            title = firstSentence;
+          } else {
+            // Use NLP tokenizer to extract the first meaningful tokens
+            try {
+              const nlpService = this.context.getService<Reactory.Service.INaturalService>(
+                "core.ReactoryNLPService@1.0.0",
+              );
+              const { tokens } = nlpService.tokenize(firstSentence);
+              // Take enough tokens to form a meaningful phrase within 80 chars
+              let built = "";
+              for (const token of tokens) {
+                const next = built ? `${built} ${token}` : token;
+                if (next.length > 80) break;
+                built = next;
+              }
+              title = built || firstSentence.substring(0, 80);
+            } catch {
+              // NLP service unavailable — fall back to truncation
+              title = firstSentence.substring(0, 80);
+            }
+          }
+        }
+
+        await ReactorConversationModel.updateOne(
+          { _id: conversationId },
+          { $set: { title } },
+        ).exec();
+
+        this.sessionLog("debug", `Generated conversation title: "${title}"`, {
+          conversationId,
+        }, conversationId);
+      } catch (err: any) {
+        this.context.error("Failed to generate conversation title", {
+          conversationId,
+          error: err?.message || err,
+        });
+      }
+    })();
+  }
+
   private validateConversationDocument(
     conversation: any,
     operation: string,
@@ -2456,6 +2531,9 @@ export default class ReactorConversationService
     query._id = { $ne: null };
 
     return await ReactorConversationModel.find(query)
+      .select("-history")
+      .sort({ updated: -1 })
+      .limit(50)
       .populate("user")      
       .exec();
   }
@@ -3132,6 +3210,18 @@ export default class ReactorConversationService
               .exec();
           }
 
+          // Generate a title from the first user message (fire-and-forget)
+          if (
+            role === "user" &&
+            conversation &&
+            !(conversation as any).title
+          ) {
+            this.generateConversationTitle(
+              conversation._id.toString(),
+              message,
+            );
+          }
+
           // Validate the found/updated conversation
           this.validateConversationDocument(
             conversation,
@@ -3216,6 +3306,14 @@ export default class ReactorConversationService
           }, sessionId.toString(), personaId);
 
           await conversation.save();
+
+          // Generate a title from the first user message (fire-and-forget)
+          if (role === "user") {
+            this.generateConversationTitle(
+              conversation._id.toString(),
+              message,
+            );
+          }
 
           // Validate the newly created conversation
           this.validateConversationDocument(
@@ -3745,6 +3843,33 @@ export default class ReactorConversationService
       { error: lastError, args },
       chatSessionId, personaId
     );
+
+    // When in SSE mode, send an error event so the client can exit the
+    // "thinking" state. Without this the client waits for an SSE COMPLETE
+    // event that never arrives.
+    if (streamingMode === StreamingMode.SSE && chatSessionId) {
+      try {
+        const sseSessionId = this.streamingSessionManager.getSessionId(chatSessionId);
+        if (sseSessionId) {
+          const errorEvent = StreamingEventFactory.createErrorEvent(
+            ReactorErrorCode.MESSAGE_ERROR,
+            lastError?.message || "Error sending message after multiple attempts",
+            { conversationId: chatSessionId, recoverable: true },
+            { sessionId: sseSessionId, conversationId: chatSessionId },
+          );
+          await this.streamingTransportManager.sendEventToSession(
+            chatSessionId,
+            errorEvent,
+          );
+        }
+      } catch (sseErr: any) {
+        this.sessionLog("warn",
+          `Failed to send SSE error event: ${sseErr?.message}`,
+          { conversationId: chatSessionId },
+          chatSessionId, personaId
+        );
+      }
+    }
 
     return this.createErrorResponse(
       ReactorErrorCode.MESSAGE_ERROR,

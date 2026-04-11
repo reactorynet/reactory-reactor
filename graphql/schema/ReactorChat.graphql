@@ -317,6 +317,10 @@ its history and metadata.
 type ReactorChatState {
   id: String
   personaId: String
+  """
+  A short title for the conversation, auto-generated from the user's first message.
+  """
+  title: String
   created: Date
   updated: Date
   user: User
