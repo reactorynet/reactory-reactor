@@ -5545,7 +5545,14 @@ export default class ReactorConversationService
       // Get the system prompt from the persona.
       const systemPromptTemplate = persona?.prompts?.["system"];
 
-      if (systemPromptTemplate) {
+      // Only add the system prompt if the conversation doesn't already have one.
+      // getNewConversation() may return a reused conversation that already contains
+      // a system message (it matches conversations with history.$size: 1 & role: "system").
+      const hasSystemMessage = conversation.history.some(
+        (msg: any) => msg.role === "system"
+      );
+
+      if (systemPromptTemplate && !hasSystemMessage) {
         // The prompt content may already be fully compiled (e.g. from buildSystemPrompt()).
         // Attempt lodash template interpolation for user/persona context, but fall back
         // to the raw content if it contains literal ${...} patterns that fail to compile.
