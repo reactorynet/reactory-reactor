@@ -4289,24 +4289,87 @@ export default class ReactorConversationService
 
       return adapter.adaptResponse(toolResult);
     } catch (error: any) {
+      const correlationId = v4();
       this.sessionLog("error", `Error executing macro: ${error.message}`, {
         error: error.message,
         macro,
         personaId,
         chatSessionId,
-        correlationId: v4(),
+        correlationId,
       }, chatSessionId, personaId);
 
-      return this.createErrorResponse(
-        ReactorErrorCode.MACRO_ERROR,
-        error.message || "Error executing macro",
-        {
-          details: error,
-          operation: "executeMacro",
-          conversationId: chatSessionId,
-          recoverable: true,
-        }
-      );
+      // Build a valid tool-role error message so the LLM sees the failure
+      // as a tool result and can suggest alternative approaches rather than
+      // leaving the conversation in a broken state.
+      const errorMessage = error.message || "Tool execution failed";
+      const toolErrorContent = JSON.stringify({
+        error: true,
+        errorMessage,
+        toolName: macro,
+        correlationId,
+        suggestion:
+          "This tool is unavailable or encountered an error. " +
+          "Please let the user know what happened, suggest alternative approaches " +
+          "if any exist, and ask whether they would like to try a different method.",
+      });
+
+      const toolErrorEntry = {
+        id: new ObjectId(),
+        role: "tool",
+        content: toolErrorContent,
+        tool_results: [
+          {
+            id: callId,
+            name: macro,
+            result: null,
+          },
+        ],
+        tool_errors: [
+          {
+            name: macro,
+            error: errorMessage,
+          },
+        ],
+        tool_call_id: callId,
+        tool_name: macro,
+        tool_args: args.args,
+        timestamp: new Date(),
+        isError: true,
+      };
+
+      // Persist the error entry to conversation history so the AI provider
+      // can read the failure on the next turn.
+      try {
+        await ReactorConversationModel.findOneAndUpdate(
+          { _id: chatSessionId },
+          {
+            $push: { history: toolErrorEntry },
+            $set: { updated: new Date() },
+          },
+          { new: true }
+        ).exec();
+      } catch (persistError: any) {
+        this.sessionLog(
+          "warn",
+          `Failed to persist tool error to conversation history: ${persistError.message}`,
+          { chatSessionId, macro },
+          chatSessionId
+        );
+      }
+
+      // Attempt to return an adapter-formatted response so callers receive a
+      // consistent shape; fall back to the raw entry if the adapter is unavailable.
+      try {
+        const conv = await ReactorConversationModel.findOne({
+          _id: chatSessionId,
+        }).exec();
+        const providerAdapter = await this.providerService.getAdapter(
+          conv?.providerId || "openai"
+        );
+        return providerAdapter.adaptResponse(toolErrorEntry);
+      } catch {
+        return toolErrorEntry;
+      }
     }
   }
 
