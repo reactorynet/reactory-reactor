@@ -811,6 +811,19 @@ class ReactorChatResolver {
     return await conversationService.attachImage(args);
   }
 
+  @mutation("ReactorCompactConversation")
+  async ReactorCompactConversation(
+    _: any,
+    args: { chatSessionId: string },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    const conversationService =
+      context.getService<IReactorConversationsService>(
+        "reactor.ReactorConversationService@1.0.0"
+      );
+    return await conversationService.compactConversation(args.chatSessionId);
+  }
+
   @mutation("ReactorDeleteChatSession")
   async ReactorDeleteChatSession(
     _: any,

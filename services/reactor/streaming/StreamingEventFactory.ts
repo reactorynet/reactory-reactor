@@ -8,6 +8,7 @@ import {
   CompletionStreamingEvent,
   ErrorStreamingEvent,
   ToolIterationLimitStreamingEvent,
+  CompactionStreamingEvent,
 } from "../types/streaming.types";
 import {
   AITokenStreamingData,
@@ -184,6 +185,67 @@ export class StreamingEventFactory {
       { iterationsCompleted, maxIterations, partialContent },
       opts,
     ) as ToolIterationLimitStreamingEvent;
+  }
+
+  // ── Compaction ───────────────────────────────────────────────────────
+
+  static createCompactionStartEvent(
+    reason: string,
+    tokensBefore: number,
+    maxTokens: number,
+    percentageUsed: number,
+    opts: StreamingEventIds = {},
+  ): CompactionStreamingEvent {
+    return StreamingEventFactory.base(
+      StreamingEventType.COMPACTION,
+      { phase: 'start', reason, tokensBefore, maxTokens, percentageUsed },
+      opts,
+    ) as CompactionStreamingEvent;
+  }
+
+  static createCompactionProgressEvent(
+    messagesArchived: number,
+    opts: StreamingEventIds = {},
+  ): CompactionStreamingEvent {
+    return StreamingEventFactory.base(
+      StreamingEventType.COMPACTION,
+      { phase: 'progress', messagesArchived },
+      opts,
+    ) as CompactionStreamingEvent;
+  }
+
+  static createCompactionCompleteEvent(
+    tokensBefore: number,
+    tokensAfter: number,
+    maxTokens: number,
+    messagesArchived: number,
+    usedFallback: boolean,
+    opts: StreamingEventIds = {},
+  ): CompactionStreamingEvent {
+    return StreamingEventFactory.base(
+      StreamingEventType.COMPACTION,
+      {
+        phase: 'complete',
+        tokensBefore,
+        tokensAfter,
+        maxTokens,
+        messagesArchived,
+        percentageAfter: maxTokens > 0 ? Math.round(tokensAfter / maxTokens * 100) : undefined,
+        usedFallback,
+      },
+      opts,
+    ) as CompactionStreamingEvent;
+  }
+
+  static createCompactionErrorEvent(
+    errorMessage: string,
+    opts: StreamingEventIds = {},
+  ): CompactionStreamingEvent {
+    return StreamingEventFactory.base(
+      StreamingEventType.COMPACTION,
+      { phase: 'error', errorMessage },
+      opts,
+    ) as CompactionStreamingEvent;
   }
 
   // ── Internal ─────────────────────────────────────────────────────────

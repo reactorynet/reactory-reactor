@@ -336,7 +336,11 @@ class OpenAIService extends AIProviderBase {
     // -- Open the streaming API connection --
     let stream: Awaited<ReturnType<typeof this.ai.chat.completions.create>>;
     try {
-      stream = await this.ai.chat.completions.create({ ...prompt, stream: true });
+      stream = await this.ai.chat.completions.create({
+        ...prompt,
+        stream: true,
+        stream_options: { include_usage: true },
+      });
     } catch (error: any) {
       const errorEvent = StreamingEventFactory.createErrorEvent(
         error.code || error.status || "CONNECTION_ERROR",
@@ -357,6 +361,7 @@ class OpenAIService extends AIProviderBase {
     let finishReason: string | null = null;
     let completionId: string | null = null;
     let model = "";
+    let streamUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null = null;
 
     try {
       for await (const chunk of stream) {
@@ -412,6 +417,11 @@ class OpenAIService extends AIProviderBase {
 
         if (choice.finish_reason) {
           finishReason = choice.finish_reason;
+        }
+
+        // Capture usage from the final chunk (sent when stream_options.include_usage is true)
+        if ((chunk as any).usage) {
+          streamUsage = (chunk as any).usage;
         }
       }
 
@@ -495,7 +505,9 @@ class OpenAIService extends AIProviderBase {
         },
         finish_reason: finishReason || "stop",
       }],
-      usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      usage: streamUsage
+        ? { prompt_tokens: streamUsage.prompt_tokens, completion_tokens: streamUsage.completion_tokens, total_tokens: streamUsage.total_tokens }
+        : { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
       // Carry reasoning through for persistence by the conversation service
       reasoning: accumulatedReasoning || undefined,
     } as any;
@@ -542,7 +554,7 @@ class OpenAIService extends AIProviderBase {
   private normalizeCompletion(
     response: OpenAI.Chat.Completions.ChatCompletion,
   ): AIChatCompletion {
-    return {
+    const completion: AIChatCompletion = {
       id: new ObjectId(),
       object: "chat.completion",
       created: new Date(),
@@ -565,6 +577,14 @@ class OpenAIService extends AIProviderBase {
         finish_reason: choice.finish_reason || "stop",
       })),
     };
+    if (response.usage) {
+      completion.usage = {
+        promptTokens: response.usage.prompt_tokens,
+        completionTokens: response.usage.completion_tokens,
+        totalTokens: response.usage.total_tokens,
+      };
+    }
+    return completion;
   }
 
   // --- Retry helpers ---

@@ -236,6 +236,15 @@ enum ReactorErrorCategory {
 Represents an error that occurred during chat processing.
 Contains details about the nature of the error for client handling.
 """
+type ReactorCompactionResult {
+  success: Boolean!
+  messagesArchived: Int!
+  tokensBefore: Int!
+  tokensAfter: Int!
+  usedFallback: Boolean!
+  error: String
+}
+
 type ReactorErrorResponse {
   code: String!
   message: String!
@@ -897,6 +906,13 @@ extend type Mutation {
   Permanently removes a chat session and all its messages.
   """
   ReactorDeleteChatSession(id: String!): Boolean
+
+  """
+  Triggers manual compaction on a conversation. The LLM summarizes older messages
+  which are then archived to truncatedHistory and replaced with a summary.
+  Returns compaction stats.
+  """
+  ReactorCompactConversation(chatSessionId: String!): ReactorCompactionResult
 
   """
   Converts spoken audio to text and sends it as a message to the persona.

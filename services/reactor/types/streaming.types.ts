@@ -113,7 +113,8 @@ export enum StreamingEventType {
   COMPLETE = 'complete',
   ERROR = 'error',
   TOOL_ITERATION_LIMIT = 'tool_iteration_limit',
-  RETRY = 'retry'
+  RETRY = 'retry',
+  COMPACTION = 'compaction'
 }
 /**
  * Base streaming event interface
@@ -234,7 +235,38 @@ export interface RetryStreamingEvent extends StreamingEventBase {
   };
 }
 
-export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent | ToolIterationLimitStreamingEvent | RetryStreamingEvent;
+/**
+ * Compaction streaming event — emitted when the conversation context window
+ * is approaching capacity and auto-compaction is triggered. The LLM summarizes
+ * older messages so they can be archived and replaced with a compact summary.
+ */
+export interface CompactionStreamingEvent extends StreamingEventBase {
+  type: StreamingEventType.COMPACTION;
+  data: {
+    /** Current phase of the compaction process */
+    phase: 'start' | 'progress' | 'complete' | 'error';
+    /** Human-readable reason for compaction (start phase) */
+    reason?: string;
+    /** Token count before compaction */
+    tokensBefore?: number;
+    /** Conversation maxTokens limit */
+    maxTokens?: number;
+    /** Percentage of maxTokens used before compaction */
+    percentageUsed?: number;
+    /** Number of messages archived during compaction */
+    messagesArchived?: number;
+    /** Token count after compaction (complete phase) */
+    tokensAfter?: number;
+    /** Percentage of maxTokens used after compaction (complete phase) */
+    percentageAfter?: number;
+    /** Error message if compaction failed (error phase) */
+    errorMessage?: string;
+    /** Whether the system fell back to dumb truncation (error phase) */
+    usedFallback?: boolean;
+  };
+}
+
+export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent | ToolIterationLimitStreamingEvent | RetryStreamingEvent | CompactionStreamingEvent;
 
 /**
  * Per-persona token pacing configuration.

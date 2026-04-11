@@ -167,6 +167,12 @@ const TOKEN_LIMITS = {
 
   /** Average characters per token used for rough estimation */
   CHARS_PER_TOKEN_ESTIMATE: 4,
+
+  /** Percentage of maxTokens that triggers auto-compaction (95%) */
+  COMPACTION_THRESHOLD: 0.95,
+
+  /** Target percentage of maxTokens after compaction (65%) */
+  COMPACTION_TARGET_MULTIPLIER: 0.65,
 } as const;
 
 const RETRY_SETTINGS = {
@@ -179,6 +185,17 @@ const RETRY_SETTINGS = {
   /** Suggested retry delay for rate limit errors in seconds */
   RATE_LIMIT_RETRY_DELAY_SECONDS: 60,
 } as const;
+
+const COMPACTION_SUMMARY_PROMPT = `You are a conversation summarizer. Your task is to create a concise but comprehensive summary of the conversation transcript provided below. This summary will replace the original messages in the conversation context window, so it MUST preserve all information needed to continue the conversation seamlessly.
+
+Your summary MUST include:
+1. **Key decisions made** — any choices, agreements, or conclusions reached
+2. **Current task context** — what the user is working on and the current state of progress
+3. **Important facts and data** — file paths, IDs, configuration values, error messages, or other specific details referenced
+4. **Unresolved items** — open questions, pending actions, or incomplete tasks
+5. **Technical context** — technologies, APIs, patterns, or architectural decisions discussed
+
+Format the summary as structured prose with clear section headers. Be concise but do NOT omit any detail that would be needed to continue the conversation. The reader of this summary has no access to the original messages.`;
 
 const DATABASE_CONSTANTS = {
   /** MongoDB duplicate key error code */
@@ -887,14 +904,20 @@ export default class ReactorConversationService
   }
 
   /**
-   * Calculate and update the token count for a conversation using atomic aggregation
-   * This method uses MongoDB's aggregation pipeline to calculate tokens atomically
+   * Calculate and update the token count for a conversation.
+   *
+   * When providerReportedTokens is supplied (and > 0), uses that value directly
+   * via $set — the provider's totalTokens already represents the full conversation
+   * context size as seen by the model. Falls back to the MongoDB aggregation
+   * pipeline with chars/4 heuristic when provider usage is unavailable.
    */
   private async updateConversationTokenCount(
-    conversationId: string
+    conversationId: string,
+    providerReportedTokens?: number,
   ): Promise<number> {
     this.sessionLog("debug", "Updating conversation token count", {
       conversationId,
+      providerReportedTokens,
       userId: this.context.user?._id,
       timestamp: new Date().toISOString(),
     }, conversationId);
@@ -910,7 +933,56 @@ export default class ReactorConversationService
     }
 
     try {
-      // Use aggregation pipeline to calculate token count atomically
+      // When the provider reports actual token usage, use it directly
+      if (providerReportedTokens !== undefined && providerReportedTokens > 0) {
+        const updatedConversation =
+          await ReactorConversationModel.findOneAndUpdate(
+            {
+              _id: conversationId,
+              user: this.context.user._id,
+            },
+            {
+              $set: {
+                tokenCount: providerReportedTokens,
+                updated: new Date(),
+              },
+            },
+            {
+              new: true,
+              runValidators: true,
+            }
+          ).exec();
+
+        if (!updatedConversation) {
+          const errorResponse = this.createErrorResponse(
+            ReactorErrorCode.CONVERSATION_UPDATE_ERROR,
+            "Failed to update conversation token count",
+            {
+              operation: "updateConversationTokenCount",
+              conversationId,
+              recoverable: true,
+            }
+          );
+          throw new Error(errorResponse.message);
+        }
+
+        this.validateConversationDocument(
+          updatedConversation,
+          "updateConversationTokenCount",
+          "after_update_provider"
+        );
+
+        this.sessionLog("debug", "Token count updated from provider usage", {
+          conversationId,
+          newTokenCount: providerReportedTokens,
+          source: "provider",
+          userId: this.context.user?._id,
+        }, conversationId);
+
+        return providerReportedTokens;
+      }
+
+      // Fallback: use aggregation pipeline to estimate token count from history
       const result = await ReactorConversationModel.aggregate([
         {
           $match: {
@@ -977,10 +1049,11 @@ export default class ReactorConversationService
         "after_update"
       );
 
-      this.sessionLog("debug", "Token count updated successfully", {
+      this.sessionLog("debug", "Token count updated from heuristic estimation", {
         conversationId,
         oldTokenCount: result[0].tokenCount,
         newTokenCount: calculatedTokens,
+        source: "heuristic",
         userId: this.context.user?._id,
       }, conversationId);
 
@@ -1293,6 +1366,302 @@ export default class ReactorConversationService
   }
 
   /**
+   * Generate a compaction summary by asking the LLM to summarize a set of
+   * conversation messages. Uses the same provider/model as the conversation.
+   */
+  private async generateCompactionSummary(
+    conversation: any,
+    messagesToSummarize: ReactorConversationHistoryItem[],
+  ): Promise<string> {
+    // Serialize messages into a readable transcript
+    const transcript = messagesToSummarize.map((msg, i) => {
+      const role = (msg.role || 'unknown').toUpperCase();
+      let content = '';
+      if (typeof msg.content === 'string') {
+        content = msg.content;
+      } else if (msg.content) {
+        content = JSON.stringify(msg.content).slice(0, 2000);
+      }
+      // Include tool call summaries (names only, not full args)
+      const toolCallNames = (msg.tool_calls || [])
+        .map((tc: any) => tc.function?.name || 'unknown')
+        .join(', ');
+      const toolInfo = toolCallNames ? ` [Tool calls: ${toolCallNames}]` : '';
+      // Truncate very long messages to keep the summary prompt manageable
+      if (content.length > 3000) {
+        content = content.slice(0, 3000) + '... [truncated]';
+      }
+      return `[${i + 1}] ${role}${toolInfo}: ${content}`;
+    }).join('\n\n');
+
+    const provider = conversation.providerId || 'google';
+    const tempConversationId = new ObjectId();
+
+    // Build a minimal persona for the summary call
+    const summaryPersona = {
+      ...await this.personaProvider.getPersona(conversation.personaId),
+      tools: [],
+      macros: [],
+      resources: [],
+    };
+
+    // Create a temporary conversation for the summary LLM call
+    const tempConversation = new ReactorConversationModel({
+      _id: tempConversationId,
+      personaId: conversation.personaId,
+      user: this.context.user,
+      modelId: conversation.modelId,
+      providerId: provider,
+      history: [
+        {
+          id: new ObjectId(),
+          role: 'system',
+          content: COMPACTION_SUMMARY_PROMPT,
+          timestamp: new Date(),
+          tool_results: [],
+        },
+      ],
+      vars: {},
+      meta: { title: 'Compaction Summary' },
+      macros: [],
+      tools: [],
+      started: new Date(),
+      toolApprovalMode: 'prompt',
+    });
+    await tempConversation.save();
+
+    try {
+      // Resolve credentials for the provider
+      const resolvedCreds = await this.providerService.resolveProviderCredentials(
+        provider,
+        summaryPersona.config,
+      );
+      if (resolvedCreds.source !== 'none' && resolvedCreds.source !== 'persona') {
+        summaryPersona.config = {
+          ...summaryPersona.config,
+          apiKey: resolvedCreds.apiKey || summaryPersona.config?.apiKey,
+          apiOrg: resolvedCreds.organization || summaryPersona.config?.apiOrg,
+          apiBaseURL: resolvedCreds.endpoint || summaryPersona.config?.apiBaseURL,
+        };
+      }
+
+      const response = await this.executeProviderChat(
+        provider,
+        tempConversationId.toString(),
+        summaryPersona,
+        {
+          personaId: conversation.personaId,
+          chatSessionId: tempConversationId.toString(),
+          message: `Please summarize the following conversation transcript:\n\n${transcript}`,
+          role: 'user',
+          streamingMode: StreamingMode.NONE,
+        },
+      );
+
+      const content = response?.choices?.[0]?.message?.content
+        || response?.content
+        || '';
+
+      if (!content || content.length < 50) {
+        throw new Error('LLM returned an insufficient summary');
+      }
+
+      return content;
+    } finally {
+      // Always clean up the temporary conversation
+      await ReactorConversationModel.deleteOne({ _id: tempConversationId }).exec();
+    }
+  }
+
+  /**
+   * Auto-compact a conversation by asking the LLM to summarize older messages,
+   * archiving them to truncatedHistory, and replacing them with a summary.
+   * Falls back to dumb truncation if the LLM summary call fails.
+   */
+  private async compactConversationHistory(
+    conversationId: string,
+    currentTokens: number,
+    maxTokens: number,
+    streamingMode: StreamingMode = StreamingMode.NONE,
+  ): Promise<{
+    success: boolean;
+    messagesArchived: number;
+    tokensBefore: number;
+    tokensAfter: number;
+    usedFallback: boolean;
+  }> {
+    const ids = { sessionId: conversationId, conversationId };
+    const isStreaming = streamingMode === StreamingMode.SSE;
+    const percentageUsed = Math.round(currentTokens / maxTokens * 100);
+
+    this.sessionLog("info", "Starting auto-compaction", {
+      conversationId, currentTokens, maxTokens, percentageUsed,
+    }, conversationId);
+
+    // ── SSE: compaction_start ──
+    if (isStreaming) {
+      try {
+        const startEvent = StreamingEventFactory.createCompactionStartEvent(
+          `Context window at ${percentageUsed}% capacity — compacting conversation`,
+          currentTokens, maxTokens, percentageUsed, ids,
+        );
+        await this.streamingTransportManager.sendEventToSession(conversationId, startEvent);
+      } catch (_) { /* best-effort */ }
+    }
+
+    const conversation = await ReactorConversationModel.findOne({
+      _id: conversationId,
+      user: this.context.user._id,
+    }).exec();
+
+    if (!conversation) {
+      throw new Error(`Conversation ${conversationId} not found for compaction`);
+    }
+
+    const history = [...conversation.history];
+    const existingTruncatedHistory = conversation.truncatedHistory || [];
+    const targetTokens = maxTokens * TOKEN_LIMITS.COMPACTION_TARGET_MULTIPLIER;
+
+    // Separate system messages (always keep) from non-system messages
+    const systemMessages = history.filter((msg) => msg.role === 'system');
+    const nonSystemMessages = history.filter((msg) => msg.role !== 'system');
+
+    let systemTokens = 0;
+    systemMessages.forEach((msg) => {
+      systemTokens += this.estimateHistoryItemTokens(msg as ReactorConversationHistoryItem);
+    });
+
+    if (systemTokens > targetTokens) {
+      this.sessionLog("warn", "System messages exceed compaction target", {
+        conversationId, systemTokens, targetTokens,
+      }, conversationId);
+      return { success: false, messagesArchived: 0, tokensBefore: currentTokens, tokensAfter: currentTokens, usedFallback: false };
+    }
+
+    // Walk non-system messages newest-first, accumulating tokens for the "keep" set.
+    // Leave room for the summary message (~2000 tokens estimated).
+    const summaryBudget = 2000;
+    const keepBudget = targetTokens - systemTokens - summaryBudget;
+    const messagesToKeep: any[] = [];
+    const messagesToArchive: any[] = [];
+    let keepTokens = 0;
+
+    for (let i = nonSystemMessages.length - 1; i >= 0; i--) {
+      const msg = nonSystemMessages[i];
+      const msgTokens = this.estimateHistoryItemTokens(msg as ReactorConversationHistoryItem);
+      if (keepTokens + msgTokens <= keepBudget) {
+        messagesToKeep.unshift(msg);
+        keepTokens += msgTokens;
+      } else {
+        messagesToArchive.unshift(msg);
+      }
+    }
+
+    if (messagesToArchive.length === 0) {
+      this.sessionLog("info", "No messages to archive — skipping compaction", {
+        conversationId,
+      }, conversationId);
+      return { success: true, messagesArchived: 0, tokensBefore: currentTokens, tokensAfter: currentTokens, usedFallback: false };
+    }
+
+    // ── Generate LLM summary ──
+    let summary: string;
+    let usedFallback = false;
+    try {
+      summary = await this.generateCompactionSummary(conversation, messagesToArchive as ReactorConversationHistoryItem[]);
+    } catch (summaryError: any) {
+      this.sessionLog("error", "Compaction summary generation failed, falling back to dumb truncation", {
+        conversationId, error: summaryError.message,
+      }, conversationId);
+
+      // ── SSE: compaction_error ──
+      if (isStreaming) {
+        try {
+          const errorEvent = StreamingEventFactory.createCompactionErrorEvent(
+            `Summary generation failed: ${summaryError.message}. Falling back to truncation.`, ids,
+          );
+          await this.streamingTransportManager.sendEventToSession(conversationId, errorEvent);
+        } catch (_) { /* best-effort */ }
+      }
+
+      // Fall back to dumb truncation
+      await this.truncateConversationHistory(conversationId, targetTokens);
+      const afterConv = await ReactorConversationModel.findById(conversationId).lean().exec();
+      const tokensAfter = (afterConv as any)?.tokenCount || 0;
+
+      if (isStreaming) {
+        try {
+          const completeEvent = StreamingEventFactory.createCompactionCompleteEvent(
+            currentTokens, tokensAfter, maxTokens, messagesToArchive.length, true, ids,
+          );
+          await this.streamingTransportManager.sendEventToSession(conversationId, completeEvent);
+        } catch (_) { /* best-effort */ }
+      }
+
+      return { success: true, messagesArchived: messagesToArchive.length, tokensBefore: currentTokens, tokensAfter, usedFallback: true };
+    }
+
+    // ── SSE: compaction_progress ──
+    if (isStreaming) {
+      try {
+        const progressEvent = StreamingEventFactory.createCompactionProgressEvent(
+          messagesToArchive.length, ids,
+        );
+        await this.streamingTransportManager.sendEventToSession(conversationId, progressEvent);
+      } catch (_) { /* best-effort */ }
+    }
+
+    // Build the summary system message
+    const summaryMessage = {
+      id: new ObjectId(),
+      role: 'system',
+      content: `[Conversation Compaction Summary - ${new Date().toISOString()}]\n\n${summary}\n\n---\n[${messagesToArchive.length} earlier messages were archived and replaced with this summary.]`,
+      timestamp: new Date(),
+      tool_results: [],
+    };
+
+    // Atomic update: replace history and append to truncatedHistory
+    const updatedConversation = await ReactorConversationModel.findOneAndUpdate(
+      { _id: conversationId },
+      {
+        history: [...systemMessages, summaryMessage, ...messagesToKeep],
+        truncatedHistory: [...existingTruncatedHistory, ...messagesToArchive],
+        updated: new Date(),
+      },
+      { new: true },
+    ).exec();
+
+    // Recalculate token count
+    const tokensAfter = await this.updateConversationTokenCount(conversationId);
+
+    this.sessionLog("info", "Compaction complete", {
+      conversationId,
+      tokensBefore: currentTokens,
+      tokensAfter,
+      messagesArchived: messagesToArchive.length,
+      messagesKept: messagesToKeep.length + systemMessages.length + 1,
+    }, conversationId);
+
+    // ── SSE: compaction_complete ──
+    if (isStreaming) {
+      try {
+        const completeEvent = StreamingEventFactory.createCompactionCompleteEvent(
+          currentTokens, tokensAfter, maxTokens, messagesToArchive.length, false, ids,
+        );
+        await this.streamingTransportManager.sendEventToSession(conversationId, completeEvent);
+      } catch (_) { /* best-effort */ }
+    }
+
+    return {
+      success: true,
+      messagesArchived: messagesToArchive.length,
+      tokensBefore: currentTokens,
+      tokensAfter,
+      usedFallback: false,
+    };
+  }
+
+  /**
    * Get the complete conversation history including truncated messages
    *
    * This method retrieves both active and truncated conversation history,
@@ -1416,6 +1785,53 @@ export default class ReactorConversationService
         truncatedTokens,
       },
     };
+  }
+
+  /**
+   * Manually trigger conversation compaction (public API for GraphQL).
+   * Determines current token state and delegates to compactConversationHistory.
+   */
+  async compactConversation(chatSessionId: string): Promise<{
+    success: boolean;
+    messagesArchived: number;
+    tokensBefore: number;
+    tokensAfter: number;
+    usedFallback: boolean;
+    error?: string;
+  }> {
+    try {
+      const conversation = await ReactorConversationModel.findOne({
+        _id: chatSessionId,
+        user: this.context.user._id,
+      }).exec();
+
+      if (!conversation) {
+        return { success: false, messagesArchived: 0, tokensBefore: 0, tokensAfter: 0, usedFallback: false, error: 'Conversation not found' };
+      }
+
+      const currentTokens = conversation.tokenCount || 0;
+      const maxTokens = conversation.maxTokens || TOKEN_LIMITS.DEFAULT_MAX_TOKENS;
+
+      // Determine streaming mode — send SSE events if a transport is connected
+      let streamingMode = StreamingMode.NONE;
+      try {
+        const sessionId = this.streamingSessionManager.getSessionId(chatSessionId);
+        if (sessionId && await this.streamingTransportManager.hasTransport(sessionId)) {
+          streamingMode = StreamingMode.SSE;
+        }
+      } catch (_) { /* no SSE — that's fine */ }
+
+      const result = await this.compactConversationHistory(
+        chatSessionId, currentTokens, maxTokens, streamingMode,
+      );
+
+      return result;
+    } catch (err: any) {
+      this.sessionLog("error", "Manual compaction failed", {
+        chatSessionId, error: err.message,
+      }, chatSessionId);
+      return { success: false, messagesArchived: 0, tokensBefore: 0, tokensAfter: 0, usedFallback: false, error: err.message };
+    }
   }
 
   /**
@@ -3409,8 +3825,41 @@ export default class ReactorConversationService
         ).exec();
       }
 
-      // Update token count after adding AI response
-      await this.updateConversationTokenCount(conversation._id.toString());
+      // Update token count after adding AI response — prefer provider-reported usage
+      const providerTotalTokens = response?.usage?.totalTokens;
+      await this.updateConversationTokenCount(conversation._id.toString(), providerTotalTokens);
+
+      // Check if auto-compaction is needed
+      const convMaxTokens = conversation.maxTokens;
+      if (convMaxTokens) {
+        const updatedConv = await ReactorConversationModel.findById(conversation._id).lean().exec();
+        const currentTokens = (updatedConv as any)?.tokenCount || 0;
+        const percentageUsed = currentTokens / convMaxTokens;
+
+        if (percentageUsed >= TOKEN_LIMITS.COMPACTION_THRESHOLD) {
+          this.sessionLog("info", "Token threshold reached, triggering auto-compaction", {
+            conversationId: conversation._id.toString(),
+            currentTokens,
+            maxTokens: convMaxTokens,
+            percentageUsed: Math.round(percentageUsed * 100),
+          }, conversation._id?.toString(), conversation.personaId);
+
+          try {
+            await this.compactConversationHistory(
+              conversation._id.toString(),
+              currentTokens,
+              convMaxTokens,
+              streamingMode,
+            );
+          } catch (compactionError: any) {
+            // Compaction failure should not break the response flow
+            this.sessionLog("error", "Auto-compaction failed", {
+              conversationId: conversation._id.toString(),
+              error: compactionError.message,
+            }, conversation._id?.toString(), conversation.personaId);
+          }
+        }
+      }
     } else {
       this.sessionLog("warn", `No AI response received for message: ${message}`, {
         response,

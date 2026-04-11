@@ -11,7 +11,9 @@ export const getRecentExecutions: Macro<unknown, GetRecentExecutionsProps> = asy
   state: ChatState,
   context?: Reactory.Server.IReactoryContext
 ): Promise<unknown> => {
+  const MAX_RECENT = 10;
   const { limit = 10 } = props;
+  const effectiveLimit = Math.min(limit, MAX_RECENT);
 
   const ctx = context || state.context;
   try {
@@ -21,7 +23,7 @@ export const getRecentExecutions: Macro<unknown, GetRecentExecutionsProps> = asy
       return { success: false, error: "core.ReactoryWorkflowService@1.0.0 is not available in the context." };
     }
 
-    const executions = await workflowService.getRecentWorkflowExecutions(limit);
+    const executions = await workflowService.getRecentWorkflowExecutions(effectiveLimit);
 
     return {
       success: true,
@@ -84,7 +86,7 @@ export const GetRecentExecutionsRegistry: MacroComponentDefinition<typeof getRec
           properties: {
             limit: {
               type: "number",
-              description: "Maximum number of recent executions to return. Defaults to 10.",
+              description: "Maximum number of recent executions to return. Defaults to 10. Maximum 10.",
             },
           },
           required: [],

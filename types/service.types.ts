@@ -642,6 +642,19 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
   clearTruncatedHistory(chatSessionId: string): Promise<{
     clearedMessages: number;
     clearedTokens: number;
+  }>;
+
+  /**
+   * Manually trigger conversation compaction. The LLM summarizes older messages
+   * which are archived to truncatedHistory and replaced with a summary.
+   */
+  compactConversation(chatSessionId: string): Promise<{
+    success: boolean;
+    messagesArchived: number;
+    tokensBefore: number;
+    tokensAfter: number;
+    usedFallback: boolean;
+    error?: string;
   }>; 
   
   /**

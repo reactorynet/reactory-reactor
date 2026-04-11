@@ -5,6 +5,7 @@ import {
   AIChatParams,
   AIAudioChatParams,
   AIChatCompletion,
+  AIChatCompletionUsage,
 } from "../../../types/model.types";
 import {
   AICompletionStreamingData,
@@ -646,7 +647,7 @@ class AnthropicService extends AIProviderBase {
     persona: IAIPersona;
     history: ReactorConversationHistory;
     messageId?: string;
-  }): Promise<{ content: string; finishReason: string; toolCalls: any[]; reasoning?: string; assistantPersisted?: boolean }> {
+  }): Promise<{ content: string; finishReason: string; toolCalls: any[]; reasoning?: string; assistantPersisted?: boolean; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
     const { sessionId, message, persona, history, messageId } = args;
 
     const messages = this.convertHistoryToAnthropicFormat(history);
@@ -827,6 +828,7 @@ class AnthropicService extends AIProviderBase {
       toolCalls: collectedToolCalls,
       reasoning: accumulatedReasoning || undefined,
       assistantPersisted,
+      usage: { promptTokens, completionTokens, totalTokens },
     };
   }
 
@@ -970,8 +972,12 @@ class AnthropicService extends AIProviderBase {
       if (role === "tool") {
         const messages = this.convertHistoryToAnthropicFormat(this.chatState.history);
         const result = await this.runToolLoop(messages, persona, this.chatState.id, messageId);
-
-        return this.buildCompletion(result.content, result.finishReason, result.toolCalls);
+        const toolLoopUsage: AIChatCompletionUsage | undefined = result.usage ? {
+          promptTokens: result.usage.promptTokens,
+          completionTokens: result.usage.completionTokens,
+          totalTokens: result.usage.promptTokens + result.usage.completionTokens,
+        } : undefined;
+        return this.buildCompletion(result.content, result.finishReason, result.toolCalls, toolLoopUsage);
       }
 
       // Handle user messages
@@ -1002,7 +1008,12 @@ class AnthropicService extends AIProviderBase {
           // with role='tool' + continueAfterTools. Do NOT execute tools
           // server-side here — that causes dual execution and corrupted
           // conversation history.
-          const completion = this.buildCompletion(streamResult.content, streamResult.finishReason, streamResult.toolCalls);
+          const streamUsage: AIChatCompletionUsage | undefined = streamResult.usage ? {
+            promptTokens: streamResult.usage.promptTokens,
+            completionTokens: streamResult.usage.completionTokens,
+            totalTokens: streamResult.usage.totalTokens,
+          } : undefined;
+          const completion = this.buildCompletion(streamResult.content, streamResult.finishReason, streamResult.toolCalls, streamUsage);
           // If the assistant message was already persisted before the SSE completion event
           // (to prevent race conditions with executeMacro), flag the completion so
           // processAIResponse in ReactorConversationService can skip the duplicate persist.
@@ -1014,7 +1025,12 @@ class AnthropicService extends AIProviderBase {
 
         // Non-streaming path with tool loop
         const result = await this.runToolLoop(messages, persona, this.chatState.id, messageId);
-        return this.buildCompletion(result.content, result.finishReason, result.toolCalls);
+        const loopUsage: AIChatCompletionUsage | undefined = result.usage ? {
+          promptTokens: result.usage.promptTokens,
+          completionTokens: result.usage.completionTokens,
+          totalTokens: result.usage.promptTokens + result.usage.completionTokens,
+        } : undefined;
+        return this.buildCompletion(result.content, result.finishReason, result.toolCalls, loopUsage);
       }
 
       // Handle other roles - just add to history without getting response
@@ -1042,8 +1058,8 @@ class AnthropicService extends AIProviderBase {
   /**
    * Build a standardized AIChatCompletion response
    */
-  private buildCompletion(content: string, finishReason: string, toolCalls: any[]): AIChatCompletion {
-    return {
+  private buildCompletion(content: string, finishReason: string, toolCalls: any[], usage?: AIChatCompletionUsage): AIChatCompletion {
+    const completion: AIChatCompletion = {
       id: new ObjectId(),
       object: "chat.completion",
       choices: [
@@ -1059,6 +1075,10 @@ class AnthropicService extends AIProviderBase {
       ],
       created: new Date(),
     };
+    if (usage) {
+      completion.usage = usage;
+    }
+    return completion;
   }
 
   async chat(

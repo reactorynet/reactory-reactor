@@ -13,6 +13,7 @@ import {
   AIChatParams,
   AIAudioChatParams,
   AIChatCompletion,
+  AIChatCompletionUsage,
   AIImage,
   AIImageGenerationParams,
   AIListResponse,
@@ -1261,6 +1262,11 @@ class GoogleAIService extends AIProviderBase {
       (result as any).__images = accumulatedImages;
     }
 
+    // Attach usage metadata for the caller to pass through buildCompletion
+    if (result?.usageMetadata) {
+      (result as any).__usageMetadata = result.usageMetadata;
+    }
+
     this.slog("info", `Streaming request completed`, {
       accumulatedTextLength: accumulatedText.length,
       accumulatedTextPreview: accumulatedText ? accumulatedText.substring(0, 150) : '(empty)',
@@ -1275,12 +1281,23 @@ class GoogleAIService extends AIProviderBase {
   /**
    * Build a normalized AIChatCompletion from extracted Gemini response data.
    */
+  private extractUsageFromResponse(result: GoogleGenAI.GenerateContentResponse | null): AIChatCompletionUsage | undefined {
+    const meta = (result as any)?.__usageMetadata || result?.usageMetadata;
+    if (!meta) return undefined;
+    return {
+      promptTokens: meta.promptTokenCount || 0,
+      completionTokens: meta.candidatesTokenCount || 0,
+      totalTokens: meta.totalTokenCount || 0,
+    };
+  }
+
   private buildCompletion(
     responseText: string,
     functionCalls: any[],
     finishReason: string = "stop",
     reasoning?: string,
     images?: AIImage[],
+    usage?: AIChatCompletionUsage,
   ): AIChatCompletion {
     const completion: any = {
       id: new ObjectId(),
@@ -1314,6 +1331,9 @@ class GoogleAIService extends AIProviderBase {
     }
     if (images && images.length > 0) {
       completion.images = images;
+    }
+    if (usage) {
+      completion.usage = usage;
     }
     return completion;
   }
@@ -1439,7 +1459,7 @@ class GoogleAIService extends AIProviderBase {
         const { responseText, functionCalls, reasoning, images } =
           this.extractGeminiCandidate(candidate);
 
-        return this.buildCompletion(responseText, functionCalls, undefined, reasoning, images);
+        return this.buildCompletion(responseText, functionCalls, undefined, reasoning, images, this.extractUsageFromResponse(result));
       }
 
       // Handle user messages
@@ -1579,7 +1599,7 @@ class GoogleAIService extends AIProviderBase {
             streamingMode: this.streamingMode,
           });
 
-          return this.buildCompletion(responseText, functionCalls, undefined, reasoning, images);
+          return this.buildCompletion(responseText, functionCalls, undefined, reasoning, images, this.extractUsageFromResponse(result));
         } catch (extractError) {
           this.context.error(
             `Error extracting Gemini candidate: ${extractError.message}`,
