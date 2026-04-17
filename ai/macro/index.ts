@@ -12,6 +12,7 @@ import MCPMacros from './mcp';
 import ProjectMacros from './projects';
 import DataMacros from './data';
 import ModuleMacros from './develop/module';
+import PlaywrightMacros from './playwright';
 
 export { MacroErrorCode, MacroError, createMacroError } from './errors';
 export { summarizeItems, truncateOutput } from './summarize';
@@ -33,6 +34,8 @@ import {
   CodeReview,
   CodeReviewFile,
 } from './develop/review/macro';
+
+import { PlaywrightNavigate, PlaywrightOpenSession } from './playwright/macro';
 
 import OpenAI from 'openai';
 import Hash from '@reactory/server-core/utils/hash';
@@ -64,6 +67,9 @@ const inputMacros: MacroFunctions = {
   GetUser,
   review: CodeReview,
   reviewFile: CodeReviewFile,
+  playwright: PlaywrightNavigate,
+  pw: PlaywrightNavigate,
+  playwright_open: PlaywrightOpenSession,
 };
 
 const outputMacros: MacroFunctions = {
@@ -94,6 +100,7 @@ export const MacroRegistry: MacroComponentDefinition<unknown>[] = [
   ...ProjectMacros,
   ...DataMacros,
   ...ModuleMacros,
+  ...PlaywrightMacros,
 ];
 
 export const getMacrosMD = (): string => {

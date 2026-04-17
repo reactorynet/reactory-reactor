@@ -114,7 +114,8 @@ export enum StreamingEventType {
   ERROR = 'error',
   TOOL_ITERATION_LIMIT = 'tool_iteration_limit',
   RETRY = 'retry',
-  COMPACTION = 'compaction'
+  COMPACTION = 'compaction',
+  INTERRUPTED = 'interrupted'
 }
 /**
  * Base streaming event interface
@@ -266,7 +267,22 @@ export interface CompactionStreamingEvent extends StreamingEventBase {
   };
 }
 
-export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent | ToolIterationLimitStreamingEvent | RetryStreamingEvent | CompactionStreamingEvent;
+/**
+ * Interrupted streaming event — emitted when the user interrupts an ongoing
+ * auto tool execution loop. The server stops tool execution at the next
+ * iteration boundary and persists a summary message.
+ */
+export interface InterruptedStreamingEvent extends StreamingEventBase {
+  type: StreamingEventType.INTERRUPTED;
+  data: {
+    /** Number of tool iterations completed before interruption */
+    iterationsCompleted: number;
+    /** User-provided reason for the interruption, if any */
+    reason?: string;
+  };
+}
+
+export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent | ToolIterationLimitStreamingEvent | RetryStreamingEvent | CompactionStreamingEvent | InterruptedStreamingEvent;
 
 /**
  * Per-persona token pacing configuration.

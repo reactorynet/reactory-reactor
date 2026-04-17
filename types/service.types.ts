@@ -704,10 +704,23 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
       result?: any;
       isError?: boolean;
       error?: string;
+      decision?: 'approved' | 'declined' | 'instructed';
+      userInstruction?: string;
     }>;
     continueProcessing?: boolean;
     streamingMode?: StreamingMode;
   }): Promise<any>;
+
+  /**
+   * Interrupts an in-progress auto tool execution loop.
+   * Sets an interrupt flag on the conversation so the server-side tool loop
+   * breaks at the next iteration boundary. Persists a summary message and
+   * notifies the client via SSE.
+   * @param chatSessionId
+   * @param personaId
+   * @param reason - Optional user-provided reason for the interruption
+   */
+  interruptToolExecution(chatSessionId: string, personaId: string, reason?: string): Promise<any>;
 
   attachImage(args: { 
     image: string, 

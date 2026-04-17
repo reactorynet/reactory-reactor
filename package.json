@@ -30,6 +30,7 @@
     "@anthropic-ai/sdk": "0.59.0",
     "@modelcontextprotocol/sdk": "1.28.0",
     "ollama": "0.6.3",
-    "neo-blessed": "^0.2.0"
+    "neo-blessed": "^0.2.0",
+    "playwright": "1.59.1"
   }
 }

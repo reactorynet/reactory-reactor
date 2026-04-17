@@ -29,7 +29,23 @@ const REACTOR_TOOL_INCLUDES = [
   'edit_file',
   'search_replace',
   'delete_file',
-  'list_dir'
+  'list_dir',
+  // Playwright browser automation tools
+  'playwright_open_session',
+  'playwright_close_session',
+  'playwright_navigate',
+  'playwright_click',
+  'playwright_type',
+  'playwright_select',
+  'playwright_press_key',
+  'playwright_get_content',
+  'playwright_inspect',
+  'playwright_wait_for',
+  'playwright_evaluate',
+  'playwright_screenshot',
+  'playwright_pdf',
+  'playwright_page_info',
+  'playwright_list_sessions',
 ];
 
 const REACTOR_RESOURCES: IAIPersonaResource[] = [  

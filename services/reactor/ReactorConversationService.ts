@@ -36,7 +36,7 @@ import ReactoryFile, {
   ReactoryFileDocument,
 } from "@reactory/server-modules/reactory-core/models/CoreFile";
 import { id } from "schema/reflection";
-import { CompletionStreamingEvent, ToolCallStreamingEvent, ToolIterationLimitStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
+import { CompletionStreamingEvent, ToolCallStreamingEvent, ToolIterationLimitStreamingEvent, InterruptedStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
 import Helpers from "authentication/strategies/helpers";
 import { StreamingSessionManager } from "./StreamingSessionManager";
 import { StreamingTransportManager } from "./StreamingTransportManager";
@@ -280,6 +280,13 @@ export default class ReactorConversationService
 
   /** Per-conversation file loggers keyed by conversationId */
   private sessionLoggers: Map<string, ChatSessionResourceManager> = new Map();
+
+  /**
+   * Tracks sessions that have been flagged for interruption.
+   * Key: conversationId, Value: reason string (or empty).
+   * Checked at each iteration of the AUTO tool execution loop.
+   */
+  private static interruptedSessions: Map<string, string> = new Map();
 
   /**
    * Initialize the ReactorConversationService with dependencies
@@ -2183,6 +2190,96 @@ export default class ReactorConversationService
   }
 
   /**
+   * Checks whether a session has been flagged for interruption.
+   */
+  private isInterrupted(conversationId: string): boolean {
+    return ReactorConversationService.interruptedSessions.has(conversationId);
+  }
+
+  /**
+   * Clears the interruption flag for a session after it has been handled.
+   */
+  private clearInterrupt(conversationId: string): string | undefined {
+    const reason = ReactorConversationService.interruptedSessions.get(conversationId);
+    ReactorConversationService.interruptedSessions.delete(conversationId);
+    return reason;
+  }
+
+  /**
+   * Interrupts an in-progress auto tool execution loop.
+   * Sets an interrupt flag so the server-side tool loop breaks at the next
+   * iteration boundary, persists a summary message, and notifies the client via SSE.
+   */
+  async interruptToolExecution(
+    chatSessionId: string,
+    personaId: string,
+    reason?: string
+  ): Promise<any> {
+    this.validateChatSessionId(chatSessionId, "interruptToolExecution");
+
+    this.sessionLog("info", "Interrupting tool execution", {
+      chatSessionId,
+      personaId,
+      reason,
+      userId: this.context.user?._id,
+    }, chatSessionId, personaId);
+
+    // Set the interrupt flag — the AUTO loop checks this at each iteration
+    ReactorConversationService.interruptedSessions.set(chatSessionId, reason || '');
+
+    // Send an SSE event to the client immediately
+    if (await this.streamingTransportManager.hasTransport(chatSessionId)) {
+      const interruptEvent: InterruptedStreamingEvent = {
+        type: StreamingEventType.INTERRUPTED,
+        sessionId: chatSessionId,
+        conversationId: chatSessionId,
+        messageId: new ObjectId().toString(),
+        timestamp: new Date(),
+        data: {
+          iterationsCompleted: 0, // actual count will be updated when loop exits
+          reason,
+        },
+      };
+      await this.streamingTransportManager.sendEventToSession(chatSessionId, interruptEvent);
+    }
+
+    // Persist a message indicating the interruption
+    const interruptMessage = reason
+      ? `Tool execution was interrupted by the user. Reason: ${reason}`
+      : 'Tool execution was interrupted by the user.';
+
+    await ReactorConversationModel.findOneAndUpdate(
+      { _id: chatSessionId },
+      {
+        $push: {
+          history: {
+            id: new ObjectId(),
+            role: 'assistant',
+            content: interruptMessage,
+            timestamp: new Date(),
+          },
+        },
+        $set: { updated: new Date() },
+      }
+    ).exec();
+
+    const conversation = await ReactorConversationModel.findById(chatSessionId).lean().exec();
+    const lastAssistant = [...(conversation?.history || [])].reverse().find((h: any) => h.role === 'assistant');
+
+    return {
+      __typename: "ReactorChatMessage",
+      id: lastAssistant?.id?.toString() || new ObjectId().toString(),
+      role: "assistant",
+      content: interruptMessage,
+      timestamp: new Date(),
+      tool_calls: [],
+      tool_results: [],
+      tool_errors: [],
+      sessionId: chatSessionId,
+    };
+  }
+
+  /**
    * Set the model and/or provider for an existing conversation.
    * Persists the override so it is used for subsequent messages and tool executions.
    */
@@ -3424,6 +3521,33 @@ export default class ReactorConversationService
             (response?.tool_calls?.length > 0 || response?.choices?.[0]?.message?.tool_calls?.length > 0) &&
             iteration < MAX_TOOL_ITERATIONS
           ) {
+            // Check for user-initiated interruption before each iteration
+            if (this.isInterrupted(effectiveConversationId)) {
+              const reason = this.clearInterrupt(effectiveConversationId);
+              this.sessionLog("info",
+                `[sendMessage] AUTO mode: interrupted by user after ${iteration} iteration(s)`,
+                { conversationId: effectiveConversationId, reason },
+                effectiveConversationId, personaId
+              );
+
+              // Send an updated interrupted SSE event with the real iteration count
+              if (streamingMode === StreamingMode.SSE) {
+                const interruptEvent: InterruptedStreamingEvent = {
+                  type: StreamingEventType.INTERRUPTED,
+                  sessionId: effectiveConversationId,
+                  conversationId: effectiveConversationId,
+                  messageId: new ObjectId().toString(),
+                  timestamp: new Date(),
+                  data: {
+                    iterationsCompleted: iteration,
+                    reason,
+                  },
+                };
+                await this.streamingTransportManager.sendEventToSession(effectiveConversationId, interruptEvent);
+              }
+              break;
+            }
+
             iteration++;
             const toolCalls = response.tool_calls || response.choices[0].message.tool_calls;
 
@@ -4441,11 +4565,20 @@ export default class ReactorConversationService
     // PROMPT/SAFE_AUTO paths where no placeholder was created).
     // Also backfill into the assistant message's tool_results array.
     for (const toolResult of results) {
-      const content = toolResult.isError
-        ? `Error executing client tool ${toolResult.toolName}: ${toolResult.error}`
-        : typeof toolResult.result === 'string'
+      let content: string;
+
+      // Handle user approval decisions (declined/instructed) differently from errors
+      if (toolResult.decision === 'declined') {
+        content = `The user chose not to run tool "${toolResult.toolName}". This is a deliberate user choice, not a failure. Continue without this tool and ask the user what they'd like to do instead.`;
+      } else if (toolResult.decision === 'instructed') {
+        content = `Instead of running tool "${toolResult.toolName}", the user provided this guidance: ${toolResult.userInstruction || toolResult.result || 'No instruction provided'}. Follow the user's instruction.`;
+      } else if (toolResult.isError) {
+        content = `Error executing client tool ${toolResult.toolName}: ${toolResult.error}`;
+      } else {
+        content = typeof toolResult.result === 'string'
           ? toolResult.result
           : JSON.stringify(toolResult.result ?? 'No result');
+      }
 
       // 1. Try to replace the placeholder tool message in history
       const updateResult = await ReactorConversationModel.findOneAndUpdate(

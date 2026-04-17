@@ -274,6 +274,18 @@ enum ReactorToolApprovalMode {
   plan
 }
 
+"""
+Represents the user's decision when prompted to approve a tool call.
+"""
+enum ReactorToolApprovalDecision {
+  """Tool was approved and executed normally"""
+  approved
+  """User deliberately chose not to run this tool (not a failure)"""
+  declined
+  """User provided alternative guidance instead of running the tool"""
+  instructed
+}
+
 type ReactorSessionVar {
   key: String!
   value: Any
@@ -533,6 +545,10 @@ input ReactorClientToolResultInput {
   isError: Boolean
   """Error message when isError is true"""
   error: String
+  """The user's approval decision. When 'declined' or 'instructed', the AI receives a user-choice message instead of an error."""
+  decision: ReactorToolApprovalDecision
+  """User-provided guidance when decision is 'instructed'. Sent to the AI as alternative instruction."""
+  userInstruction: String
 }
 
 """
@@ -917,6 +933,17 @@ extend type Mutation {
   Returns compaction stats.
   """
   ReactorCompactConversation(chatSessionId: String!): ReactorCompactionResult
+
+  """
+  Interrupts an in-progress auto tool execution loop.
+  Signals the server to stop executing tools at the next iteration boundary,
+  persists a summary message, and notifies the client via SSE.
+  """
+  ReactorInterruptToolExecution(
+    chatSessionId: String!
+    personaId: String!
+    reason: String
+  ): ReactorChatMessage
 
   """
   Converts spoken audio to text and sends it as a message to the persona.

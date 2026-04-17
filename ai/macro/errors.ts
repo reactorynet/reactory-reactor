@@ -95,6 +95,20 @@ export enum MacroErrorCode {
   // ── Timeout ──────────────────────────────
   /** A generic operation timed out */
   TIMEOUT = 'TIMEOUT',
+
+  // ── Playwright ───────────────────────────
+  /** The requested browser session was not found */
+  PLAYWRIGHT_SESSION_NOT_FOUND = 'PLAYWRIGHT_SESSION_NOT_FOUND',
+  /** A page navigation failed */
+  PLAYWRIGHT_NAVIGATION_ERROR = 'PLAYWRIGHT_NAVIGATION_ERROR',
+  /** A CSS selector did not match any element */
+  PLAYWRIGHT_SELECTOR_NOT_FOUND = 'PLAYWRIGHT_SELECTOR_NOT_FOUND',
+  /** A Playwright operation timed out */
+  PLAYWRIGHT_TIMEOUT = 'PLAYWRIGHT_TIMEOUT',
+  /** JavaScript evaluation in the page context failed */
+  PLAYWRIGHT_EVALUATION_ERROR = 'PLAYWRIGHT_EVALUATION_ERROR',
+  /** The browser process crashed or could not be launched */
+  PLAYWRIGHT_BROWSER_ERROR = 'PLAYWRIGHT_BROWSER_ERROR',
 }
 
 /**
