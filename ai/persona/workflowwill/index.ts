@@ -24,21 +24,23 @@ const WORKFLOW_TOOL_INCLUDES = [
   'env',
   'state',
   'datetime',
-  'http',
-  'httpGet',
-  'httpPost',
+  'http',  
+  'controlWorkflowInstance',
   'executeYamlWorkflow',
-  'listWorkflows',
+  'getRecentExecutions',
   'getWorkflow',
-  'getWorkflowYaml',
-  'listWorkflowInstances',
+  'getWorkflowErrors',
   'getWorkflowHistory',
   'getWorkflowStats',
+  'getWorkflowYaml',
+  'listWorkflowInstances',
+  'listWorkflows',
   'listWorkflowSchedules',
-  'getWorkflowErrors',
-  'getRecentExecutions',
-  'controlWorkflowInstance',
   'listWorkflowSteps',
+  'saveWorkflowYaml',
+  'validateWorkflowYaml',
+  'deleteWorkflowDefinition',
+  'workflow'
 ];
 
 const REACTORY_HOME = process.env.REACTORY_HOME || process.cwd();
@@ -162,7 +164,7 @@ let WORKFLOW_TOOLS: any[] = [];
 
 try {
   WORKFLOW_TOOLS = WORKFLOW_MACROS.map(m => m.tools).flat().filter(t => {
-    if (t.type === "function") {
+    if (t.type === "function" && WORKFLOW_TOOL_INCLUDES.indexOf(t?.function?.name as string) >= 0) {
       return true;
     }
     return false;

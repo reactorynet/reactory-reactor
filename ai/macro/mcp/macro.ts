@@ -1,370 +1,45 @@
+import fs from "fs";
+import path from "path";
+import { URL } from "url";
+import yaml from "js-yaml";
+import { v4 as uuidv4 } from "uuid";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { 
-  InitializedNotification,
-  InitializedNotificationSchema,
-  InitializeRequestSchema
-} from "@modelcontextprotocol/sdk/types.js";
-import { ChatState, Macro, MacroComponentDefinition } from "../../openai/types/chat";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import Reactory from "@reactorynet/reactory-core";
-import { v4 as uuidv4 } from "uuid";
-import { URL } from "url";
-import path from "path";
+import { ChatState, Macro, MacroComponentDefinition, MCPClient } from "../../openai/types/chat";
+import { McpCliProps } from "./types";
 import {
   addConnectionToSession,
   updateConnectionStatus,
-  removeConnectionFromSession,
   McpConnectionEntry,
-} from './session-config';
-import { loadClientsFromSession } from './load-clients';
+  McpTransportKind,
+} from "./session-config";
+import { loadClientsFromSession } from "./load-clients";
 
-// Command handler functions
-const getCapabilities = async (params: string[], state: ChatState): Promise<unknown> => {
-  const { mcpClients } = state;
-  try {
-    return mcpClients.map((client) => client.client.getServerCapabilities());
-  } catch (error) {
-    return { error: `Failed to get capabilities: ${error.message}` };
-  }
-};
-
-const getPrompts = async (params: string[], state: ChatState): Promise<unknown> => {
-  const { mcpClients } = state;
-  try {
-    return mcpClients.map((client) => client.client.listPrompts());
-  } catch (error) {
-    return { error: `Failed to get prompts: ${error.message}` };
-  }
-};
-
-const getTools = async (params: string[], state: ChatState): Promise<unknown> => {
-  const { mcpClients } = state;
-  const [ id, format = 'text' ] = params;
-  try {
-    
-    if (mcpClients.length === 0) { 
-      return format === 'json' ? JSON.stringify({ error: 'No MCP Clients found' }) : 'Error: No MCP Clients found - please add a connection';
-    }
-
-    let client = mcpClients[0];
-    if (id) {
-      client = mcpClients.find((client) => client.id === id.trim());
-      if (!client) {
-        return format === 'json' ? JSON.stringify({ error: `No client found with id: ${id}` }) : `Error: No client found with id: ${id}`;
-      }
-    }
-    const tools = await client.client.listTools();
-    
-    if (tools?.count === 0) {
-      return format === 'json' ? JSON.stringify({ error: 'No tools found' }) : 'Error: No tools found';
-    }
-    
-    switch (format) { 
-      case 'json':
-        return JSON.stringify(tools, null, 2);
-      case 'text':
-      default:
-        const toolText = tools.tools.map((tool) => {
-          return `Tool: ${tool.name}\nDescription: ${tool.description}\n\n`;
-        })
-        return `Tools for client ${client.name} (${client.id}):\n\n${toolText}`;
-    }
-  } catch (error) {
-    return { error: `Failed to get tools: ${error.message}` };
-  }
-};
-
-const getResources = async (params: string[], state: ChatState): Promise<unknown> => {
-  const { mcpClients } = state;
-  try {
-    return mcpClients.map((client) => client.client.listResources());
-  } catch (error) {
-    return { error: `Failed to get resources: ${error.message}` };
-  }
-};
-
-const addConnection = async (params: string[], state: ChatState): Promise<unknown> => {
-  try {
-    const [id, url, transport = 'sse'] = params;
-    
-    if (!state.mcpClients) {
-      state.mcpClients = [];
-    }
-    const { mcpClients } = state;
-    
-    if (!id || !url) {
-      return "Missing required parameters. Usage: @mcpcli(add-connection, id, url, [transport])";
-    }
-
-    const client = new Client({
-      name: id,
-      version: '1.0.0',        
-    });
-    
-    const baseUrl = url.endsWith('/') ? url : `${url}/`;
-    const connectionId = uuidv4();
-    const sseTransport = new StreamableHTTPClientTransport(new URL(baseUrl));
-    
-    sseTransport.requestInit = {
-      credentials: 'include',
-      headers: {
-        'Authorization': state.auth?.token ? `Bearer ${state.auth.token}` : '',
-        'x-client-key': state.clientKey || '',
-        'x-client-pwd': state.clientSecret || ''
-      }
-    };
-    
-    mcpClients.push({
-      id: connectionId,
-      client,
-      name: id,
-      description: `MCP Client for ${id}`,  
-      transports: {
-        sse: sseTransport
-      }
-    });
-    if (state.sessionFolder) {
-      addConnectionToSession(state.sessionFolder, {
-        id: connectionId,
-        serverName: id,
-        description: `MCP Client for ${id}`,
-        url,
-        transport: transport as McpConnectionEntry['transport'],
-        status: 'inactive',
-      });
-    }
-    
-    return `Added connection ${id} with url ${url}`;
-  } catch (error) {
-    return { error: `Failed to add connection: ${error.message}` };
-  }
-};
-
-// Command handler function for calling a tool
-const callTool = async (params: string[], state: ChatState): Promise<unknown> => { 
-  try {
-    const [id, toolName, ...toolParams] = params;
-    const { mcpClients } = state;
-
-    if (!id || !toolName) {
-      return "Missing required parameters. Usage: @mcp(call-tool, id, toolName, [params])";
-    }
-
-    const client = mcpClients.find((client) => client.id === id.trim());
-    if (!client) {
-      return `No client found with id: ${id}`;
-    }
-
-    const tools = await client.client.listTools();
-    const tool = tools.find((tool) => tool.name === toolName);
-    if (!tool) {
-      return `No tool found with name: ${toolName}`;
-    }
-
-    const result = await client.client.callTool(toolName, ...toolParams);
-    return result;
-  } catch (error) {
-    return { error: `Failed to call tool: ${error.message}` };
-  }
+// ── Result envelope used by every handler ───────────────────────────────────
+interface HandlerResult<T = unknown> {
+  success: boolean;
+  data?: T;
+  error?: string;
 }
 
-const connectClient = async (params: string[], state: ChatState): Promise<unknown> => {
-  try {
-    const [id] = params;
-    const { mcpClients, context } = state;
-    
-    if (!id) return 'No id provided, please use @mcp(connect, id)';
-    
-    const mcpClientDefinition = mcpClients.find((client) => client.id === id.trim());
-    if (!mcpClientDefinition) {
-      return `No client found with id: ${id}`;
-    }
+const ok = <T,>(data: T): HandlerResult<T> => ({ success: true, data });
+const fail = (error: string): HandlerResult => ({ success: false, error });
 
-    const { client, transports } = mcpClientDefinition;
-    
-    if (!transports) {
-      return `No transports found for client: ${id}`;
-    }
-
-    let transport = null;
-    if (transports.sse) {
-      const sseTransport = transports.sse;
-      sseTransport.eventSourceInit = {
-        ...sseTransport.eventSourceInit,
-        withCredentials: true
-      };
-      
-      sseTransport.requestInit = {
-        ...sseTransport.requestInit,
-      }
-
-      transport = sseTransport;      
-    }
-
-    if (transports.stdio) {
-      transport = transports.stdio;
-    }
-
-    if (transports.websocket) {
-      transport = transports.websocket;
-    }
-
-    if (!transport) {
-      return `No transport found for client: ${id}`;
-    }
-
-    if (client.transport) {
-      try { 
-        client.transport.close();
-        // Give the connection time to close properly
-        await new Promise(resolve => setTimeout(resolve, 500));
-      } catch (err) { 
-        console.error(`Error closing transport: ${err.message}`);
-      }
-    }
-
-    try {
-      // on connect the client sends an initializer message.
-      let transportInstance = new StreamableHTTPClientTransport(new URL(transport.url), {
-        eventSourceInit: transport?.eventSourceInit,
-        requestInit: transport.requestInit,
-      });
-
-      transportInstance.onmessage = (message) => { 
-        context.log(`Client ${mcpClientDefinition.id} message: ${message.data}`);
-        // Handle the message
-        const parsedMessage = JSON.parse(message.data);
-      };
-      client.onclose = () => {
-        context.log(`Client ${mcpClientDefinition.id} closed`);
-        if (client.transport) {
-          client.transport.close();
-        }
-      }
-
-
-      client.onerror = (error) => {
-        context.log(`Client ${mcpClientDefinition.id} error: ${error.message}`);
-        if (client.transport) {
-          client.transport.close();
-        }      
-      }
-
-      client.setNotificationHandler(InitializedNotificationSchema, (notification) => { 
-        context.log(`Client ${mcpClientDefinition.id} initialized: ${notification}`);
-        // Handle the initialized notification
-        return notification;
-      });
-
-      client.setRequestHandler(InitializeRequestSchema, async (request) => { 
-        context.log(`Client ${mcpClientDefinition.id} initialize request: ${request}`);
-        // Handle the initialize request
-        return {
-          id: mcpClientDefinition.id,
-          name: mcpClientDefinition.name,
-          description: mcpClientDefinition.description
-        };
-      });
-
-      await mcpClientDefinition.client.connect(transportInstance);
-      console.log(`Connected to ${mcpClientDefinition.id} with transport: ${transport.type}`);
-      await new Promise(resolve => setTimeout(resolve, 1000));
-
-      if (state.sessionFolder) {
-        updateConnectionStatus(state.sessionFolder, mcpClientDefinition.id, 'active');
-      }
-      
-      console.log(`Getting capabilities for ${mcpClientDefinition.id}`);
-      const capabilities = await mcpClientDefinition.client.getServerCapabilities();
-      const toolsList = await mcpClientDefinition.client.listTools();
-      const promptsList = await mcpClientDefinition.client.listPrompts();
-      const resourcesList = await mcpClientDefinition.client.listResources();
-      const capabilitiesText = `Connected to ${capabilities?.serverInfo?.name || 'unknown'}: 
-        Server capabilities:
-          - tools: ${toolsList?.tools?.length || 0} tools
-          - prompts: ${promptsList?.prompts || 0} prompts
-          - resources: ${resourcesList?.resources?.length || 0} resources
-
-        Call @mcp(capabilities, ${mcpClientDefinition.id}) to get the capabilities of the client
-        Call @mcp(prompts, ${mcpClientDefinition.id}) to get the prompts of the client
-        Call @mcp(tools, ${mcpClientDefinition.id}) to get the tools of the client
-        Call @mcp(resources, ${mcpClientDefinition.id}) to get the resources of the client
-        Call @mcp(disconnect, ${mcpClientDefinition.id}) to disconnect from the client
-        Call @mcp(exec, toolName, args, ${mcpClientDefinition.id}) to execute a tool        
-        `;
-
-      return capabilitiesText;
-    } catch (error) {
-      console.error(`Error connecting to MCP: ${error.message}`, error);
-      return `Error connecting to ${mcpClientDefinition.id}: ${error.message}`;
-    }
-  } catch (error) {
-    return { error: `Connection error: ${error.message}` };
-  }
-};
-
-const disconnectClient = async (params: string[], state: ChatState): Promise<unknown> => {
-  try {
-    const [id] = params;
-    const { mcpClients } = state;
-
-    if (!id) return 'No id provided, please use @mcp(disconnect, id)';
-    
-    const client = mcpClients.find((client) => client.id === id.trim());
-    if (!client) {
-      return `No client found with id: ${id}`;
-    }
-
-    const { transports } = client;
-
-    if (!transports) {
-      return `No transports found for client: ${id}`;
-    }
-
-    client.client.transport.close();
-
-    if (state.sessionFolder) {
-      updateConnectionStatus(state.sessionFolder, client.id, 'inactive');
-    }
-
-    return `Disconnected from ${client.id}`;
-  } catch (error) {
-    return `Failed to disconnect: ${error.message}`;
-  }
-};
-
-const listConnections = async (params: string[], state: ChatState): Promise<unknown> => {
-  try {
-    const { 
-      mcpClients = []
-    } = state;
-    
-    const connections = mcpClients.map((client) => ({
-      id: client.id,
-      name: client.name,
-      description: client.description 
-    }));
-
-    if (connections.length === 0) { 
-      return `No connections found`;
-    } else {
-      return `
-      Found ${connections.length} connections:
-      ${connections.map((client) => { return `- ${client.name} (${client.id}): ${client.description}` }).join('\n')}
-      Call @mcp(connect, ${connections[0].id}) to connect to the first client or any of the other mcp utilities      
-      `;
-    }
-  } catch (error) {
-    return { error: `Failed to list connections: ${error.message}` };
-  }
-};
-
+// ── Catalog helpers ─────────────────────────────────────────────────────────
 interface AvailableServiceEntry {
   id: string;
   name: string;
   description: string;
+  transport: McpTransportKind;
+  /** Required for http transport */
   url?: string;
-  transport: string;
+  /** Required for stdio transport; catalog-supplied, never agent-supplied */
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  cwd?: string;
   connectorRef?: string;
   tags?: string[];
   requiredEnvVars?: string[];
@@ -373,63 +48,595 @@ interface AvailableServiceEntry {
 
 const resolveEnvTemplate = (value: string): string =>
   value.replace(/\$\{([^:}]+)(?::([^}]*))?\}/g, (_match, envKey, fallback) =>
-    process.env[envKey] || fallback || ''
+    process.env[envKey] || fallback || ""
   );
 
-const getAvailable = async (params: string[], state: ChatState): Promise<unknown> => {
+const availableCatalogPath = (): string | null => {
   const dataRoot = process.env.REACTORY_DATA || process.env.APP_DATA_ROOT;
-  if (!dataRoot) {
-    return { success: false, data: null, instructions: 'REACTORY_DATA not configured' };
+  if (!dataRoot) return null;
+  return path.join(dataRoot, "profiles", "reactor", "mcp", "available.yaml");
+};
+
+const loadAvailableCatalog = (): AvailableServiceEntry[] => {
+  const p = availableCatalogPath();
+  if (!p || !fs.existsSync(p)) return [];
+  try {
+    const raw = fs.readFileSync(p, "utf8");
+    const parsed = yaml.load(raw) as { services?: AvailableServiceEntry[] } | undefined;
+    return (parsed?.services ?? []).map((svc) => ({
+      ...svc,
+      // Accept legacy 'sse' catalog entries but normalise to 'http'.
+      transport: (svc.transport as string) === "sse" ? "http" : svc.transport,
+      url: svc.url ? resolveEnvTemplate(svc.url) : undefined,
+    }));
+  } catch {
+    return [];
+  }
+};
+
+const isUrlInCatalog = (candidateUrl: string, catalog: AvailableServiceEntry[]): boolean => {
+  try {
+    const candidate = new URL(candidateUrl);
+    return catalog.some((svc) => {
+      if (!svc.url) return false;
+      try {
+        const allowed = new URL(svc.url);
+        return allowed.origin === candidate.origin && candidate.pathname.startsWith(allowed.pathname);
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return false;
+  }
+};
+
+const findClient = (state: ChatState, id: string): MCPClient | undefined =>
+  (state.mcpClients ?? []).find((c) => c.id === id.trim());
+
+const buildAuthHeaders = (state: ChatState): Record<string, string> => {
+  const headers: Record<string, string> = {};
+  if (state.authToken) headers["Authorization"] = `Bearer ${state.authToken}`;
+  const anyState = state as unknown as { clientKey?: string; clientSecret?: string };
+  if (anyState.clientKey) headers["x-client-key"] = anyState.clientKey;
+  if (anyState.clientSecret) headers["x-client-pwd"] = anyState.clientSecret;
+  return headers;
+};
+
+/**
+ * Whether stdio transports are permitted in this runtime.
+ *
+ * Always allowed in the electron desktop shell (where the MCP subprocess runs
+ * on the user's own machine). On a cloud/server deployment it must be enabled
+ * explicitly via `REACTORY_MCP_STDIO_ENABLED=true` so operators opt in to the
+ * process-spawning surface.
+ */
+const isStdioAllowed = (): boolean => {
+  if ((process.versions as Record<string, string | undefined>).electron) return true;
+  return process.env.REACTORY_MCP_STDIO_ENABLED === "true";
+};
+
+const pickActiveTransport = (mcpClient: MCPClient):
+  | { kind: "http"; transport: StreamableHTTPClientTransport }
+  | { kind: "stdio"; transport: StdioClientTransport }
+  | null => {
+  if (mcpClient.transports?.http) return { kind: "http", transport: mcpClient.transports.http };
+  if (mcpClient.transports?.stdio) return { kind: "stdio", transport: mcpClient.transports.stdio };
+  return null;
+};
+
+// Turn a raw MCP SDK transport error into an actionable, user-facing message.
+// The original message is preserved in the fallback so debugging isn't lost.
+const classifyMcpError = (
+  err: unknown,
+  ctx: { kind: "http" | "stdio"; url?: string; command?: string; id: string }
+): string => {
+  const raw = err instanceof Error ? err.message : String(err);
+  const endpoint =
+    ctx.kind === "http" ? ctx.url ?? "(unknown url)" : ctx.command ?? `(stdio client ${ctx.id})`;
+
+  if (/Unexpected content type:\s*text\/html/i.test(raw)) {
+    return (
+      `MCP endpoint at ${endpoint} returned HTML instead of a Streamable-HTTP response. ` +
+      `The URL probably points to a web page or login form rather than the MCP endpoint ` +
+      `(MCP servers respond with application/json or text/event-stream). ` +
+      `Verify the exact path — many implementations expose /mcp, /sse, or /rpc.`
+    );
+  }
+  if (/Unexpected content type/i.test(raw)) {
+    return `MCP endpoint at ${endpoint} returned an unsupported content type. Underlying: ${raw}`;
+  }
+  if (/ECONNREFUSED/i.test(raw)) {
+    return `MCP server at ${endpoint} refused the connection. Is the server running on the expected host/port?`;
+  }
+  if (/ENOTFOUND|EAI_AGAIN/i.test(raw)) {
+    return `MCP server host for ${endpoint} could not be resolved via DNS. Check the hostname.`;
+  }
+  if (/ETIMEDOUT|timed? out/i.test(raw)) {
+    return `MCP connection to ${endpoint} timed out. The server may be slow or unreachable.`;
+  }
+  if (/\b401\b|Unauthorized/i.test(raw)) {
+    return (
+      `MCP server at ${endpoint} rejected credentials (401). ` +
+      `If the host is not listed in available.yaml, Reactory does not forward auth headers. ` +
+      `Add it to the catalog or provide a pre-authenticated URL.`
+    );
+  }
+  if (/\b403\b|Forbidden/i.test(raw)) {
+    return `MCP server at ${endpoint} returned 403 Forbidden. The current user lacks access to this endpoint.`;
+  }
+  if (/\b404\b|Not Found/i.test(raw)) {
+    return `MCP endpoint ${endpoint} returned 404. Verify the exact path (e.g. /mcp, /sse).`;
+  }
+  if (/\b5\d{2}\b/.test(raw)) {
+    return `MCP server at ${endpoint} returned a 5xx server error. Retry shortly; check the remote server logs. Underlying: ${raw}`;
+  }
+  if (/fetch failed/i.test(raw)) {
+    return `MCP transport could not reach ${endpoint} (network failure). Underlying: ${raw}`;
+  }
+  return `MCP transport error for ${endpoint}: ${raw}`;
+};
+
+// ── Handlers (each returns HandlerResult) ───────────────────────────────────
+
+const getCapabilities = async (
+  id: string | undefined,
+  state: ChatState
+): Promise<HandlerResult> => {
+  const clients = id ? (findClient(state, id) ? [findClient(state, id)!] : []) : state.mcpClients ?? [];
+  if (id && clients.length === 0) return fail(`No client found with id: ${id}`);
+  const data = clients.map((c) => ({
+    id: c.id,
+    name: c.name,
+    capabilities: c.client.getServerCapabilities(),
+  }));
+  return ok(data);
+};
+
+const getPrompts = async (
+  id: string | undefined,
+  state: ChatState
+): Promise<HandlerResult> => {
+  const clients = id ? (findClient(state, id) ? [findClient(state, id)!] : []) : state.mcpClients ?? [];
+  if (id && clients.length === 0) return fail(`No client found with id: ${id}`);
+  const data = await Promise.all(
+    clients.map(async (c) => {
+      try {
+        return { id: c.id, name: c.name, prompts: await c.client.listPrompts() };
+      } catch (err) {
+        return { id: c.id, name: c.name, error: (err as Error).message };
+      }
+    })
+  );
+  return ok(data);
+};
+
+const getResources = async (
+  id: string | undefined,
+  state: ChatState
+): Promise<HandlerResult> => {
+  const clients = id ? (findClient(state, id) ? [findClient(state, id)!] : []) : state.mcpClients ?? [];
+  if (id && clients.length === 0) return fail(`No client found with id: ${id}`);
+  const data = await Promise.all(
+    clients.map(async (c) => {
+      try {
+        return { id: c.id, name: c.name, resources: await c.client.listResources() };
+      } catch (err) {
+        return { id: c.id, name: c.name, error: (err as Error).message };
+      }
+    })
+  );
+  return ok(data);
+};
+
+const getTools = async (
+  id: string | undefined,
+  format: "json" | "text",
+  state: ChatState
+): Promise<HandlerResult> => {
+  const clients = state.mcpClients ?? [];
+  if (clients.length === 0) return fail("No MCP clients registered — use add-connection first.");
+
+  const client = id ? findClient(state, id) : clients[0];
+  if (!client) return fail(`No client found with id: ${id}`);
+
+  const tools = await client.client.listTools();
+
+  if (format === "json") return ok(tools);
+
+  const text = (tools.tools ?? [])
+    .map((t: { name: string; description?: string }) => `Tool: ${t.name}\nDescription: ${t.description ?? ""}\n`)
+    .join("\n");
+  return ok(`Tools for client ${client.name} (${client.id}):\n\n${text || "(no tools)"}`);
+};
+
+const addHttpConnection = (
+  id: string,
+  url: string,
+  state: ChatState,
+  catalog: AvailableServiceEntry[]
+): HandlerResult => {
+  const baseUrl = url.endsWith("/") ? url : `${url}/`;
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(baseUrl);
+  } catch {
+    return fail(
+      `add-connection failed: "${url}" is not a valid URL. Provide an absolute http:// or https:// URL.`
+    );
+  }
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    return fail(
+      `add-connection failed: URL "${url}" must use the http:// or https:// scheme (got ${parsedUrl.protocol}).`
+    );
   }
 
-  const availablePath = path.join(dataRoot, 'profiles', 'reactor', 'mcp', 'available.yaml');
-  if (!fs.existsSync(availablePath)) {
-    return { success: false, data: null, instructions: `No available.yaml found at ${availablePath}` };
+  const inCatalog = isUrlInCatalog(url, catalog);
+  const client = new Client({ name: id, version: "1.0.0" });
+  const connectionId = uuidv4();
+
+  const requestInit: RequestInit = {
+    credentials: "include",
+    headers: inCatalog ? buildAuthHeaders(state) : {},
+  };
+  const httpTransport = new StreamableHTTPClientTransport(parsedUrl, { requestInit });
+
+  state.mcpClients!.push({
+    id: connectionId,
+    client,
+    name: id,
+    description: `MCP Client for ${id}`,
+    transports: { http: httpTransport },
+    url,
+  });
+
+  if (state.sessionFolder) {
+    addConnectionToSession(state.sessionFolder, {
+      id: connectionId,
+      serverName: id,
+      description: `MCP Client for ${id}`,
+      url,
+      transport: "http",
+      status: "inactive",
+    });
   }
+
+  return ok({
+    id: connectionId,
+    name: id,
+    transport: "http",
+    url,
+    credentialsForwarded: inCatalog,
+    message: inCatalog
+      ? `Added http connection ${id} with url ${url} (credentials forwarded — host in available.yaml).`
+      : `Added http connection ${id} with url ${url} (no credentials forwarded — host not in available.yaml).`,
+  });
+};
+
+const addStdioConnection = (
+  id: string,
+  state: ChatState,
+  catalog: AvailableServiceEntry[]
+): HandlerResult => {
+  if (!isStdioAllowed()) {
+    return fail(
+      "stdio transport is disabled in this runtime. Enable with REACTORY_MCP_STDIO_ENABLED=true " +
+      "(server deployments) or run inside the Reactory desktop/electron shell."
+    );
+  }
+
+  const catalogEntry = catalog.find((svc) => svc.id === id);
+  if (!catalogEntry) {
+    return fail(
+      `stdio connections must reference a service id defined in available.yaml. ` +
+      `No catalog entry found for id "${id}". Use command="available" to list options.`
+    );
+  }
+  if (catalogEntry.transport !== "stdio") {
+    return fail(
+      `Catalog entry "${id}" declares transport="${catalogEntry.transport}", not stdio. ` +
+      `Call add-connection without transport=stdio to use that service.`
+    );
+  }
+  if (!catalogEntry.command) {
+    return fail(`Catalog entry "${id}" is missing a "command" field required for stdio transport.`);
+  }
+
+  const client = new Client({ name: id, version: "1.0.0" });
+  const connectionId = uuidv4();
+
+  const stdioTransport = new StdioClientTransport({
+    command: catalogEntry.command,
+    args: catalogEntry.args ?? [],
+    env: catalogEntry.env,
+    cwd: catalogEntry.cwd,
+  });
+
+  state.mcpClients!.push({
+    id: connectionId,
+    client,
+    name: id,
+    description: catalogEntry.description || `MCP Client for ${id}`,
+    transports: { stdio: stdioTransport },
+    command: catalogEntry.command,
+  });
+
+  if (state.sessionFolder) {
+    addConnectionToSession(state.sessionFolder, {
+      id: connectionId,
+      serverName: id,
+      description: catalogEntry.description || `MCP Client for ${id}`,
+      transport: "stdio",
+      command: catalogEntry.command,
+      args: catalogEntry.args,
+      env: catalogEntry.env,
+      cwd: catalogEntry.cwd,
+      status: "inactive",
+    });
+  }
+
+  return ok({
+    id: connectionId,
+    name: id,
+    transport: "stdio",
+    command: catalogEntry.command,
+    message: `Added stdio connection ${id} (command resolved from catalog).`,
+  });
+};
+
+const addConnection = async (
+  id: string,
+  url: string | undefined,
+  transport: McpTransportKind,
+  state: ChatState
+): Promise<HandlerResult> => {
+  if (!state.mcpClients) state.mcpClients = [];
+
+  const existing = state.mcpClients.find((c) => c.name === id);
+  if (existing) {
+    return ok({ id: existing.id, reused: true, message: `Connection ${id} already registered.` });
+  }
+
+  const catalog = loadAvailableCatalog();
+  const resolved: McpTransportKind = transport === "sse" ? "http" : transport;
+
+  if (resolved === "stdio") {
+    return addStdioConnection(id, state, catalog);
+  }
+
+  if (!url) return fail("http transport requires a url.");
+  return addHttpConnection(id, url, state, catalog);
+};
+
+const callTool = async (
+  id: string,
+  toolName: string,
+  toolArgs: Record<string, unknown> | undefined,
+  toolParams: string[] | undefined,
+  state: ChatState
+): Promise<HandlerResult> => {
+  const client = findClient(state, id);
+  if (!client) return fail(`No client found with id: ${id}`);
+
+  const displayName = client.name ?? id;
+
+  let tools: { tools?: Array<{ name: string }> };
+  try {
+    tools = await client.client.listTools();
+  } catch (err) {
+    return fail(
+      `call-tool failed: could not list tools for client "${displayName}". ` +
+        `Is the transport connected? (command="connect", id="${id}"). ` +
+        `Underlying: ${(err as Error).message}`
+    );
+  }
+
+  const available = (tools.tools ?? []).map((t) => t.name);
+  if (!available.includes(toolName)) {
+    const hint = available.length
+      ? `Available tools: ${available.slice(0, 10).join(", ")}${available.length > 10 ? ", …" : ""}.`
+      : "The connected server exposes no tools.";
+    return fail(`No tool named "${toolName}" on client "${displayName}". ${hint}`);
+  }
+
+  const args: Record<string, unknown> =
+    toolArgs && typeof toolArgs === "object"
+      ? toolArgs
+      : toolParams && toolParams.length > 0
+      ? { args: toolParams }
+      : {};
 
   try {
-    const raw = fs.readFileSync(availablePath, 'utf8');
-    const catalog = yaml.load(raw) as { version?: string; services?: AvailableServiceEntry[] } | undefined;
-    const services = catalog?.services ?? [];
-
-    const connectedIds = new Set((state.mcpClients ?? []).map((c) => c.name));
-
-    const [format = 'text'] = params;
-    const enriched = services.map((svc) => ({
-      ...svc,
-      url: svc.url ? resolveEnvTemplate(svc.url) : undefined,
-      connected: connectedIds.has(svc.id),
-    }));
-
-    if (format === 'json') {
-      return JSON.stringify(enriched, null, 2);
-    }
-
-    const lines = enriched.map((svc) => {
-      const status = svc.connected ? '(connected)' : '';
-      return `- **${svc.name}** [${svc.id}] ${status}\n  ${svc.description}\n  Transport: ${svc.transport}${svc.url ? ` | URL: ${svc.url}` : ''}`;
-    });
-
-    return lines.length > 0
-      ? `Available MCP services:\n\n${lines.join('\n\n')}\n\nUse @mcp(add-connection, <id>, <url>) to register a connection.`
-      : 'No MCP services are defined in available.yaml.';
+    const result = await client.client.callTool({ name: toolName, arguments: args });
+    return ok(result);
   } catch (err) {
-    return { success: false, data: null, instructions: `Error reading available.yaml: ${err.message}` };
+    return fail(
+      `call-tool "${toolName}" on client "${displayName}" failed: ${(err as Error).message}`
+    );
   }
 };
 
-// Command map
-const commandHandlers: Record<string, (params: string[], state: ChatState) => Promise<unknown>> = {
-  'capabilities': getCapabilities,
-  'prompts': getPrompts,
-  'tools': getTools,
-  'resources': getResources,
-  'add-connection': addConnection,
-  'connect': connectClient,
-  'disconnect': disconnectClient,
-  'connections': listConnections,
-  'available': getAvailable,
+const connectClient = async (
+  id: string,
+  state: ChatState
+): Promise<HandlerResult> => {
+  const { context } = state;
+  const mcpClient = findClient(state, id);
+  if (!mcpClient) return fail(`No client found with id: ${id}`);
+
+  const active = pickActiveTransport(mcpClient);
+  if (!active) return fail(`No transport configured for client: ${id}`);
+
+  const existing = (mcpClient.client as unknown as { transport?: { close: () => Promise<void> } }).transport;
+  if (existing) {
+    try { await existing.close(); } catch (err) {
+      context?.log(`MCP: error closing previous transport for ${id}: ${(err as Error).message}`, {}, "warn");
+    }
+  }
+
+  // During connect() the SDK fires the same error through both the onerror
+  // listener AND the connect-promise rejection. Gate listener output so only
+  // post-connect runtime failures surface in logs.
+  let connectInFlight = true;
+
+  mcpClient.client.onclose = () => {
+    if (connectInFlight) return;
+    context?.log(`MCP: client ${id} transport closed`, {}, "info");
+  };
+  mcpClient.client.onerror = (error: Error) => {
+    if (connectInFlight) return;
+    context?.log(`MCP: client ${id} error: ${error.message}`, { error }, "error");
+  };
+
+  const errCtx = {
+    kind: active.kind,
+    url: mcpClient.url,
+    command: mcpClient.command,
+    id: mcpClient.id,
+  } as const;
+
+  try {
+    await mcpClient.client.connect(active.transport);
+  } catch (err) {
+    const classified = classifyMcpError(err, errCtx);
+    const rawMessage = err instanceof Error ? err.message : String(err);
+    context?.log(
+      `MCP: connect failed for ${id} via ${active.kind}: ${classified}`,
+      { raw: rawMessage },
+      "error"
+    );
+    if (state.sessionFolder) {
+      updateConnectionStatus(state.sessionFolder, mcpClient.id, "error");
+    }
+    return fail(classified);
+  } finally {
+    connectInFlight = false;
+  }
+
+  if (state.sessionFolder) {
+    updateConnectionStatus(state.sessionFolder, mcpClient.id, "active");
+  }
+
+  const capabilities = mcpClient.client.getServerCapabilities();
+  const [toolsList, promptsList, resourcesList] = await Promise.all([
+    capabilities?.tools ? mcpClient.client.listTools().catch(() => ({ tools: [] })) : Promise.resolve({ tools: [] }),
+    capabilities?.prompts ? mcpClient.client.listPrompts().catch(() => ({ prompts: [] })) : Promise.resolve({ prompts: [] }),
+    capabilities?.resources ? mcpClient.client.listResources().catch(() => ({ resources: [] })) : Promise.resolve({ resources: [] }),
+  ]);
+
+  const summary = {
+    id: mcpClient.id,
+    name: mcpClient.name,
+    transport: active.kind,
+    serverInfo: mcpClient.client.getServerVersion?.() ?? null,
+    capabilities,
+    toolCount: (toolsList as { tools?: unknown[] }).tools?.length ?? 0,
+    promptCount: (promptsList as { prompts?: unknown[] }).prompts?.length ?? 0,
+    resourceCount: (resourcesList as { resources?: unknown[] }).resources?.length ?? 0,
+  };
+  return ok(summary);
 };
+
+const disconnectClient = async (
+  id: string,
+  state: ChatState
+): Promise<HandlerResult> => {
+  const client = findClient(state, id);
+  if (!client) return fail(`No client found with id: ${id}`);
+
+  const transport = (client.client as unknown as { transport?: { close: () => Promise<void> } }).transport;
+  if (transport) {
+    try { await transport.close(); } catch (err) {
+      return fail(`Failed to close transport: ${(err as Error).message}`);
+    }
+  }
+
+  if (state.sessionFolder) {
+    updateConnectionStatus(state.sessionFolder, client.id, "inactive");
+  }
+
+  return ok({ id: client.id, message: `Disconnected from ${client.id}` });
+};
+
+const listConnections = async (state: ChatState): Promise<HandlerResult> => {
+  const connections = (state.mcpClients ?? []).map((c) => ({
+    id: c.id,
+    name: c.name,
+    description: c.description,
+    transport: c.transports?.http ? "http" : c.transports?.stdio ? "stdio" : "unknown",
+  }));
+  return ok(connections);
+};
+
+const getAvailable = async (
+  format: "json" | "text",
+  state: ChatState
+): Promise<HandlerResult> => {
+  const p = availableCatalogPath();
+  if (!p) return fail("REACTORY_DATA is not configured.");
+  if (!fs.existsSync(p)) return fail(`No available.yaml found at ${p}`);
+
+  const services = loadAvailableCatalog();
+  const stdioAllowed = isStdioAllowed();
+  const connectedNames = new Set((state.mcpClients ?? []).map((c) => c.name));
+
+  const enriched = services.map((svc) => ({
+    ...svc,
+    connected: connectedNames.has(svc.id),
+    available: svc.transport === "stdio" ? stdioAllowed : true,
+  }));
+
+  if (format === "json") return ok(enriched);
+
+  if (enriched.length === 0) return ok("No MCP services are defined in available.yaml.");
+
+  const lines = enriched.map((svc) => {
+    const status = svc.connected ? " (connected)" : "";
+    const gated = svc.transport === "stdio" && !stdioAllowed ? " (stdio disabled in this runtime)" : "";
+    const locator = svc.transport === "stdio"
+      ? `command: ${svc.command ?? "(missing)"}`
+      : `url: ${svc.url ?? "(missing)"}`;
+    return `- **${svc.name}** [${svc.id}]${status}${gated}\n  ${svc.description}\n  Transport: ${svc.transport} | ${locator}`;
+  });
+  return ok(
+    `Available MCP services:\n\n${lines.join("\n\n")}\n\nUse add-connection to register a service.`
+  );
+};
+
+// ── Instruction templates ───────────────────────────────────────────────────
+const AVAILABLE_COMMANDS =
+  "capabilities, prompts, tools, resources, add-connection, connect, disconnect, connections, call-tool, available";
+
+const instructionsFor = (command: string, result: HandlerResult, extra?: Record<string, string>): string => {
+  if (!result.success) {
+    return `## MCP ${command} — Error\n\n${result.error}\n\n### Recovery Options:\n- Use \`mcp\` with command="connections" to check registered clients\n- Use \`mcp\` with command="available" to see catalog services\n- Use \`mcp\` with command="connect" to reestablish a connection`;
+  }
+  switch (command) {
+    case "capabilities":
+      return `## MCP Server Capabilities\n\nRetrieved capabilities.\n\n### Next Steps:\n- Use command="tools" to list tools\n- Use command="prompts" to list prompts\n- Use command="resources" to list resources`;
+    case "prompts":
+      return `## MCP Prompts\n\nRetrieved prompts.\n\n### Next Steps:\n- Use command="tools" or command="call-tool"`;
+    case "tools":
+      return `## MCP Tools\n\nRetrieved tool list for ${extra?.id ?? "default"} client.\n\n### Next Steps:\n- Use command="call-tool", id, toolName, toolArgs={...}\n- Use format="json" for machine-readable output`;
+    case "resources":
+      return `## MCP Resources\n\nRetrieved resources.`;
+    case "add-connection":
+      return `## MCP Connection Added\n\n### Next Steps:\n- Use command="connect", id="<connection_id>" to establish the transport\n- Use command="connections" to list all registered clients`;
+    case "connect":
+      return `## MCP Client Connected\n\n### Next Steps:\n- Use command="tools", id="${extra?.id}" to discover available tools\n- Use command="call-tool" to execute a tool`;
+    case "disconnect":
+      return `## MCP Client Disconnected\n\n### Next Steps:\n- Use command="connect", id="${extra?.id}" to reconnect`;
+    case "call-tool":
+      return `## MCP Tool Executed\n\nTool **${extra?.toolName}** on client **${extra?.id}** returned.\n\n### Next Steps:\n- Inspect the returned data\n- Use \`var\` to store it for later`;
+    case "available":
+      return `## Available MCP Services\n\n### Next Steps:\n- Use command="add-connection", id, url to register an http service\n- Use command="add-connection", id, transport="stdio" to register a stdio service (desktop or gated server only)\n- Use command="connect", id to establish the transport`;
+    case "connections":
+    default:
+      return `## MCP Connections\n\n### Available Commands:\n${AVAILABLE_COMMANDS}\n\n### Next Steps:\n- Use command="add-connection" to register a new server\n- Use command="connect" to establish a transport\n- Use command="tools" to discover tools`;
+  }
+};
+
+// ── Entry point ─────────────────────────────────────────────────────────────
 
 export const McpCli: Macro<unknown, McpCliProps> = async (
   props: McpCliProps,
@@ -437,242 +644,200 @@ export const McpCli: Macro<unknown, McpCliProps> = async (
 ): Promise<unknown> => {
   try {
     loadClientsFromSession(state);
+
     const {
-      command = 'connections', 
-      id, 
-      url, 
-      transport = 'sse', 
-      toolName, 
-      toolParams = [], 
-      format = 'text' 
-    } = props;
+      command = "connections",
+      id,
+      url,
+      transport = "http",
+      toolName,
+      toolArgs,
+      toolParams,
+      format = "text",
+    } = props as McpCliProps & { toolArgs?: Record<string, unknown> };
 
-    const clientCount = state.mcpClients?.length || 0;
-    const availableCommands = 'capabilities, prompts, tools, resources, add-connection, connect, disconnect, connections, call-tool, available';
+    let result: HandlerResult;
+    const extra: Record<string, string> = {};
 
-    // Map command to appropriate handler
     switch (command) {
-      case 'capabilities': {
-        const result = await getCapabilities(id ? [id] : [], state);
-        return {
-          success: !result?.error,
-          data: result,
-          instructions: result?.error
-            ? `## MCP Capabilities \u2014 Error\n\n${result.error}\n\n### Recovery Options:\n- Use \`mcp\` with command="connections" to verify available clients\n- Ensure the client is connected first with command="connect"`
-            : `## MCP Server Capabilities\n\nRetrieved capabilities for ${id || 'all'} client(s).\n\n### Suggested Next Steps:\n- Use \`mcp\` with command="tools" to list available tools\n- Use \`mcp\` with command="prompts" to list available prompts\n- Use \`mcp\` with command="resources" to list resources`
-        };
-      }
-      case 'prompts': {
-        const result = await getPrompts(id ? [id] : [], state);
-        return {
-          success: !result?.error,
-          data: result,
-          instructions: result?.error
-            ? `## MCP Prompts \u2014 Error\n\n${result.error}\n\n### Recovery Options:\n- Verify client is connected with \`mcp\` command="connections"`
-            : `## MCP Prompts\n\nRetrieved prompts for ${id || 'all'} client(s).\n\n### Suggested Next Steps:\n- Use \`mcp\` with command="tools" to list tools\n- Use \`mcp\` with command="call-tool" to execute a tool`
-        };
-      }
-      case 'tools': {
-        const result = await getTools(id ? [id, format] : [format], state);
-        const hasError = typeof result === 'object' && result?.error;
-        return {
-          success: !hasError,
-          data: result,
-          instructions: hasError
-            ? `## MCP Tools \u2014 Error\n\n${result.error}\n\n### Recovery Options:\n- Use \`mcp\` command="connections" to check available clients\n- Use \`mcp\` command="connect" to establish a connection first`
-            : `## MCP Tools\n\nRetrieved tool list for ${id || 'default'} client.\n\n### Suggested Next Steps:\n- Use \`mcp\` with command="call-tool", id="<client_id>", toolName="<tool_name>" to execute a tool\n- Use format="json" for machine-readable output`
-        };
-      }
-      case 'resources': {
-        const result = await getResources(id ? [id] : [], state);
-        return {
-          success: !result?.error,
-          data: result,
-          instructions: result?.error
-            ? `## MCP Resources \u2014 Error\n\n${result.error}`
-            : `## MCP Resources\n\nRetrieved resources for ${id || 'all'} client(s).`
-        };
-      }
-      case 'add-connection': {
-        if (!id || !url) {
-          return {
-            success: false,
-            error: 'Missing required parameters: id and url',
-            instructions: `## MCP Add Connection \u2014 Missing Parameters\n\nBoth **id** and **url** are required.\n\n### Usage:\n- command="add-connection", id="my-server", url="http://localhost:3001/sse"\n- Optional: transport="sse" (default), "stdio", or "websocket"`
-          };
-        }
-        const result = await addConnection([id, url, transport], state);
-        const hasError = typeof result === 'object' && result?.error;
-        return {
-          success: !hasError,
-          data: result,
-          instructions: hasError
-            ? `## MCP Add Connection \u2014 Error\n\n${result.error}\n\n### Recovery Options:\n- Verify the URL is correct and the MCP server is running\n- Check the transport type (sse, stdio, websocket)`
-            : `## MCP Connection Added\n\nConnection **${id}** registered (${url}, transport: ${transport}).\n\n### Suggested Next Steps:\n- Use \`mcp\` with command="connect", id="<connection_id>" to establish the connection\n- Use \`mcp\` with command="connections" to list all registered connections`
-        };
-      }
-      case 'connect': {
+      case "capabilities":
+        result = await getCapabilities(id, state);
+        break;
+      case "prompts":
+        result = await getPrompts(id, state);
+        break;
+      case "tools":
+        result = await getTools(id, format, state);
+        extra.id = id ?? "default";
+        break;
+      case "resources":
+        result = await getResources(id, state);
+        break;
+      case "add-connection":
         if (!id) {
-          return {
-            success: false,
-            error: 'Missing required parameter: id',
-            instructions: `## MCP Connect \u2014 Missing ID\n\nA client **id** is required.\n\n### Recovery Options:\n- Use \`mcp\` with command="connections" to list available client IDs\n- Use \`mcp\` with command="add-connection" to register a new connection first`
-          };
+          result = fail("add-connection requires id.");
+        } else {
+          result = await addConnection(id, url, transport as McpTransportKind, state);
         }
-        const result = await connectClient([id], state);
-        const hasError = typeof result === 'object' && result?.error;
-        return {
-          success: !hasError,
-          data: result,
-          instructions: hasError
-            ? `## MCP Connect \u2014 Error\n\n${typeof result === 'object' ? result.error : result}\n\n### Recovery Options:\n- Verify the MCP server is running at the configured URL\n- Check the transport configuration\n- Use \`mcp\` command="connections" to verify client registration`
-            : `## MCP Client Connected\n\n${typeof result === 'string' ? result : `Connected to client ${id}.`}\n\n### Suggested Next Steps:\n- Use \`mcp\` with command="tools", id="${id}" to discover available tools\n- Use \`mcp\` with command="call-tool" to execute a tool`
-        };
-      }
-      case 'disconnect': {
+        break;
+      case "connect":
         if (!id) {
-          return {
-            success: false,
-            error: 'Missing required parameter: id',
-            instructions: `## MCP Disconnect \u2014 Missing ID\n\nA client **id** is required.\n\n### Recovery Options:\n- Use \`mcp\` with command="connections" to find client IDs`
-          };
+          result = fail("connect requires id.");
+        } else {
+          result = await connectClient(id, state);
+          extra.id = id;
         }
-        const result = await disconnectClient([id], state);
-        const hasError = typeof result === 'string' && result.startsWith('Failed');
-        return {
-          success: !hasError,
-          data: result,
-          instructions: hasError
-            ? `## MCP Disconnect \u2014 Error\n\n${result}\n\n### Recovery Options:\n- Use \`mcp\` command="connections" to verify the client exists`
-            : `## MCP Client Disconnected\n\nDisconnected from **${id}**.\n\n### Suggested Next Steps:\n- Use \`mcp\` with command="connect", id="${id}" to reconnect\n- Use \`mcp\` with command="connections" to see remaining connections`
-        };
-      }
-      case 'call-tool': {
+        break;
+      case "disconnect":
+        if (!id) {
+          result = fail("disconnect requires id.");
+        } else {
+          result = await disconnectClient(id, state);
+          extra.id = id;
+        }
+        break;
+      case "call-tool":
         if (!id || !toolName) {
-          return {
-            success: false,
-            error: 'Missing required parameters: id and toolName',
-            instructions: `## MCP Call Tool \u2014 Missing Parameters\n\nBoth **id** (client) and **toolName** are required.\n\n### Usage:\n- command="call-tool", id="<client_id>", toolName="<tool_name>", toolParams=["arg1", "arg2"]\n\n### Recovery Options:\n- Use \`mcp\` with command="tools", id="<client_id>" to list available tool names`
-          };
+          result = fail("call-tool requires id and toolName.");
+        } else {
+          result = await callTool(id, toolName, toolArgs, toolParams, state);
+          extra.id = id;
+          extra.toolName = toolName;
         }
-        const result = await callTool([id, toolName, ...toolParams], state);
-        const hasError = typeof result === 'object' && result?.error;
-        return {
-          success: !hasError,
-          data: result,
-          instructions: hasError
-            ? `## MCP Call Tool \u2014 Error\n\n${result.error}\n\n### Recovery Options:\n- Verify the tool name with \`mcp\` command="tools"\n- Check the client is connected with \`mcp\` command="connections"\n- Review toolParams format`
-            : `## MCP Tool Executed\n\nTool **${toolName}** on client **${id}** returned successfully.\n\n### Suggested Next Steps:\n- Inspect the returned data\n- Call another tool if needed\n- Use \`var\` to store the result for later use`
-        };
-      }
-      case 'available': {
-        const result = await getAvailable(format ? [format] : [], state);
-        const hasError = typeof result === 'object' && result !== null && 'success' in result && !(result as any).success;
-        return {
-          success: !hasError,
-          data: result,
-          instructions: hasError
-            ? `## MCP Available — Error\n\n${(result as any)?.instructions || 'Unknown error'}`
-            : `## Available MCP Services\n\n${typeof result === 'string' ? result : JSON.stringify(result, null, 2)}\n\n### Suggested Next Steps:\n- Use \`mcp\` with command="add-connection", id="<service_id>", url="<url>" to register\n- Use \`mcp\` with command="connect", id="<client_id>" to establish connection`
-        };
-      }
-      case 'connections':
-      default: {
-        const result = await listConnections([], state);
-        const hasError = typeof result === 'object' && result?.error;
-        return {
-          success: !hasError,
-          data: result,
-          instructions: hasError
-            ? `## MCP Connections \u2014 Error\n\n${result.error}`
-            : `## MCP Connections (${clientCount})\n\n${clientCount === 0 ? 'No connections registered.' : `${clientCount} connection(s) available.`}\n\n### Suggested Next Steps:\n${clientCount === 0 ? '- Use \\`mcp\\` with command="add-connection", id="name", url="http://..." to add one' : '- Use \\`mcp\\` with command="connect", id="<client_id>" to establish a connection\\n- Use \\`mcp\\` with command="tools" to discover available tools'}\n\n### Available Commands:\n${availableCommands}`
-        };
-      }
+        break;
+      case "available":
+        result = await getAvailable(format, state);
+        break;
+      case "connections":
+      default:
+        result = await listConnections(state);
+        break;
     }
+
+    return {
+      ...result,
+      instructions: instructionsFor(command, result, extra),
+    };
   } catch (error) {
-    console.error(`Error in MCP CLI: ${error instanceof Error ? error.message : 'Unknown error'}`, error);
+    const message = error instanceof Error ? error.message : String(error);
+    const command = (props as McpCliProps)?.command ?? "(unknown)";
+    state.context?.log(`MCP macro error in command "${command}": ${message}`, { error }, "error");
     return {
       success: false,
-      error: `An error occurred: ${error instanceof Error ? error.message : 'Unknown error'}`,
-      instructions: `## MCP Error\n\n${error instanceof Error ? error.message : 'Unknown error'}\n\n### Recovery Options:\n- Use \`mcp\` with command="connections" to check client state\n- Verify the MCP server is running and accessible`
+      error: `MCP ${command} failed: ${message}`,
+      instructions: `## MCP ${command} — Error\n\n${message}\n\n### Recovery Options:\n- Use command="connections" to inspect client state\n- Use command="available" to see catalog entries\n- Verify the MCP server is running and reachable\n- Available commands: ${AVAILABLE_COMMANDS}`,
     };
   }
 };
 
 export const McpClientMacroRegistry: MacroComponentDefinition<typeof McpCli> = {
-
-  nameSpace: 'reactor-macros',
-  name: 'mcp',
-  version: '1.0.0',
+  nameSpace: "reactor-macros",
+  name: "mcp",
+  version: "1.0.0",
   component: McpCli,
   description: `# MCP Client Macro
-  Use this macro to interact with the Model Context Protocol Clients
 
-  ## Usage
-  @mcp(capabilities, id) - returns a json object with the capabilities of the MCP Client
-  @mcp(prompts, id) - returns a json object with the prompts of the MCP Client
-  @mcp(tools, id) - returns a json object with the tools of the MCP Client
-  @mcp(resources, id) - returns a json object with the resources of the MCP Client
-  @mcp(connect, url) - returns a json object with the connection status of the MCP Client
-  @mcp(disconnect, id) - returns a json object with the disconnection status of the MCP Client
-  @mcp(connections) - returns a json object with the connections of the MCP Client
-  @mcp(available) - returns a list of available MCP services from the catalog
+  Interact with Model Context Protocol (MCP) servers registered in this session.
+
+  ## Typical flow
+  1. command="available" — list catalog services
+  2. command="add-connection", id, url — register an http connection
+     OR command="add-connection", id, transport="stdio" — register a stdio service from the catalog
+  3. command="connect", id=<returned_uuid> — open the transport
+  4. command="tools", id=<uuid> — list available tools
+  5. command="call-tool", id, toolName, toolArgs={...} — invoke a tool
+  6. command="disconnect", id — optional, closes the transport
+
+  ## Transports
+  - http  — Streamable HTTP (MCP spec). Default for remote services.
+  - stdio — local child process. Desktop/electron and gated server deployments
+            only (REACTORY_MCP_STDIO_ENABLED=true). Command/args/env are
+            resolved from the catalog entry; the agent never supplies them.
+
+  ## Security
+  Auth credentials are only forwarded to URLs present in available.yaml.
   `,
-  features: [{
-    feature: 'capabilities',
-    featureType: Reactory.FeatureType.function,
-    action: ['get', 'fetch', 'retrieve'],
-  }, {
-    feature: 'available',
-    featureType: Reactory.FeatureType.function,
-    action: ['list', 'get'],
-  }],
-  stem: 'mcp',
-  tags: ['mcp', 'chat', 'session', 'context'],
-  roles: ['USER'],
-  tools: [{
-    type: "function",
-    function: {
-      name: "mcp",
-      description: `MCP Client Macro that allows you to interact with the Model Context Protocol Clients`,
-      parameters: {
-        type: "object",
-        properties: {
-          command: {
-            type: "string",
-            enum: ["capabilities", "prompts", "tools", "resources", "add-connection", "connect", "disconnect", "connections", "call-tool", "available"],
-            description: "The MCP command to execute"
+  features: [
+    {
+      feature: "capabilities",
+      featureType: Reactory.FeatureType.function,
+      action: ["get", "fetch", "retrieve"],
+    },
+    {
+      feature: "available",
+      featureType: Reactory.FeatureType.function,
+      action: ["list", "get"],
+    },
+  ],
+  stem: "mcp",
+  tags: ["mcp", "chat", "session", "context"],
+  roles: ["USER"],
+  tools: [
+    {
+      type: "function",
+      function: {
+        name: "mcp",
+        description:
+          "Interact with registered MCP (Model Context Protocol) servers. Use command='available' to browse the catalog, then add-connection → connect → tools → call-tool. Transports: http (Streamable HTTP) for remote services, stdio for local catalog-defined services (desktop or gated server only).",
+        parameters: {
+          type: "object",
+          properties: {
+            command: {
+              type: "string",
+              enum: [
+                "capabilities",
+                "prompts",
+                "tools",
+                "resources",
+                "add-connection",
+                "connect",
+                "disconnect",
+                "connections",
+                "call-tool",
+                "available",
+              ],
+              description: "The MCP command to execute",
+            },
+            id: {
+              type: "string",
+              description:
+                "For connect/disconnect/call-tool: the connection uuid returned by add-connection. For add-connection: the catalog service id (required) — also used as the name.",
+            },
+            url: {
+              type: "string",
+              description: "URL of the MCP server. Required for add-connection when transport='http'.",
+            },
+            transport: {
+              type: "string",
+              enum: ["http", "stdio"],
+              description:
+                "Transport kind. 'http' = Streamable HTTP per MCP spec (default, for remote services). 'stdio' = local child-process transport — requires a matching entry in available.yaml and is disabled on server deployments unless REACTORY_MCP_STDIO_ENABLED=true.",
+            },
+            toolName: {
+              type: "string",
+              description: "Tool name for call-tool.",
+            },
+            toolArgs: {
+              type: "object",
+              description:
+                "Structured arguments object for call-tool. Preferred over toolParams. Shape must match the remote tool's schema.",
+              additionalProperties: true,
+            },
+            toolParams: {
+              type: "array",
+              items: { type: "string" },
+              description:
+                "Deprecated. Positional string arguments wrapped as {args: [...]} when toolArgs is absent. Prefer toolArgs.",
+            },
+            format: {
+              type: "string",
+              enum: ["json", "text"],
+              description: "Response format for tools/available.",
+            },
           },
-          id: {
-            type: "string",
-            description: "Client ID for operations that require it"
-          },
-          url: {
-            type: "string",
-            description: "URL for connection operations"
-          },
-          transport: {
-            type: "string",
-            enum: ["sse", "stdio", "websocket"],
-            description: "Transport type for connections"
-          },
-          toolName: {
-            type: "string",
-            description: "Tool name for tool execution"
-          },
-          toolParams: {
-            type: "array",
-            items: { type: "string" },
-            description: "Additional parameters for tool execution"
-          },
-          format: {
-            type: "string",
-            enum: ["json", "text"],
-            description: "Response format"
-          }
+          required: ["command"],
         },
-        required: ["command"]
-      }
-    }
-  }]
-}
+      },
+    },
+  ],
+};

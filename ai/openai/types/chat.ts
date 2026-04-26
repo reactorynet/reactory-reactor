@@ -5,9 +5,8 @@ import { IAIPersona } from "@reactory/server-modules/reactory-reactor/types/serv
 import { ReactorConversationHistory } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp";
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio'
-import { WebSocketClientTransport } from '@modelcontextprotocol/sdk/client/websocket';
 
 // Tool approval modes
 export enum ToolApprovalMode {
@@ -144,19 +143,21 @@ export type ChatMessage = OpenAI.ChatCompletionMessage | RatedChatCompletionResp
 export interface MCPClient {
   id: string
   client: Client
+  /**
+   * Transports constructed for this client. Only one is expected to be set.
+   * - `http` — Streamable HTTP transport (MCP spec, replaces legacy SSE)
+   * - `stdio` — local child-process transport (desktop / gated server use)
+   */
   transports: {
-    sse?: { 
-      url: URL
-      requestInit?: RequestInit
-      eventSourceInit?: {
-        fetch: (url: string, init?: RequestInit) => Promise<Response>
-      }
-    }
+    http?: StreamableHTTPClientTransport
     stdio?: StdioClientTransport
-    websocket?: WebSocketClientTransport    
   }
   name?: string
   description?: string
+  /** Endpoint URL for http transport. Cached for diagnostics and error messages. */
+  url?: string
+  /** Resolved command for stdio transport. Cached for diagnostics and error messages. */
+  command?: string
 }
 
 /**

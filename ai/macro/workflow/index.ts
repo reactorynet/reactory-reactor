@@ -6,6 +6,9 @@ import { ExecuteYamlWorkflowRegistry } from './executeYaml.macro';
 import { ListWorkflowsRegistry } from './listWorkflows.macro';
 import { GetWorkflowRegistry } from './getWorkflow.macro';
 import { GetWorkflowYamlRegistry } from './getWorkflowYaml.macro';
+import { SaveWorkflowYamlRegistry } from './saveWorkflowYaml.macro';
+import { ValidateWorkflowYamlRegistry } from './validateWorkflowYaml.macro';
+import { DeleteWorkflowDefinitionRegistry } from './deleteWorkflowDefinition.macro';
 import { ListWorkflowInstancesRegistry } from './listWorkflowInstances.macro';
 import { GetWorkflowHistoryRegistry } from './getWorkflowHistory.macro';
 import { GetWorkflowStatsRegistry } from './getWorkflowStats.macro';
@@ -22,6 +25,9 @@ export default [
   ListWorkflowsRegistry,
   GetWorkflowRegistry,
   GetWorkflowYamlRegistry,
+  SaveWorkflowYamlRegistry,
+  ValidateWorkflowYamlRegistry,
+  DeleteWorkflowDefinitionRegistry,
   ListWorkflowInstancesRegistry,
   GetWorkflowHistoryRegistry,
   GetWorkflowStatsRegistry,

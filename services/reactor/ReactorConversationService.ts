@@ -381,27 +381,55 @@ export default class ReactorConversationService
   private static get tokenCountAggregationExpression() {
     const charsPerToken = TOKEN_LIMITS.CHARS_PER_TOKEN_ESTIMATE;
 
-    // Helper: estimate tokens for a value — if string, use strLenCP; otherwise 0
+    // Helper: estimate tokens for a value.
+    // - string        → strLenCP / charsPerToken
+    // - array (e.g. multimodal content parts) → sum strLenCP of each part's .text
+    // - anything else → safely $convert to string (onError: "") and measure that
     const strTokens = (field: string) => ({
       $cond: {
         if: { $eq: [{ $type: field }, "string"] },
         then: { $divide: [{ $strLenCP: field }, charsPerToken] },
         else: {
           $cond: {
-            if: { $in: [{ $type: field }, ["object", "array"]] },
+            if: { $isArray: field },
             then: {
-              $let: {
-                vars: { serialized: { $toString: field } },
+              $reduce: {
+                input: field,
+                initialValue: 0,
                 in: {
-                  $cond: {
-                    if: { $eq: [{ $type: "$$serialized" }, "string"] },
-                    then: { $divide: [{ $strLenCP: "$$serialized" }, charsPerToken] },
-                    else: 0,
-                  },
+                  $add: [
+                    "$$value",
+                    {
+                      $cond: {
+                        if: { $eq: [{ $type: "$$this.text" }, "string"] },
+                        then: {
+                          $divide: [
+                            { $strLenCP: "$$this.text" },
+                            charsPerToken,
+                          ],
+                        },
+                        else: 0,
+                      },
+                    },
+                  ],
                 },
               },
             },
-            else: 0,
+            else: {
+              $divide: [
+                {
+                  $strLenCP: {
+                    $convert: {
+                      input: field,
+                      to: "string",
+                      onError: "",
+                      onNull: "",
+                    },
+                  },
+                },
+                charsPerToken,
+              ],
+            },
           },
         },
       },
