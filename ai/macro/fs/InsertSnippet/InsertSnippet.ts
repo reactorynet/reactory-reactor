@@ -4,8 +4,34 @@ import { ChatState, Macro, MacroComponentDefinition } from '@reactory/server-mod
 import logger from '@reactory/server-core/logging';
 
 /**
+ * A line is "structural" when it carries no semantic content of its own —
+ * blank lines, lone closers (`}`, `]`, `)`), and trailing-comma/-semicolon
+ * variants. These lines match each other across unrelated scopes and were
+ * the root cause of the false-positive trim bug in the original
+ * implementation: a snippet ending with `  }` against a file whose next
+ * line was also `  }` would have its closing brace silently stripped.
+ */
+export function isStructuralLine(line: string): boolean {
+  // Empty / whitespace-only.
+  if (!line || /^\s*$/.test(line)) return true;
+  // Lone closers, optionally followed by `;` or `,`, optionally preceded
+  // by indentation. e.g. `}`, `  }`, `})`, `})`, `});`, `],`, `  ));`.
+  return /^\s*[\]})]+\s*[;,]?\s*$/.test(line);
+}
+
+/**
  * Trims leading and trailing snippet lines that duplicate adjacent file
- * content.  Returns a new snippet array (may be unchanged).
+ * content. Returns a new snippet array (may be unchanged).
+ *
+ * Refinement (per InsertSnippet_Fix_Spec): a candidate trim is rejected
+ * when ALL of its lines are "structural" (blank, or lone closing brace
+ * variants). This prevents the common false positive where a snippet
+ * ending in `}` was mistakenly matched against a parent scope's closing
+ * `}`, which previously caused brace-strip corruption of the output.
+ *
+ * Callers wanting to bypass overlap detection entirely should set
+ * `props.exactMatch: true` on the macro args; that path skips this
+ * function altogether.
  */
 function trimOverlap(
   snippetLines: string[],
@@ -24,6 +50,14 @@ function trimOverlap(
       }
     }
     if (match) {
+      // Structural-only safety: don't trim a candidate that's purely
+      // closers/blanks. Such a match is far more likely a coincidence
+      // than a duplicated context block. Continue scanning shorter
+      // candidates in case a non-structural shorter prefix matches.
+      const candidate = snippetLines.slice(0, len);
+      if (candidate.every(isStructuralLine)) {
+        continue;
+      }
       trimStart = len;
       break;
     }
@@ -43,6 +77,10 @@ function trimOverlap(
       }
     }
     if (match) {
+      const candidate = snippetLines.slice(offset, offset + len);
+      if (candidate.every(isStructuralLine)) {
+        continue;
+      }
       trimEnd = len;
       break;
     }
@@ -64,7 +102,7 @@ export const InsertSnippet: Macro<string, InsertSnippetProps> = async (
   props: InsertSnippetProps,
   state: ChatState
 ) => {
-  const { path, start, end, snippet } = props;
+  const { path, start, end, snippet, exactMatch } = props;
   try {
     if (!path || !path.trim()) {
       return 'Error: path is required';
@@ -110,10 +148,16 @@ export const InsertSnippet: Macro<string, InsertSnippetProps> = async (
     }
 
     // ── Overlap detection: trim snippet edges that duplicate neighbours ──
+    // The `exactMatch` flag bypasses overlap detection entirely. Use it
+    // when the snippet's edges legitimately match the neighbouring lines
+    // (e.g., a snippet ending with `}` that closes a block, written
+    // against a file whose following line is also `}`).
     const snippetLines = snippet.split('\n');
     const linesBefore = lines.slice(0, startLine - 1);
     const linesAfter = lines.slice(endLine);
-    const trimmedSnippet = trimOverlap(snippetLines, linesBefore, linesAfter);
+    const trimmedSnippet = exactMatch
+      ? snippetLines
+      : trimOverlap(snippetLines, linesBefore, linesAfter);
 
     const modifiedLines = [
       ...linesBefore,
@@ -153,7 +197,8 @@ export const InsertSnippetComponentRegister: MacroComponentDefinition<typeof Ins
         "INSERT mode: when only 'start' is provided the snippet is inserted BEFORE that line; the original line and all lines after it are preserved automatically.\n" +
         "REPLACE mode: when both 'start' and 'end' are provided the lines in [start, end] are replaced by the snippet; lines BEFORE start and AFTER end are preserved automatically.\n" +
         "IMPORTANT: The snippet must contain ONLY the new/replacement content. Do NOT include context lines that already exist before start or after end — they are kept automatically and including them causes duplication.\n" +
-        "IMPORTANT: After each insertText call, line numbers in the file CHANGE. You MUST re-read the file (via snip or readFile) before making another insertText call to get the updated line numbers. Never reuse line numbers from a previous read after an edit.",
+        "IMPORTANT: After each insertText call, line numbers in the file CHANGE. You MUST re-read the file (via snip or readFile) before making another insertText call to get the updated line numbers. Never reuse line numbers from a previous read after an edit.\n" +
+        "OPTIONAL: Set 'exactMatch' to true when your snippet contains structural boundaries (such as '}', ']', or blank lines) at its very start or end that legitimately belong to the replacement and must not be stripped by the overlap-trimming safety feature.",
       icon: "content_paste",
       parameters: {
         type: "object",
@@ -173,6 +218,10 @@ export const InsertSnippetComponentRegister: MacroComponentDefinition<typeof Ins
           snippet: {
             type: "string",
             description: "The exact replacement or insertion text. Must contain ONLY new content — do NOT repeat lines that already exist before 'start' or after 'end'."
+          },
+          exactMatch: {
+            type: "boolean",
+            description: "If true, disables the automatic overlap-trimming safety feature. Set to true when your snippet contains structural boundaries (like '}', ']', or blank lines) at its very start or end that legitimately match the surrounding lines and must not be stripped. Default: false."
           }
         },
         required: ["path", "start", "snippet"]

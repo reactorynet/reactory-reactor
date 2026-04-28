@@ -342,4 +342,123 @@ describe('InsertSnippet', () => {
       expect(result).toMatch(/re-read/i);
     });
   });
+
+  // ── exactMatch escape hatch + structural-line refinement ──────────────
+  // Per InsertSnippet_Fix_Spec: prevent the false-positive trim that
+  // strips a snippet's closing brace when the next file line is also a
+  // closing brace (parent scope). Two safety layers: (1) the exactMatch
+  // flag bypasses overlap detection entirely; (2) by default, overlap
+  // matches consisting purely of structural lines (blank, lone closers)
+  // are skipped.
+  describe('exactMatch + structural-line overlap refinement', () => {
+    it('does NOT strip a closing brace when file-after also starts with a closing brace (structural-line refinement)', async () => {
+      // The bug pattern: replacing the inner `if` block; snippet ends
+      // with `  }` (the inner block's own close); the file's next line
+      // is `}` closing the outer function. Under the old behaviour the
+      // inner `}` was stripped, breaking syntax.
+      const original = [
+        'function outer() {',
+        '  if (x) {',
+        '    return 1;',
+        '  }',
+        '}',
+      ].join('\n');
+      const filePath = await writeFile('overlap-structural-bug.txt', original);
+
+      // Replace lines 2..4 (the if-block body) with a new if-block that
+      // again ends with `  }`. The next file line (line 5 of the
+      // original) is `}` — same shape, different scope.
+      const snippet = ['  if (y) {', '    return 2;', '  }'].join('\n');
+      await InsertSnippet(
+        { path: filePath, start: '2', end: '4', snippet },
+        state,
+      );
+
+      const content = await readFile(filePath);
+      // The inner `}` MUST still be present — five lines total, well-formed.
+      expect(content.split('\n')).toEqual([
+        'function outer() {',
+        '  if (y) {',
+        '    return 2;',
+        '  }',
+        '}',
+      ]);
+    });
+
+    it('does NOT strip a leading blank line that matches a blank line before start', async () => {
+      const original = ['header', '', 'mid', 'tail'].join('\n');
+      const filePath = await writeFile('overlap-blank-leading.txt', original);
+
+      // Snippet starts with a blank line; line before start is also blank.
+      // Under the structural-only-skip rule the blank line MUST stay.
+      const snippet = ['', 'NEW1', 'NEW2'].join('\n');
+      await InsertSnippet(
+        { path: filePath, start: '3', end: '3', snippet },
+        state,
+      );
+
+      const content = await readFile(filePath);
+      expect(content.split('\n')).toEqual(['header', '', '', 'NEW1', 'NEW2', 'tail']);
+    });
+
+    it('exactMatch=true bypasses overlap trim even when a non-structural overlap exists', async () => {
+      // Recreate the existing "trims trailing snippet lines" scenario but
+      // with exactMatch=true — the trim should NOT happen, so the
+      // duplicated line4/line5 stays in the output.
+      const original = 'line1\nline2\nline3\nline4\nline5';
+      const filePath = await writeFile('exactmatch-trailing.txt', original);
+
+      const snippet = 'NEW2\nNEW3\nline4\nline5';
+      await InsertSnippet(
+        { path: filePath, start: '2', end: '3', snippet, exactMatch: true },
+        state,
+      );
+
+      const content = await readFile(filePath);
+      // exactMatch preserves the snippet verbatim, producing a
+      // duplicated tail. The contract is "exact insertion"; the AI
+      // accepts responsibility for the result.
+      expect(content.split('\n')).toEqual([
+        'line1', 'NEW2', 'NEW3', 'line4', 'line5', 'line4', 'line5',
+      ]);
+    });
+
+    it('exactMatch=false (default) still trims real-content overlaps (no regression)', async () => {
+      // Same setup as the test above but without exactMatch — the trim
+      // SHOULD fire because the overlapping lines are not structural.
+      const original = 'line1\nline2\nline3\nline4\nline5';
+      const filePath = await writeFile('default-trim-still-works.txt', original);
+
+      const snippet = 'NEW2\nNEW3\nline4\nline5';
+      await InsertSnippet(
+        { path: filePath, start: '2', end: '3', snippet },
+        state,
+      );
+
+      const content = await readFile(filePath);
+      expect(content.split('\n')).toEqual(['line1', 'NEW2', 'NEW3', 'line4', 'line5']);
+    });
+
+    it('still trims when overlap mixes structural and non-structural lines (mixed candidate is acceptable signal)', async () => {
+      // The structural-only safety only kicks in when EVERY line of the
+      // candidate trim is structural. A mixed candidate (real content
+      // PLUS a brace) is still a valid signal of accidental duplication
+      // and should still trim.
+      const original = 'A\nrealLine\n}\nC\nD';
+      const filePath = await writeFile('overlap-mixed.txt', original);
+
+      // Replace `realLine\n}` with a snippet that accidentally re-includes
+      // both the realLine AND the `}` at the leading edge.
+      const snippet = 'realLine\n}\nNEW';
+      await InsertSnippet(
+        { path: filePath, start: '2', end: '3', snippet },
+        state,
+      );
+
+      const content = await readFile(filePath);
+      // The `realLine\n}` 2-line prefix matches; not-all-structural →
+      // trim fires; result has just the NEW line in that slot.
+      expect(content.split('\n')).toEqual(['A', 'realLine', '}', 'NEW', 'C', 'D']);
+    });
+  });
 });

@@ -339,6 +339,16 @@ export interface InsertSnippetProps {
   end?: string;
   /** The snippet content to insert */
   snippet: string;
+  /**
+   * If true, disables the automatic overlap-trimming safety feature. Set
+   * to true when the snippet contains structural boundaries (such as `}`,
+   * `]`, blank lines) that legitimately match the surrounding file lines
+   * and must not be stripped.
+   *
+   * Default: false (overlap detection is on, but with the structural-line
+   * refinement that already prevents the most common false positive).
+   */
+  exactMatch?: boolean;
 }
 
 /**
