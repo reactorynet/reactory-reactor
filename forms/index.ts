@@ -13,6 +13,8 @@ import ReactorProjectIncidentsForm from "./projectIncidents";
 import ReactorProjectTeamForm from "./projectTeamPanel";
 import ReactorProjectDeploymentsForm from "./projectDeployments";
 import ProviderConfigForm from "./providerConfig";
+import UserBudgetAdminForm from "./userBudgetAdmin";
+import UsageDashboardForm from "./usageDashboard";
 
 export default [
   GraphExplorerForm,
@@ -30,4 +32,6 @@ export default [
   ReactorProjectTeamForm,
   ReactorProjectDeploymentsForm,
   ProviderConfigForm,
+  UserBudgetAdminForm,
+  UsageDashboardForm,
 ];
