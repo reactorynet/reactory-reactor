@@ -254,6 +254,22 @@ export interface AIChatCompletionUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /** Cached input tokens (OpenAI prompt_tokens_details.cached_tokens, Anthropic cache_read_input_tokens, Gemini cachedContentTokenCount) */
+  cachedPromptTokens?: number;
+  /** Cache write tokens (Anthropic cache_creation_input_tokens) */
+  cacheWriteTokens?: number;
+  /** Reasoning tokens for o-series and other models that expose them separately */
+  reasoningTokens?: number;
+  /** Audio input duration in seconds */
+  audioInputSeconds?: number;
+  /** Audio output duration in seconds */
+  audioOutputSeconds?: number;
+  /** Video input duration in seconds */
+  videoInputSeconds?: number;
+  /** Video output duration in seconds */
+  videoOutputSeconds?: number;
+  /** Generated images grouped by size/quality */
+  imagesGenerated?: Array<{ size?: string; quality?: string; count: number }>;
 }
 
 /**

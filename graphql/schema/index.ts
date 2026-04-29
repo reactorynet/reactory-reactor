@@ -7,6 +7,7 @@ const ReactorTypeDefinitions = loadGraphQLTypeDefinitions(
     'ReactorProviders',
     'ReactorCapabilities',
     'ReactorMessageProcessing',
+    'ReactorBudget',
     // Instead of a single file, load all files in the new ReactorSystemGraph directory
     'ReactorSystemGraph/types',
     'ReactorSystemGraph/project',

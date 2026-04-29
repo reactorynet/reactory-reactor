@@ -1284,10 +1284,14 @@ class GoogleAIService extends AIProviderBase {
   private extractUsageFromResponse(result: GoogleGenAI.GenerateContentResponse | null): AIChatCompletionUsage | undefined {
     const meta = (result as any)?.__usageMetadata || result?.usageMetadata;
     if (!meta) return undefined;
+    const cached = meta.cachedContentTokenCount || 0;
+    const reasoning = meta.thoughtsTokenCount || 0;
     return {
       promptTokens: meta.promptTokenCount || 0,
       completionTokens: meta.candidatesTokenCount || 0,
       totalTokens: meta.totalTokenCount || 0,
+      ...(cached > 0 ? { cachedPromptTokens: cached } : {}),
+      ...(reasoning > 0 ? { reasoningTokens: reasoning } : {}),
     };
   }
 

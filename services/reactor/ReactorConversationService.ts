@@ -31,6 +31,9 @@ import resolveImageUrls from "@reactory/server-modules/reactory-reactor/utils/re
 import { ChatCompletion, ChatCompletionMessage } from "openai/resources";
 import ReactorMacroService from "./providers/ReactorMacroService";
 import DocumentChunkingService from "./DocumentChunkingService";
+import ReactoryUsageService from "./ReactoryUsageService";
+import ReactoryBudgetService from "./ReactoryBudgetService";
+import { BudgetExceededError } from "./errors/BudgetExceededError";
 import { ReactorConversationHistoryItem } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import ReactoryFile, {
   ReactoryFileDocument,
@@ -225,6 +228,8 @@ const DATABASE_CONSTANTS = {
     { id: "reactor.DocumentChunkingService@1.0.0", alias: "chunkingService" },
     { id: "reactor.StreamingSessionManager@1.0.0", alias: "streamingSessionManager" },
     { id: "reactor.StreamingTransportManager@1.0.0", alias: "streamingTransportManager" },
+    { id: "reactor.ReactoryUsageService@1.0.0", alias: "usageService" },
+    { id: "reactor.ReactoryBudgetService@1.0.0", alias: "budgetService" },
   ],
 })
 export default class ReactorConversationService
@@ -277,6 +282,14 @@ export default class ReactorConversationService
 
   /** Streaming transport manager for managing streaming transports */
   private streamingTransportManager: StreamingTransportManager;
+
+  /** Usage service for recording per-call AI usage and cost events */
+  // @ts-ignore - injected via service dependencies
+  private usageService: ReactoryUsageService;
+
+  /** Budget service for enforcing per-user spend limits */
+  // @ts-ignore - injected via service dependencies
+  private budgetService: ReactoryBudgetService;
 
   /** Per-conversation file loggers keyed by conversationId */
   private sessionLoggers: Map<string, ChatSessionResourceManager> = new Map();
@@ -3167,6 +3180,36 @@ export default class ReactorConversationService
       timestamp: new Date().toISOString(),
     }, chatSessionId, personaId);
 
+    // Pre-flight budget gate. Throws BudgetExceededError when the user is over a hard limit.
+    // No-op for users without a budget document. Tool-result callbacks (role='tool') do not
+    // independently incur cost, so we skip the gate for them.
+    if (role !== 'tool' && user?._id) {
+      try {
+        await this.budgetService.assertWithinBudget(user._id, {
+          conversationId: chatSessionId,
+        });
+      } catch (err: any) {
+        if (err instanceof BudgetExceededError) {
+          this.sessionLog(
+            'warn',
+            'Pre-flight budget gate blocked message',
+            { userId: user._id?.toString(), budget: err.budget },
+            chatSessionId,
+            personaId,
+          );
+          throw err;
+        }
+        // Soft failures in the budget service must not block traffic.
+        this.sessionLog(
+          'warn',
+          'Budget pre-flight check failed (allowing message through)',
+          { error: err?.message },
+          chatSessionId,
+          personaId,
+        );
+      }
+    }
+
     const maxRetries = 3;
     let lastError: any;
 
@@ -4079,13 +4122,15 @@ export default class ReactorConversationService
           }
         }
 
-        // Use findOneAndUpdate for atomic update
+        // Use findOneAndUpdate for atomic update.
+        // Pre-allocate the messageId so we can correlate the usage event with this turn.
+        const aiMessageId = new ObjectId();
         await ReactorConversationModel.findOneAndUpdate(
           { _id: conversation._id },
           {
             $push: {
               history: {
-                id: new ObjectId(),
+                id: aiMessageId,
                 response, // add the original response for debugging
                 role: aiMessage.role,
                 content: aiMessage.content,
@@ -4100,6 +4145,36 @@ export default class ReactorConversationService
           },
           { new: true }
         ).exec();
+
+        // Emit a usage event for this AI response. Source-of-truth for cost lives in
+        // reactor_usage_events; failures here must not break the response flow.
+        if (response?.usage) {
+          try {
+            const rawUser: any = conversation.user;
+            const userId = rawUser?._id ?? rawUser;
+            await this.usageService.recordUsage({
+              userId,
+              conversationId: conversation._id,
+              messageId: aiMessageId,
+              personaId: conversation.personaId,
+              providerId: conversation.providerId || 'unknown',
+              modelId: conversation.modelId,
+              usage: response.usage,
+              occurredAt: new Date(),
+              finishReason: response.choices?.[0]?.finish_reason,
+              toolCallCount: aiMessage.tool_calls?.length || 0,
+              streamingMode: streamingMode === StreamingMode.SSE,
+            });
+          } catch (usageErr: any) {
+            this.sessionLog(
+              "warn",
+              "Failed to record usage event",
+              { error: usageErr?.message },
+              conversation._id?.toString(),
+              conversation.personaId,
+            );
+          }
+        }
       }
 
       // Update token count after adding AI response — prefer provider-reported usage

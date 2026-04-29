@@ -1,0 +1,123 @@
+"""
+Per-period budget configuration for a single bucket (day/week/month).
+Limits and thresholds are USD cents.
+"""
+type ReactorUserBudgetPeriod {
+  limitUsdCents: Float!
+  softThresholdPct: Float!
+  hardBlock: Boolean!
+}
+
+input ReactorUserBudgetPeriodInput {
+  limitUsdCents: Float!
+  softThresholdPct: Float! = 80.0
+  hardBlock: Boolean! = true
+}
+
+type ReactorUserBudgetScope {
+  providerIds: [String!]
+  modelIds: [String!]
+}
+
+input ReactorUserBudgetScopeInput {
+  providerIds: [String!]
+  modelIds: [String!]
+}
+
+type ReactorUserBudgetPricingOverride {
+  providerId: String!
+  modelId: String!
+  inputPerTokenUsdCents: Float
+  outputPerTokenUsdCents: Float
+  cachedInputPerTokenUsdCents: Float
+  cacheWritePerTokenUsdCents: Float
+  reasoningPerTokenUsdCents: Float
+  audioInputPerSecondUsdCents: Float
+  audioOutputPerSecondUsdCents: Float
+  videoInputPerSecondUsdCents: Float
+  videoOutputPerSecondUsdCents: Float
+  imageGenerationPerImageUsdCents: Float
+  embeddingPerTokenUsdCents: Float
+}
+
+input ReactorUserBudgetPricingOverrideInput {
+  providerId: String!
+  modelId: String!
+  inputPerTokenUsdCents: Float
+  outputPerTokenUsdCents: Float
+  cachedInputPerTokenUsdCents: Float
+  cacheWritePerTokenUsdCents: Float
+  reasoningPerTokenUsdCents: Float
+  audioInputPerSecondUsdCents: Float
+  audioOutputPerSecondUsdCents: Float
+  videoInputPerSecondUsdCents: Float
+  videoOutputPerSecondUsdCents: Float
+  imageGenerationPerImageUsdCents: Float
+  embeddingPerTokenUsdCents: Float
+}
+
+"""
+Per-user budget. Only present when the user has explicitly opted in.
+"""
+type ReactorUserBudget {
+  id: ObjID!
+  userId: ObjID!
+  active: Boolean!
+  timezone: String!
+  weekStartsOn: String!
+  day: ReactorUserBudgetPeriod
+  week: ReactorUserBudgetPeriod
+  month: ReactorUserBudgetPeriod
+  scope: ReactorUserBudgetScope
+  pricingOverrides: [ReactorUserBudgetPricingOverride!]
+  created: Date
+  updated: Date
+}
+
+input ReactorSetUserBudgetInput {
+  userId: ObjID!
+  active: Boolean! = true
+  timezone: String! = "UTC"
+  weekStartsOn: String! = "mon"
+  day: ReactorUserBudgetPeriodInput
+  week: ReactorUserBudgetPeriodInput
+  month: ReactorUserBudgetPeriodInput
+  scope: ReactorUserBudgetScopeInput
+  pricingOverrides: [ReactorUserBudgetPricingOverrideInput!]
+}
+
+"""
+Result of a budget check. periods is empty when status === 'no-budget'.
+"""
+type ReactorBudgetCheckPeriod {
+  period: String!
+  usedUsdCents: Float!
+  limitUsdCents: Float!
+  pctUsed: Float!
+  softThresholdPct: Float!
+  breachedHard: Boolean!
+  breachedSoft: Boolean!
+}
+
+type ReactorBudgetCheckResult {
+  status: String!
+  periods: [ReactorBudgetCheckPeriod!]!
+}
+
+type ReactorUsagePeriodSummary {
+  totalUsdCents: Float!
+  eventCount: Int!
+  start: Date!
+  end: Date!
+}
+
+extend type Query {
+  ReactorUserBudget(userId: ObjID!): ReactorUserBudget
+  ReactorBudgetCheck(userId: ObjID!): ReactorBudgetCheckResult!
+  ReactorUserUsage(userId: ObjID!, period: String!): ReactorUsagePeriodSummary!
+}
+
+extend type Mutation {
+  ReactorSetUserBudget(input: ReactorSetUserBudgetInput!): ReactorUserBudget!
+  ReactorClearUserBudget(userId: ObjID!): Boolean!
+}

@@ -2,6 +2,32 @@ import * as yaml from 'js-yaml';
 import * as fs from 'fs';
 import * as path from 'path';
 
+/**
+ * Per-model pricing block. Every field is USD cents per unit (token, second, image).
+ * `null` means unpriced — the cost dimension is not tracked for billing on this model.
+ */
+export interface ProviderModelPricing {
+  inputPerTokenUsdCents: number | null;
+  outputPerTokenUsdCents: number | null;
+  cachedInputPerTokenUsdCents: number | null;
+  cacheWritePerTokenUsdCents: number | null;
+  reasoningPerTokenUsdCents: number | null;
+  audioInputPerSecondUsdCents: number | null;
+  audioOutputPerSecondUsdCents: number | null;
+  videoInputPerSecondUsdCents: number | null;
+  videoOutputPerSecondUsdCents: number | null;
+  imageGenerationPerImageUsdCents: number | null;
+  imageGenerationTiers?: ProviderImageGenerationTier[];
+  embeddingPerTokenUsdCents: number | null;
+  currency: string;
+  pricingEffectiveFrom: string | null;
+}
+
+export interface ProviderImageGenerationTier {
+  match: { size?: string; quality?: string };
+  usdCents: number;
+}
+
 export interface ProviderModelConfig {
   id: string;
   providerId?: string;
@@ -9,11 +35,6 @@ export interface ProviderModelConfig {
   version?: string;
   capabilities: string[];
   contextLength?: number;
-  costPerToken?: number;
-  inputCostPerToken?: number;
-  outputCostPerToken?: number;
-  inputCostPerTokenUsdCents?: number | null;
-  outputCostPerTokenUsdCents?: number | null;
   rpm?: number | null;
   itpm?: number | null;
   otpm?: number | null;
@@ -21,6 +42,7 @@ export interface ProviderModelConfig {
   supportsStreaming?: boolean;
   supportedTools?: string[];
   supportedMediaTypes?: string[];
+  pricing: ProviderModelPricing;
 }
 
 export interface ProviderStatusConfig {
@@ -68,15 +90,27 @@ interface ProviderYamlEntry {
   models?: ProviderModelConfig[];
 }
 
-/**
- * Interpolates environment variables in string values.
- * Supports ${VAR_NAME} and ${VAR_NAME:-default} syntax.
- */
+const DEFAULT_PRICING: ProviderModelPricing = {
+  inputPerTokenUsdCents: null,
+  outputPerTokenUsdCents: null,
+  cachedInputPerTokenUsdCents: null,
+  cacheWritePerTokenUsdCents: null,
+  reasoningPerTokenUsdCents: null,
+  audioInputPerSecondUsdCents: null,
+  audioOutputPerSecondUsdCents: null,
+  videoInputPerSecondUsdCents: null,
+  videoOutputPerSecondUsdCents: null,
+  imageGenerationPerImageUsdCents: null,
+  embeddingPerTokenUsdCents: null,
+  currency: 'USD',
+  pricingEffectiveFrom: null,
+};
+
 function interpolateEnvVars(value: unknown): unknown {
   if (typeof value === 'string') {
     return value.replace(/\$\{([^}]+)\}/g, (_match, envExpr: string) => {
       const [varName, defaultValue] = envExpr.split(':-');
-      return process.env[varName.trim()] || defaultValue?.trim() || '';
+      return process.env[varName.trim()] ?? defaultValue?.trim() ?? '';
     });
   }
   if (Array.isArray(value)) {
@@ -92,24 +126,22 @@ function interpolateEnvVars(value: unknown): unknown {
   return value;
 }
 
-/**
- * Determines provider availability based on configured credential env vars.
- */
 function resolveAvailability(entry: ProviderYamlEntry): boolean {
   if (!entry.credentialEnvVars) return false;
-  // Provider is available if at least one credential env var is set and non-empty
   return Object.values(entry.credentialEnvVars).some(
     envVar => !!process.env[envVar]?.trim()
   );
 }
 
-/**
- * Converts a raw YAML provider entry into a typed ProviderConfig.
- */
+function normalizePricing(raw: Partial<ProviderModelPricing> | undefined): ProviderModelPricing {
+  return { ...DEFAULT_PRICING, ...(raw || {}) };
+}
+
 function toProviderConfig(entry: ProviderYamlEntry): ProviderConfig {
   const models: ProviderModelConfig[] = (entry.models || []).map(m => ({
     ...m,
     providerId: entry.id,
+    pricing: normalizePricing(m.pricing),
   }));
 
   return {
@@ -133,10 +165,6 @@ function toProviderConfig(entry: ProviderYamlEntry): ProviderConfig {
   };
 }
 
-/**
- * Loads provider configs from the default providers.yaml file co-located
- * with this module, with environment variable interpolation.
- */
 export function loadProviders(yamlPath?: string): ProviderConfig[] {
   const filePath = yamlPath || path.join(__dirname, 'providers.yaml');
   const raw = fs.readFileSync(filePath, 'utf8');
@@ -144,9 +172,6 @@ export function loadProviders(yamlPath?: string): ProviderConfig[] {
   return (interpolated.providers || []).map(toProviderConfig);
 }
 
-/**
- * Returns an individual model's config by model ID, searching across providers.
- */
 export function findModelById(
   providers: ProviderConfig[],
   modelId: string
@@ -158,11 +183,6 @@ export function findModelById(
   return null;
 }
 
-/**
- * Returns all models from a given provider that are compatible with a set
- * of required capabilities. A model is compatible if its capabilities
- * include at least all of the required capabilities.
- */
 export function getCompatibleModels(
   providers: ProviderConfig[],
   requiredCapabilities: string[]

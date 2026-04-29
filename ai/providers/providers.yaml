@@ -5,14 +5,26 @@
 # Provider availability is determined at runtime based on whether
 # the required API keys are configured.
 #
-# Pricing and limits metadata fields:
-# - inputCostPerTokenUsdCents / outputCostPerTokenUsdCents: USD cents per token
-# - rpm: requests per minute
-# - itpm: input tokens per minute
-# - otpm: output tokens per minute
+# Pricing model:
+# Each model has a `pricing` block with these float fields (USD cents per unit; null = unpriced):
+#   inputPerTokenUsdCents           standard prompt tokens
+#   outputPerTokenUsdCents          standard completion tokens
+#   cachedInputPerTokenUsdCents     cache reads (OpenAI/Anthropic/Gemini context caching)
+#   cacheWritePerTokenUsdCents      cache writes (Anthropic charges extra)
+#   reasoningPerTokenUsdCents       reasoning/thinking tokens when billed separately
+#   audioInputPerSecondUsdCents     speech-to-text input
+#   audioOutputPerSecondUsdCents    TTS output
+#   videoInputPerSecondUsdCents     video input
+#   videoOutputPerSecondUsdCents    video output
+#   imageGenerationPerImageUsdCents flat per-image fallback (use imageGenerationTiers when price varies by size/quality)
+#   imageGenerationTiers            optional list of { match: { size, quality }, usdCents }
+#   embeddingPerTokenUsdCents       text-embedding models
+#   currency                        always "USD" for now
+#   pricingEffectiveFrom            ISO date this pricing took effect
 #
-# Note: Several providers expose account/tier specific limits only.
-# For those models, values are null and should be resolved at runtime from provider dashboards.
+# Rate limits: rpm (requests/min), itpm (input tokens/min), otpm (output tokens/min).
+# Several providers expose account/tier specific limits only; values may be null and
+# should be resolved at runtime from provider dashboards.
 
 providers:
   - id: openai
@@ -44,14 +56,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.00025
-        outputCostPerTokenUsdCents: 0.0015
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: 0.00025
+          outputPerTokenUsdCents: 0.0015
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gpt-5.4-mini
         name: GPT-5.4 Mini
         version: "2026-03"
@@ -64,14 +88,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.000075
-        outputCostPerTokenUsdCents: 0.00045
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: 0.000075
+          outputPerTokenUsdCents: 0.00045
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gpt-5.4-nano
         name: GPT-5.4 Nano
         version: "2026-03"
@@ -83,13 +119,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.00002
-        outputCostPerTokenUsdCents: 0.000125
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: 0.00002
+          outputPerTokenUsdCents: 0.000125
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gpt-4o
         name: GPT-4o
         version: "2024-05-13"
@@ -102,14 +150,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.0005
-        outputCostPerTokenUsdCents: 0.0015
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: 0.0005
+          outputPerTokenUsdCents: 0.0015
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gpt-4o-mini
         name: GPT-4o Mini
         version: "2024-07-18"
@@ -121,14 +181,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.00005
-        outputCostPerTokenUsdCents: 0.00015
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: 0.00005
+          outputPerTokenUsdCents: 0.00015
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gpt-4-turbo
         name: GPT-4 Turbo
         version: "2024-04-09"
@@ -141,14 +213,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.001
-        outputCostPerTokenUsdCents: 0.003
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: 0.001
+          outputPerTokenUsdCents: 0.003
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gpt-4
         name: GPT-4
         version: "1"
@@ -160,13 +244,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.003
-        outputCostPerTokenUsdCents: 0.006
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: 0.003
+          outputPerTokenUsdCents: 0.006
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gpt-3.5-turbo
         name: GPT-3.5 Turbo
         version: "1"
@@ -177,13 +273,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.00005
-        outputCostPerTokenUsdCents: 0.00015
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: 0.00005
+          outputPerTokenUsdCents: 0.00015
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: o1
         name: o1
         version: "2024-12-17"
@@ -195,14 +303,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: o3-mini
         name: o3 Mini
         version: "2025-01-31"
@@ -214,14 +334,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
       # Image generation models
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gpt-image-1
         name: GPT Image 1
         version: "1"
@@ -231,13 +363,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: false
         supportedTools: []
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: dall-e-3
         name: DALL-E 3
         version: "3"
@@ -247,13 +391,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: false
         supportedTools: []
         supportedMediaTypes:
           - text
 
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
   - id: xai
     name: xAI
     endpointUrl: "${XAI_API_BASE_URL:-https://api.x.ai/v1}"
@@ -285,14 +441,26 @@ providers:
         rpm: 607
         itpm: 4000000
         otpm: 4000000
-        inputCostPerTokenUsdCents: 0.0002
-        outputCostPerTokenUsdCents: 0.0006
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: 0.0002
+          outputPerTokenUsdCents: 0.0006
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: grok-4.20-beta-0309-reasoning
         name: Grok 4.20 Beta (Reasoning)
         version: "4.20"
@@ -305,14 +473,26 @@ providers:
         rpm: 607
         itpm: 4000000
         otpm: 4000000
-        inputCostPerTokenUsdCents: 0.0002
-        outputCostPerTokenUsdCents: 0.0006
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: 0.0002
+          outputPerTokenUsdCents: 0.0006
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: grok-4.20-beta-0309-non-reasoning
         name: Grok 4.20 Beta (Non-Reasoning)
         version: "4.20"
@@ -324,14 +504,26 @@ providers:
         rpm: 607
         itpm: 4000000
         otpm: 4000000
-        inputCostPerTokenUsdCents: 0.0002
-        outputCostPerTokenUsdCents: 0.0006
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: 0.0002
+          outputPerTokenUsdCents: 0.0006
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: grok-code-fast-1
         name: Grok Code Fast 1
         version: "1"
@@ -343,13 +535,25 @@ providers:
         rpm: 2125
         itpm: 2000000
         otpm: 2000000
-        inputCostPerTokenUsdCents: 0.00002
-        outputCostPerTokenUsdCents: 0.00015
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: 0.00002
+          outputPerTokenUsdCents: 0.00015
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: grok-4-1-fast-reasoning
         name: Grok 4-1 Fast (Reasoning)
         version: "4.1"
@@ -362,14 +566,26 @@ providers:
         rpm: 607
         itpm: 4000000
         otpm: 4000000
-        inputCostPerTokenUsdCents: 0.00002
-        outputCostPerTokenUsdCents: 0.00005
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: 0.00002
+          outputPerTokenUsdCents: 0.00005
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: grok-4-1-fast-non-reasoning
         name: Grok 4-1 Fast (Non-Reasoning)
         version: "4.1"
@@ -381,8 +597,6 @@ providers:
         rpm: 607
         itpm: 4000000
         otpm: 4000000
-        inputCostPerTokenUsdCents: 0.00002
-        outputCostPerTokenUsdCents: 0.00005
         supportsStreaming: true
         supportedTools:
           - function-calling
@@ -390,6 +604,20 @@ providers:
           - text
           - image
       # Image generation models
+        pricing:
+          inputPerTokenUsdCents: 0.00002
+          outputPerTokenUsdCents: 0.00005
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: grok-imagine-image-pro
         name: Grok Imagine Image Pro
         version: "1"
@@ -398,12 +626,24 @@ providers:
         rpm: 30
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: false
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: grok-imagine-image
         name: Grok Imagine Image
         version: "1"
@@ -412,13 +652,25 @@ providers:
         rpm: 300
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: false
         supportedMediaTypes:
           - text
           - image
       # Video generation models
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: grok-imagine-video
         name: Grok Imagine Video
         version: "1"
@@ -427,14 +679,26 @@ providers:
         rpm: 60
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: false
         supportedMediaTypes:
           - text
           - image
           - video
       # Voice & Audio
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: grok-realtime
         name: Realtime API
         version: "1"
@@ -444,12 +708,24 @@ providers:
         rpm: 100
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedMediaTypes:
           - text
           - audio
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: grok-tts
         name: Text to Speech
         version: "1"
@@ -459,13 +735,25 @@ providers:
         rpm: 100
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: false
         supportedMediaTypes:
           - text
           - audio
 
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
   - id: google
     name: Google Gemini
     endpointUrl: "${GOOGLE_AI_API_URL:-https://generativelanguage.googleapis.com}"
@@ -494,8 +782,6 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.0002
-        outputCostPerTokenUsdCents: 0.0012
         supportsStreaming: true
         supportedTools:
           - function-calling
@@ -504,6 +790,20 @@ providers:
           - image
           - video
           - audio
+        pricing:
+          inputPerTokenUsdCents: 0.0002
+          outputPerTokenUsdCents: 0.0012
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gemini-3-flash-preview
         name: Gemini 3 Flash Preview
         version: "3.0"
@@ -516,8 +816,6 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.00005
-        outputCostPerTokenUsdCents: 0.0003
         supportsStreaming: true
         supportedTools:
           - function-calling
@@ -526,6 +824,20 @@ providers:
           - image
           - video
           - audio
+        pricing:
+          inputPerTokenUsdCents: 0.00005
+          outputPerTokenUsdCents: 0.0003
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gemini-3.1-flash-lite-preview
         name: Gemini 3.1 Flash-Lite Preview
         version: "3.1"
@@ -538,8 +850,6 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.000025
-        outputCostPerTokenUsdCents: 0.00015
         supportsStreaming: true
         supportedTools:
           - function-calling
@@ -548,6 +858,20 @@ providers:
           - image
           - video
           - audio
+        pricing:
+          inputPerTokenUsdCents: 0.000025
+          outputPerTokenUsdCents: 0.00015
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gemini-2.5-pro
         name: Gemini 2.5 Pro
         version: "2.5"
@@ -560,8 +884,6 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.000125
-        outputCostPerTokenUsdCents: 0.001
         supportsStreaming: true
         supportedTools:
           - function-calling
@@ -570,6 +892,20 @@ providers:
           - image
           - video
           - audio
+        pricing:
+          inputPerTokenUsdCents: 0.000125
+          outputPerTokenUsdCents: 0.001
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gemini-2.5-flash
         name: Gemini 2.5 Flash
         version: "2.5"
@@ -582,8 +918,6 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.00003
-        outputCostPerTokenUsdCents: 0.00025
         supportsStreaming: true
         supportedTools:
           - function-calling
@@ -592,6 +926,20 @@ providers:
           - image
           - video
           - audio
+        pricing:
+          inputPerTokenUsdCents: 0.00003
+          outputPerTokenUsdCents: 0.00025
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gemini-2.0-flash
         name: Gemini 2.0 Flash
         version: "2.0"
@@ -604,14 +952,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.00001
-        outputCostPerTokenUsdCents: 0.00004
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: 0.00001
+          outputPerTokenUsdCents: 0.00004
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gemini-pro
         name: Gemini Pro
         version: "1.0"
@@ -623,13 +983,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gemini-pro-vision
         name: Gemini Pro Vision
         version: "1.0"
@@ -642,8 +1014,6 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
@@ -651,6 +1021,20 @@ providers:
           - text
           - image
       # Image generation models
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gemini-3.1-pro-image-preview
         name: Gemini Pro Image Preview
         version: "3.1"
@@ -662,14 +1046,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.00001
-        outputCostPerTokenUsdCents: 0.00004
         supportsStreaming: false
         supportedTools: []
         supportedMediaTypes:
           - text
           - image
 
+        pricing:
+          inputPerTokenUsdCents: 0.00001
+          outputPerTokenUsdCents: 0.00004
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gemini-3-pro-image-preview
         name: Gemini Pro Image Preview
         version: "3.0"
@@ -681,14 +1077,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.00001
-        outputCostPerTokenUsdCents: 0.00004
         supportsStreaming: false
         supportedTools: []
         supportedMediaTypes:
           - text
           - image
 
+        pricing:
+          inputPerTokenUsdCents: 0.00001
+          outputPerTokenUsdCents: 0.00004
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gemini-2.5-flash-image
         name: Gemini 2.5 Flash Image Generation
         version: "2.5"
@@ -700,14 +1108,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.00001
-        outputCostPerTokenUsdCents: 0.00004
         supportsStreaming: false
         supportedTools: []
         supportedMediaTypes:
           - text
           - image
 
+        pricing:
+          inputPerTokenUsdCents: 0.00001
+          outputPerTokenUsdCents: 0.00004
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
   - id: copilot
     name: GitHub Copilot
     endpointUrl: "${GITHUB_COPILOT_API_URL:-https://models.inference.ai.azure.com}"
@@ -734,14 +1154,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gpt-4o
         name: GPT-4o (Copilot)
         version: "2024-05-13"
@@ -754,14 +1186,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gpt-4o-mini
         name: GPT-4o Mini (Copilot)
         version: "2024-07-18"
@@ -773,8 +1217,6 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
@@ -782,6 +1224,20 @@ providers:
           - text
           - image
 
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
   - id: azure-openai
     name: Azure OpenAI
     endpointUrl: "${AZURE_OPENAI_ENDPOINT:-}"
@@ -812,14 +1268,26 @@ providers:
         rpm: 10000
         itpm: 1000000
         otpm: 1000000
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gpt-5.4-mini
         name: GPT-5.4 Mini (Azure)
         version: "2026-03-17"
@@ -832,14 +1300,26 @@ providers:
         rpm: 1000
         itpm: 1000000
         otpm: 1000000
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gpt-4o
         name: GPT-4o (Azure)
         version: "2024-05-13"
@@ -852,14 +1332,26 @@ providers:
         rpm: 1800
         itpm: 300000
         otpm: 300000
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gpt-4o-mini
         name: GPT-4o Mini (Azure)
         version: "2024-07-18"
@@ -871,14 +1363,26 @@ providers:
         rpm: 20000
         itpm: 2000000
         otpm: 2000000
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gpt-4
         name: GPT-4 (Azure)
         version: "1"
@@ -890,14 +1394,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
 
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
   - id: anthropic
     name: Anthropic
     endpointUrl: "${ANTHROPIC_API_BASE_URL:-https://api.anthropic.com}"
@@ -925,14 +1441,26 @@ providers:
         rpm: 50
         itpm: 30000
         otpm: 8000
-        inputCostPerTokenUsdCents: 0.0003
-        outputCostPerTokenUsdCents: 0.0015
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: 0.0003
+          outputPerTokenUsdCents: 0.0015
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: claude-haiku-4-5
         name: Claude Haiku 4.5
         version: "4.5"
@@ -945,14 +1473,26 @@ providers:
         rpm: 50
         itpm: 50000
         otpm: 10000
-        inputCostPerTokenUsdCents: 0.0001
-        outputCostPerTokenUsdCents: 0.0005
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: 0.0001
+          outputPerTokenUsdCents: 0.0005
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: claude-opus-4-6
         name: Claude Opus 4.6
         version: "4.6"
@@ -965,14 +1505,26 @@ providers:
         rpm: 50
         itpm: 30000
         otpm: 8000
-        inputCostPerTokenUsdCents: 0.0005
-        outputCostPerTokenUsdCents: 0.0025
         supportsStreaming: true
-        supportedTools: 
+        supportedTools:
           - function-calling
         supportedMediaTypes:
           - image
           - text
+        pricing:
+          inputPerTokenUsdCents: 0.0005
+          outputPerTokenUsdCents: 0.0025
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: claude-sonnet-4-5
         name: Claude Sonnet 4.5
         version: "4.5"
@@ -985,13 +1537,25 @@ providers:
         rpm: 50
         itpm: 30000
         otpm: 8000
-        inputCostPerTokenUsdCents: 0.0003
-        outputCostPerTokenUsdCents: 0.0015
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: 0.0003
+          outputPerTokenUsdCents: 0.0015
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: claude-3-opus
         name: Claude 3 Opus
         version: "3.0"
@@ -1004,14 +1568,26 @@ providers:
         rpm: 50
         itpm: 30000
         otpm: 8000
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: claude-3-sonnet
         name: Claude 3 Sonnet
         version: "3.0"
@@ -1024,14 +1600,26 @@ providers:
         rpm: 50
         itpm: 30000
         otpm: 8000
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: claude-3-haiku
         name: Claude 3 Haiku
         version: "3.0"
@@ -1044,8 +1632,6 @@ providers:
         rpm: 50
         itpm: 50000
         otpm: 10000
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
@@ -1053,6 +1639,20 @@ providers:
           - text
           - image
 
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
   - id: amazon
     name: Amazon Bedrock
     endpointUrl: "${AMAZON_Q_API_URL:-https://q.amazonaws.com}"
@@ -1083,13 +1683,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.00003
-        outputCostPerTokenUsdCents: 0.00004
         supportsStreaming: true
         supportedTools:
           - aws-service-integration
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: 0.00003
+          outputPerTokenUsdCents: 0.00004
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: claude-3-haiku-aws
         name: Claude 3 Haiku (via AWS)
         version: "1.0"
@@ -1101,8 +1713,6 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
@@ -1110,6 +1720,20 @@ providers:
           - text
           - image
 
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
   - id: cohere
     name: Cohere
     endpointUrl: "${COHERE_API_URL:-https://api.cohere.ai}"
@@ -1136,13 +1760,25 @@ providers:
         rpm: 500
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: command-r7b
         name: Command R7B
         version: "12-2024"
@@ -1154,13 +1790,25 @@ providers:
         rpm: 500
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: command-r
         name: Command R
         version: "1.0"
@@ -1172,13 +1820,25 @@ providers:
         rpm: 500
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.00005
-        outputCostPerTokenUsdCents: 0.00015
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: 0.00005
+          outputPerTokenUsdCents: 0.00015
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: command-r-plus
         name: Command R+
         version: "1.0"
@@ -1190,14 +1850,26 @@ providers:
         rpm: 500
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: 0.00025
-        outputCostPerTokenUsdCents: 0.001
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
 
+        pricing:
+          inputPerTokenUsdCents: 0.00025
+          outputPerTokenUsdCents: 0.001
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
   - id: ollama
     name: Ollama
     endpointUrl: "${OLLAMA_API_BASE_URL:-http://localhost:11434}"
@@ -1222,13 +1894,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: llama3.2
         name: Llama 3.2 (3B)
         version: "3.2"
@@ -1240,13 +1924,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: llama3.2:1b
         name: Llama 3.2 (1B)
         version: "3.2"
@@ -1257,11 +1953,23 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: llama3.1
         name: Llama 3.1 (8B)
         version: "3.1"
@@ -1273,13 +1981,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: llama3.1:70b
         name: Llama 3.1 (70B)
         version: "3.1"
@@ -1291,13 +2011,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: llama3.1:405b
         name: Llama 3.1 (405B)
         version: "3.1"
@@ -1309,13 +2041,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: mistral
         name: Mistral (7B)
         version: "0.3"
@@ -1327,13 +2071,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: mistral-nemo
         name: Mistral NeMo (12B)
         version: "2407"
@@ -1345,13 +2101,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: mistral-small
         name: Mistral Small (22B)
         version: "3.1"
@@ -1364,14 +2132,26 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: codellama
         name: Code Llama (7B)
         version: "1.0"
@@ -1382,11 +2162,23 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: codellama:13b
         name: Code Llama (13B)
         version: "1.0"
@@ -1397,11 +2189,23 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: codellama:34b
         name: Code Llama (34B)
         version: "1.0"
@@ -1412,11 +2216,23 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: phi4
         name: Phi-4 (14B)
         version: "4.0"
@@ -1428,13 +2244,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: phi4-mini
         name: Phi-4 Mini (3.8B)
         version: "4.0"
@@ -1446,13 +2274,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: phi3
         name: Phi-3 (3.8B)
         version: "3.0"
@@ -1464,11 +2304,23 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: phi3:medium
         name: Phi-3 Medium (14B)
         version: "3.0"
@@ -1480,11 +2332,23 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: qwen3.5
         name: Qwen 3.5 9b
         version: "3.5"
@@ -1495,10 +2359,22 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportedTools:
           - function-calling
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: qwen2.5
         name: Qwen 2.5 (7B)
         version: "2.5"
@@ -1510,13 +2386,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: qwen2.5:14b
         name: Qwen 2.5 (14B)
         version: "2.5"
@@ -1528,13 +2416,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: qwen2.5:72b
         name: Qwen 2.5 (72B)
         version: "2.5"
@@ -1546,13 +2446,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: qwen2.5-coder
         name: Qwen 2.5 Coder (7B)
         version: "2.5"
@@ -1563,13 +2475,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: qwen2.5-coder:14b
         name: Qwen 2.5 Coder (14B)
         version: "2.5"
@@ -1580,13 +2504,25 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: deepseek-r1
         name: DeepSeek R1 (7B)
         version: "1.0"
@@ -1598,11 +2534,23 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: deepseek-r1:14b
         name: DeepSeek R1 (14B)
         version: "1.0"
@@ -1614,11 +2562,23 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: deepseek-r1:70b
         name: DeepSeek R1 (70B)
         version: "1.0"
@@ -1630,11 +2590,23 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gemma3
         name: Gemma 3 (4B)
         version: "3.0"
@@ -1647,12 +2619,24 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gemma3:12b
         name: Gemma 3 (12B)
         version: "3.0"
@@ -1665,12 +2649,24 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: gemma3:27b
         name: Gemma 3 (27B)
         version: "3.0"
@@ -1683,12 +2679,24 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedMediaTypes:
           - text
           - image
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: nomic-embed-text
         name: Nomic Embed Text
         version: "1.5"
@@ -1698,11 +2706,23 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: false
         supportedMediaTypes:
           - text
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'
       - id: mxbai-embed-large
         name: MxBai Embed Large
         version: "1.0"
@@ -1712,10 +2732,22 @@ providers:
         rpm: null
         itpm: null
         otpm: null
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: false
         supportedMediaTypes:
           - text
 
 
+        pricing:
+          inputPerTokenUsdCents: null
+          outputPerTokenUsdCents: null
+          cachedInputPerTokenUsdCents: null
+          cacheWritePerTokenUsdCents: null
+          reasoningPerTokenUsdCents: null
+          audioInputPerSecondUsdCents: null
+          audioOutputPerSecondUsdCents: null
+          videoInputPerSecondUsdCents: null
+          videoOutputPerSecondUsdCents: null
+          imageGenerationPerImageUsdCents: null
+          embeddingPerTokenUsdCents: null
+          currency: USD
+          pricingEffectiveFrom: '2026-04-29'

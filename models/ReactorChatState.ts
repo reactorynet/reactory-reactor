@@ -119,6 +119,15 @@ export interface ReactorConversationDocument {
   tokenCount?: number
   // The maximum number of tokens this chat should be
   maxTokens?: number
+  // Cached cost/usage summary recomputed by ReactoryUsageService.
+  // Source-of-truth for cost lives in reactor_usage_events; this is a denormalized cache.
+  usageSummary?: {
+    totalPromptTokens: number
+    totalCompletionTokens: number
+    totalTokens: number
+    totalCostUsdCents: number
+    lastEventAt: Date | null
+  }
   // The truncated history - messages removed to stay within token limits
   truncatedHistory?: ReactorConversationHistory
   // The user files attached to this conversation session
@@ -254,6 +263,18 @@ const ReactorConversationSchema = new Schema({
     type: Number,
     default: null,
     min: 0,
+  },
+  // Denormalized cost cache — recomputed by ReactoryUsageService
+  usageSummary: {
+    type: {
+      totalPromptTokens: { type: Number, default: 0 },
+      totalCompletionTokens: { type: Number, default: 0 },
+      totalTokens: { type: Number, default: 0 },
+      totalCostUsdCents: { type: Number, default: 0 },
+      lastEventAt: { type: Date, default: null },
+    },
+    default: null,
+    _id: false,
   },
   files: {
     type: [ObjectId],

@@ -141,7 +141,9 @@ class ReactorCapabilityService implements IReactorCapabilityService {
       eligibleProviders.sort((a, b) => {
         const modelA = a.models.find((m: any) => m.id === a.defaultModel);
         const modelB = b.models.find((m: any) => m.id === b.defaultModel);
-        return (modelA?.costPerToken || 0) - (modelB?.costPerToken || 0);
+        const costA = modelA?.pricing?.inputPerTokenUsdCents ?? 0;
+        const costB = modelB?.pricing?.inputPerTokenUsdCents ?? 0;
+        return costA - costB;
       });
     }
     

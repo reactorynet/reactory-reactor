@@ -361,7 +361,13 @@ class OpenAIService extends AIProviderBase {
     let finishReason: string | null = null;
     let completionId: string | null = null;
     let model = "";
-    let streamUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null = null;
+    let streamUsage: {
+      prompt_tokens: number;
+      completion_tokens: number;
+      total_tokens: number;
+      prompt_tokens_details?: { cached_tokens?: number };
+      completion_tokens_details?: { reasoning_tokens?: number };
+    } | null = null;
 
     try {
       for await (const chunk of stream) {
@@ -506,7 +512,13 @@ class OpenAIService extends AIProviderBase {
         finish_reason: finishReason || "stop",
       }],
       usage: streamUsage
-        ? { prompt_tokens: streamUsage.prompt_tokens, completion_tokens: streamUsage.completion_tokens, total_tokens: streamUsage.total_tokens }
+        ? {
+            prompt_tokens: streamUsage.prompt_tokens,
+            completion_tokens: streamUsage.completion_tokens,
+            total_tokens: streamUsage.total_tokens,
+            prompt_tokens_details: streamUsage.prompt_tokens_details,
+            completion_tokens_details: streamUsage.completion_tokens_details,
+          }
         : { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
       // Carry reasoning through for persistence by the conversation service
       reasoning: accumulatedReasoning || undefined,
@@ -578,10 +590,14 @@ class OpenAIService extends AIProviderBase {
       })),
     };
     if (response.usage) {
+      const cached = (response.usage as any).prompt_tokens_details?.cached_tokens;
+      const reasoning = (response.usage as any).completion_tokens_details?.reasoning_tokens;
       completion.usage = {
         promptTokens: response.usage.prompt_tokens,
         completionTokens: response.usage.completion_tokens,
         totalTokens: response.usage.total_tokens,
+        ...(typeof cached === 'number' ? { cachedPromptTokens: cached } : {}),
+        ...(typeof reasoning === 'number' ? { reasoningTokens: reasoning } : {}),
       };
     }
     return completion;

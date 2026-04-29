@@ -12,6 +12,9 @@ import {
 } from './ReactorGraphNode';
 import MCPRegistryModel from './MCPRegistry';
 import MCPInstalledConnectorModel from './MCPInstalledConnector';
+import { ReactoryUsageEventModelComponentRegistryEntry } from './ReactoryUsageEvent';
+import { ReactoryUserBudgetModelComponentRegistryEntry } from './ReactoryUserBudget';
+import { ReactoryUsageAlertModelComponentRegistryEntry } from './ReactoryUsageAlert';
 
 export const MCPRegistryModelComponentRegistryEntry = {
   nameSpace: 'reactory',
@@ -41,4 +44,7 @@ export default [
   MCPInstalledConnectorModelComponentRegistryEntry,
   SecurityPersonaComponentRegistryEntry,
   WorkflowWillPersonaComponentRegistryEntry,
+  ReactoryUsageEventModelComponentRegistryEntry,
+  ReactoryUserBudgetModelComponentRegistryEntry,
+  ReactoryUsageAlertModelComponentRegistryEntry,
 ];

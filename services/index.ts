@@ -23,6 +23,8 @@ import { StreamingTransportManager } from "./reactor/StreamingTransportManager";
 import MCPRegistryService from "./mcp/MCPRegistryService";
 import ReactorPlaywrightService from "./playwright/ReactorPlaywrightService";
 import PersonaLoaderService from "@reactory/server-modules/reactory-reactor/ai/persona/loader/persona-loader";
+import ReactoryUsageService from "./reactor/ReactoryUsageService";
+import ReactoryBudgetService from "./reactor/ReactoryBudgetService";
 
 export default [
   ReactorMacroService,
@@ -45,7 +47,9 @@ export default [
   ReactNativeProjectProcessor,
   DocumentChunkingService,
   MCPRegistryService,
-  StreamingSessionManager,  
+  StreamingSessionManager,
   StreamingTransportManager,
   ReactorPlaywrightService,
+  ReactoryUsageService,
+  ReactoryBudgetService,
 ];

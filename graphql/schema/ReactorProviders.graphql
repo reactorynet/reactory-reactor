@@ -9,13 +9,37 @@ type ReactorModelDefinition {
   version: String
   capabilities: [String!]!
   contextLength: Int
-  costPerToken: Float
-  inputCostPerToken: Float
-  outputCostPerToken: Float
+  pricing: ReactorModelPricing
   maxParallelRequests: Int
   supportsStreaming: Boolean
   supportedTools: [String]
   supportedMediaTypes: [String]
+}
+
+"""
+Per-model pricing fields (USD cents per unit). null = unpriced for that dimension.
+"""
+type ReactorModelPricing {
+  inputPerTokenUsdCents: Float
+  outputPerTokenUsdCents: Float
+  cachedInputPerTokenUsdCents: Float
+  cacheWritePerTokenUsdCents: Float
+  reasoningPerTokenUsdCents: Float
+  audioInputPerSecondUsdCents: Float
+  audioOutputPerSecondUsdCents: Float
+  videoInputPerSecondUsdCents: Float
+  videoOutputPerSecondUsdCents: Float
+  imageGenerationPerImageUsdCents: Float
+  imageGenerationTiers: [ReactorModelPricingTier!]
+  embeddingPerTokenUsdCents: Float
+  currency: String!
+  pricingEffectiveFrom: String
+}
+
+type ReactorModelPricingTier {
+  size: String
+  quality: String
+  usdCents: Float!
 }
 
 """

@@ -9,6 +9,7 @@ import ReactorProviders from './ReactorProviders';
 import MCPRegistryResolvers from '../mcp/resolvers';
 
 import ReactorProviderAuth from './ReactorProviderAuth';
+import ReactorBudget from './ReactorBudget';
 
 export default mergeGraphResolver([
   ReactorChat,
@@ -20,5 +21,6 @@ export default mergeGraphResolver([
   MCPRegistryResolvers,
 
   ReactorProviders,
-  ReactorProviderAuth
+  ReactorProviderAuth,
+  ReactorBudget,
 ]);

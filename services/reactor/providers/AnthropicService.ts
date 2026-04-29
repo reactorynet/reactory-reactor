@@ -647,7 +647,7 @@ class AnthropicService extends AIProviderBase {
     persona: IAIPersona;
     history: ReactorConversationHistory;
     messageId?: string;
-  }): Promise<{ content: string; finishReason: string; toolCalls: any[]; reasoning?: string; assistantPersisted?: boolean; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
+  }): Promise<{ content: string; finishReason: string; toolCalls: any[]; reasoning?: string; assistantPersisted?: boolean; usage?: { promptTokens: number; completionTokens: number; totalTokens: number; cachedPromptTokens?: number; cacheWriteTokens?: number } }> {
     const { sessionId, message, persona, history, messageId } = args;
 
     const messages = this.convertHistoryToAnthropicFormat(history);
@@ -658,6 +658,8 @@ class AnthropicService extends AIProviderBase {
     let totalTokens = 0;
     let promptTokens = 0;
     let completionTokens = 0;
+    let cachedPromptTokens = 0;
+    let cacheWriteTokens = 0;
     let finishReason = "stop";
     const collectedToolCalls: any[] = [];
 
@@ -673,6 +675,8 @@ class AnthropicService extends AIProviderBase {
           // Extract input token usage from message_start
           if (chunk.message?.usage) {
             promptTokens = chunk.message.usage.input_tokens || 0;
+            cachedPromptTokens = chunk.message.usage.cache_read_input_tokens || 0;
+            cacheWriteTokens = chunk.message.usage.cache_creation_input_tokens || 0;
           }
           break;
         }
@@ -828,7 +832,13 @@ class AnthropicService extends AIProviderBase {
       toolCalls: collectedToolCalls,
       reasoning: accumulatedReasoning || undefined,
       assistantPersisted,
-      usage: { promptTokens, completionTokens, totalTokens },
+      usage: {
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        ...(cachedPromptTokens > 0 ? { cachedPromptTokens } : {}),
+        ...(cacheWriteTokens > 0 ? { cacheWriteTokens } : {}),
+      },
     };
   }
 
@@ -846,10 +856,12 @@ class AnthropicService extends AIProviderBase {
     finishReason: string;
     toolCalls: any[];
     toolResults: any[];
-    usage: { promptTokens: number; completionTokens: number };
+    usage: { promptTokens: number; completionTokens: number; cachedPromptTokens?: number; cacheWriteTokens?: number };
   }> {
     let totalPromptTokens = 0;
     let totalCompletionTokens = 0;
+    let totalCachedPromptTokens = 0;
+    let totalCacheWriteTokens = 0;
     const allToolCalls: any[] = [];
     const allToolResults: any[] = [];
 
@@ -861,6 +873,8 @@ class AnthropicService extends AIProviderBase {
       if (response.usage) {
         totalPromptTokens += response.usage.input_tokens;
         totalCompletionTokens += response.usage.output_tokens;
+        totalCachedPromptTokens += (response.usage as any).cache_read_input_tokens || 0;
+        totalCacheWriteTokens += (response.usage as any).cache_creation_input_tokens || 0;
       }
 
       const responseText = this.extractResponseText(response);
@@ -881,7 +895,12 @@ class AnthropicService extends AIProviderBase {
           finishReason: response.stop_reason || "end_turn",
           toolCalls: allToolCalls,
           toolResults: allToolResults,
-          usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens },
+          usage: {
+            promptTokens: totalPromptTokens,
+            completionTokens: totalCompletionTokens,
+            ...(totalCachedPromptTokens > 0 ? { cachedPromptTokens: totalCachedPromptTokens } : {}),
+            ...(totalCacheWriteTokens > 0 ? { cacheWriteTokens: totalCacheWriteTokens } : {}),
+          },
         };
       }
 
@@ -948,7 +967,12 @@ class AnthropicService extends AIProviderBase {
       finishReason: "max_tool_iterations",
       toolCalls: allToolCalls,
       toolResults: allToolResults,
-      usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens },
+      usage: {
+        promptTokens: totalPromptTokens,
+        completionTokens: totalCompletionTokens,
+        ...(totalCachedPromptTokens > 0 ? { cachedPromptTokens: totalCachedPromptTokens } : {}),
+        ...(totalCacheWriteTokens > 0 ? { cacheWriteTokens: totalCacheWriteTokens } : {}),
+      },
     };
   }
 
@@ -976,6 +1000,8 @@ class AnthropicService extends AIProviderBase {
           promptTokens: result.usage.promptTokens,
           completionTokens: result.usage.completionTokens,
           totalTokens: result.usage.promptTokens + result.usage.completionTokens,
+          ...(result.usage.cachedPromptTokens ? { cachedPromptTokens: result.usage.cachedPromptTokens } : {}),
+          ...(result.usage.cacheWriteTokens ? { cacheWriteTokens: result.usage.cacheWriteTokens } : {}),
         } : undefined;
         return this.buildCompletion(result.content, result.finishReason, result.toolCalls, toolLoopUsage);
       }
@@ -1012,6 +1038,8 @@ class AnthropicService extends AIProviderBase {
             promptTokens: streamResult.usage.promptTokens,
             completionTokens: streamResult.usage.completionTokens,
             totalTokens: streamResult.usage.totalTokens,
+            ...(streamResult.usage.cachedPromptTokens ? { cachedPromptTokens: streamResult.usage.cachedPromptTokens } : {}),
+            ...(streamResult.usage.cacheWriteTokens ? { cacheWriteTokens: streamResult.usage.cacheWriteTokens } : {}),
           } : undefined;
           const completion = this.buildCompletion(streamResult.content, streamResult.finishReason, streamResult.toolCalls, streamUsage);
           // If the assistant message was already persisted before the SSE completion event
@@ -1029,6 +1057,8 @@ class AnthropicService extends AIProviderBase {
           promptTokens: result.usage.promptTokens,
           completionTokens: result.usage.completionTokens,
           totalTokens: result.usage.promptTokens + result.usage.completionTokens,
+          ...(result.usage.cachedPromptTokens ? { cachedPromptTokens: result.usage.cachedPromptTokens } : {}),
+          ...(result.usage.cacheWriteTokens ? { cacheWriteTokens: result.usage.cacheWriteTokens } : {}),
         } : undefined;
         return this.buildCompletion(result.content, result.finishReason, result.toolCalls, loopUsage);
       }

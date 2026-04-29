@@ -2,6 +2,7 @@ import Reactory from '@reactorynet/reactory-core';
 import ReactorCli from './reactor-cli/ReactorCli';
 import ReactorTuiApp from './reactor-tui/ReactorTui';
 import GraphManagerCLI from './SystemGraphManager/GraphManager';
+import BackfillUsageCLI from './backfill-usage/BackfillUsage';
 type ReactoryCliApp = (vargs: string[], context: Reactory.Server.IReactoryContext) => Promise<void>
 
 /**
@@ -39,6 +40,7 @@ const ReactorCliApp: Reactory.IReactoryComponentDefinition<ReactoryCliApp> = {
 const ReactoryCliApps: Reactory.IReactoryComponentDefinition<ReactoryCliApp>[] = [
   ReactorCliApp,
   GraphManagerCLI,
+  BackfillUsageCLI,
   {
     nameSpace: 'reactor',
     name: 'ReactorTui',
