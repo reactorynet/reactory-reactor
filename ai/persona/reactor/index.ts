@@ -46,6 +46,11 @@ const REACTOR_TOOL_INCLUDES = [
   'playwright_pdf',
   'playwright_page_info',
   'playwright_list_sessions',
+  // slack tools
+  'readSlackMessages',
+  'readSlackThreadReplies',
+  'getSlackChannelInfo',
+  'listSlackChannels'
 ];
 
 const REACTOR_RESOURCES: IAIPersonaResource[] = [  
