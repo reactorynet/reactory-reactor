@@ -3,7 +3,6 @@
   "version": "1.1.0",
   "displayName": "Reactory Reactor AI module",
   "description": "Reactory Reactor AI Module - provides AI services and components for the reactory eco-system.",
-  "private": "true",
   "files": [
     "dist",
     "docs",
@@ -18,19 +17,19 @@
     {
       "license": "Commercial"
     }
-  ],  
+  ],
   "repository": {
     "type": "git",
     "url": "https://github.com/reactorynet/reactory-reactor.git"
   },
   "dependencies": {
-    "@google/genai":"1.24.0",
-    "openai": "4.87.3",
-    "@aws-sdk/client-bedrock": "3.864.0",
     "@anthropic-ai/sdk": "0.59.0",
+    "@aws-sdk/client-bedrock": "3.864.0",
+    "@google/genai": "1.24.0",
     "@modelcontextprotocol/sdk": "1.28.0",
-    "ollama": "0.6.3",
     "neo-blessed": "^0.2.0",
+    "ollama": "0.6.3",
+    "openai": "4.87.3",
     "playwright": "1.59.1"
   }
 }
