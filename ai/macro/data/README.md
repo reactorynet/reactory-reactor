@@ -4,6 +4,12 @@ This module provides database access macros for AI agents to execute SQL queries
 
 ## Available Database Macros
 
+### List Data Connections (`@listDataConnections`)
+- **File**: `connections/macro.ts`
+- **Purpose**: Lists partner-configured data connections available to the current user/agent.
+- **Security**: If a connection setting defines `roles`, access is filtered using runtime role checks.
+- **Output**: Sanitized connection metadata (`connectionId`, `variant`, `host`, `port`, `database`, optional roles/description). Passwords are never returned.
+
 ### PostgreSQL (`@postgres`)
 - **File**: `pgsql/macro.ts`
 - **Dependencies**: `pg` package

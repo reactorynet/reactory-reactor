@@ -13,6 +13,7 @@ import ProjectMacros from './projects';
 import DataMacros from './data';
 import ModuleMacros from './develop/module';
 import PlaywrightMacros from './playwright';
+import SkillsMacros from './skills';
 
 export { MacroErrorCode, MacroError, createMacroError } from './errors';
 export { summarizeItems, truncateOutput } from './summarize';
@@ -101,6 +102,7 @@ export const MacroRegistry: MacroComponentDefinition<unknown>[] = [
   ...DataMacros,
   ...ModuleMacros,
   ...PlaywrightMacros,
+  ...SkillsMacros,
 ];
 
 export const getMacrosMD = (): string => {

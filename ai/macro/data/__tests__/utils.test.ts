@@ -26,11 +26,32 @@ describe('getDatabaseConnection', () => {
   it('should return connection data when found', () => {
     const partner = {
       settings: [
-        { name: 'my-db', settingType: 'connection', data: { variant: 'postgres', host: 'localhost' } },
+        {
+          name: 'my-db',
+          settingType: 'connection',
+          variant: 'postgres',
+          data: { host: 'localhost', port: 5432, database: 'db', username: 'u', password: 'p' },
+        },
       ],
     };
     const result = getDatabaseConnection('my-db', partner);
-    expect(result).toEqual({ variant: 'postgres', host: 'localhost' });
+    expect(result).toEqual(
+      expect.objectContaining({ variant: 'postgres', host: 'localhost' })
+    );
+  });
+
+  it('should support legacy settingType + data.variant shape', () => {
+    const partner = {
+      settings: [
+        {
+          name: 'legacy-db',
+          settingType: 'connection',
+          data: { variant: 'postgres', host: 'localhost' },
+        },
+      ],
+    };
+    const result = getDatabaseConnection('legacy-db', partner);
+    expect(result).toEqual(expect.objectContaining({ variant: 'postgres', host: 'localhost' }));
   });
 
   it('should return null when partner is null', () => {
@@ -55,6 +76,15 @@ describe('getDatabaseConnection', () => {
     const partner = {
       settings: [
         { name: 'my-db', settingType: 'credential', data: { variant: 'postgres' } },
+      ],
+    };
+    expect(getDatabaseConnection('my-db', partner)).toBeNull();
+  });
+
+  it('should return null when variant cannot be resolved', () => {
+    const partner = {
+      settings: [
+        { name: 'my-db', settingType: 'connection', data: { host: 'localhost' } },
       ],
     };
     expect(getDatabaseConnection('my-db', partner)).toBeNull();

@@ -16,6 +16,7 @@ import { PostgresMacroRegistry } from './pgsql/macro';
 import { MySqlMacroRegistry } from './mysql/macro';
 import { MongoReadMacroRegistry, MongoWriteMacroRegistry } from './mongo/macro';
 import SearchMacroRegistryEntries from './search/macro';
+import ListDataConnectionsMacroRegistryEntries from './connections/macro';
 
 // Export types
 export * from './types';
@@ -37,6 +38,7 @@ export { MongoReadMacro, MongoReadMacroRegistry, MongoWriteMacro, MongoWriteMacr
 
 // Export all macro registries for easy registration
 export const DatabaseMacros = [
+  ...ListDataConnectionsMacroRegistryEntries,
   PostgresMacroRegistry,
   MySqlMacroRegistry, // Uncomment when mysql2 is available
   MsSqlMacroRegistry,

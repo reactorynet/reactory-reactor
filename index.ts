@@ -6,6 +6,7 @@ import Services from './services';
 import Models from './models';
 import Forms from './forms';
 import Middlewares from './middleware';
+import ReactorSkills from './ai/skills';
 
 const ClientCertificate = require.resolve('./certs/reactory-web-client.cert');
 const {
@@ -51,6 +52,14 @@ const ReactorModule: Reactory.Server.IReactoryModule = {
   passportProviders: [],
   cli: ReactorCli,
   pdfs: [],
+  reactor: {
+    providers: [],
+    tools: [],
+    mcp: [],
+    agents: [],
+    macros: [],
+    skills: ReactorSkills,
+  },
   description: 'Reactory Reactor Module',
 };
 

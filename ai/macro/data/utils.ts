@@ -1,7 +1,13 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import os from 'os';
-import { DatabaseMacroProps, DatabaseConnection, DatabaseQueryResult, OutputFormat } from './types';
+import {
+  DatabaseMacroProps,
+  DatabaseConnection,
+  DatabaseQueryResult,
+  ListedDatabaseConnection,
+  OutputFormat,
+} from './types';
 import logger from '@reactory/server-core/logging';
 
 /**
@@ -17,19 +23,98 @@ export const getDatabaseConnection = (
     }
 
     const connectionSetting = partner.settings.find(
-      (setting: any) => 
-        setting.name === connectionId && 
-        setting.settingType === 'connection'
+      (setting: PartnerSettingConnection) =>
+        setting.name === connectionId &&
+        isConnectionSetting(setting)
     );
 
     if (!connectionSetting || !connectionSetting.data) {
       return null;
     }
 
-    return connectionSetting.data;
+    const variant = resolveSettingVariant(connectionSetting);
+    if (!variant) {
+      return null;
+    }
+
+    return {
+      ...connectionSetting.data,
+      variant,
+    } as DatabaseConnection;
   } catch (error) {
     logger.error(`Error getting database connection ${connectionId}:`, error);
     return null;
+  }
+};
+
+type PartnerSettingConnection = {
+  name?: string;
+  type?: string;
+  settingType?: string;
+  variant?: DatabaseConnection['variant'];
+  description?: string;
+  roles?: string[];
+  data?: Partial<DatabaseConnection>;
+};
+
+const isConnectionSetting = (setting: PartnerSettingConnection): boolean =>
+  setting?.settingType === 'connection' || setting?.type === 'connection';
+
+const resolveSettingVariant = (
+  setting: PartnerSettingConnection,
+): DatabaseConnection['variant'] | undefined =>
+  (setting?.data?.variant as DatabaseConnection['variant']) ??
+  (setting?.variant as DatabaseConnection['variant']);
+
+/**
+ * Lists available data connections from partner settings, filtered by access.
+ *
+ * Security behavior:
+ * - If a setting has a non-empty `roles` array, `hasAnyRole` must approve access.
+ * - If `hasAnyRole` is not provided for a role-protected setting, access is denied.
+ */
+export const listDatabaseConnections = (
+  partner: any,
+  hasAnyRole?: (roles: string[]) => boolean,
+): ListedDatabaseConnection[] => {
+  try {
+    if (!partner?.settings || !Array.isArray(partner.settings)) {
+      return [];
+    }
+
+    return partner.settings
+      .filter((setting: PartnerSettingConnection) => isConnectionSetting(setting))
+      .filter(
+        (setting: PartnerSettingConnection) =>
+          !!setting?.name && !!resolveSettingVariant(setting)
+      )
+      .filter((setting: PartnerSettingConnection) => {
+        const roles = Array.isArray(setting?.roles)
+          ? setting.roles.filter((role) => typeof role === 'string' && role.trim().length > 0)
+          : [];
+
+        if (roles.length === 0) return true;
+        if (!hasAnyRole) return false;
+
+        try {
+          return hasAnyRole(roles);
+        } catch (error) {
+          logger.error(`Error evaluating roles for connection ${setting?.name}:`, error);
+          return false;
+        }
+      })
+      .map((setting: PartnerSettingConnection): ListedDatabaseConnection => ({
+        connectionId: setting.name as string,
+        variant: resolveSettingVariant(setting) as ListedDatabaseConnection['variant'],
+        host: setting.data?.host,
+        port: setting.data?.port,
+        database: setting.data?.database,
+        description: setting.description,
+        roles: setting.roles,
+      }));
+  } catch (error) {
+    logger.error('Error listing database connections:', error);
+    return [];
   }
 };
 

@@ -323,11 +323,44 @@ export interface IToolCallResponse {
   tool_call_id: string
 }
 
-export interface IReactorModule extends Reactory.Server.IReactoryModule {
+/**
+ * Defines a skill that can be discovered via the skills catalog and read by the agent.
+ * Skills are Markdown instruction files contributed by server modules through their
+ * `reactor.skills` array. The agent discovers them via `searchSkills` and reads their
+ * content via `readSkill`.
+ */
+export interface ISkillDefinition {
+  /** Unique FQN: "{namespace}.{name}@{version}", e.g. "reactory-kb.createArticle@1.0.0" */
+  id: string;
+  /** Human-readable name, e.g. "createArticle" */
+  name: string;
+  /** One-paragraph summary used for catalog search and discovery */
+  description: string;
+  /** Owning module nameSpace, e.g. "reactory-kb" */
+  nameSpace: string;
+  /** Semver string, e.g. "1.0.0" */
+  version: string;
+  /** Absolute path to the skill Markdown file on disk (use require.resolve() in module definitions) */
+  filePath: string;
+  /** Categorisation tags, e.g. ["knowledge-base", "content", "crud"] */
+  tags?: string[];
+  /** Required user roles to access this skill, e.g. ["ADMIN", "DEVELOPER"] */
+  roles?: string[];
+  /** Optional JSON Schema describing skill input parameters */
+  parameters?: Schema;
+  /** Optional example invocation strings shown in search results */
+  examples?: string[];
+}
+
+export interface IReactorModule extends Omit<Reactory.Server.IReactoryModule, 'reactor'> {
   reactor: {
     macros?: MacroComponentDefinition<unknown>[]
     tools?: MacroToolDefinition[]
     providers?: any[],
     personas?: IAIPersona[]
+    agents?: any[]
+    mcp?: any[]
+    /** Skills contributed by this module to the global skill catalog */
+    skills?: ISkillDefinition[]
   }
 }

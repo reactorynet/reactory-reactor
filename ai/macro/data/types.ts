@@ -49,6 +49,27 @@ export interface DatabaseConnection {
 }
 
 /**
+ * A safe connection descriptor returned to agents when listing available
+ * database connections. Intentionally excludes credentials like password.
+ */
+export interface ListedDatabaseConnection {
+  /** Connection identifier used by data macros */
+  connectionId: string;
+  /** Connection variant */
+  variant: DatabaseVariant;
+  /** Host address */
+  host?: string;
+  /** Port number */
+  port?: number;
+  /** Database name */
+  database?: string;
+  /** Optional descriptive label */
+  description?: string;
+  /** Roles required to use the connection (if configured) */
+  roles?: string[];
+}
+
+/**
  * Database query result
  */
 export interface DatabaseQueryResult {
