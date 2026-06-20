@@ -355,7 +355,7 @@ class PersonaLoaderService implements Reactory.Service.IReactoryService {
     if (!this.registriesPopulated) {
       this.populateRegistries();
     }
-
+    this.context.log(`Converting persona config ${config?.name || 'Unset - check persona config'} to persona interface`)
     const persona: IAIPersona = {
       id: config.id,
       name: config.name,
