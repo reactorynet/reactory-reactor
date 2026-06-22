@@ -42,6 +42,21 @@ const CONVERSATION_SERVICE_ID = 'reactor.ReactorConversationService@1.0.0';
 const VALID_TOOL_MODES = ['auto', 'safe_auto', 'prompt', 'plan'];
 const VALID_MERGE_STRATEGIES = ['append', 'prepend', 'replace'];
 
+/**
+ * The conversation service returns a `{ __typename: 'ReactorErrorResponse', ... }`
+ * object on failure (it does not throw). Extract a readable message + nested
+ * detail so the workflow surfaces the real cause (e.g. an unknown personaId).
+ */
+function describeErrorResponse(resp: any): string {
+  const base = resp?.message || 'error response';
+  const details = resp?.details;
+  const detailMsg =
+    details instanceof Error
+      ? details.message
+      : details?.message || (typeof details === 'string' ? details : undefined);
+  return detailMsg ? `${base} — ${detailMsg}` : base;
+}
+
 export interface AgentConversationStepConfig {
   /** The AI agent/persona id to converse with. */
   personaId: string;
@@ -102,15 +117,30 @@ export class AgentConversationStep extends BaseYamlStep {
         context.logger.info(
           `Starting agent conversation with persona "${personaId}" (toolApprovalMode=${toolApprovalMode})`,
         );
-        const session = await conversationService.startChatSession({
+        const session: any = await conversationService.startChatSession({
           personaId,
           systemPrompt: instructions,
           streamingMode: StreamingMode.NONE,
           toolApprovalMode,
           promptMergeStrategy,
+          // Both must be arrays — startChatSession iterates them (args.macros.forEach).
           tools: [],
-          macros: {},
+          macros: [],
         });
+
+        // startChatSession catches internal errors and RETURNS a
+        // ReactorErrorResponse (it does not throw) — surface the real cause
+        // (e.g. an unknown personaId) instead of a generic "no session id".
+        if (session?.__typename === 'ReactorErrorResponse') {
+          const detail = describeErrorResponse(session);
+          context.logger.error(`Failed to start agent conversation: ${detail}`);
+          return {
+            success: false,
+            error: `Failed to start agent conversation with persona "${personaId}": ${detail}`,
+            outputs: {},
+            metadata: { personaId },
+          };
+        }
 
         sessionId = session?.id || session?._id?.toString?.() || session?.sessionId;
         if (!sessionId) {
@@ -132,13 +162,24 @@ export class AgentConversationStep extends BaseYamlStep {
         context.logger.info(`Resuming agent conversation "${sessionId}" with persona "${personaId}"`);
       }
 
-      const response = await conversationService.sendMessage({
+      const response: any = await conversationService.sendMessage({
         message,
         personaId,
         chatSessionId: sessionId,
         streamingMode: StreamingMode.NONE,
         toolApprovalMode,
       });
+
+      if (response?.__typename === 'ReactorErrorResponse') {
+        const detail = describeErrorResponse(response);
+        context.logger.error(`Agent conversation turn failed: ${detail}`);
+        return {
+          success: false,
+          error: `Agent conversation turn failed: ${detail}`,
+          outputs: { sessionId },
+          metadata: { personaId, sessionId },
+        };
+      }
 
       const content =
         response?.content ||
@@ -148,9 +189,15 @@ export class AgentConversationStep extends BaseYamlStep {
 
       context.logger.info(`Agent "${personaId}" responded (session: ${sessionId})`);
 
+      // IMPORTANT: only return serializable essentials. Workflow step outputs are
+      // persisted into the durable workflow instance data — putting the raw
+      // conversation `response` object (provider/mongoose document, possibly
+      // circular / non-BSON-serializable) there breaks instance persistence, which
+      // silently discards the step advance and causes the engine to re-run this
+      // step forever. `content` (the agent's text) + `sessionId` are all callers need.
       return {
         success: true,
-        outputs: { sessionId, content, response },
+        outputs: { sessionId, content },
         metadata: { personaId, sessionId, toolApprovalMode },
       };
     } catch (err) {
@@ -195,7 +242,7 @@ export class AgentConversationStep extends BaseYamlStep {
 
   private getConversationService(context: StepExecutionContext): any {
     try {
-      return context.reactoryContext.getService(CONVERSATION_SERVICE_ID);
+      return context.reactoryContext?.getService(CONVERSATION_SERVICE_ID) ?? null;
     } catch {
       return null;
     }

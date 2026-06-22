@@ -36,6 +36,43 @@ function makeContext(service: any) {
 }
 
 describe('AgentConversationStep', () => {
+  it('surfaces the real error when startChatSession returns a ReactorErrorResponse', async () => {
+    // The conversation service does NOT throw on failure — it returns an error
+    // response object with no session id. The step must detect it and report
+    // the underlying cause (here an unknown persona) rather than a generic message.
+    const service = makeService({
+      startChatSession: jest.fn(async () => ({
+        __typename: 'ReactorErrorResponse',
+        message: 'Error starting chat session',
+        details: { message: 'Persona with id Nope not found' },
+      })),
+    });
+    const step = new AgentConversationStep('chat', { personaId: 'Nope', message: 'hi' });
+
+    const result = await step.execute(makeContext(service));
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Persona with id Nope not found');
+    expect(service.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('surfaces a ReactorErrorResponse from sendMessage', async () => {
+    const service = makeService({
+      sendMessage: jest.fn(async () => ({
+        __typename: 'ReactorErrorResponse',
+        message: 'Tool execution limit exceeded',
+      })),
+    });
+    const step = new AgentConversationStep('chat', { personaId: 'ReactorAIPersona', message: 'hi' });
+
+    const result = await step.execute(makeContext(service));
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Tool execution limit exceeded');
+    // sessionId from the created session is preserved for diagnostics.
+    expect(result.outputs.sessionId).toBe('sess-1');
+  });
+
   it('creates a conversation with instructions + auto tool approval, then sends the message', async () => {
     const service = makeService();
     const step = new AgentConversationStep('chat', {
