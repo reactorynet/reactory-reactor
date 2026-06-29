@@ -17,6 +17,8 @@ export interface ChatsMacroProps {
   files?: string[];
   /** Optional model for training operations */
   model?: string;
+  /** Optional provider for training operations */
+  provider?: string;
   /** Number of recent history items to return for the followup action (default: 2) */
   historyCount?: number;
 }

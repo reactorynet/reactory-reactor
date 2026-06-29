@@ -30,7 +30,7 @@ class ReactorChatResolver {
   async ReactorConversations(
     _: any,
     args: {
-      filter?: { personaId?: string; userId?: string; modelId?: string };
+      filter?: { personaId?: string;modelId?: string };
     },
     context: Reactory.Server.IReactoryContext
   ) {

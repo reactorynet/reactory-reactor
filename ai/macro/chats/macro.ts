@@ -15,7 +15,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
   props: ChatsMacroProps,
   state: ChatState
 ): Promise<unknown> => {
-  const { action, id, message, files, model } = props;
+  const { action, id, message, files, model, provider } = props;
   const { context } = state;
 
   try {
@@ -196,6 +196,8 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
           const response = await conversationService.sendMessage({
             personaId: persona.id,
             message,
+            modelId: model || state.model,
+            providerId: provider || state.provider,
             chatSessionId: existingChatId || undefined,
             streamingMode: StreamingMode.NONE,
             tool_results: undefined,
@@ -473,7 +475,11 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
             },
             model: {
               type: "string",
-              description: "Model identifier for the 'train' action.",
+              description: "Provide a specific model for the action. - Optional will use the default model if not specified.",
+            },
+            provider: {
+              type: "string",
+              description: "Provide a specific provider for the action. - Optional will use the default provider if not specified.",
             },
             historyCount: {
               type: "number",
