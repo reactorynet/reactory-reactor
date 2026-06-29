@@ -1221,54 +1221,54 @@ providers:
         supportedMediaTypes:
           - text
 
-id: deepseek
-name: DeepSeek
-endpointUrl: "${DEEPSEEK_API_BASE_URL:-https://api.deepseek.com}"
-apiVersion: v1
-defaultModel: deepseek-chat
-capabilities:
-  - text-generation
-  - code-generation
-  - reasoning
-credentialRequirements:
-  - apiKey
-credentialEnvVars:
-  apiKey: DEEPSEEK_API_KEY
-models:
-  - id: deepseek-chat
-    name: DeepSeek Chat
-    version: "1"
-    capabilities:
-      - text-generation
-      - code-generation
-    contextLength: 64000
-    rpm: null
-    itpm: null
-    otpm: null
-    inputCostPerTokenUsdCents: 0.000014
-    outputCostPerTokenUsdCents: 0.000028
-    supportsStreaming: true
-    supportedTools:
-      - function-calling
-    supportedMediaTypes:
-      - text
-  - id: deepseek-reasoner
-    name: DeepSeek Reasoner
-    version: "1"
+  - id: deepseek
+    name: DeepSeek
+    endpointUrl: "${DEEPSEEK_API_BASE_URL:-https://api.deepseek.com}"
+    apiVersion: v1
+    defaultModel: deepseek-chat
     capabilities:
       - text-generation
       - code-generation
       - reasoning
-    contextLength: 64000
-    rpm: null
-    itpm: null
-    otpm: null
-    inputCostPerTokenUsdCents: 0.000055
-    outputCostPerTokenUsdCents: 0.000219
-    supportsStreaming: true
-    supportedTools: []          # ⚠️ Remove function-calling - not supported
-    supportedMediaTypes:
-      - text
+    credentialRequirements:
+      - apiKey
+    credentialEnvVars:
+      apiKey: DEEPSEEK_API_KEY
+    models:
+      - id: deepseek-chat
+        name: DeepSeek Chat
+        version: "1"
+        capabilities:
+          - text-generation
+          - code-generation
+        contextLength: 64000
+        rpm: null
+        itpm: null
+        otpm: null
+        inputCostPerTokenUsdCents: 0.000014
+        outputCostPerTokenUsdCents: 0.000028
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+      - id: deepseek-reasoner
+        name: DeepSeek Reasoner
+        version: "1"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+        contextLength: 64000
+        rpm: null
+        itpm: null
+        otpm: null
+        inputCostPerTokenUsdCents: 0.000055
+        outputCostPerTokenUsdCents: 0.000219
+        supportsStreaming: true
+        supportedTools: []
+        supportedMediaTypes:
+          - text
 
   - id: ollama
     name: Ollama
