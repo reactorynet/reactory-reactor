@@ -136,12 +136,40 @@ function toProviderConfig(entry: ProviderYamlEntry): ProviderConfig {
 /**
  * Loads provider configs from the default providers.yaml file co-located
  * with this module, with environment variable interpolation.
+ * Optionally loads user-specific providers from ~/.reactor/providers.yaml.
  */
 export function loadProviders(yamlPath?: string): ProviderConfig[] {
-  const filePath = yamlPath || path.join(__dirname, 'providers.yaml');
-  const raw = fs.readFileSync(filePath, 'utf8');
-  const interpolated = interpolateEnvVars(yaml.load(raw)) as ProviderYamlRoot;
-  return (interpolated.providers || []).map(toProviderConfig);
+  const defaultFilePath = yamlPath || path.join(__dirname, 'providers.yaml');
+  const userFilePath = path.join(process.env.HOME || '/', '.reactor', 'providers.yaml');
+
+  // Load default providers
+  const defaultRaw = fs.readFileSync(defaultFilePath, 'utf8');
+  const defaultInterpolated = interpolateEnvVars(yaml.load(defaultRaw)) as ProviderYamlRoot;
+
+  // Load user providers if they exist
+  let userProviders: ProviderYamlEntry[] = [];
+  try {
+    if (fs.existsSync(userFilePath)) {
+      const userRaw = fs.readFileSync(userFilePath, 'utf8');
+      const userInterpolated = interpolateEnvVars(yaml.load(userRaw)) as ProviderYamlRoot;
+      userProviders = userInterpolated.providers || [];
+    }
+  } catch (error) {
+    // If user file cannot be read, continue with just default providers
+    console.warn(`Warning: Could not read user providers file at ${userFilePath}:`, error);
+  }
+
+  // Combine default providers with user providers
+  const allProviders = [...(defaultInterpolated.providers || []), ...userProviders];
+
+  // Remove duplicates (user providers take precedence)
+  const providerMap = new Map<string, ProviderYamlEntry>();
+  allProviders.forEach(provider => {
+    providerMap.set(provider.id, provider);
+  });
+
+  // Convert to ProviderConfig
+  return Array.from(providerMap.values()).map(toProviderConfig);
 }
 
 /**

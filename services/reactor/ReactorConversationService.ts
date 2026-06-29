@@ -3013,17 +3013,6 @@ export default class ReactorConversationService
     }
   ): Promise<any> {
     switch (provider) {
-      case "xai":
-      case "openai":
-      case "copilot":
-      case "azure-openai":
-        // x-ai, openai, copilot, and azure-openai use the same OpenAI-compatible service
-        await this.openaiService.initialize(chatSessionId, persona);
-        return await this.openaiService.chat({
-          ...chatArgs,
-          persistState: false, // Don't persist here since we handle it in ReactorConversationService
-        });
-
       case "ollama":
         // Ollama uses the native Ollama Node SDK via OllamaAIService
         await this.ollamaService.initialize(chatSessionId, persona);
@@ -3047,10 +3036,12 @@ export default class ReactorConversationService
           persistState: false, // Don't persist here since we handle it in ReactorConversationService
         });
       default:
-        this.sessionLog("error", `Provider ${provider} not implemented`, {
-          provider,
-        }, chatSessionId, persona?.id);
-        throw new Error(`Provider ${provider} not implemented`);
+        // x-ai, openai, copilot, and azure-openai use the same OpenAI-compatible service
+        await this.openaiService.initialize(chatSessionId, persona);
+        return await this.openaiService.chat({
+          ...chatArgs,
+          persistState: false, // Don't persist here since we handle it in ReactorConversationService
+        });
     }
   }
 

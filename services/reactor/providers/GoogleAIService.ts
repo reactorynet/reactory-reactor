@@ -889,7 +889,7 @@ class GoogleAIService extends AIProviderBase {
         chatConfig.tools = tools;
         chatConfig.toolConfig = {
           functionCallingConfig: {
-            mode: FunctionCallingConfigMode.AUTO,
+            mode: process.env.GOOGLE_AI_FUNCTION_CALLING_CONFIG_MODE || "VALIDATED",
           },
         };
       }
@@ -2023,7 +2023,7 @@ class GoogleAIService extends AIProviderBase {
       await this.initializeClient(persona);
     }
 
-    const modelId = "gemini-2.0-flash-image-generation";
+    const modelId = process.env.GOOGLE_AI_IMAGE_GENERATION_MODEL_ID || "gemini-2.0-flash-image-generation";
     const response = await this.ai.models.generateContent({
       model: modelId,
       contents: [{ role: "user", parts: [{ text: params.prompt }] }],

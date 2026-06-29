@@ -1717,5 +1717,3 @@ providers:
         supportsStreaming: false
         supportedMediaTypes:
           - text
-
-

@@ -1,0 +1,67 @@
+nameSpace: reactor
+name: instruct
+version: 1.0.0
+description: "Sends a message to an AI agent within a chat session."
+author: "WorkflowWill"
+tags: ["ai", "agent", "chat", "instruction"]
+metadata:
+  timeout: 180000
+  retryPolicy:
+    maxAttempts: 2
+    backoffStrategy: linear
+    initialDelay: 2000
+inputs:
+  instruction:
+    type: string
+    required: true
+    description: "The message or prompt to send to the agent."
+  personaId:
+    type: string
+    required: true
+    description: "The ID of the AI agent/persona to interact with."
+    default: "reactor"
+  sessionId:
+    type: string
+    required: false
+    description: "Optional. The ID of an existing chat session to resume."
+  systemPrompt:
+    type: string
+    required: false
+    description: "Optional. A system prompt to provide context for a new conversation."
+outputs:
+  agentResponse:
+    type: string
+    source: "${steps.instructAgent.outputs.content}"
+    description: "The text content of the agent's response."
+  sessionId:
+    type: string
+    source: "${steps.instructAgent.outputs.sessionId}"
+    description: "The ID of the chat session, for continuing the conversation."
+steps:
+  - id: startWorkflowLog
+    name: "Log Instruction Start"
+    type: log
+    config:
+      level: info
+      message: "Sending instruction to persona '${input.personaId}' in session '${input.sessionId | default: 'new'}'.'"
+  - id: instructAgent
+    name: "Send Instruction to Agent"
+    type: agent_conversation
+    dependsOn: startWorkflowLog
+    config:
+      personaId: "${input.personaId}"
+      message: "${input.instruction}"
+      sessionId: "${input.sessionId}"
+      instructions: "${input.systemPrompt}"
+      toolApprovalMode: "auto"
+      promptMergeStrategy: "append"
+    onError:
+      action: fail
+      message: "The agent conversation step failed."
+  - id: endWorkflowLog
+    name: "Log Instruction Complete"
+    type: log
+    dependsOn: instructAgent
+    config:
+      level: info
+      message: "Agent responded in session '${steps.instructAgent.outputs.sessionId}'."

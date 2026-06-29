@@ -96,7 +96,7 @@ export class AgentConversationStep extends BaseYamlStep {
     const personaId = this.resolveTemplate(config.personaId, context);
     const message = this.resolveTemplate(config.message, context);
     const instructions = config.instructions ? this.resolveTemplate(config.instructions, context) : '';
-    const toolApprovalMode = (config.toolApprovalMode as ToolApprovalMode) || ToolApprovalMode.AUTO;
+      const toolApprovalMode = (config.toolApprovalMode as ToolApprovalMode) || ToolApprovalMode.AUTO;
     const promptMergeStrategy = config.promptMergeStrategy || 'append';
     let sessionId = config.sessionId ? this.resolveTemplate(config.sessionId, context) : undefined;
 

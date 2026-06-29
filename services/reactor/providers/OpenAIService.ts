@@ -161,6 +161,27 @@ class OpenAIService extends AIProviderBase {
         delete openAIArgs.organization;
         break;
       }
+      case "ollama":
+        openAIArgs.baseURL = apiBaseURL || process.env.OLLAMA_API_BASE_URL || "http://localhost:11434/v1";
+        openAIArgs.apiKey = apiKey || process.env.OLLAMA_API_KEY;
+        delete openAIArgs.organization;
+        break;
+      case "llamacpp":
+        openAIArgs.baseURL = apiBaseURL || process.env.LLAMA_CPP_API_URL || "http://localhost:8080";
+        openAIArgs.apiKey = apiKey || process.env.LLAMA_CPP_API_KEY;
+        delete openAIArgs.organization;
+        break;
+      case "vllm":
+        openAIArgs.baseURL = apiBaseURL || process.env.VLLM_API_BASE_URL || "http://localhost:8000";
+        openAIArgs.apiKey = apiKey || process.env.VLLM_API_KEY;
+        delete openAIArgs.organization;
+        break;
+      default:
+        // Default to OpenAI-compatible endpoint
+        openAIArgs.baseURL = apiBaseURL || process.env.OPENAI_API_BASE_URL || "https://api.openai.com/v1";
+        openAIArgs.apiKey = apiKey || process.env.OPENAI_API_KEY;
+        delete openAIArgs.organization;
+        break;
     }
 
     // Apply persona-specific configuration overrides
