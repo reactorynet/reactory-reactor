@@ -66,15 +66,12 @@ tools:
     - writeFile
     - listDirectory
     - createDirectory
-
     # HTTP -- for pulling business data from internal and external APIs
     - httpGet
     - httpPost
     - http
-
     # GraphQL -- for querying the Reactory platform data layer
     - graphql
-
     # Cross-agent collaboration -- delegate to existing specialists
     - chats
     # Shell -- for running scripts or invoking CLI tools when required
@@ -85,17 +82,6 @@ tools:
     - chart
     - d3
     - image
-
-# ─────────────────────────────────────────────
-# Macros Configuration
-# ─────────────────────────────────────────────
-macros:
-  includes:
-    # File system macro for structured read/write workflows
-    - FsMacroRegistry
-
-    # Agent management -- create, list, and inspect AI persona definitions
-    - ReactorPersonaMacroRegistry
 
 # ─────────────────────────────────────────────
 # Resources Configuration

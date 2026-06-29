@@ -39,7 +39,7 @@ import logger from "@reactory/server-core/logging";
   description: "Service for CRUD operations on Reactor Projects",
   serviceType: "data",
   dependencies: [
-    { id: "reactor.ReactoryWorkflowService@1.0.0", alias: "workflowService" },
+    { id: "core.ReactoryWorkflowService@1.0.0", alias: "workflowService" },
   ],
 })
 class ReactorProjectServiceImpl implements ReactorProjectService {
