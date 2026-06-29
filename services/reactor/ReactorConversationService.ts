@@ -2632,7 +2632,7 @@ export default class ReactorConversationService
       userId: this.context.user?._id,
     });
 
-    const { personaId, userId, modelId } = filter || {};
+    const { personaId, modelId } = filter || {};
     const query: any = {};
 
     // check if the user is logged in or an anoymous user.
@@ -2641,15 +2641,10 @@ export default class ReactorConversationService
     } else {
       return [];
     }
+    query.user = this.context.user;
 
     if (personaId) query.personaId = personaId;
-    if (userId) query.userId = userId;
     if (modelId) query.modelId = modelId;
-
-    // If no filter specified, get all conversations for current user
-    if (!filter || Object.keys(filter).length === 0) {
-      query.user = this.context.user;
-    }
 
     // ensure the query doesn't return any
     // results that don't have an _id.

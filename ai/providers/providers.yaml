@@ -482,6 +482,29 @@ providers:
     credentialEnvVars:
       apiKey: GOOGLE_AI_STUDIO_API_KEY
     models:
+          
+      - id: gemini-3.5-flash
+        name: Gemini 3.5 Flash
+        version: "3.5"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+        contextLength: 1048576
+        rpm: null
+        itpm: null
+        otpm: null
+        inputCostPerTokenUsdCents: 0.0002
+        outputCostPerTokenUsdCents: 0.0012
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+          - video
+          - audio    
       - id: gemini-3.1-pro-preview
         name: Gemini 3.1 Pro Preview
         version: "3.1"
@@ -526,8 +549,8 @@ providers:
           - image
           - video
           - audio
-      - id: gemini-3.1-flash-lite-preview
-        name: Gemini 3.1 Flash-Lite Preview
+      - id: gemini-3.1-flash-lite
+        name: Gemini 3.1 Flash-Lite
         version: "3.1"
         capabilities:
           - text-generation
@@ -1198,11 +1221,60 @@ providers:
         supportedMediaTypes:
           - text
 
+  - id: deepseek
+    name: DeepSeek
+    endpointUrl: "${DEEPSEEK_API_BASE_URL:-https://api.deepseek.com}"
+    apiVersion: v1
+    defaultModel: deepseek-chat
+    capabilities:
+      - text-generation
+      - code-generation
+      - reasoning
+    credentialRequirements:
+      - apiKey
+    credentialEnvVars:
+      apiKey: DEEPSEEK_API_KEY
+    models:
+      - id: deepseek-chat
+        name: DeepSeek Chat
+        version: "1"
+        capabilities:
+          - text-generation
+          - code-generation
+        contextLength: 64000
+        rpm: null
+        itpm: null
+        otpm: null
+        inputCostPerTokenUsdCents: 0.000014
+        outputCostPerTokenUsdCents: 0.000028
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+      - id: deepseek-reasoner
+        name: DeepSeek Reasoner
+        version: "1"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+        contextLength: 64000
+        rpm: null
+        itpm: null
+        otpm: null
+        inputCostPerTokenUsdCents: 0.000055
+        outputCostPerTokenUsdCents: 0.000219
+        supportsStreaming: true
+        supportedTools: []
+        supportedMediaTypes:
+          - text
+
   - id: ollama
     name: Ollama
     endpointUrl: "${OLLAMA_API_BASE_URL:-http://localhost:11434}"
     apiVersion: v1
-    defaultModel: llama3.2
+    defaultModel: qwen3.6
     capabilities:
       - text-generation
       - code-generation
@@ -1211,9 +1283,9 @@ providers:
     credentialRequirements: []
     credentialEnvVars: {}
     models:
-      - id: qwen3
+      - id: qwen3.6
         name: Qwen 3 (8B)
-        version: "3.0"
+        version: "3.6:35b"
         capabilities:
           - text-generation
           - code-generation
