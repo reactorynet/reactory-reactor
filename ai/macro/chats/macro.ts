@@ -196,8 +196,8 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
           const response = await conversationService.sendMessage({
             personaId: persona.id,
             message,
-            modelId: model || state.model,
-            providerId: provider || state.provider,
+            modelId: model || state.modelId,
+            providerId: provider,
             chatSessionId: existingChatId || undefined,
             streamingMode: StreamingMode.NONE,
             tool_results: undefined,
