@@ -302,6 +302,9 @@ class ReactorProviderService implements IReactorProviderService {
     this.adapters.set("ollama", openaiCompatibleAdapter("Ollama", "/api/reactor/stream/ollama"));
     this.adapters.set("copilot", openaiCompatibleAdapter("GitHub Copilot", "/api/reactor/stream/copilot"));
     this.adapters.set("azure-openai", openaiCompatibleAdapter("Azure OpenAI", "/api/reactor/stream/azure-openai"));
+    this.adapters.set("llamacpp", openaiCompatibleAdapter("llama.cpp", "/api/reactor/stream/llamacpp"));
+    this.adapters.set("vllm", openaiCompatibleAdapter("vLLM", "/api/reactor/stream/vllm"));
+    this.adapters.set("deepseek", openaiCompatibleAdapter("DeepSeek", "/api/reactor/stream/deepseek"));
     this.adapters.set("google", googleAdapter);
     this.adapters.set("amazon", amazonAdapter);
     this.adapters.set("anthropic", anthropicAdapter);

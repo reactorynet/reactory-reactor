@@ -168,7 +168,7 @@ class OpenAIService extends AIProviderBase {
         break;
       case "llamacpp":
         openAIArgs.baseURL = apiBaseURL || process.env.LLAMA_CPP_API_URL || "http://localhost:8080";
-        openAIArgs.apiKey = apiKey || process.env.LLAMA_CPP_API_KEY;
+        openAIArgs.apiKey = apiKey || process.env.LLAMA_CPP_API_KEY || "llamacpp-no-key";
         delete openAIArgs.organization;
         break;
       case "vllm":
@@ -229,19 +229,20 @@ class OpenAIService extends AIProviderBase {
     const { chatState } = this;
     const { history, modelId } = chatState;
 
-    const messages: ChatCompletionMessageParam[] = [];
+    const systemMessages: ChatCompletionMessageParam[] = [];
+    const conversationMessages: ChatCompletionMessageParam[] = [];
 
     history.forEach((msg) => {
       if (!msg) return;
 
       if (msg.role === "system" && msg.content) {
-        messages.push({ role: "system", content: msg.content as string });
+        systemMessages.push({ role: "system", content: msg.content as string });
       } else if (msg.role === "user" && msg.content) {
-        messages.push({ role: "user", content: msg.content as string });
+        conversationMessages.push({ role: "user", content: msg.content as string });
       } else if (msg.role === "assistant") {
         const toolCalls = (msg as any).tool_calls;
         if (toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0) {
-          messages.push({
+          conversationMessages.push({
             role: "assistant",
             content: (msg.content as string) || null,
             tool_calls: toolCalls.map((tc: any) => ({
@@ -256,12 +257,12 @@ class OpenAIService extends AIProviderBase {
             })),
           });
         } else if (msg.content) {
-          messages.push({ role: "assistant", content: msg.content as string });
+          conversationMessages.push({ role: "assistant", content: msg.content as string });
         }
       } else if (msg.role === "tool") {
         const toolCallId = (msg as any).tool_call_id;
         if (toolCallId) {
-          messages.push({
+          conversationMessages.push({
             role: "tool",
             tool_call_id: toolCallId,
             content: typeof msg.content === "string"
@@ -272,16 +273,24 @@ class OpenAIService extends AIProviderBase {
       }
     });
 
+    // File manifest must be a system message — keep it with other system messages
+    // at the front so providers that enforce "system first" (Jinja templates) don't reject it.
     if (chatState.files && chatState.files.length > 0) {
       const fileManifest = chatState.files.map((f: any) =>
         `- id: "${f._id || f.id}", filename: "${f.filename}", path: "${f.path || 'N/A'}", type: "${f.mimetype || 'unknown'}", size: ${f.size || 0}`
       ).join("\n");
 
-      messages.push({
+      systemMessages.push({
         role: "system",
         content: `The user has the following files attached to this chat session. You can read their contents using the readChatFile tool with the file id.\n\nAttached files:\n${fileManifest}`,
       });
     }
+
+    // System messages first, then conversation history, then the current user turn.
+    const messages: ChatCompletionMessageParam[] = [
+      ...systemMessages,
+      ...conversationMessages,
+    ];
 
     messages.push({
       role: "user",

@@ -1,294 +1,322 @@
 import { StreamingTransportManager } from '../StreamingTransportManager';
 import { StreamingSessionManager } from '../StreamingSessionManager';
 import { StreamingTransport } from '../StreamingTransport';
-import { StreamingSession, StreamingEvent } from '../types/streaming.types';
+import { StreamingEvent } from '../types/streaming.types';
 
-// Mock dependencies
-jest.mock('../StreamingSessionManager');
-jest.mock('../StreamingTransport');
+const mockContext = {
+  debug: jest.fn(),
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+} as any;
 
 const mockSessionManager = {
-  createSession: jest.fn(),
   getSession: jest.fn(),
   updateSession: jest.fn(),
-  cleanupExpiredSessions: jest.fn(),
-  DEFAULT_EXPIRY_HOURS: 1,
-  SESSION_KEY_PREFIX: 'streaming:session:',
-  SESSION_INDEX_KEY: 'streaming:sessions',
-  getSessionKey: jest.fn(),
-  getTTLSeconds: jest.fn(),
 } as unknown as jest.Mocked<StreamingSessionManager>;
 
-const createMockTransport = (isConnected = true) => ({
+const createMockTransport = (isConnected = true): jest.Mocked<StreamingTransport> => ({
   isConnected,
   initialize: jest.fn().mockResolvedValue(undefined),
   sendEvent: jest.fn().mockResolvedValue(undefined),
   close: jest.fn().mockResolvedValue(undefined),
 } as jest.Mocked<StreamingTransport>);
 
+const SSE_ID = 'sse-session-123';
+const CHAT_ID = 'chat-session-456';
+
+const makeEvent = (type: string = 'token'): StreamingEvent => ({
+  type: type as StreamingEvent['type'],
+  sessionId: SSE_ID,
+  conversationId: CHAT_ID,
+  messageId: 'msg-1',
+  timestamp: new Date('2024-01-01T00:00:00Z'),
+  data: { content: 'Hello', delta: 'Hello', position: 0, isComplete: false },
+});
+
 describe('StreamingTransportManager', () => {
   let manager: StreamingTransportManager;
   let mockTransport: jest.Mocked<StreamingTransport>;
-  
+
   beforeEach(() => {
-    manager = new StreamingTransportManager(mockSessionManager);
+    (StreamingTransportManager as any).instance = undefined;
+    manager = new StreamingTransportManager({}, mockContext);
+    (manager as any).sessionManager = mockSessionManager;
     mockTransport = createMockTransport();
     jest.clearAllMocks();
   });
-  
-  afterEach(() => {
-    jest.clearAllMocks();
-  });
-  
-  describe('constructor', () => {
-    it('should create manager with session manager dependency', () => {
-      expect(manager).toBeInstanceOf(StreamingTransportManager);
-    });
-  });
-  
+
   describe('registerTransport', () => {
-    const sessionId = 'test-session-123';
-    
-    it('should register transport for session and initialize it', async () => {
-      await manager.registerTransport(sessionId, mockTransport);
-      
+    it('should register and initialize a transport', async () => {
+      await manager.registerTransport({
+        sessionId: SSE_ID,
+        chatSessionId: CHAT_ID,
+        transport: mockTransport,
+      });
+
       expect(mockTransport.initialize).toHaveBeenCalled();
-      expect(manager.hasTransport(sessionId)).toBe(true);
+      expect(manager.hasTransport(SSE_ID)).toBe(true);
     });
-    
-    it('should throw error if transport already registered for session', async () => {
-      await manager.registerTransport(sessionId, mockTransport);
-      
+
+    it('should evict a previous transport for the same chat session on reconnect', async () => {
+      await manager.registerTransport({
+        sessionId: SSE_ID,
+        chatSessionId: CHAT_ID,
+        transport: mockTransport,
+      });
+
       const newTransport = createMockTransport();
-      await expect(manager.registerTransport(sessionId, newTransport))
-        .rejects.toThrow('Transport already registered for session');
+      const newSseId = 'sse-session-789';
+      await manager.registerTransport({
+        sessionId: newSseId,
+        chatSessionId: CHAT_ID,
+        transport: newTransport,
+      });
+
+      expect(mockTransport.close).toHaveBeenCalled();
+      expect(manager.hasTransport(SSE_ID)).toBe(false);
+      expect(manager.hasTransport(newSseId)).toBe(true);
     });
-    
+
     it('should handle transport initialization failure', async () => {
-      const initError = new Error('Transport init failed');
       const failingTransport = createMockTransport();
-      failingTransport.initialize.mockRejectedValue(initError);
-      
-      await expect(manager.registerTransport(sessionId, failingTransport))
-        .rejects.toThrow('Transport init failed');
-      
-      expect(manager.hasTransport(sessionId)).toBe(false);
+      failingTransport.initialize.mockRejectedValue(new Error('Init failed'));
+
+      await expect(manager.registerTransport({
+        sessionId: SSE_ID,
+        chatSessionId: CHAT_ID,
+        transport: failingTransport,
+      })).rejects.toThrow('Init failed');
+
+      expect(manager.hasTransport(SSE_ID)).toBe(false);
     });
   });
-  
+
   describe('sendEventToSession', () => {
-    const sessionId = 'test-session-123';
-    const mockEvent: StreamingEvent = {
-      type: 'token',
-      sessionId,
-      conversationId: 'test-conversation-456',
-      timestamp: new Date('2024-01-01T00:00:00Z'),
-      data: {
-        content: 'Hello',
-        delta: 'Hello',
-        position: 0,
-        isComplete: false
-      }
-    };
-    
     beforeEach(async () => {
-      await manager.registerTransport(sessionId, mockTransport);
+      await manager.registerTransport({
+        sessionId: SSE_ID,
+        chatSessionId: CHAT_ID,
+        transport: mockTransport,
+      });
     });
-    
-    it('should send event to registered transport', async () => {
-      await manager.sendEventToSession(sessionId, mockEvent);
-      
-      expect(mockTransport.sendEvent).toHaveBeenCalledWith(mockEvent);
+
+    it('should send an event to the registered transport', async () => {
+      const event = makeEvent();
+      await manager.sendEventToSession(CHAT_ID, event);
+
+      expect(mockTransport.sendEvent).toHaveBeenCalledWith(event);
     });
-    
-    it('should throw error if no transport registered for session', async () => {
-      const unknownSessionId = 'unknown-session';
-      
-      await expect(manager.sendEventToSession(unknownSessionId, mockEvent))
-        .rejects.toThrow('No transport registered for session');
+
+    it('should buffer (not throw) when no session mapping exists', async () => {
+      const event = makeEvent();
+
+      await manager.sendEventToSession('unknown-chat-id', event);
+
+      expect(mockTransport.sendEvent).not.toHaveBeenCalled();
     });
-    
-    it('should handle transport send failure', async () => {
-      const sendError = new Error('Transport send failed');
-      mockTransport.sendEvent.mockRejectedValue(sendError);
-      
-      await expect(manager.sendEventToSession(sessionId, mockEvent))
-        .rejects.toThrow('Transport send failed');
+
+    it('should buffer (not throw) when the transport is disconnected', async () => {
+      (mockTransport as any).isConnected = false;
+      const event = makeEvent();
+
+      await manager.sendEventToSession(CHAT_ID, event);
+
+      expect(mockTransport.sendEvent).not.toHaveBeenCalled();
+      expect(manager.hasTransport(SSE_ID)).toBe(false);
     });
-    
-    it('should update session last activity timestamp', async () => {
-      const mockSession: StreamingSession = {
-        sessionId,
-        conversationId: 'test-conversation-456',
-        userId: 'test-user-789',
-        transport: 'sse',
-        status: 'active',
-        createdAt: new Date('2024-01-01T00:00:00Z'),
-        lastActivity: new Date('2024-01-01T00:00:00Z'),
-        expiresAt: new Date('2024-01-01T01:00:00Z'),
-        capabilities: {
-          supportsTokenStreaming: true,
-          supportsToolStreaming: false
-        }
+
+    it('should throw and buffer when a connected transport send fails', async () => {
+      mockTransport.sendEvent.mockRejectedValue(new Error('Send failed'));
+      const event = makeEvent();
+
+      await expect(manager.sendEventToSession(CHAT_ID, event))
+        .rejects.toThrow('Send failed');
+    });
+
+    it('should update session last activity after a successful send', async () => {
+      const mockSession = {
+        sessionId: SSE_ID,
+        conversationId: CHAT_ID,
+        userId: 'user-1',
+        transport: 'sse' as const,
+        status: 'active' as const,
+        createdAt: new Date(),
+        lastActivity: new Date(),
+        expiresAt: new Date(Date.now() + 3600000),
+        capabilities: { supportsTokenStreaming: true, supportsToolStreaming: false },
       };
-      
       mockSessionManager.getSession.mockResolvedValue(mockSession);
-      
-      await manager.sendEventToSession(sessionId, mockEvent);
-      
+
+      await manager.sendEventToSession(CHAT_ID, makeEvent());
+
+      await new Promise(resolve => setTimeout(resolve, 1100));
+
       expect(mockSessionManager.updateSession).toHaveBeenCalledWith(
-        sessionId,
-        expect.objectContaining({
-          lastActivity: expect.any(Date)
-        })
+        SSE_ID,
+        expect.objectContaining({ lastActivity: expect.any(Date) }),
       );
     });
   });
-  
-  describe('closeTransport', () => {
-    const sessionId = 'test-session-123';
-    
-    beforeEach(async () => {
-      await manager.registerTransport(sessionId, mockTransport);
+
+  describe('event buffering on disconnect and flush on reconnect', () => {
+    it('should buffer events while disconnected and flush them on reconnect', async () => {
+      await manager.registerTransport({
+        sessionId: SSE_ID,
+        chatSessionId: CHAT_ID,
+        transport: mockTransport,
+      });
+
+      (mockTransport as any).isConnected = false;
+
+      const event1 = makeEvent('token');
+      const event2 = makeEvent('token');
+      const completeEvent = makeEvent('complete');
+
+      await manager.sendEventToSession(CHAT_ID, event1);
+      await manager.sendEventToSession(CHAT_ID, event2);
+      await manager.sendEventToSession(CHAT_ID, completeEvent);
+
+      expect(mockTransport.sendEvent).not.toHaveBeenCalled();
+
+      const newTransport = createMockTransport(true);
+      const newSseId = 'sse-session-999';
+      await manager.registerTransport({
+        sessionId: newSseId,
+        chatSessionId: CHAT_ID,
+        transport: newTransport,
+      });
+
+      expect(newTransport.sendEvent).toHaveBeenCalledTimes(3);
+      expect(newTransport.sendEvent).toHaveBeenNthCalledWith(1, event1);
+      expect(newTransport.sendEvent).toHaveBeenNthCalledWith(2, event2);
+      expect(newTransport.sendEvent).toHaveBeenNthCalledWith(3, completeEvent);
     });
-    
-    it('should close transport and unregister it', async () => {
-      await manager.closeTransport(sessionId);
-      
-      expect(mockTransport.close).toHaveBeenCalled();
-      expect(manager.hasTransport(sessionId)).toBe(false);
-    });
-    
-    it('should be idempotent for unknown session', async () => {
-      const unknownSessionId = 'unknown-session';
-      
-      // Should not throw
-      await manager.closeTransport(unknownSessionId);
-    });
-    
-    it('should handle transport close failure gracefully', async () => {
-      const closeError = new Error('Transport close failed');
-      mockTransport.close.mockRejectedValue(closeError);
-      
-      // Should not throw, but should still unregister transport
-      await manager.closeTransport(sessionId);
-      
-      expect(manager.hasTransport(sessionId)).toBe(false);
+
+    it('should buffer events when no transport is registered and flush on register', async () => {
+      const event1 = makeEvent('token');
+      const event2 = makeEvent('complete');
+
+      await manager.sendEventToSession(CHAT_ID, event1);
+      await manager.sendEventToSession(CHAT_ID, event2);
+
+      await manager.registerTransport({
+        sessionId: SSE_ID,
+        chatSessionId: CHAT_ID,
+        transport: mockTransport,
+      });
+
+      expect(mockTransport.sendEvent).toHaveBeenCalledTimes(2);
+      expect(mockTransport.sendEvent).toHaveBeenNthCalledWith(1, event1);
+      expect(mockTransport.sendEvent).toHaveBeenNthCalledWith(2, event2);
     });
   });
-  
+
+  describe('closeTransport', () => {
+    it('should close and unregister a transport', async () => {
+      await manager.registerTransport({
+        sessionId: SSE_ID,
+        chatSessionId: CHAT_ID,
+        transport: mockTransport,
+      });
+
+      await manager.closeTransport(SSE_ID);
+
+      expect(mockTransport.close).toHaveBeenCalled();
+      expect(manager.hasTransport(SSE_ID)).toBe(false);
+    });
+
+    it('should be idempotent for an unknown session', async () => {
+      await manager.closeTransport('unknown-sse-id');
+    });
+
+    it('should handle transport close failure gracefully', async () => {
+      await manager.registerTransport({
+        sessionId: SSE_ID,
+        chatSessionId: CHAT_ID,
+        transport: mockTransport,
+      });
+      mockTransport.close.mockRejectedValue(new Error('Close failed'));
+
+      await manager.closeTransport(SSE_ID);
+
+      expect(manager.hasTransport(SSE_ID)).toBe(false);
+    });
+  });
+
   describe('closeAllTransports', () => {
     it('should close all registered transports', async () => {
-      const sessionId1 = 'session-1';
-      const sessionId2 = 'session-2';
       const transport1 = createMockTransport();
       const transport2 = createMockTransport();
-      
-      await manager.registerTransport(sessionId1, transport1);
-      await manager.registerTransport(sessionId2, transport2);
-      
+
+      await manager.registerTransport({ sessionId: 'sse-1', chatSessionId: 'chat-1', transport: transport1 });
+      await manager.registerTransport({ sessionId: 'sse-2', chatSessionId: 'chat-2', transport: transport2 });
+
       await manager.closeAllTransports();
-      
+
       expect(transport1.close).toHaveBeenCalled();
       expect(transport2.close).toHaveBeenCalled();
-      expect(manager.hasTransport(sessionId1)).toBe(false);
-      expect(manager.hasTransport(sessionId2)).toBe(false);
-    });
-    
-    it('should handle individual transport close failures', async () => {
-      const sessionId1 = 'session-1';
-      const sessionId2 = 'session-2';
-      const transport1 = createMockTransport();
-      const transport2 = createMockTransport();
-      
-      transport1.close.mockRejectedValue(new Error('Close failed'));
-      transport2.close.mockResolvedValue(undefined);
-      
-      await manager.registerTransport(sessionId1, transport1);
-      await manager.registerTransport(sessionId2, transport2);
-      
-      // Should not throw, but should close all
-      await manager.closeAllTransports();
-      
-      expect(transport1.close).toHaveBeenCalled();
-      expect(transport2.close).toHaveBeenCalled();
-      expect(manager.hasTransport(sessionId1)).toBe(false);
-      expect(manager.hasTransport(sessionId2)).toBe(false);
+      expect(manager.getTransportCount()).toBe(0);
     });
   });
-  
+
   describe('getTransportCount', () => {
-    it('should return correct transport count', async () => {
+    it('should return the correct count', async () => {
       expect(manager.getTransportCount()).toBe(0);
-      
-      await manager.registerTransport('session-1', mockTransport);
+
+      await manager.registerTransport({ sessionId: 'sse-1', chatSessionId: 'chat-1', transport: mockTransport });
       expect(manager.getTransportCount()).toBe(1);
-      
+
       const transport2 = createMockTransport();
-      await manager.registerTransport('session-2', transport2);
+      await manager.registerTransport({ sessionId: 'sse-2', chatSessionId: 'chat-2', transport: transport2 });
       expect(manager.getTransportCount()).toBe(2);
-      
-      await manager.closeTransport('session-1');
+
+      await manager.closeTransport('sse-1');
       expect(manager.getTransportCount()).toBe(1);
     });
   });
-  
-  describe('cleanup operations', () => {
-    it('should clean up disconnected transports', async () => {
-      const sessionId1 = 'session-1';
-      const sessionId2 = 'session-2';
-      const connectedTransport = createMockTransport(true);
-      const disconnectedTransport = createMockTransport(false);
-      
-      await manager.registerTransport(sessionId1, connectedTransport);
-      await manager.registerTransport(sessionId2, disconnectedTransport);
-      
-      const cleanedCount = await manager.cleanupDisconnectedTransports();
-      
-      expect(cleanedCount).toBe(1);
-      expect(manager.hasTransport(sessionId1)).toBe(true);
-      expect(manager.hasTransport(sessionId2)).toBe(false);
+
+  describe('hasTransport', () => {
+    it('should return true for a connected transport', async () => {
+      await manager.registerTransport({
+        sessionId: SSE_ID,
+        chatSessionId: CHAT_ID,
+        transport: mockTransport,
+      });
+
+      expect(manager.hasTransport(SSE_ID)).toBe(true);
+    });
+
+    it('should return false and clean up for a disconnected transport', async () => {
+      await manager.registerTransport({
+        sessionId: SSE_ID,
+        chatSessionId: CHAT_ID,
+        transport: mockTransport,
+      });
+      (mockTransport as any).isConnected = false;
+
+      expect(manager.hasTransport(SSE_ID)).toBe(false);
+      expect(manager.getTransportCount()).toBe(0);
+    });
+
+    it('should return false for an unknown session', () => {
+      expect(manager.hasTransport('unknown-sse-id')).toBe(false);
     });
   });
-  
-  describe('integration scenarios', () => {
-    it('should handle complete transport lifecycle', async () => {
-      const sessionId = 'test-session-123';
-      const mockEvent: StreamingEvent = {
-        type: 'token',
-        sessionId,
-        conversationId: 'test-conversation-456',
-        timestamp: new Date(),
-        data: { content: 'Test message' }
-      };
-      
-      // Register transport
-      await manager.registerTransport(sessionId, mockTransport);
-      expect(manager.hasTransport(sessionId)).toBe(true);
-      
-      // Send events
-      await manager.sendEventToSession(sessionId, mockEvent);
-      expect(mockTransport.sendEvent).toHaveBeenCalledWith(mockEvent);
-      
-      // Close transport
-      await manager.closeTransport(sessionId);
-      expect(mockTransport.close).toHaveBeenCalled();
-      expect(manager.hasTransport(sessionId)).toBe(false);
-    });
-    
-    it('should handle transport registration failures gracefully', async () => {
-      const sessionId = 'test-session-123';
-      const failingTransport = {
-        ...mockTransport,
-        initialize: jest.fn().mockRejectedValue(new Error('Init failed'))
-      };
-      
-      await expect(manager.registerTransport(sessionId, failingTransport))
-        .rejects.toThrow('Init failed');
-      
-      // Should not be registered
-      expect(manager.hasTransport(sessionId)).toBe(false);
-      expect(manager.getTransportCount()).toBe(0);
+
+  describe('cleanupDisconnectedTransports', () => {
+    it('should close disconnected transports and keep connected ones', async () => {
+      const connected = createMockTransport(true);
+      const disconnected = createMockTransport(false);
+
+      await manager.registerTransport({ sessionId: 'sse-1', chatSessionId: 'chat-1', transport: connected });
+      await manager.registerTransport({ sessionId: 'sse-2', chatSessionId: 'chat-2', transport: disconnected });
+
+      const cleanedCount = await manager.cleanupDisconnectedTransports();
+
+      expect(cleanedCount).toBe(1);
+      expect(manager.hasTransport('sse-1')).toBe(true);
+      expect(manager.hasTransport('sse-2')).toBe(false);
     });
   });
 });

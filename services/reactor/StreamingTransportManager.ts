@@ -26,6 +26,15 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
   private readonly activityTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private sessionManager: StreamingSessionManager;
 
+  /**
+   * Events buffered for a chat session while no connected transport exists.
+   * On reconnect (registerTransport), the buffer is flushed to the new transport
+   * so the client receives the full response that was generated while it was away.
+   */
+  private readonly eventBuffer = new Map<string, { events: StreamingEvent[]; createdAt: number }>();
+  private static readonly MAX_BUFFER_SIZE = 1000;
+  private static readonly BUFFER_TTL_MS = 5 * 60 * 1000;
+
   private static instance: StreamingTransportManager;
 
   constructor(props: any, context: Reactory.Server.IReactoryContext) {
@@ -62,6 +71,74 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
       if (sseId === sseSessionId) return chatId;
     }
     return undefined;
+  }
+
+  /**
+   * Buffer an event for a chat session so it can be flushed when a transport
+   * is re-registered. Drops the oldest events if the buffer is full and
+   * discards buffers older than BUFFER_TTL_MS.
+   */
+  private bufferEvent(chatSessionId: string, event: StreamingEvent): void {
+    this.cleanupExpiredBuffers();
+
+    let entry = this.eventBuffer.get(chatSessionId);
+    if (!entry) {
+      entry = { events: [], createdAt: Date.now() };
+      this.eventBuffer.set(chatSessionId, entry);
+    }
+
+    entry.events.push(event);
+    if (entry.events.length > StreamingTransportManager.MAX_BUFFER_SIZE) {
+      entry.events.splice(0, entry.events.length - StreamingTransportManager.MAX_BUFFER_SIZE);
+    }
+  }
+
+  /**
+   * Flush buffered events for a chat session to a newly registered transport.
+   * Called from registerTransport after the transport is initialized.
+   */
+  private async flushEventBuffer(chatSessionId: string, transport: StreamingTransport): Promise<void> {
+    const entry = this.eventBuffer.get(chatSessionId);
+    if (!entry || entry.events.length === 0) return;
+
+    this.eventBuffer.delete(chatSessionId);
+
+    this.slog("info", `Flushing ${entry.events.length} buffered event(s) for chat session ${chatSessionId}`, {
+      eventCount: entry.events.length,
+      bufferedAt: new Date(entry.createdAt).toISOString(),
+    }, chatSessionId);
+
+    for (const event of entry.events) {
+      if (!transport.isConnected) {
+        this.bufferEvent(chatSessionId, event);
+        return;
+      }
+      try {
+        await transport.sendEvent(event);
+      } catch (error: any) {
+        this.slog("warn", `Error flushing buffered event: ${error.message}`, {
+          eventType: event.type,
+          chatSessionId,
+        }, chatSessionId);
+        this.bufferEvent(chatSessionId, event);
+        return;
+      }
+    }
+  }
+
+  /**
+   * Remove buffers that have exceeded their TTL.
+   */
+  private cleanupExpiredBuffers(): void {
+    const now = Date.now();
+    for (const [chatSessionId, entry] of this.eventBuffer.entries()) {
+      if (now - entry.createdAt > StreamingTransportManager.BUFFER_TTL_MS) {
+        this.slog("debug", `Discarding expired event buffer for chat session ${chatSessionId}`, {
+          eventCount: entry.events.length,
+        }, chatSessionId);
+        this.eventBuffer.delete(chatSessionId);
+      }
+    }
   }
 
   private setSessionManager(sessionManager: StreamingSessionManager) {
@@ -123,6 +200,8 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
         chatSessions: Array.from(this.chatSessions.entries()),
         transports: Array.from(this.transports.keys()),
       }, chatSessionId);
+
+      await this.flushEventBuffer(chatSessionId, transport);
     } catch (error: any) {
       this.slog("error", `Error registering transport: ${error.message}`, {
         stack: error.stack,
@@ -137,35 +216,44 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
   }
 
   /**
-   * Send an event to a specific session's transport
+   * Send an event to a specific session's transport.
+   * If no connected transport exists, the event is buffered and flushed
+   * when a transport is re-registered (e.g. on client reconnect).
    */
   async sendEventToSession(chatSessionId: string, event: StreamingEvent): Promise<void> {
     const sessionId = this.chatSessions.get(chatSessionId);
 
     if (!sessionId) {
-      this.slog("error", `No session found for chat session ${chatSessionId}`, undefined, chatSessionId);
-      throw new Error('No session registered for chat session');
+      this.slog("debug", `No session found for chat session ${chatSessionId} — buffering event`, {
+        eventType: event.type,
+      }, chatSessionId);
+      this.bufferEvent(chatSessionId, event);
+      return;
     }
 
     const transport = this.transports.get(sessionId);
 
     if (!transport) {
-      this.slog("error", `No transport found for SSE session ${sessionId}`, undefined, chatSessionId);
-      throw new Error('No transport registered for session');
+      this.slog("debug", `No transport found for SSE session ${sessionId} — buffering event`, {
+        eventType: event.type,
+      }, chatSessionId);
+      this.bufferEvent(chatSessionId, event);
+      return;
     }
 
-    // Pre-validate the transport is still connected before attempting to write.
     if (!transport.isConnected) {
-      this.slog("error", `Transport for SSE session ${sessionId} is no longer connected — cleaning up`, undefined, chatSessionId);
+      this.slog("debug", `Transport for SSE session ${sessionId} is disconnected — buffering event`, {
+        eventType: event.type,
+      }, chatSessionId);
       this.transports.delete(sessionId);
       this.chatSessions.delete(chatSessionId);
-      throw new Error('Transport is no longer connected');
+      this.bufferEvent(chatSessionId, event);
+      return;
     }
 
     try {
       await transport.sendEvent(event);
 
-      // Log tool_call and complete events at info level for debugging tool invocation
       if (event.type === 'tool_call' || event.type === 'complete' || event.type === 'error') {
         this.slog("debug", `Sent ${event.type} event`, {
           eventType: event.type,
@@ -174,7 +262,6 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
         }, chatSessionId);
       }
 
-      // Throttle session activity updates — at most once per second
       this.throttledUpdateSessionActivity(sessionId);
     } catch (error: any) {
       this.slog("error", `Error sending event: ${error.message}`, {
@@ -182,11 +269,11 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
         chatSessionId,
       }, chatSessionId);
 
-      // If transport fails, consider it disconnected and clean up
       if (!transport.isConnected) {
         this.transports.delete(sessionId);
         this.chatSessions.delete(chatSessionId);
       }
+      this.bufferEvent(chatSessionId, event);
       throw error;
     }
   }
