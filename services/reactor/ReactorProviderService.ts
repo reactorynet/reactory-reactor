@@ -1,8 +1,11 @@
 import Reactory from "@reactorynet/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
-import { IReactorProviderService } from "../../types/service.types";
+import { IReactorProviderService, ReactorProviderAuthStatus } from "../../types/service.types";
 import { loadProviders, ProviderConfig, ProviderModelConfig, getCompatibleModels, findModelById } from "../../ai/providers/provider-loader";
-import { decryptCredentials } from "../../utils/credential-encryption";
+import {
+  decryptCredentials,
+  encryptCredentials,
+} from "../../utils/credential-encryption";
 
 const AUTH_KEY_PREFIX = "ai-provider:";
 
@@ -12,8 +15,30 @@ export interface ResolvedCredentials {
   organization?: string;
   deploymentName?: string;
   apiVersion?: string;
-  source: "user" | "app" | "persona" | "environment" | "none";
+  source: "session" | "user" | "app" | "persona" | "environment" | "none";
   [key: string]: any;
+}
+
+/**
+ * Returns true if the override object contains at least one credential value.
+ * Used to decide whether a per-request sessionOverride should take priority.
+ */
+function hasAnyCredential(override: Record<string, any>): boolean {
+  return Object.values(override).some(
+    (v) => v !== undefined && v !== null && v !== ""
+  );
+}
+
+/**
+ * Masks an API key for safe display, e.g. "sk-abcdef123456" -> "sk-…3456".
+ * Returns undefined for empty input.
+ */
+function maskKey(key: string): string | undefined {
+  if (!key || typeof key !== "string") return undefined;
+  if (key.length <= 8) return "••••••••";
+  const prefix = key.slice(0, key.indexOf("-") + 1 || 3);
+  const tail = key.slice(-4);
+  return `${prefix}…${tail}`;
 }
 
 /**
@@ -367,13 +392,172 @@ class ReactorProviderService implements IReactorProviderService {
   }
 
   /**
-   * Resolves provider credentials using priority: User > App > Persona config > Environment.
-   * Decrypts any encrypted values before returning.
+   * Returns the auth status for each provider for the current user, plus a
+   * non-secret echo (endpoint, organization, maskedKeyHint) for providers the
+   * user has configured. The echo is derived server-side via
+   * redactCredentials(decrypt(...)) so the raw key never reaches the client.
+   */
+  async getUserProviderAuth(): Promise<ReactorProviderAuthStatus[]> {
+    const providers = await this.getProviders();
+    const user = this.context.user as any;
+    const userAuths: any[] = user?.authentications || [];
+    const partner = this.context.partner;
+    const appAuthConfigs: any[] = (partner as any)?.auth_config || [];
+
+    return providers.map((provider) => {
+      const authKey = `${AUTH_KEY_PREFIX}${provider.id}`;
+      const userAuth = userAuths.find((a: any) => a.provider === authKey);
+      const appAuth = appAuthConfigs.find((a: any) => a.provider === authKey);
+
+      let endpoint: string | undefined;
+      let organization: string | undefined;
+      let maskedKeyHint: string | undefined;
+
+      if (userAuth?.props) {
+        try {
+          const propsObj = userAuth.props.toObject ? userAuth.props.toObject() : userAuth.props;
+          const decrypted = decryptCredentials(propsObj);
+          const { isDefault: _isDefault, ...creds } = decrypted;
+          void _isDefault;
+          endpoint = creds.endpoint;
+          organization = creds.organization;
+          maskedKeyHint = creds.apiKey ? maskKey(creds.apiKey) : undefined;
+        } catch (err) {
+          this.context.error?.(`Failed to decrypt user credentials for ${provider.id}`, err);
+        }
+      }
+
+      const isDefault = !!(userAuth?.props?.isDefault === true);
+      const isAppDefault = !!appAuth?.enabled;
+
+      return {
+        provider: provider.id,
+        configured: !!userAuth,
+        isDefault,
+        isAppDefault,
+        source: userAuth
+          ? "user"
+          : appAuth?.enabled
+            ? "app"
+            : provider.status?.available
+              ? "environment"
+              : "none",
+        endpoint,
+        organization,
+        maskedKeyHint,
+      };
+    });
+  }
+
+  /**
+   * Saves provider auth credentials for the current user. Encrypts sensitive
+   * values, writes to user.authentications[ai-provider:<id>], and — when
+   * setAsAccountDefault is true — clears isDefault on every other ai-provider:*
+   * auth the user holds so only one provider is flagged as default at a time.
+   * When setAsAppDefault is true (ADMIN only), updates partner.auth_config.
+   */
+  async saveProviderAuth(input: {
+    providerId: string;
+    credentials: Record<string, any>;
+    setAsAccountDefault?: boolean;
+    setAsAppDefault?: boolean;
+  }): Promise<ReactorProviderAuthStatus> {
+    const { providerId, credentials, setAsAccountDefault = true, setAsAppDefault = false } = input;
+    const authKey = `${AUTH_KEY_PREFIX}${providerId}`;
+    const user = this.context.user as any;
+
+    const encrypted = encryptCredentials(credentials);
+    if (setAsAccountDefault !== undefined) {
+      encrypted.isDefault = setAsAccountDefault === true;
+    }
+
+    // Clear isDefault on every other ai-provider:* auth the user holds so only
+    // one provider can be the user's default at a time.
+    if (setAsAccountDefault === true && Array.isArray(user?.authentications)) {
+      let mutated = false;
+      for (const auth of user.authentications) {
+        if (auth.provider?.startsWith?.(AUTH_KEY_PREFIX) && auth.provider !== authKey) {
+          if (auth.props?.isDefault === true) {
+            auth.props = { ...(auth.props.toObject ? auth.props.toObject() : auth.props), isDefault: false };
+            mutated = true;
+          }
+        }
+      }
+      if (mutated) {
+        await user.save();
+      }
+    }
+
+    await user.setAuthentication({
+      provider: authKey,
+      props: encrypted,
+      lastLogin: new Date(),
+    });
+
+    if (setAsAppDefault) {
+      const isAdmin = this.context.hasRole?.("ADMIN") ?? false;
+      if (!isAdmin) {
+        throw new Error("Only ADMIN users can set app-level provider defaults");
+      }
+
+      const partner = this.context.partner as any;
+      if (partner) {
+        const existingConfigs: any[] = partner.auth_config || [];
+        const existingIdx = existingConfigs.findIndex((c: any) => c.provider === authKey);
+        const authConfigEntry = {
+          provider: authKey,
+          enabled: true,
+          properties: encrypted,
+        };
+        if (existingIdx >= 0) {
+          existingConfigs[existingIdx] = authConfigEntry;
+        } else {
+          existingConfigs.push(authConfigEntry);
+        }
+        partner.auth_config = existingConfigs;
+        await partner.save();
+      }
+    }
+
+    return {
+      provider: providerId,
+      configured: true,
+      isDefault: setAsAccountDefault !== false,
+      isAppDefault: setAsAppDefault === true,
+      source: "user",
+      endpoint: credentials.endpoint,
+      organization: credentials.organization,
+      maskedKeyHint: credentials.apiKey ? maskKey(credentials.apiKey) : undefined,
+    };
+  }
+
+  /**
+   * Removes provider auth credentials for the current user.
+   */
+  async removeProviderAuth(providerId: string): Promise<boolean> {
+    const authKey = `${AUTH_KEY_PREFIX}${providerId}`;
+    const user = this.context.user as any;
+    await user.removeAuthentication(authKey);
+    return true;
+  }
+
+  /**
+   * Resolves provider credentials using priority:
+   * sessionOverride > User > App > Persona config > Environment.
+   * Decrypts any encrypted values before returning. The sessionOverride is a
+   * per-request credential set supplied by the client (e.g. for a single chat
+   * session); it is never persisted.
    */
   async resolveProviderCredentials(
     providerId: string,
-    personaConfig?: Record<string, any>
+    personaConfig?: Record<string, any>,
+    sessionOverride?: Record<string, any>
   ): Promise<ResolvedCredentials> {
+    // 0. Per-request session override (client-supplied, never persisted)
+    if (sessionOverride && hasAnyCredential(sessionOverride)) {
+      return { ...sessionOverride, source: "session" };
+    }
+
     const authKey = `${AUTH_KEY_PREFIX}${providerId}`;
     const user = this.context.user;
 
@@ -383,7 +567,9 @@ class ReactorProviderService implements IReactorProviderService {
     if (userAuth?.props) {
       try {
         const decrypted = decryptCredentials(userAuth.props.toObject ? userAuth.props.toObject() : userAuth.props);
-        return { ...decrypted, source: "user" };
+        const { isDefault: _isDefault, ...creds } = decrypted;
+        void _isDefault;
+        return { ...creds, source: "user" };
       } catch (err) {
         this.context.error?.(`Failed to decrypt user credentials for ${providerId}`, err);
       }

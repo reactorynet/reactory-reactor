@@ -1300,12 +1300,58 @@ export interface IReactorProviderService extends Reactory.Service.IReactoryServi
   getModelsForPersona(personaCapabilities?: string[]): Promise<{ provider: any; model: any }[]>;
 
   /**
-   * Resolves provider credentials using priority: User > App > Persona config > Environment.
+   * Returns the authentication status for each provider for the current user,
+   * including a non-secret echo (endpoint, organization, maskedKeyHint) for
+   * providers the user has configured. Computed server-side via
+   * redactCredentials(decrypt(...)) so the raw key never reaches the client.
+   */
+  getUserProviderAuth(): Promise<ReactorProviderAuthStatus[]>;
+
+  /**
+   * Saves provider authentication credentials for the current user.
+   * Encrypts sensitive values via encryptCredentials before persisting to
+   * user.authentications[ai-provider:<id>]. When setAsAccountDefault is true,
+   * clears isDefault on every other ai-provider:* auth the user holds so only
+   * one provider is flagged as the user default at a time. When setAsAppDefault
+   * is true (ADMIN only), updates partner.auth_config.
+   */
+  saveProviderAuth(input: {
+    providerId: string;
+    credentials: Record<string, any>;
+    setAsAccountDefault?: boolean;
+    setAsAppDefault?: boolean;
+  }): Promise<ReactorProviderAuthStatus>;
+
+  /**
+   * Removes provider authentication credentials for the current user.
+   */
+  removeProviderAuth(providerId: string): Promise<boolean>;
+
+  /**
+   * Resolves provider credentials using priority:
+   * sessionOverride > User > App > Persona config > Environment.
+   * The sessionOverride is a per-request credential set supplied by the client
+   * (e.g. for a single chat session); it is never persisted.
    */
   resolveProviderCredentials(
     providerId: string,
-    personaConfig?: Record<string, any>
+    personaConfig?: Record<string, any>,
+    sessionOverride?: Record<string, any>
   ): Promise<{ apiKey?: string; endpoint?: string; organization?: string; deploymentName?: string; apiVersion?: string; source: string; [key: string]: any }>;
+}
+
+/**
+ * Auth status for a provider, including a non-secret echo for client pre-fill.
+ */
+export interface ReactorProviderAuthStatus {
+  provider: string;
+  configured: boolean;
+  isDefault: boolean;
+  isAppDefault: boolean;
+  source?: string;
+  endpoint?: string;
+  organization?: string;
+  maskedKeyHint?: string;
 }
 
 /**

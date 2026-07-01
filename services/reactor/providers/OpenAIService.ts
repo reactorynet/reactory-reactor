@@ -163,7 +163,7 @@ class OpenAIService extends AIProviderBase {
       }
       case "ollama":
         openAIArgs.baseURL = apiBaseURL || process.env.OLLAMA_API_BASE_URL || "http://localhost:11434/v1";
-        openAIArgs.apiKey = apiKey || process.env.OLLAMA_API_KEY;
+        openAIArgs.apiKey = apiKey || process.env.OLLAMA_API_KEY || "ollama-no-key";
         delete openAIArgs.organization;
         break;
       case "llamacpp":
@@ -173,7 +173,7 @@ class OpenAIService extends AIProviderBase {
         break;
       case "vllm":
         openAIArgs.baseURL = apiBaseURL || process.env.VLLM_API_BASE_URL || "http://localhost:8000";
-        openAIArgs.apiKey = apiKey || process.env.VLLM_API_KEY;
+        openAIArgs.apiKey = apiKey || process.env.VLLM_API_KEY || "vllm-no-key";
         delete openAIArgs.organization;
         break;
       default:

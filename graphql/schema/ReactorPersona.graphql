@@ -313,4 +313,10 @@ input ReactorInitSession {
   Optional provider ID override. When provided, uses this provider instead of the persona default.
   """
   providerId: String
+  """
+  Per-request provider credential override. When provided, the server uses these
+  credentials for this request only (priority: sessionOverride > user > app > persona > env).
+  Never persisted on the chat session.
+  """
+  providerAuthOverride: ReactorProviderAuthOverrideInput
 }

@@ -66,6 +66,8 @@ type ReactorProviderModelResult {
 
 """
 Represents the authentication configuration status for a provider.
+Non-secret echo fields (endpoint, organization, maskedKeyHint) are derived
+server-side from redactCredentials(decrypt(...)) so the raw key never reaches the client.
 """
 type ReactorProviderAuthConfig {
   provider: String!
@@ -73,6 +75,9 @@ type ReactorProviderAuthConfig {
   isDefault: Boolean!
   isAppDefault: Boolean!
   source: String
+  endpoint: String
+  organization: String
+  maskedKeyHint: String
 }
 
 """
@@ -90,4 +95,41 @@ Input for removing provider authentication credentials.
 """
 input ReactorRemoveProviderAuthInput {
   providerId: String!
+}
+
+"""
+Per-request provider credential override. The client sends this with each
+chat request when the user has chosen to apply credentials only to a specific
+chat session. The server uses these for the single request and never persists them.
+"""
+input ReactorProviderAuthOverrideInput {
+  apiKey: String
+  endpoint: String
+  organization: String
+  deploymentName: String
+  apiVersion: String
+}
+
+extend type Query {
+  """
+  Returns the authentication status for each provider for the current user,
+  including a non-secret echo (endpoint, organization, maskedKeyHint) for
+  providers the user has configured.
+  """
+  ReactorUserProviderAuth: [ReactorProviderAuthConfig!]!
+}
+
+extend type Mutation {
+  """
+  Saves provider authentication credentials for the current user.
+  Optionally flags the provider as the user's default (setAsAccountDefault)
+  or as the application default (setAsAppDefault, ADMIN only).
+  """
+  ReactorSaveProviderAuth(input: ReactorSaveProviderAuthInput!): ReactorProviderAuthConfig!
+
+  """
+  Removes provider authentication credentials for the current user and
+  clears any local default flag for that provider.
+  """
+  ReactorRemoveProviderAuth(input: ReactorRemoveProviderAuthInput!): Boolean!
 }

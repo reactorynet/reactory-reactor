@@ -487,6 +487,12 @@ input ReactorSendMessageInput {
   Only used when the active model supports image input.
   """
   images: [String]
+  """
+  Per-request provider credential override. When provided, the server uses these
+  credentials for this request only (priority: sessionOverride > user > app > persona > env).
+  Never persisted on the chat session.
+  """
+  providerAuthOverride: ReactorProviderAuthOverrideInput
 }
 
 """

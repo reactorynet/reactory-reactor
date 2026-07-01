@@ -43,7 +43,7 @@ import { TokenPacer } from "../streaming/TokenPacer";
   ],
 })
 class OllamaAIService extends AIProviderBase {
-  ai!: Ollama;
+  ai!: typeof Ollama;
   fileService!: Reactory.Service.IReactoryFileService;
   userService!: Reactory.Service.IReactoryUserService;
   fetchService!: Reactory.Service.IFetchService;

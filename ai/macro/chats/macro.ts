@@ -9,14 +9,98 @@ import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPerso
 import { IReactorConversationsService } from "../../../types/service.types";
 import { StreamingMode } from "modules/reactory-reactor/services/reactor/types/streaming.types";
 import { ChatsMacroProps } from './types';
+import logger from "@reactory/server-core/logging";
+
+
+/**
+ * Resolve a free-text model/provider hint from the agent into the canonical
+ * ids used by the provider registry. The LLM often supplies a display name
+ * (e.g. "GPT-5.4") instead of the model id (e.g. "gpt-5.4"); the downstream
+ * conversation service looks models up strictly by `m.id === modelId`, so
+ * passing a name through unchanged causes the sub-agent launch to fail.
+ *
+ * Resolution order:
+ *  - provider: exact id match, then case-insensitive name match
+ *  - model:    exact id match (any provider), then name match scoped to the
+ *              resolved provider, then name match across all providers
+ *
+ * If nothing matches, the original value is returned unchanged so the
+ * downstream service surfaces its own error rather than failing silently.
+ */
+async function resolveModelAndProvider(
+  context: Reactory.Server.IReactoryContext,
+  model?: string,
+  provider?: string,
+): Promise<{ modelId?: string; providerId?: string }> {
+  if (!model && !provider) return { modelId: undefined, providerId: undefined };
+
+  const providerService = context.getService<any>("reactor.ReactorProviderService@1.0.0");
+  if (!providerService) {
+    return { modelId: model, providerId: provider };
+  }
+
+  let resolvedProviderId = provider;
+  if (provider) {
+    const providers = await providerService.getProviders();
+    const exactProvider = providers.find((p: any) => p.id === provider);
+    if (exactProvider) {
+      resolvedProviderId = exactProvider.id;
+    } else {
+      const byName = providers.find(
+        (p: any) => p.name?.toLowerCase() === provider.toLowerCase()
+      );
+      if (byName) resolvedProviderId = byName.id;
+    }
+  }
+
+  let resolvedModelId = model;
+  if (model) {
+    const providers = await providerService.getProviders();
+    let matchedModelId: string | undefined;
+
+    for (const p of providers) {
+      const found = p.models?.find((m: any) => m.id === model);
+      if (found) { matchedModelId = found.id; break; }
+    }
+
+    if (!matchedModelId) {
+      const scopedProviders = resolvedProviderId
+        ? providers.filter((p: any) => p.id === resolvedProviderId)
+        : providers;
+      for (const p of scopedProviders) {
+        const found = p.models?.find(
+          (m: any) => m.name?.toLowerCase() === model.toLowerCase()
+        );
+        if (found) { matchedModelId = found.id; break; }
+      }
+    }
+
+    if (!matchedModelId) {
+      for (const p of providers) {
+        const found = p.models?.find(
+          (m: any) => m.name?.toLowerCase() === model.toLowerCase()
+        );
+        if (found) { matchedModelId = found.id; break; }
+      }
+    }
+
+    if (matchedModelId) resolvedModelId = matchedModelId;
+  }
+
+  return { modelId: resolvedModelId, providerId: resolvedProviderId };
+}
 
 
 export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
   props: ChatsMacroProps,
   state: ChatState
 ): Promise<unknown> => {
-  const { action, id, message, files, model, provider } = props;
-  const { context } = state;
+  const { context, modelId, providerId } = state;
+  const { action, id, message, files, model = modelId, provider = providerId} = props;
+
+  
+
+  logger.info(`ChatsMacro: model=${model}, provider=${provider} action=${action}, id=${id}, message=${message}, files=${files}`);
 
   try {
     switch (action) {
@@ -45,6 +129,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
       case "list": {
         const chats = await ReactorConversationModel.find({
           user: state.context.user,
+          parentSessionId: { $in: [null, undefined] },
         }).then();
         if (chats && chats.length > 0) {
           const chatSummaries = chats.map((chat) => {
@@ -193,11 +278,16 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
             ? ToolApprovalMode.AUTO
             : ToolApprovalMode.SAFE_AUTO;
 
+          // The agent often passes a model display name (e.g. "GPT-5.4")
+          // rather than the model id. Resolve to the canonical id before
+          // delegating so the sub-agent provider lookup succeeds.
+          const resolved = await resolveModelAndProvider(context, model, provider);
+
           const response = await conversationService.sendMessage({
             personaId: persona.id,
             message,
-            modelId: model || state.modelId,
-            providerId: provider,
+            modelId: resolved.modelId || state.modelId,
+            providerId: resolved.providerId,
             chatSessionId: existingChatId || undefined,
             streamingMode: StreamingMode.NONE,
             tool_results: undefined,
@@ -342,6 +432,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
       case "clear": {
         const chats = await ReactorConversationModel.find({
           user: state.context.user,
+          parentSessionId: { $in: [null, undefined] },
         }).then();
         const deletedCount = chats?.length || 0;
         if (chats && chats.length > 0) {
@@ -475,11 +566,11 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
             },
             model: {
               type: "string",
-              description: "Provide a specific model for the action. - Optional will use the default model if not specified.",
+              description: "Optional model to use for the action. Accepts either the model id (e.g. 'gpt-5.4') or the display name (e.g. 'GPT-5.4'); names are resolved to ids automatically. If omitted, the current session's model is used.",
             },
             provider: {
               type: "string",
-              description: "Provide a specific provider for the action. - Optional will use the default provider if not specified.",
+              description: "Optional provider for the action. Accepts either the provider id (e.g. 'openai') or the display name (e.g. 'OpenAI'); names are resolved to ids automatically. If omitted, the persona's default provider is used.",
             },
             historyCount: {
               type: "number",

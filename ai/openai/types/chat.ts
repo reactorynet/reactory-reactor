@@ -281,6 +281,11 @@ export type ChatState = {
    * Populated from the conversation document's virtual property.
    */
   sessionFolder?: string
+
+  /**
+   * The model provider id
+   */
+  providerId?: string
 }
   
 export interface QuestionHandlerResponse {

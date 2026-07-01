@@ -689,8 +689,10 @@ class ReactorChatResolver {
     context: Reactory.Server.IReactoryContext
   ) {
     if (!chatState?.id) return [];
+    if (!context?.user || context.user.anon) return [];
     const children = await ReactorConversationModel.find({
       parentSessionId: chatState.id.toString(),
+      user: context.user?._id ?? context.user,
     }).lean().exec();
     return children.map(c => ({
       __typename: "ReactorChatState" as const,
@@ -714,6 +716,13 @@ class ReactorChatResolver {
         providerId?: string;
         continueAfterTools?: boolean;
         images?: string[];
+        providerAuthOverride?: {
+          apiKey?: string;
+          endpoint?: string;
+          organization?: string;
+          deploymentName?: string;
+          apiVersion?: string;
+        };
       };
     },
     context: Reactory.Server.IReactoryContext
@@ -750,6 +759,7 @@ class ReactorChatResolver {
         providerId: args.message.providerId,
         continueAfterTools: args.message.continueAfterTools,
         images: args.message.images,
+        providerAuthOverride: args.message.providerAuthOverride,
       });
     } catch (error) {
       return {

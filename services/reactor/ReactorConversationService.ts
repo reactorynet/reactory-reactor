@@ -2650,6 +2650,10 @@ export default class ReactorConversationService
     // results that don't have an _id.
     query._id = { $ne: null };
 
+    // Sub-agent sessions (children of a parent session) are only reachable
+    // via the parent's `chats` relationship, never from the main session list.
+    query.parentSessionId = { $in: [null, undefined] };
+
     return await ReactorConversationModel.find(query)
       .select("-history")
       .sort({ updated: -1 })
@@ -3119,6 +3123,13 @@ export default class ReactorConversationService
     images?: string[];
     toolApprovalMode?: ToolApprovalMode;
     parentSessionId?: string;
+    providerAuthOverride?: {
+      apiKey?: string;
+      endpoint?: string;
+      organization?: string;
+      deploymentName?: string;
+      apiVersion?: string;
+    };
   }): Promise<any> {
     const {
       personaId,
@@ -3136,6 +3147,7 @@ export default class ReactorConversationService
       images,
       toolApprovalMode: toolApprovalModeOverride,
       parentSessionId,
+      providerAuthOverride,
     } = args;
     const { user } = this.context;
 
@@ -3462,10 +3474,12 @@ export default class ReactorConversationService
         }
 
         // Execute chat with the specified provider
-        // Resolve user/app credentials and inject into persona config
+        // Resolve user/app credentials and inject into persona config.
+        // Per-request sessionOverride (client-supplied, never persisted) takes priority.
         const resolvedCreds = await this.providerService.resolveProviderCredentials(
           provider,
-          effectivePersona.config
+          effectivePersona.config,
+          providerAuthOverride
         );
         if (resolvedCreds.source !== "none" && resolvedCreds.source !== "persona") {
           effectivePersona.config = {
@@ -4691,7 +4705,8 @@ export default class ReactorConversationService
     const persona = await this.context
       .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0")
       .getPersona(personaId);
-    const provider = persona.providerId || "openai";
+    const storedConv = await ReactorConversationModel.findById(chatSessionId).select('providerId').lean().exec();
+    const provider = storedConv?.providerId || persona.providerId || "xai";
     const adapter = await this.providerService.getAdapter(provider);
 
     if (streamingMode === StreamingMode.SSE) {

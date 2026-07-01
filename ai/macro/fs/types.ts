@@ -352,6 +352,76 @@ export interface InsertSnippetProps {
 }
 
 /**
+ * Return type for InsertSnippet macro.
+ *
+ * Mirrors the structured shape used by WriteFile so callers (AI agents,
+ * UI, logs) can programmatically distinguish success from failure and
+ * inspect what the macro actually did — overlap trimming is visible in
+ * `data.trimmedLeading` / `data.trimmedTrailing`, which makes the
+ * silent-mutation behaviour observable instead of opaque.
+ */
+export interface InsertSnippetResult {
+  /** Whether the operation was successful */
+  success: boolean;
+  /** Error message if operation failed */
+  error?: string;
+  /** Standardized error code for programmatic handling */
+  errorCode?: MacroErrorCode;
+  /** Result details if operation succeeded */
+  data?: {
+    /** Full file path */
+    path: string;
+    /** Operation mode: 'insert' (no end given) or 'replace' (start+end) */
+    mode: 'insert' | 'replace';
+    /** Operation type label, e.g. 'insert', 'replace', 'blocked_open_handles' */
+    operation: string;
+    /** Resolved 1-based start line */
+    startLine: number;
+    /** Resolved 1-based end line (startLine - 1 for pure insert) */
+    endLine: number;
+    /** Number of original file lines preserved before the edit point */
+    linesBefore: number;
+    /** Number of original file lines preserved after the edit point */
+    linesAfter: number;
+    /** Number of lines in the submitted snippet (before trim) */
+    snippetLines: number;
+    /** Number of snippet lines actually written (after any overlap trim) */
+    insertedLines: number;
+    /** Lines stripped from the leading edge by overlap detection */
+    trimmedLeading: number;
+    /** Lines stripped from the trailing edge by overlap detection */
+    trimmedTrailing: number;
+    /** Whether overlap detection was bypassed via exactMatch */
+    exactMatch: boolean;
+    /** Final total line count of the file */
+    totalLines: number;
+    /** File size in bytes after the edit */
+    size: number;
+    /** File size formatted as human readable string */
+    sizeFormatted: string;
+  };
+  /** Tool name for context */
+  tool: string;
+  /** Original parameters passed to the macro */
+  params: InsertSnippetProps;
+  /** Metadata about the operation */
+  metadata?: {
+    /** Execution time in milliseconds */
+    executionTime: number;
+    /** Timestamp of operation */
+    timestamp: Date;
+    /** User who performed the operation */
+    user?: string;
+    /** Whether file existed before operation */
+    fileExisted: boolean;
+    /** Type of operation performed */
+    operationType: string;
+  };
+  /** Instructions for AI on how to use the data */
+  instructions?: string;
+}
+
+/**
  * Properties for MakeDirectory macro
  */
 export interface MakeDirectoryProps {
