@@ -1,6 +1,6 @@
 import Reactory from "@reactorynet/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
-import Ollama, { Message, Tool, ToolCall } from "ollama";
+import { Ollama, Message, Tool, ToolCall } from "ollama";
 import {
   AIStreamingCapabilities,
   IAIPersona,
@@ -43,7 +43,7 @@ import { TokenPacer } from "../streaming/TokenPacer";
   ],
 })
 class OllamaAIService extends AIProviderBase {
-  ai!: typeof Ollama;
+  ai!: Ollama;
   fileService!: Reactory.Service.IReactoryFileService;
   userService!: Reactory.Service.IReactoryUserService;
   fetchService!: Reactory.Service.IFetchService;

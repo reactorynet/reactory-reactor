@@ -132,8 +132,11 @@ const checkOpenHandles = async (
       details: `Open handles held by PIDs: ${pids.join(', ')}`,
     };
   } catch (err) {
-    // lsof exits 1 when no results — that means no open handles.
-    if ((err as NodeJS.ErrnoException).code === 1) {
+    // lsof exits 1 when no results — that means no open handles. Node's
+    // child_process sets `.code` to the numeric exit code on non-zero
+    // exits, but ErrnoException types it as `string | undefined`, so
+    // compare via String() to satisfy both the type system and runtime.
+    if (String((err as NodeJS.ErrnoException).code) === '1') {
       return { hasOpenHandles: false };
     }
     logger.warn(`Unable to check open handles for ${targetPath}: ${(err as Error).message}`);
@@ -149,6 +152,11 @@ export const InsertSnippet: Macro<InsertSnippetResult, InsertSnippetProps> = asy
 ): Promise<InsertSnippetResult> => {
   const startTime = Date.now();
   const { path, start, end, snippet, exactMatch } = props;
+
+  // Hoisted so the catch block can report fileExisted accurately even
+  // when the throw happens before `targetPath` would otherwise be in
+  // scope. Stays `''` until the path-validation guard assigns it.
+  let targetPath = '';
 
   const fail = (
     error: string,
@@ -189,7 +197,7 @@ export const InsertSnippet: Macro<InsertSnippetResult, InsertSnippetProps> = asy
     }
 
     const startLine = rawStart;
-    const targetPath = path.trim();
+    targetPath = path.trim();
     const fileExisted = existsSync(targetPath);
 
     if (!fileExisted) {
@@ -230,14 +238,8 @@ export const InsertSnippet: Macro<InsertSnippetResult, InsertSnippetProps> = asy
         true,
       );
     }
-    if (startLine < 1) {
-      return fail(
-        `start line ${startLine} is before beginning of file`,
-        MacroErrorCode.VALIDATION_INVALID_PARAM,
-        'validation',
-        true,
-      );
-    }
+    // `startLine < 1` is already ruled out by the rawStart < 1 guard above;
+    // no second check needed here.
 
     let endLine: number;
     let mode: 'insert' | 'replace';
@@ -391,7 +393,7 @@ Line numbers in the file have **changed**. You MUST re-read the file (via \`read
       `.trim(),
     };
   } catch (err) {
-    logger.error(`Error writing file at ${path}:`, err);
+    logger.error(`Error writing file at ${targetPath || path}:`, err);
 
     const nodeErr = err as NodeJS.ErrnoException;
     let errorCode = MacroErrorCode.IO_READ_WRITE_ERROR;
@@ -399,10 +401,10 @@ Line numbers in the file have **changed**. You MUST re-read the file (via \`read
     else if (nodeErr.code === 'EACCES' || nodeErr.code === 'EPERM') errorCode = MacroErrorCode.IO_PERMISSION_DENIED;
 
     return fail(
-      `Failed to edit file at ${path}: ${(err as Error).message}`,
+      `Failed to edit file at ${targetPath || path}: ${(err as Error).message}`,
       errorCode,
       'error',
-      existsSync(path?.trim?.() || ''),
+      targetPath ? existsSync(targetPath) : false,
     );
   }
 };

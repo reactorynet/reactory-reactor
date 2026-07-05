@@ -84,12 +84,12 @@ const WORKFLOW_RESOURCES: IAIPersonaResource[] = [
     created: new Date(),
   },
   {
-    id: 'reactor-workflow-steps',
-    name: 'Reactor Module Workflow Steps',
-    description: `The workflow step implementations provided by the reactory-reactor module,
-    including extended steps for GraphQL, MongoDB, search, email, user lookup, and more.`,
-    type: 'directory',
-    url: path.join(REACTORY_SERVER, '/src/modules/reactory-reactor/workflow/steps'),
+    id: 'yaml-workflow-schema',
+    name: 'YAML Workflow Schema',
+    description: `The JSON schema for validating YAML workflow definitions.
+    This schema defines the structure, required fields, and validation rules for workflows.`,
+    type: 'file',
+    url: path.join(REACTORY_SERVER, '/src/modules/reactory-core/workflow/schema/workflow.schema.json'),
     created: new Date(),
   },
   {
@@ -243,8 +243,7 @@ export const WorkflowWillPersona: IAIPersona = {
     apiBaseURL: process.env.GOOGLE_AI_API_URL,
     project: process.env.GOOGLE_AI_STUDIO_PROJECT_ID,
   },
-  tools: [...WORKFLOW_TOOLS],
-  maxTokens: 1048576,
+  tools: [...WORKFLOW_TOOLS],  
   // @ts-ignore
   macros: [
     ...WORKFLOW_MACROS

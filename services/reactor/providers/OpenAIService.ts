@@ -141,7 +141,10 @@ class OpenAIService extends AIProviderBase {
       baseURL: apiBaseURL || process.env.OPENAI_API_BASE_URL,
     };
 
-    switch (providerId) {
+    // Normalize so provider IDs are matched case-insensitively; a registry id
+    // like "Ollama"/"Vllm" must resolve to the same endpoint config as its
+    // lowercase provider type, otherwise it falls through to the OpenAI default.
+    switch (providerId?.toLowerCase()) {
       case "xai":
         openAIArgs.baseURL = apiBaseURL || process.env.XAI_API_BASE_URL || "https://api.x.ai/v1";
         openAIArgs.apiKey = apiKey || process.env.X_AI_API_KEY;

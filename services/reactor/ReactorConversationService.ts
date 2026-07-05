@@ -3011,7 +3011,10 @@ export default class ReactorConversationService
       streamingMode?: StreamingMode;
     }
   ): Promise<any> {
-    switch (provider) {
+    // Provider IDs from the registry (e.g. providers.yaml) may be cased
+    // arbitrarily (e.g. "Ollama"). Normalize so routing is case-insensitive;
+    // otherwise a mismatch silently falls through to the OpenAI-compatible default.
+    switch (provider?.toLowerCase()) {
       case "ollama":
         // Ollama uses the native Ollama Node SDK via OllamaAIService
         await this.ollamaService.initialize(chatSessionId, persona);

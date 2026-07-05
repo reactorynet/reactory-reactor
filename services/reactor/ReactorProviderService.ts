@@ -388,7 +388,10 @@ class ReactorProviderService implements IReactorProviderService {
   }
 
   async getAdapter(providerId: string): Promise<any> {
-    return this.adapters.get(providerId);
+    // Adapters are registered under lowercase provider-type keys (e.g. "ollama").
+    // Provider IDs from the registry may be cased differently (e.g. "Ollama"),
+    // so normalize before lookup to avoid returning undefined.
+    return this.adapters.get(providerId) ?? this.adapters.get(providerId?.toLowerCase());
   }
 
   /**

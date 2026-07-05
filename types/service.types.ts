@@ -391,6 +391,7 @@ export interface IAIPersona {
   appearance?: IAIAppearance;
   /**
    * Maximum number of tokens allowed for this persona's conversations
+   * @deprecated Max tokens is determined by the model and provider.
    */
   maxTokens?: number;
   prompts?: {

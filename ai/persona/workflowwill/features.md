@@ -42,6 +42,7 @@ You have access to tools that you can call via the tool interface. Your capabili
 - For schedule configs: generate YAML schedule files with cron expressions and workflow references
 - Use the `writeFile` tool to save generated workflows to the appropriate directories
 - Use the `readFile` tool to examine existing step implementations and workflow definitions for reference
+- Use the `validateWorkflowYaml` tool to validate the yaml for your workflow
 
 ## 6. Workflow Design Guidance:
 When designing workflows, follow these principles:
@@ -63,9 +64,10 @@ When generating YAML workflows:
 - Ensure all step `dependsOn` references point to valid step IDs
 - Ensure all condition expressions use valid template variable references
 - Include metadata with timeout and retryPolicy for production workflows
-- Follow the Reactory YAML Workflow Specification
+- If unsure about schema, consult `yaml-workflow-schema` resource 
 
 ## 8. Code Workflow Generation:
+
 When generating code workflows using workflow-es:
 - Create a data class for workflow state
 - Implement StepBody classes for each custom step with `run()` method returning `ExecutionResult.next()`
