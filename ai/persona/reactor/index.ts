@@ -216,13 +216,12 @@ const buildResourceDescriptions = (resources: any[]): string => {
 
 // Enhanced system prompt builder
 const buildSystemPrompt = (userRoles: string[] = ['USER'], availableTools: any[] = REACTOR_TOOLS) => {
-  const toolDescriptions = buildToolDescriptions(availableTools);
+  // const toolDescriptions = buildToolDescriptions(availableTools);
   const roleCapabilities = getRoleCapabilities(userRoles);
   const resourceDescription = buildResourceDescriptions(REACTOR_RESOURCES);
   
   return lodash.template(REACTOR_PERSONA_TEXT + '\n\n' + REACTOR_FEATURES_TEXT)({
     date: new Date().toISOString(),
-    toolDescriptions,
     resourceDescription,
     userRole: userRoles.join(', '),
     roleSpecificCapabilities: roleCapabilities

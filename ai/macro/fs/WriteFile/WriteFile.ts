@@ -308,7 +308,7 @@ export const WriteFileComponentRegister: MacroComponentDefinition<typeof WriteFi
   description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
   features: [],
   stem: 'file',
-  roles: ['DEVELOPER', 'ADMIN'],
+  roles: ['FILE-WRITER-LOCAL', 'DEVELOPER', 'ADMIN'],
   tags: ['macro', 'file', 'write', 'save', 'output'],
   tools: [{
     type: "function",

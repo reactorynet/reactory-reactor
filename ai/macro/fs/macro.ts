@@ -28,7 +28,7 @@ export const FileMacros = [
   WriteFileComponentRegister,
   ListDirectoryComponentRegister,
   ExtractFileComponentRegister,
-  InsertSnippetComponentRegister,
+  // InsertSnippetComponentRegister,
   PathInfoComponentRegister,
   MakeDirectoryComponentRegister,
   DeleteDirectoryComponentRegister,
