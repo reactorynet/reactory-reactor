@@ -631,13 +631,42 @@ class OpenAIService extends AIProviderBase {
       "temporary", "service unavailable", "internal server error",
       "bad gateway", "gateway timeout",
     ];
-    return retryablePatterns.some((p) => msg.includes(p) || code.includes(p));
+    if (retryablePatterns.some((p) => msg.includes(p) || code.includes(p))) {
+      return true;
+    }
+    // Malformed / invalid tool-call errors are retryable: modifyMessageForRetry
+    // coaches the model to emit a well-formed call (or plain text) on retry.
+    return this.isToolCallError(error);
+  }
+
+  /**
+   * Detect a malformed / invalid tool-call error worth a coached retry.
+   * Deliberately narrow so genuine tool *execution* failures (e.g. a tool that
+   * throws) are not retried — those won't be fixed by re-prompting.
+   */
+  private isToolCallError(error: any): boolean {
+    const msg = error?.message?.toLowerCase() || "";
+    const code = error?.code?.toLowerCase() || "";
+    const mentionsTool =
+      msg.includes("tool") || msg.includes("function") ||
+      code.includes("tool") || code.includes("function");
+    if (!mentionsTool) return false;
+    const malformedSignals = [
+      "malformed", "invalid", "parse", "arguments", "schema",
+      "unexpected", "could not be processed",
+    ];
+    return malformedSignals.some((p) => msg.includes(p) || code.includes(p));
   }
 
   private modifyMessageForRetry(message: string, lastError: any): string {
     const errorMsg = lastError?.message?.toLowerCase() || "";
     if (errorMsg.includes("tool") || errorMsg.includes("function")) {
-      return `Please provide a simple, direct response to: ${message}`;
+      return (
+        "SYSTEM NOTICE: your previous tool call could not be processed. " +
+        "If you call a tool, use an exact declared tool name and provide arguments " +
+        "as a single valid JSON object matching its schema; otherwise answer in plain text. " +
+        `Now respond to: ${message}`
+      );
     }
     return message;
   }

@@ -122,10 +122,9 @@ class OllamaAIService extends AIProviderBase {
           const ollamaToolCalls: ToolCall[] = toolCalls.map((tc: any) => ({
             function: {
               name: tc.function?.name || tc.name || "",
-              arguments:
-                typeof tc.function?.arguments === "string"
-                  ? JSON.parse(tc.function.arguments || "{}")
-                  : tc.function?.arguments ?? tc.args ?? {},
+              arguments: this.safeParseArgs(
+                tc.function?.arguments ?? tc.args
+              ),
             },
           }));
           messages.push({
@@ -387,14 +386,80 @@ class OllamaAIService extends AIProviderBase {
   private isRetryableError(error: any): boolean {
     if (!error) return false;
     const msg = error.message?.toLowerCase() || "";
-    return (
+    if (
       msg.includes("rate limit") ||
       msg.includes("timeout") ||
       msg.includes("network") ||
       msg.includes("connection") ||
       msg.includes("service unavailable") ||
       msg.includes("internal server error")
-    );
+    ) {
+      return true;
+    }
+    // Malformed / invalid tool-call errors are retryable: modifyMessageForRetry
+    // coaches the model to emit a well-formed call (or plain text) on retry.
+    return this.isToolCallError(error);
+  }
+
+  /**
+   * Detect a malformed / invalid tool-call error worth a coached retry.
+   * Deliberately narrow so genuine tool *execution* failures (a tool that
+   * throws) are not retried — those won't be fixed by re-prompting.
+   */
+  private isToolCallError(error: any): boolean {
+    const msg = error?.message?.toLowerCase() || "";
+    const mentionsTool = msg.includes("tool") || msg.includes("function");
+    if (!mentionsTool) return false;
+    const malformedSignals = [
+      "malformed", "invalid", "parse", "arguments", "schema",
+      "unexpected", "could not be processed",
+    ];
+    return malformedSignals.some((p) => msg.includes(p));
+  }
+
+  /**
+   * Parse persisted tool-call arguments defensively. Local models (via Ollama)
+   * can emit malformed tool calls, and those arguments may have been persisted
+   * as an unparseable JSON string. This must never throw — a bad argument
+   * string cannot be allowed to crash prompt building.
+   */
+  private safeParseArgs(args: unknown): Record<string, unknown> {
+    if (args && typeof args === "object") {
+      return args as Record<string, unknown>;
+    }
+    if (typeof args === "string") {
+      try {
+        const parsed = JSON.parse(args || "{}");
+        return parsed && typeof parsed === "object" ? parsed : {};
+      } catch {
+        this.context.warn(
+          "Failed to parse persisted Ollama tool-call arguments; using empty args",
+          { args },
+          "OllamaAIService.safeParseArgs"
+        );
+        return {};
+      }
+    }
+    return {};
+  }
+
+  /**
+   * Reshape the message on retry. Only coach the model for tool/function
+   * related failures — transient (network / rate-limit) retries must re-send
+   * the user's original message unchanged, since the message was not the
+   * problem.
+   */
+  private modifyMessageForRetry(message: string, lastError: any): string {
+    const errorMsg = lastError?.message?.toLowerCase() || "";
+    if (errorMsg.includes("tool") || errorMsg.includes("function")) {
+      return (
+        "SYSTEM NOTICE: your previous tool call could not be processed. " +
+        "If you call a tool, use an exact declared tool name and provide arguments " +
+        "as a single valid JSON object matching its schema; otherwise answer in plain text. " +
+        `Now respond to: ${message}`
+      );
+    }
+    return message;
   }
 
   // --- Public chat method ---
@@ -425,7 +490,8 @@ class OllamaAIService extends AIProviderBase {
         }
 
         const model = this.chatState.modelId;
-        const userMessage = attempt > 1 ? `Please provide a simple, direct response to: ${message}` : message;
+        const userMessage =
+          attempt > 1 ? this.modifyMessageForRetry(message, lastError) : message;
         const messages = this.buildMessages(userMessage);
         const tools = await this.getToolDefinitions();
 

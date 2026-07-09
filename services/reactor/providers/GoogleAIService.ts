@@ -1191,6 +1191,21 @@ class GoogleAIService extends AIProviderBase {
     });
 
     if (!hasPendingAutoToolCalls) {
+      // If the stream terminated with a retryable failure (e.g. a malformed
+      // function call), do NOT emit a completion event — it would be an empty,
+      // dead-end message and the client would render it before the retry lands.
+      // Throw instead so chat()'s retry loop re-prompts the model with coaching;
+      // the successful attempt emits the real completion event. If every retry
+      // is exhausted, chat()'s fallback emits a terminal event so we never hang.
+      if (finishReason && this.isRetryableFinishReason(finishReason)) {
+        this.context.warn(
+          `Streaming response finished with retryable reason ${finishReason} - will retry`,
+          { sessionId, finishReason },
+          logTag,
+        );
+        throw new AIProviderError(finishReason, { finishReason });
+      }
+
       // Save any accumulated images to disk and replace base64 with CDN URLs
       let completionImages: typeof accumulatedImages | undefined =
         accumulatedImages.length > 0 ? accumulatedImages : undefined;
@@ -1607,7 +1622,18 @@ class GoogleAIService extends AIProviderBase {
             "GoogleAIService.getAIResponse"
           );
 
-          // Return a fallback response instead of throwing
+          // Retryable extraction errors (MALFORMED_FUNCTION_CALL,
+          // UNEXPECTED_TOOL_CALL, EMPTY_RESPONSE, …) MUST propagate so chat()'s
+          // retry loop can re-prompt the model with corrective coaching.
+          // Swallowing them here — as this path previously did — defeats the
+          // retry mechanism entirely and returns a dead-end fallback to the
+          // user. We deliberately do NOT push the user turn to history on a
+          // failed attempt, so the retry rebuilds a clean chat session.
+          if (this.isRetryableError(extractError)) {
+            throw extractError;
+          }
+
+          // Non-retryable extraction failure — return a graceful fallback.
           const userConversationHistoryItem: ReactorConversationHistoryItem = {
             id: new ObjectId(),
             role: "user",
@@ -1661,23 +1687,35 @@ class GoogleAIService extends AIProviderBase {
     // Handle special finish reasons that indicate issues
     if (candidate.finishReason) {
       switch (candidate.finishReason) {
-        case "UNEXPECTED_TOOL_CALL":
+        case "UNEXPECTED_TOOL_CALL": {
+          const malformedDetail = this.extractMalformedCallDetail(candidate);
           this.context.warn(
             "Gemini encountered an unexpected tool call - will retry",
-            { candidate },
+            { candidate, malformedDetail },
             "GoogleAIService.extractGeminiCandidate"
           );
-          // Throw a retryable error instead of returning fallback
-          throw new AIProviderError("UNEXPECTED_TOOL_CALL");
+          // Throw a retryable error and carry the offending detail so the
+          // retry can coach the model to self-correct.
+          throw new AIProviderError("UNEXPECTED_TOOL_CALL", {
+            finishReason: candidate.finishReason,
+            malformedDetail,
+          });
+        }
 
-        case "MALFORMED_FUNCTION_CALL":
+        case "MALFORMED_FUNCTION_CALL": {
+          const malformedDetail = this.extractMalformedCallDetail(candidate);
           this.context.warn(
             "Gemini encountered a malformed function call - will retry",
-            { candidate },
+            { candidate, malformedDetail },
             "GoogleAIService.extractGeminiCandidate"
           );
-          // Throw a retryable error instead of returning fallback
-          throw new AIProviderError("MALFORMED_FUNCTION_CALL");
+          // Throw a retryable error and carry the offending detail so the
+          // retry can coach the model to self-correct.
+          throw new AIProviderError("MALFORMED_FUNCTION_CALL", {
+            finishReason: candidate.finishReason,
+            malformedDetail,
+          });
+        }
 
         case "SAFETY":
           this.context.warn(
@@ -1815,7 +1853,7 @@ class GoogleAIService extends AIProviderBase {
       streamingMode = StreamingMode.NONE,
     } = params;
 
-    const maxRetries = 2;
+    const maxRetries = 3;
     let lastError: any;
     this.streamingMode = streamingMode;
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -1905,6 +1943,35 @@ class GoogleAIService extends AIProviderBase {
       "GoogleAIService.chat"
     );
 
+    const fallbackContent =
+      "I'm experiencing some technical difficulties right now. Please try again in a moment, or rephrase your question.";
+
+    // In streaming mode the failed attempts intentionally suppressed their
+    // completion events (see handleStreamingRequest), so the client is still
+    // waiting. Emit a terminal completion event with the graceful message so
+    // the stream closes cleanly instead of hanging.
+    if (this.streamingMode === StreamingMode.SSE && this.chatState?.id) {
+      try {
+        const sessionId = this.chatState.id;
+        const completionEvent = StreamingEventFactory.createCompletionEvent(
+          fallbackContent,
+          "error",
+          undefined,
+          { sessionId, conversationId: sessionId },
+        );
+        await this.streamingTransportManager.sendEventToSession(
+          sessionId,
+          completionEvent
+        );
+      } catch (emitError) {
+        this.context.error(
+          "Failed to emit terminal completion event after exhausted retries",
+          { error: emitError },
+          "GoogleAIService.chat"
+        );
+      }
+    }
+
     // Return a graceful error response instead of throwing
     return {
       id: new ObjectId(),
@@ -1913,8 +1980,7 @@ class GoogleAIService extends AIProviderBase {
         {
           index: 0,
           message: {
-            content:
-              "I'm experiencing some technical difficulties right now. Please try again in a moment, or rephrase your question.",
+            content: fallbackContent,
             role: "assistant",
             tool_calls: [],
           },
@@ -1930,24 +1996,84 @@ class GoogleAIService extends AIProviderBase {
    */
   private modifyMessageForRetry(message: string, lastError: any): string {
     const errorMessage = lastError?.message?.toLowerCase() || "";
+    const malformedDetail: string =
+      typeof lastError?.meta?.malformedDetail === "string"
+        ? lastError.meta.malformedDetail
+        : "";
 
-    // For tool call related errors, try to simplify the request
+    // For tool-call related errors (common with Gemini 3.x, which is more
+    // eager to call tools), don't just simplify — coach the model on how to
+    // emit a well-formed call, and feed back its own failed attempt so it can
+    // self-correct rather than repeat the same mistake.
     if (
       errorMessage.includes("unexpected_tool_call") ||
       errorMessage.includes("malformed_function_call")
     ) {
       this.context.log(
-        "Modifying message for retry to avoid tool call issues",
-        { originalMessage: message, error: lastError.message },
+        "Modifying message for retry to correct malformed tool call",
+        {
+          originalMessage: message,
+          error: lastError.message,
+          hasDetail: !!malformedDetail,
+        },
         "GoogleAIService.modifyMessageForRetry"
       );
 
-      // Add a prefix to encourage a simpler response
-      return `Please provide a simple, direct response to: ${message}`;
+      const instructions = [
+        "SYSTEM NOTICE: Your previous reply contained a malformed function/tool call that could not be parsed and was discarded.",
+        "If you call a tool you MUST:",
+        "  1. Use only tools declared/available in this session, with their exact names.",
+        "  2. Emit the call via the structured function-call mechanism — do NOT write it as free text, markdown, or a code block.",
+        "  3. Provide arguments as a single valid JSON object matching the tool's parameter schema (quoted keys/strings, no trailing commas, no comments, no unescaped newlines).",
+        "If you do not actually need a tool to answer, reply in plain natural-language text instead of calling one.",
+      ];
+
+      if (malformedDetail) {
+        instructions.push(
+          `For reference, your previous malformed attempt was:\n---\n${malformedDetail}\n---\nCorrect it and try again.`
+        );
+      }
+
+      instructions.push(`Now respond to the original request: ${message}`);
+
+      return instructions.join("\n");
     }
 
     // For other errors, just return the original message
     return message;
+  }
+
+  /**
+   * Extract whatever detail Gemini provides about a malformed/unexpected
+   * function call so it can be fed back to the model on retry. Gemini usually
+   * populates `finishMessage` with the raw (unparseable) call text; we also
+   * fall back to any text/functionCall parts present on the candidate. The
+   * result is bounded so it never bloats the retry prompt.
+   */
+  private extractMalformedCallDetail(candidate: any): string {
+    const pieces: string[] = [];
+
+    if (typeof candidate?.finishMessage === "string" && candidate.finishMessage.trim()) {
+      pieces.push(candidate.finishMessage.trim());
+    }
+
+    const parts = candidate?.content?.parts;
+    if (Array.isArray(parts)) {
+      for (const part of parts) {
+        if (typeof part?.text === "string" && part.text.trim()) {
+          pieces.push(part.text.trim());
+        } else if (part?.functionCall) {
+          try {
+            pieces.push(JSON.stringify(part.functionCall));
+          } catch {
+            /* non-serialisable — skip */
+          }
+        }
+      }
+    }
+
+    // Only need enough context for the model to self-correct.
+    return pieces.join("\n").slice(0, 2000);
   }
 
   /**
@@ -1980,6 +2106,20 @@ class GoogleAIService extends AIProviderBase {
 
     return retryablePatterns.some(
       (pattern) => errorMessage.includes(pattern) || errorCode.includes(pattern)
+    );
+  }
+
+  /**
+   * Gemini finish reasons that represent a recoverable failure of the current
+   * attempt (rather than a valid terminal response). These are detected in the
+   * streaming path so we can retry with coaching instead of emitting a bogus
+   * completion event. Mirrors the throwing cases in extractGeminiCandidate.
+   */
+  private isRetryableFinishReason(finishReason: string): boolean {
+    return (
+      finishReason === "MALFORMED_FUNCTION_CALL" ||
+      finishReason === "UNEXPECTED_TOOL_CALL" ||
+      finishReason === "OTHER"
     );
   }
 
