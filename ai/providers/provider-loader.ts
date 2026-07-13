@@ -156,7 +156,7 @@ export function loadProviders(yamlPath?: string): ProviderConfig[] {
     }
   } catch (error) {
     // If user file cannot be read, continue with just default providers
-    console.warn(`Warning: Could not read user providers file at ${userFilePath}:`, error);
+    console.warn(`Warning: Could not read user providers file at ${userFilePath}:`);
   }
 
   // Combine default providers with user providers
