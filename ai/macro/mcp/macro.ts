@@ -1,11 +1,9 @@
-import fs from "fs";
-import path from "path";
 import { URL } from "url";
-import yaml from "js-yaml";
 import { v4 as uuidv4 } from "uuid";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import Reactory from "@reactorynet/reactory-core";
 import { ChatState, Macro, MacroComponentDefinition, MCPClient } from "../../openai/types/chat";
 import { McpCliProps } from "./types";
@@ -16,6 +14,11 @@ import {
   McpTransportKind,
 } from "./session-config";
 import { loadClientsFromSession } from "./load-clients";
+import { AvailableServiceEntry, standardMcpConfigPath, standardMcpConfigPaths } from "./standard-config";
+import { loadAvailableCatalog, availableCatalogPath } from "./catalog";
+import { isLocalMode } from "./runtime-mode";
+import { buildMcpOAuthProvider } from "./oauth/provider-factory";
+import { UserAuthenticationsTokenStore, TokenStoreUser } from "@reactory/server-core/authentication/oauth";
 
 // ── Result envelope used by every handler ───────────────────────────────────
 interface HandlerResult<T = unknown> {
@@ -28,51 +31,8 @@ const ok = <T,>(data: T): HandlerResult<T> => ({ success: true, data });
 const fail = (error: string): HandlerResult => ({ success: false, error });
 
 // ── Catalog helpers ─────────────────────────────────────────────────────────
-interface AvailableServiceEntry {
-  id: string;
-  name: string;
-  description: string;
-  transport: McpTransportKind;
-  /** Required for http transport */
-  url?: string;
-  /** Required for stdio transport; catalog-supplied, never agent-supplied */
-  command?: string;
-  args?: string[];
-  env?: Record<string, string>;
-  cwd?: string;
-  connectorRef?: string;
-  tags?: string[];
-  requiredEnvVars?: string[];
-  autoConnect?: boolean;
-}
-
-const resolveEnvTemplate = (value: string): string =>
-  value.replace(/\$\{([^:}]+)(?::([^}]*))?\}/g, (_match, envKey, fallback) =>
-    process.env[envKey] || fallback || ""
-  );
-
-const availableCatalogPath = (): string | null => {
-  const dataRoot = process.env.REACTORY_DATA || process.env.APP_DATA_ROOT;
-  if (!dataRoot) return null;
-  return path.join(dataRoot, "profiles", "reactor", "mcp", "available.yaml");
-};
-
-const loadAvailableCatalog = (): AvailableServiceEntry[] => {
-  const p = availableCatalogPath();
-  if (!p || !fs.existsSync(p)) return [];
-  try {
-    const raw = fs.readFileSync(p, "utf8");
-    const parsed = yaml.load(raw) as { services?: AvailableServiceEntry[] } | undefined;
-    return (parsed?.services ?? []).map((svc) => ({
-      ...svc,
-      // Accept legacy 'sse' catalog entries but normalise to 'http'.
-      transport: (svc.transport as string) === "sse" ? "http" : svc.transport,
-      url: svc.url ? resolveEnvTemplate(svc.url) : undefined,
-    }));
-  } catch {
-    return [];
-  }
-};
+// The catalog loaders live in ./catalog (shared with the OAuth callback route).
+// `AvailableServiceEntry`, `resolveEnvTemplate` etc. live in ./standard-config.
 
 const isUrlInCatalog = (candidateUrl: string, catalog: AvailableServiceEntry[]): boolean => {
   try {
@@ -106,15 +66,14 @@ const buildAuthHeaders = (state: ChatState): Record<string, string> => {
 /**
  * Whether stdio transports are permitted in this runtime.
  *
- * Always allowed in the electron desktop shell (where the MCP subprocess runs
- * on the user's own machine). On a cloud/server deployment it must be enabled
+ * Always allowed in local mode — the electron desktop shell, an explicit local
+ * install (`IS_DESKTOP_INSTALL`/`IS_LOCAL_MODE`), where the MCP subprocess runs
+ * on the user's own machine. On a cloud/server deployment it must be enabled
  * explicitly via `REACTORY_MCP_STDIO_ENABLED=true` so operators opt in to the
  * process-spawning surface.
  */
-const isStdioAllowed = (): boolean => {
-  if ((process.versions as Record<string, string | undefined>).electron) return true;
-  return process.env.REACTORY_MCP_STDIO_ENABLED === "true";
-};
+const isStdioAllowed = (): boolean =>
+  isLocalMode() || process.env.REACTORY_MCP_STDIO_ENABLED === "true";
 
 const pickActiveTransport = (mcpClient: MCPClient):
   | { kind: "http"; transport: StreamableHTTPClientTransport }
@@ -254,7 +213,8 @@ const addHttpConnection = (
   id: string,
   url: string,
   state: ChatState,
-  catalog: AvailableServiceEntry[]
+  catalog: AvailableServiceEntry[],
+  catalogEntry?: AvailableServiceEntry
 ): HandlerResult => {
   const baseUrl = url.endsWith("/") ? url : `${url}/`;
   let parsedUrl: URL;
@@ -275,28 +235,43 @@ const addHttpConnection = (
   const client = new Client({ name: id, version: "1.0.0" });
   const connectionId = uuidv4();
 
-  const requestInit: RequestInit = {
-    credentials: "include",
-    headers: inCatalog ? buildAuthHeaders(state) : {},
+  // Static headers declared on the catalog entry (e.g. a token in ~/.reactor/mcp.yaml)
+  // are always applied; forwarded auth headers are layered on only for catalog hosts.
+  const staticHeaders = catalogEntry?.headers ?? {};
+  const headers: Record<string, string> = {
+    ...staticHeaders,
+    ...(inCatalog ? buildAuthHeaders(state) : {}),
   };
-  const httpTransport = new StreamableHTTPClientTransport(parsedUrl, { requestInit });
+  const requestInit: RequestInit = { credentials: "include", headers };
+
+  // oauth-typed services get an SDK OAuthClientProvider (tokens persisted to the
+  // shared encrypted store); everything else keeps the static-header path.
+  const authProvider = buildMcpOAuthProvider(state, id, catalogEntry?.auth);
+  const httpTransport = new StreamableHTTPClientTransport(
+    parsedUrl,
+    authProvider ? { requestInit, authProvider } : { requestInit }
+  );
+  const description = catalogEntry?.description || `MCP Client for ${id}`;
 
   state.mcpClients!.push({
     id: connectionId,
     client,
     name: id,
-    description: `MCP Client for ${id}`,
+    description,
     transports: { http: httpTransport },
     url,
+    authProvider: authProvider ?? undefined,
   });
 
   if (state.sessionFolder) {
     addConnectionToSession(state.sessionFolder, {
       id: connectionId,
       serverName: id,
-      description: `MCP Client for ${id}`,
+      description,
       url,
       transport: "http",
+      headers: Object.keys(staticHeaders).length ? staticHeaders : undefined,
+      auth: catalogEntry?.auth,
       status: "inactive",
     });
   }
@@ -306,8 +281,11 @@ const addHttpConnection = (
     name: id,
     transport: "http",
     url,
+    oauth: !!authProvider,
     credentialsForwarded: inCatalog,
-    message: inCatalog
+    message: authProvider
+      ? `Added http connection ${id} with url ${url} (OAuth — run connect; you'll be prompted to authorize).`
+      : inCatalog
       ? `Added http connection ${id} with url ${url} (credentials forwarded — host in available.yaml).`
       : `Added http connection ${id} with url ${url} (no credentials forwarded — host not in available.yaml).`,
   });
@@ -320,15 +298,16 @@ const addStdioConnection = (
 ): HandlerResult => {
   if (!isStdioAllowed()) {
     return fail(
-      "stdio transport is disabled in this runtime. Enable with REACTORY_MCP_STDIO_ENABLED=true " +
-      "(server deployments) or run inside the Reactory desktop/electron shell."
+      "stdio transport is disabled in this runtime. It is enabled automatically in local mode " +
+      "(IS_DESKTOP_INSTALL=true / IS_LOCAL_MODE=true, or the electron shell); on server deployments " +
+      "set REACTORY_MCP_STDIO_ENABLED=true to opt in."
     );
   }
 
   const catalogEntry = catalog.find((svc) => svc.id === id);
   if (!catalogEntry) {
     return fail(
-      `stdio connections must reference a service id defined in available.yaml. ` +
+      `stdio connections must reference a service id defined in available.yaml or ~/.reactor/mcp.yaml. ` +
       `No catalog entry found for id "${id}". Use command="available" to list options.`
     );
   }
@@ -398,14 +377,22 @@ const addConnection = async (
   }
 
   const catalog = loadAvailableCatalog();
+  const catalogEntry = catalog.find((svc) => svc.id === id);
   const resolved: McpTransportKind = transport === "sse" ? "http" : transport;
 
   if (resolved === "stdio") {
     return addStdioConnection(id, state, catalog);
   }
 
-  if (!url) return fail("http transport requires a url.");
-  return addHttpConnection(id, url, state, catalog);
+  // http: an explicit url wins; otherwise fall back to the catalog entry's url so
+  // catalog / ~/.reactor/mcp.yaml services can be connected by id alone.
+  const effectiveUrl = url ?? catalogEntry?.url;
+  if (!effectiveUrl) {
+    return fail(
+      "http transport requires a url (pass url=..., or reference a catalog id that declares one)."
+    );
+  }
+  return addHttpConnection(id, effectiveUrl, state, catalog, catalogEntry);
 };
 
 const callTool = async (
@@ -498,6 +485,23 @@ const connectClient = async (
   try {
     await mcpClient.client.connect(active.transport);
   } catch (err) {
+    // OAuth: the SDK throws UnauthorizedError after invoking the provider's
+    // redirectToAuthorization. Surface the consent URL rather than a hard error
+    // so the user can authorize and re-run connect.
+    if (err instanceof UnauthorizedError || mcpClient.authProvider?.pendingAuthorizationUrl) {
+      const authorizationUrl = mcpClient.authProvider?.pendingAuthorizationUrl;
+      context?.log(`MCP: client ${id} requires authorization`, { authorizationUrl }, "info");
+      if (state.sessionFolder) {
+        updateConnectionStatus(state.sessionFolder, mcpClient.id, "inactive");
+      }
+      return {
+        success: false,
+        error: authorizationUrl
+          ? `MCP server "${mcpClient.name ?? id}" requires OAuth authorization.`
+          : `MCP server "${mcpClient.name ?? id}" requires OAuth authorization, but no authorization URL was produced.`,
+        data: { needsAuthorization: true, id: mcpClient.id, authorizationUrl },
+      };
+    }
     const classified = classifyMcpError(err, errCtx);
     const rawMessage = err instanceof Error ? err.message : String(err);
     context?.log(
@@ -558,6 +562,31 @@ const disconnectClient = async (
   return ok({ id: client.id, message: `Disconnected from ${client.id}` });
 };
 
+/**
+ * Clears the stored OAuth grant for a connection (revokes local credentials).
+ * The next connect will trigger a fresh authorization.
+ */
+const logoutClient = async (
+  id: string,
+  state: ChatState
+): Promise<HandlerResult> => {
+  const client = findClient(state, id);
+  if (!client) return fail(`No client found with id: ${id}`);
+
+  const user = state.context?.user as unknown as TokenStoreUser | undefined;
+  if (!user || typeof user.removeAuthentication !== "function") {
+    return fail("No user on the session context — cannot clear stored OAuth credentials.");
+  }
+
+  const store = new UserAuthenticationsTokenStore(user);
+  await store.remove(`mcp:${client.name ?? id}`);
+
+  if (state.sessionFolder) {
+    updateConnectionStatus(state.sessionFolder, client.id, "inactive");
+  }
+  return ok({ id: client.id, message: `Cleared OAuth credentials for ${client.name ?? id}.` });
+};
+
 const listConnections = async (state: ChatState): Promise<HandlerResult> => {
   const connections = (state.mcpClients ?? []).map((c) => ({
     id: c.id,
@@ -572,10 +601,8 @@ const getAvailable = async (
   format: "json" | "text",
   state: ChatState
 ): Promise<HandlerResult> => {
-  const p = availableCatalogPath();
-  if (!p) return fail("REACTORY_DATA is not configured.");
-  if (!fs.existsSync(p)) return fail(`No available.yaml found at ${p}`);
-
+  // The registry merges two sources: the curated operator catalog (available.yaml)
+  // and the user's standard config (~/.reactor/mcp.yaml). Either alone is enough.
   const services = loadAvailableCatalog();
   const stdioAllowed = isStdioAllowed();
   const connectedNames = new Set((state.mcpClients ?? []).map((c) => c.name));
@@ -588,7 +615,17 @@ const getAvailable = async (
 
   if (format === "json") return ok(enriched);
 
-  if (enriched.length === 0) return ok("No MCP services are defined in available.yaml.");
+  if (enriched.length === 0) {
+    const curated = availableCatalogPath();
+    const standardPaths = standardMcpConfigPaths();
+    return ok(
+      `No MCP services are defined. Looked in:\n` +
+        `- ${curated ?? "(REACTORY_DATA not set — no available.yaml path)"}\n` +
+        (standardPaths.length
+          ? standardPaths.map((p) => `- ${p}`).join("\n")
+          : `- ${standardMcpConfigPath()} (not found)`)
+    );
+  }
 
   const lines = enriched.map((svc) => {
     const status = svc.connected ? " (connected)" : "";
@@ -605,10 +642,24 @@ const getAvailable = async (
 
 // ── Instruction templates ───────────────────────────────────────────────────
 const AVAILABLE_COMMANDS =
-  "capabilities, prompts, tools, resources, add-connection, connect, disconnect, connections, call-tool, available";
+  "capabilities, prompts, tools, resources, add-connection, connect, disconnect, connections, call-tool, available, authorize, logout";
 
 const instructionsFor = (command: string, result: HandlerResult, extra?: Record<string, string>): string => {
   if (!result.success) {
+    // OAuth: connect surfaced an authorization URL — guide the user to authorize.
+    const data = result.data as { needsAuthorization?: boolean; authorizationUrl?: string; id?: string } | undefined;
+    if (data?.needsAuthorization) {
+      const urlLine = data.authorizationUrl
+        ? `1. Open this URL in a browser to authorize:\n\n   ${data.authorizationUrl}\n`
+        : `1. No authorization URL was produced — check the server's OAuth configuration.\n`;
+      return (
+        `## MCP ${command} — Authorization required\n\n${result.error}\n\n### Next Steps:\n` +
+        urlLine +
+        `2. After granting consent, run \`mcp\` command="connect" id="${data.id ?? extra?.id ?? "<id>"}" again.\n` +
+        `- In local (desktop) mode the browser opens automatically.\n` +
+        `- Use command="logout" id=... to clear a stored grant and re-authorize.`
+      );
+    }
     return `## MCP ${command} — Error\n\n${result.error}\n\n### Recovery Options:\n- Use \`mcp\` with command="connections" to check registered clients\n- Use \`mcp\` with command="available" to see catalog services\n- Use \`mcp\` with command="connect" to reestablish a connection`;
   }
   switch (command) {
@@ -626,6 +677,10 @@ const instructionsFor = (command: string, result: HandlerResult, extra?: Record<
       return `## MCP Client Connected\n\n### Next Steps:\n- Use command="tools", id="${extra?.id}" to discover available tools\n- Use command="call-tool" to execute a tool`;
     case "disconnect":
       return `## MCP Client Disconnected\n\n### Next Steps:\n- Use command="connect", id="${extra?.id}" to reconnect`;
+    case "authorize":
+      return `## MCP Authorization\n\n### Next Steps:\n- Complete consent in the browser if prompted, then command="connect" id="${extra?.id}"`;
+    case "logout":
+      return `## MCP OAuth Credentials Cleared\n\n### Next Steps:\n- Use command="connect", id="${extra?.id}" to authorize again`;
     case "call-tool":
       return `## MCP Tool Executed\n\nTool **${extra?.toolName}** on client **${extra?.id}** returned.\n\n### Next Steps:\n- Inspect the returned data\n- Use \`var\` to store it for later`;
     case "available":
@@ -696,6 +751,24 @@ export const McpCli: Macro<unknown, McpCliProps> = async (
           extra.id = id;
         }
         break;
+      case "authorize":
+        // Authorization is driven by the connect handshake; re-running connect
+        // (re)issues the consent URL when the server requires OAuth.
+        if (!id) {
+          result = fail("authorize requires id.");
+        } else {
+          result = await connectClient(id, state);
+          extra.id = id;
+        }
+        break;
+      case "logout":
+        if (!id) {
+          result = fail("logout requires id.");
+        } else {
+          result = await logoutClient(id, state);
+          extra.id = id;
+        }
+        break;
       case "call-tool":
         if (!id || !toolName) {
           result = fail("call-tool requires id and toolName.");
@@ -754,8 +827,17 @@ export const McpClientMacroRegistry: MacroComponentDefinition<typeof McpCli> = {
             only (REACTORY_MCP_STDIO_ENABLED=true). Command/args/env are
             resolved from the catalog entry; the agent never supplies them.
 
+  ## Catalog sources
+  The registry ("available" command) merges two sources:
+  - the curated operator catalog at $REACTORY_DATA/profiles/reactor/mcp/available.yaml
+  - the user's standard config at ~/.reactor/mcp.{json,yaml,yml} (the same
+    "mcpServers" map format used by Claude Desktop / Cursor). Either source alone
+    is sufficient. On an id collision the curated catalog wins.
+
   ## Security
-  Auth credentials are only forwarded to URLs present in available.yaml.
+  Auth credentials are only forwarded to URLs present in available.yaml or
+  the standard ~/.reactor config. stdio services (from either source) remain gated by
+  REACTORY_MCP_STDIO_ENABLED outside the desktop shell.
   `,
   features: [
     {
@@ -795,6 +877,8 @@ export const McpClientMacroRegistry: MacroComponentDefinition<typeof McpCli> = {
                 "connections",
                 "call-tool",
                 "available",
+                "authorize",
+                "logout",
               ],
               description: "The MCP command to execute",
             },

@@ -6158,7 +6158,7 @@ export default class ReactorConversationService
     if (!error) return false;
 
     const errorMessage = error.message?.toLowerCase() || "";
-    const errorCode = error.code?.toLowerCase() || "";
+    const errorCode = String(error.code || "").toLowerCase();
 
     // Retryable errors
     const retryablePatterns = [

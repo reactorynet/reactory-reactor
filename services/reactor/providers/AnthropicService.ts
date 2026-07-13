@@ -890,7 +890,7 @@ class AnthropicService extends AIProviderBase {
       for (const toolBlock of toolUseBlocks) {
         this.context.log(
           `Executing tool: ${toolBlock.name}`,
-          { toolId: toolBlock.id, input: toolBlock.input },
+          { toolId: toolBlock.id },
           "AnthropicService.runToolLoop"
         );
 
@@ -1211,7 +1211,7 @@ class AnthropicService extends AIProviderBase {
     }
 
     const errorMessage = error.message?.toLowerCase() || "";
-    const errorCode = error.code?.toLowerCase() || "";
+    const errorCode = String(error.code || "").toLowerCase();
 
     const retryablePatterns = [
       "rate limit",

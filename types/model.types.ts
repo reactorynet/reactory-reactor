@@ -41,15 +41,54 @@ export interface ReactorNodeMetric {
   value: string
 }
 
-export interface ReactorNodeLink {
-  id: string | ObjectId
-  type: string
-  description: string
-  source: string | ObjectId
-  target: string | ObjectId
+/**
+ * The kinds of relationship an edge can express. Mirrors the ReactorLinkType
+ * enum in the GraphQL schema. An edge may carry more than one type (e.g. a file
+ * that both imports and depends on another).
+ */
+export enum ReactorLinkType {
+  INPUT = 'INPUT',
+  OUTPUT = 'OUTPUT',
+  DEPENDENCY = 'DEPENDENCY',
+  CONNECTION = 'CONNECTION',
+  INFERRED = 'INFERRED',
+  DIRECT = 'DIRECT',
+  /** A calls B (function/method invocation). */
+  CALL = 'CALL',
+  /** A extends B (class inheritance). */
+  INHERITS = 'INHERITS',
+  /** A implements B (interface implementation). */
+  IMPLEMENTS = 'IMPLEMENTS',
+  /** A references B (generic symbol reference). */
+  REFERENCE = 'REFERENCE',
 }
 
-export interface ReactorNodeForceLink extends ReactorNodeLink { 
+export interface ReactorNodeLink {
+  /** Deterministic id derived from (source, target, primary type). */
+  id: number
+  /** Source node id (deterministic node id). */
+  source: number
+  /** Target node id (deterministic node id). */
+  target: number
+  /**
+   * @deprecated Use `types`. Retained for backwards compatibility - when set it
+   * is treated as the primary/first entry of `types`.
+   */
+  type?: string
+  /** The relationship types this edge expresses. */
+  types?: (ReactorLinkType | string)[]
+  /** Short human label for the edge (e.g. the imported symbol name). */
+  title?: string
+  description?: string
+  /** The project this edge belongs to, used for scoping queries. */
+  projectId?: string | number
+  /** Arbitrary edge metadata (line numbers, resolved module, etc.). */
+  data?: any
+  created?: Date
+  updated?: Date
+}
+
+export interface ReactorNodeForceLink extends ReactorNodeLink {
   value: number;
 }
 

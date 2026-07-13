@@ -1487,7 +1487,7 @@ class GoogleAIService extends AIProviderBase {
 
         // Send the message and get response
         this.context.log(
-          `Sending message to Google AI: ${message}`,
+          `Sending message to Google AI`,
           {},
           "GoogleAIService.getAIResponse"
         );
@@ -2012,7 +2012,7 @@ class GoogleAIService extends AIProviderBase {
       this.context.log(
         "Modifying message for retry to correct malformed tool call",
         {
-          originalMessage: message,
+          originalMessage: typeof message === "string" ? message.substring(0, 100) + "..." : "complex message",
           error: lastError.message,
           hasDetail: !!malformedDetail,
         },
@@ -2083,7 +2083,7 @@ class GoogleAIService extends AIProviderBase {
     if (!error) return false;
 
     const errorMessage = error.message?.toLowerCase() || "";
-    const errorCode = error.code?.toLowerCase() || "";
+    const errorCode = String(error.code || "").toLowerCase();
 
     // Retryable errors
     const retryablePatterns = [

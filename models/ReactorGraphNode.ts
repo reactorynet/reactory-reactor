@@ -209,9 +209,12 @@ const ReactorNodeMetricValueSchema: Schema<ReactorNodeMetric> = new Schema<React
   value: String,
 });
 
-const ReactorNodeSchema: Schema<ReactorNode> = new Schema<ReactorNode>({ 
-  id: ObjectId,
+const ReactorNodeSchema: Schema<ReactorNode> = new Schema<ReactorNode>({
+  // Deterministic numeric id derived from the node's logical key (GraphIdentity).
+  id: { type: Number, index: true, unique: true },
   index: Number,
+  // Pipe-delimited ancestry key of ids, e.g. "12345|67890".
+  key: { type: String, index: true },
   type: {
     type: String,
     enum: Object.values(ReactorNodeType),
@@ -222,11 +225,20 @@ const ReactorNodeSchema: Schema<ReactorNode> = new Schema<ReactorNode>({
   name: String,
   version: String,
   description: String,
+  // FQN of the processor that owns/produced this node.
+  providerId: { type: String, index: true },
+  // Parent node id (numeric), null for project roots.
+  parentId: { type: Number, index: true },
+  // Absolute source location (file path / repo path) where applicable.
+  source: String,
   attributes: [{ }],
   metrics: [ReactorNodeMetricValueSchema],
-  children: [{ type: ObjectId, ref: 'ReactorNode' }],
-  inputs: [{ type: ObjectId, ref: 'ReactorNode' }],
-  outputs: [{ type: ObjectId, ref: 'ReactorNode' }],
+  children: [{ type: Number }],
+  inputs: [{ type: Number }],
+  outputs: [{ type: Number }],
+  dependencies: [{ type: Number }],
+  // Free-form node payload (relativePath, language, symbol kind, etc.).
+  data: Schema.Types.Mixed,
   created: {
     type: Date,
     default: () => { return new Date() }
@@ -281,6 +293,7 @@ export const ReactorNodeMetricTypeModelComponentRegistryEntry: Reactory.IReactor
 
 const ReactorNodeModelName = 'ReactorNode';
 const ReactorNodeModel = mongoose.model<ReactorNode>(ReactorNodeModelName, ReactorNodeSchema, 'reactor_nodes');
+export { ReactorNodeModel };
 export type TReactorNodeModel = typeof ReactorNodeModel;
 export const ReactorNodeModelComponentRegistryEntry: Reactory.IReactoryComponentDefinition<typeof ReactorNodeModel> = { 
   name: 'ReactorNodeModel',

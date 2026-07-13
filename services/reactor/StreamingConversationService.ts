@@ -240,6 +240,6 @@ export class StreamingConversationService extends ReactorConversationService {
   private emitStreamingEvent(session: StreamingSession, event: any): void {
     // TODO: Implement actual event emission via SSE/WebSocket
     // For now, this is a placeholder that logs the event
-    console.log(`[${session.sessionId}] Streaming event:`, event.type, event.data);
+    console.log(`[${session.sessionId}] Streaming event:`, event.type);
   }
 }

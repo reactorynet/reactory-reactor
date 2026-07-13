@@ -1,15 +1,30 @@
-import CSharpProjectProcessor from './CSharpProjectProcessor';
+import CSharpProjectProcessor from "./CSharpProjectProcessor";
+import { makeContext, writeProject, cleanup } from "../../graph/testUtils";
 
-describe('CSharpProjectProcessor', () => {
-  it('should instantiate without error', () => {
-    const processor = new CSharpProjectProcessor({}, {} as any);
+describe("CSharpProjectProcessor", () => {
+  const ctx = makeContext();
+  const processor = new CSharpProjectProcessor({}, ctx);
+
+  it("instantiates", () => {
     expect(processor).toBeDefined();
   });
 
-  it('should return false for supportsProject if no repoPath', () => {
-    const processor = new CSharpProjectProcessor({}, {} as any);
+  it("returns false when no repoPath", () => {
     expect(processor.supportsProject({})).toBe(false);
   });
 
-  // Add more tests for getProjectType, getFileSpecs, etc. as needed
+  it("detects .csproj / .sln projects and rejects foreign ones", () => {
+    const proj = writeProject({ "App.csproj": "<Project/>", "Program.cs": "class P {}" });
+    expect(processor.supportsProject(proj.project)).toBe(true);
+    expect(processor.getProjectTypes(proj.project)).toEqual(["csharp"]);
+    cleanup(proj.dir);
+
+    const sln = writeProject({ "App.sln": "Microsoft Visual Studio Solution File" });
+    expect(processor.supportsProject(sln.project)).toBe(true);
+    cleanup(sln.dir);
+
+    const foreign = writeProject({ "index.js": "module.exports = 1;" });
+    expect(processor.supportsProject(foreign.project)).toBe(false);
+    cleanup(foreign.dir);
+  });
 });

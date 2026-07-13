@@ -787,13 +787,22 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
   }
 
   async sync(project: IReactorProject): Promise<IReactorProject> {
-    // Stub: Implement sync logic as needed
-    return project;
+    // Re-run processing (which persists nodes/edges and indexes searchables)
+    // and stamp the sync time.
+    const processed = (await this.processProject(project)) as IReactorProject;
+    processed.lastSync = new Date();
+    if (processed._id || processed.id) {
+      await this.updateProject(`${processed._id || processed.id}`, {
+        lastSync: processed.lastSync,
+      });
+    }
+    return processed;
   }
 
   async index(project: IReactorProject): Promise<IReactorProject> {
-    // Stub: Implement index logic as needed
-    return project;
+    // Indexing == running the processors' process() pipeline, which builds and
+    // persists the graph nodes/edges and writes searchables to the index.
+    return (await this.processProject(project)) as IReactorProject;
   }
 
   async getAttributes(node: any): Promise<ReactorNodeAttributes[]> {

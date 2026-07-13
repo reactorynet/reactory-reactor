@@ -158,6 +158,12 @@ export interface MCPClient {
   url?: string
   /** Resolved command for stdio transport. Cached for diagnostics and error messages. */
   command?: string
+  /**
+   * OAuth provider for oauth-typed http connections. Passed to the SDK transport
+   * as `authProvider`; after a failed connect it exposes `pendingAuthorizationUrl`
+   * so the macro can surface the consent URL to the user.
+   */
+  authProvider?: { pendingAuthorizationUrl?: string }
 }
 
 /**

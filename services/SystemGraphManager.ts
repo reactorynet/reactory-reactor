@@ -1,14 +1,12 @@
 import Reactory from "@reactorynet/reactory-core";
 import ApiError from "@reactory/server-core/exceptions";
 
-import { IReactorProject, IProjectProcessor, ISystemGraphManager, PageReactorProjectResult, ReactorProjectService } from "../types/service.types"
+import { IReactorProject, IProjectProcessor, ISystemGraphManager, PagedFilter, PageReactorProjectResult, ReactorProjectService } from "../types/service.types"
 import Hash from "@reactory/server-core/utils/hash";
-import { ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorNodeType } from "../types/model.types";
+import { ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorLinkType, ReactorNodeType } from "../types/model.types";
 import { DefaultReactorNodeCategories } from '../models/ReactorGraphNode';
-
-import { 
-  getReactorProjectCatalogs
-} from '../data'
+import { ReactorNodeLinkModel } from '../models/ReactorNodeLink';
+import { linkId, nodeId, projectLogicalKey } from './graph/GraphIdentity';
 import { service } from "@reactory/server-core/application/decorators";
 
 const kvp = {
@@ -96,47 +94,92 @@ class SystemGraphManager implements ISystemGraphManager {
     }
 
     const children: ReactorNode[] = [];
-    
-    const promises = parents.map((parent) => {
+
+    const promises = parents.map(async (parent) => {
+      if (!parent?.providerId) {
+        context.warn(`Node ${parent?.id} has no providerId; cannot resolve children`);
+        return [] as ReactorNode[];
+      }
       const provider = context.getService<IProjectProcessor>(parent.providerId);
-      if(provider) {
-        return provider.getChildrenForNode(parent, parent.key, null, null);
+      if (!provider || typeof provider.getChildrenForNode !== 'function') {
+        context.warn(`Provider ${parent.providerId} not found for node ${parent.id}`);
+        return [] as ReactorNode[];
+      }
+      try {
+        return (await provider.getChildrenForNode(parent, parent.key, null, null)) || [];
+      } catch (err) {
+        context.error(`getChildrenForNode failed for node ${parent.id}: ${(err as Error).message}`);
+        return [] as ReactorNode[];
       }
     });
 
     const results = await Promise.all(promises);
     results.forEach((result) => {
-      children.push(...result);
+      if (Array.isArray(result)) children.push(...result);
     });
 
     return children;
   }
-  getLinks(sources: ReactorNode[], types: string[], targets: ReactorNode[]): Promise<ReactorNodeLink[]> {
-    throw new Error("Method not implemented.");
-  }
-  createLink(source: ReactorNode, type: string, target: ReactorNode): Promise<ReactorNodeLink> {
-    throw new Error("Method not implemented.");
-  }
-  updateLink(link: ReactorNodeLink): Promise<ReactorNodeLink> {
-    throw new Error("Method not implemented.");
-  }
-  deleteLink(link: ReactorNodeLink): Promise<ReactorNodeLink> {
-    throw new Error("Method not implemented.");
+  /**
+   * Returns edges touching any of the given source or target nodes, optionally
+   * filtered by link type. Edges reference nodes by their deterministic id, so
+   * this works even when the endpoint nodes are not currently materialised in
+   * the lazy tree cache.
+   */
+  async getLinks(sources: ReactorNode[], types: string[], targets: ReactorNode[]): Promise<ReactorNodeLink[]> {
+    const query: any = {};
+    const or: any[] = [];
+    const sourceIds = (sources || []).map((s) => s.id).filter((id) => id !== undefined);
+    const targetIds = (targets || []).map((t) => t.id).filter((id) => id !== undefined);
+    if (sourceIds.length) or.push({ source: { $in: sourceIds } });
+    if (targetIds.length) or.push({ target: { $in: targetIds } });
+    if (or.length) query.$or = or;
+    if (types && types.length) query.types = { $in: types };
+    return ReactorNodeLinkModel.find(query).lean() as unknown as ReactorNodeLink[];
   }
 
-  async getProjects(): Promise<PageReactorProjectResult> {
-    const projects = await getReactorProjectCatalogs(this.context);
-     const results: PageReactorProjectResult = { 
-      projects: projects,
-      paging: {
-        hasNext: false,
-        page: 1,
-        pageSize: projects.length,
-        total: projects.length
-      }
-     }
+  /**
+   * Creates (or upserts) an edge between two nodes. The edge id is derived from
+   * (source, target, type) so re-creating the same relationship is idempotent.
+   */
+  async createLink(source: ReactorNode, type: string, target: ReactorNode): Promise<ReactorNodeLink> {
+    const id = linkId(source.id, target.id, type);
+    const now = new Date();
+    await ReactorNodeLinkModel.updateOne(
+      { id },
+      {
+        $set: {
+          source: source.id,
+          target: target.id,
+          type,
+          types: [type as ReactorLinkType],
+          updated: now,
+        },
+        $setOnInsert: { id, created: now },
+      },
+      { upsert: true }
+    );
+    return ReactorNodeLinkModel.findOne({ id }).lean() as unknown as ReactorNodeLink;
+  }
 
-     return results;
+  async updateLink(link: ReactorNodeLink): Promise<ReactorNodeLink> {
+    await ReactorNodeLinkModel.updateOne(
+      { id: link.id },
+      { $set: { ...link, updated: new Date() } }
+    );
+    return ReactorNodeLinkModel.findOne({ id: link.id }).lean() as unknown as ReactorNodeLink;
+  }
+
+  async deleteLink(link: ReactorNodeLink): Promise<ReactorNodeLink> {
+    const existing = (await ReactorNodeLinkModel.findOne({ id: link.id }).lean()) as unknown as ReactorNodeLink;
+    await ReactorNodeLinkModel.deleteOne({ id: link.id });
+    return existing;
+  }
+
+  async getProjects(filter?: Partial<PagedFilter>): Promise<PageReactorProjectResult> {
+    // Single source of truth: the persisted project store (Mongo). This keeps
+    // the id space consistent with getCatalogNodes / getProjectForCatalogNode.
+    return this.projectService.getProjects(filter);
   }
 
   getProject(pathSpec: string): Promise<IReactorProject> {
@@ -205,30 +248,36 @@ class SystemGraphManager implements ISystemGraphManager {
     return await processorService.process(projectSpec as IReactorProject);
   }
 
-  catalogProjects(projects: Partial<IReactorProject>[]): Promise<Partial<IReactorProject>[]> {  
-    const that = this;
-
-    projects.forEach((project) => {
-      that.catalogProject(project);
-    });
-
-    return Promise.resolve(projects);
-  } 
+  async catalogProjects(projects: Partial<IReactorProject>[]): Promise<Partial<IReactorProject>[]> {
+    const processed: Partial<IReactorProject>[] = [];
+    for (const project of projects) {
+      try {
+        await this.catalogProject(project);
+        processed.push(project);
+      } catch (err) {
+        this.context.error(
+          `catalogProject failed for ${project?.name || project?.id}: ${(err as Error).message}`
+        );
+      }
+    }
+    return processed;
+  }
 
 
   async getProjectNode(project: Partial<IReactorProject>): Promise<ReactorDataNode<Partial<IReactorProject>>> {
     const provider = this.context.getService<IProjectProcessor>(project?.processors?.[0]?.processor);
     if(provider && provider.getProjectNode) {
-      return await provider.getProjectNode(project);      
+      return await provider.getProjectNode(project);
     } else {
+      const id = nodeId(projectLogicalKey(project));
       return {
-        id: project.id,
-        index: Hash(project.id),
-        key: `${project.id}`,
+        id,
+        index: id,
+        key: `${id}`,
         name: project.name,
         version: project.version,
         nameSpace: project.nameSpace,
-        providerId: project.processors?.[0].processor || 'reactor.SimpleProjectProvider@1.0.0',
+        providerId: project.processors?.[0]?.processor || 'reactor.FileProjectProcessor@1.0.0',
         source: project.repoPath,
         type: ReactorNodeType.SYSTEM,
         categories: [],
@@ -278,53 +327,70 @@ class SystemGraphManager implements ISystemGraphManager {
     return node;
   }
 
-  async getNode(id: number, key: string): Promise<ReactorNode> {
-    // check the cache
+  /**
+   * Resolves a node by id. Resolution order:
+   *  1. the ephemeral node cache (populated as the tree is browsed),
+   *  2. a catalog (project root) node,
+   *  3. a tree walk down the ancestry `key` ("<rootId>|<childId>|...").
+   *
+   * The ancestry walk lazily expands each level via the owning provider, so any
+   * node in the tree can be addressed even if it was never browsed before.
+   */
+  async getNode(id: number, key?: string): Promise<ReactorNode> {
     const { context, getChildren, getCatalogNode } = this;
+
     const cached = await context.getValue<ReactorNode>(`REACTOR_NODE_${id}`);
+    if (cached) return cached;
 
-    if(!cached) {
+    // Is this a project root?
+    try {
+      const rootNode = await getCatalogNode(id);
+      if (rootNode) return rootNode;
+    } catch {
+      // Not a catalog root - fall through to the ancestry walk.
+    }
 
-      //get the root node from catalog nodes
-      let rootNode = await getCatalogNode(id);
+    if (!key) {
+      throw new ApiError(`Node ${id} not found; provide an ancestry key to walk the tree`, 404);
+    }
 
-      if(rootNode) return rootNode;
-      
-      if(!rootNode && !key) {
-        throw new ApiError(`Root Node ${id} not found, provide a key to search using tree`, 400);
+    const ancestors = key.split('|').filter((s) => s.length > 0).map((s) => Number(s));
+    if (ancestors.length === 0) {
+      throw new ApiError(`Invalid ancestry key '${key}' for node ${id}`, 400);
+    }
+
+    // Walk from the root down to the target.
+    let node = await getCatalogNode(ancestors[0]);
+    for (let i = 1; i < ancestors.length; i++) {
+      const children = await getChildren([node]);
+      const next = children.find((n) => n.id === ancestors[i]);
+      if (!next) {
+        throw new ApiError(`Node ${ancestors[i]} not found under ${node.id}`, 404);
       }
-      // if not in cache, get from the catalog
-      // use the key path to get the node
-      if(key) {
-        let ancestors = key.split('|');
-        let root = ancestors.shift(); 
-        
-        rootNode = await getCatalogNode(parseInt(root));
+      node = next;
+    }
 
-        let node = rootNode;
-        let children = await getChildren([node]);
-        while(ancestors.length > 0) {
-          const next = ancestors.shift();
-          node = children.find((n) => n.id === Number(next));
-          if(!node) {
-            throw new ApiError(`Node ${next} not found`, 400);
-          }
-          children = await getChildren([node]);
-        }
+    if (node.id !== id) {
+      context.warn(`getNode: resolved node id ${node.id} does not match requested id ${id}`);
+    }
 
-        return node;
-
-      }
-    } 
-    return cached;  
+    await context.setValue(`REACTOR_NODE_${id}`, node);
+    return node;
   }
 
   async getProjectForCatalogNode(node: Partial<ReactorNode>): Promise<Partial<IReactorProject>> {
-    const projects = await getReactorProjectCatalogs(this.context);
-    const project = projects.find((p) => p.id === node.id);
+    // Map a catalog node id back to its project. Node ids are the deterministic
+    // hash of the project's logical key, so match on that rather than assuming
+    // node.id equals the raw project id.
+    const { projects } = await this.projectService.getProjects({
+      paging: { page: 1, pageSize: 1000 },
+    });
+    const project = projects.find(
+      (p) => nodeId(projectLogicalKey(p)) === node.id || `${p.id}` === `${node.id}`
+    );
 
-    if(!project) {
-      throw new ApiError(`Project ${node.name} not found`, 400);
+    if (!project) {
+      throw new ApiError(`Project for node ${node.name || node.id} not found`, 404);
     }
 
     return project;

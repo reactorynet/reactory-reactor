@@ -168,6 +168,56 @@ class AIPersonaProvider
       }
     }
 
+    // we will also check the ~/.reactor directory for any persona definitions that may have been added by the user
+    const userPersonaDir = path.join(process.env.HOME || process.env.USERPROFILE || "", ".reactor", "ai", "persona");
+    if (fs.existsSync(userPersonaDir)) {
+      log(`Found user persona directory: ${userPersonaDir}`, {}, "debug", "reactor.AIPersonaProvider");
+      const subdirs = fs.readdirSync(userPersonaDir, { withFileTypes: true }).filter((d) => d.isDirectory());
+      for (const subdir of subdirs) {
+        const subdirPath = path.join(userPersonaDir, subdir.name);
+        try {
+          const personas = this.personaLoader.loadFromDirectory(subdirPath) as unknown as IAIPersona[];
+          for (const persona of personas) {
+            try {
+              this.registerPersona(persona, { id: "user", name: "User", nameSpace: "user" } as Reactory.Server.IReactoryModule);
+              totalLoaded++;
+              log(
+                `Registered user AI persona "${persona.name}" (${persona.id}) from user directory (subdirectory ${subdir.name})`,
+                {},
+                "debug",
+                "reactor.AIPersonaProvider",
+              );
+            } catch (regErr) {
+              log(
+                `Failed to register user persona "${persona.id}" from user directory (subdirectory ${subdir.name}): ${regErr}`,
+                { error: regErr },
+                "error",
+                "reactor.AIPersonaProvider",
+              );
+            }
+          }
+
+          // copy avatar.png to public storage if present
+          const avatarPath = path.join(subdirPath, "avatar.png");
+          if (fs.existsSync(avatarPath)) {
+            const personaName = subdirPath.split(path.sep).pop();
+            const publicAvatarDir = path.join(process.env.REACTORY_DATA as string, "profiles", "reactor", "personas", personaName);
+            if (!fs.existsSync(publicAvatarDir)) {
+              fs.mkdirSync(publicAvatarDir, { recursive: true });
+            }
+            const targetAvatarPath = path.join(publicAvatarDir, "avatar.png");
+            fs.copyFileSync(avatarPath, targetAvatarPath);
+          }
+        } catch (subdirErr) {
+          log(
+            `Failed to load user personas from ${subdirPath}: ${subdirErr}`,
+            { error: subdirErr },
+            "warning",
+            "reactor.AIPersonaProvider",
+          );
+        }
+      }
+    }
     log(
       `AIPersonaProvider startup complete — loaded ${totalLoaded} persona(s) across ${modules.length} module(s)`,
       {},

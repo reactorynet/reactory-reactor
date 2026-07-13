@@ -25,6 +25,10 @@ enum ReactorLinkType {
   CONNECTION
   INFERRED
   DIRECT
+  CALL
+  INHERITS
+  IMPLEMENTS
+  REFERENCE
 }
 
 type ReactorNodeCategory {

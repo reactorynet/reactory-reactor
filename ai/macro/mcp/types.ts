@@ -14,7 +14,9 @@ export interface McpCliProps {
     | 'disconnect'
     | 'connections'
     | 'call-tool'
-    | 'available';
+    | 'available'
+    | 'authorize'
+    | 'logout';
   /** Client ID for operations that require it */
   id?: string;
   /**
