@@ -1,0 +1,371 @@
+# reactor.AgentGitCommit@1.0.0
+#
+# An AI-driven git commit workflow.
+#
+# Gathers all relevant repository context upfront (branch, recent log, working-tree
+# status, unstaged diff, staged diff) and feeds it to the Reactor agent.  The agent
+# decides — based on the evidence — which git operation to perform:
+#
+#   commit          — stage nothing new; commit what is already staged.
+#   add_and_commit  — stage tracked changes, then commit everything.
+#   stash           — changes are incomplete / WIP; stash them.
+#   abort           — nothing meaningful to do (clean tree or only untracked noise).
+#
+# The workflow extracts the agent's JSON decision, resolves the commit / stash
+# message, and executes the correct git commands through pre-defined, safe
+# cli_command steps — the agent NEVER executes arbitrary shell code.
+#
+# Inputs:
+#   workdir   (optional) — absolute path of the git repo root; defaults to server cwd.
+#   personaId (optional) — AI persona to consult; defaults to "reactor".
+#   hint      (optional) — free-text context hint for the agent.
+#   sessionId (optional) — resume an existing agent session (idempotent retries).
+nameSpace: reactor
+name: AgentGitCommit
+version: 1.0.0
+description: "AI-driven git commit: gathers repo context, consults the Reactor agent, executes the agent's decision."
+tags: [dev, git, agent, ai, commit]
+metadata:
+  timeout: 300000
+  retryPolicy:
+    maxAttempts: 2
+    backoffStrategy: linear
+    initialDelay: 3000
+
+inputs:
+  workdir:
+    type: string
+    required: false
+    description: "Absolute path of the git repository root. Defaults to the server process cwd."
+  personaId:
+    type: string
+    required: false
+    default: "ReactorAIPersona"
+    description: "Reactor AI persona to consult for the commit decision."
+  hint:
+    type: string
+    required: false
+    description: "Optional context hint for the agent (e.g. 'added unit tests for the payment module')."
+  sessionId:
+    type: string
+    required: false
+    description: "Resume an existing agent session. Useful for engine retries so the same conversation is reused."
+
+steps:
+  # ── 0. Resolve effective working directory ───────────────────────────────
+  # input.workdir is optional.  When not provided, resolveTemplate leaves the
+  # ${...} token intact; the node script detects this and falls back to
+  # process.cwd() so downstream cli_command steps always receive a valid path.
+  - id: resolveWorkdir
+    type: cli_command
+    config:
+      command: "node"
+      args:
+        - "-e"
+        - |
+          const wd = process.env.WD;
+          const effective = (wd && !wd.startsWith('${')) ? wd : process.cwd();
+          process.stdout.write(effective);
+      env:
+        WD: "${input.workdir}"
+      output:
+        captureStdout: true
+        captureStderr: false
+
+  - id: setCwd
+    type: set_variable
+    dependsOn: resolveWorkdir
+    config:
+      action: set
+      key: cwd
+      source: step_output
+      sourcePath: resolveWorkdir.outputs.stdout
+
+  # ── 1. Gather git context (parallel) ─────────────────────────────────────
+  - id: gatherContext
+    type: parallel
+    dependsOn: setCwd
+    config:
+      branches:
+        - name: branch
+          steps:
+            - id: getBranch
+              type: cli_command
+              config:
+                command: "git branch --show-current"
+                cwd: "${variables.cwd}"
+                failOnError: false
+                expectedExitCodes: [0, 1]
+                output:
+                  captureStdout: true
+                  captureStderr: false
+        - name: status
+          steps:
+            - id: getStatus
+              type: cli_command
+              config:
+                command: "git status --short"
+                cwd: "${variables.cwd}"
+                failOnError: false
+                expectedExitCodes: [0, 1]
+                output:
+                  captureStdout: true
+                  captureStderr: false
+        - name: diffStat
+          steps:
+            - id: getDiffStat
+              type: cli_command
+              config:
+                command: "git diff --stat"
+                cwd: "${variables.cwd}"
+                failOnError: false
+                expectedExitCodes: [0, 1]
+                output:
+                  captureStdout: true
+                  captureStderr: false
+        - name: stagedStat
+          steps:
+            - id: getStagedStat
+              type: cli_command
+              config:
+                command: "git diff --cached --stat"
+                cwd: "${variables.cwd}"
+                failOnError: false
+                expectedExitCodes: [0, 1]
+                output:
+                  captureStdout: true
+                  captureStderr: false
+        - name: recentLog
+          steps:
+            - id: getRecentLog
+              type: cli_command
+              config:
+                command: "git log --oneline -5"
+                cwd: "${variables.cwd}"
+                failOnError: false
+                expectedExitCodes: [0, 1, 128]
+                output:
+                  captureStdout: true
+                  captureStderr: false
+
+  # ── 2. Consult the agent ──────────────────────────────────────────────────
+  - id: consultAgent
+    type: agent_conversation
+    dependsOn: gatherContext
+    config:
+      personaId: "${input.personaId}"
+      sessionId: "${input.sessionId}"
+      instructions: |
+        You are a git workflow assistant embedded in an automated CI/CD system.
+        Your sole job is to analyse a git repository status report and decide on
+        the correct git operation to perform.
+
+        You MUST respond with ONLY a single JSON object — no prose, no markdown
+        code fences, no explanation before or after the JSON.
+
+        Required shape:
+        {
+          "action": "commit" | "add_and_commit" | "stash" | "abort",
+          "commitMessage": "<imperative-mood summary, ≤72 chars>",
+          "stashMessage":  "<brief WIP description>",
+          "paths":         ["."],
+          "reasoning":     "<one sentence>"
+        }
+
+        Decision rules:
+        • "commit"         — all worthwhile changes are already staged; commit as-is.
+        • "add_and_commit" — unstaged tracked changes are ready and should be committed.
+        • "stash"          — changes are clearly incomplete or experimental (WIP).
+        • "abort"          — nothing meaningful to do (clean tree, or only untracked noise).
+
+        "commitMessage" is required for "commit" and "add_and_commit".
+        "stashMessage"  is required for "stash".
+        "paths"         defaults to ["."] (stage everything).
+        Commit messages must use imperative mood (e.g. "Add", "Fix", "Refactor").
+      message: |
+        Branch: ${steps.getBranch.outputs.stdout}
+
+        Recent commits (newest first):
+        ${steps.getRecentLog.outputs.stdout}
+
+        Working-tree status (M=modified, A=added, D=deleted, ??=untracked):
+        ${steps.getStatus.outputs.stdout}
+
+        Unstaged diff summary:
+        ${steps.getDiffStat.outputs.stdout}
+
+        Already-staged diff summary:
+        ${steps.getStagedStat.outputs.stdout}
+        ${input.hint}
+        Respond with the JSON decision object ONLY.
+      toolApprovalMode: auto
+      promptMergeStrategy: append
+
+  # ── 3. Extract the JSON decision from the agent response ─────────────────
+  # Parses the first JSON object found in the agent's content, normalises the
+  # fields, and writes a compact JSON string to stdout for use in conditions
+  # and downstream steps.
+  - id: parseDecision
+    type: cli_command
+    dependsOn: consultAgent
+    config:
+      command: "node"
+      args:
+        - "-e"
+        - |
+          const raw = process.env.AGENT_RESP || '';
+          const m = raw.match(/\{[\s\S]*\}/);
+          if (!m) {
+            process.stderr.write('No JSON object found in agent response.\nAgent said:\n' + raw + '\n');
+            process.exit(1);
+          }
+          let d;
+          try { d = JSON.parse(m[0]); }
+          catch (e) { process.stderr.write('JSON.parse failed: ' + e.message + '\n'); process.exit(1); }
+          const valid = ['commit','add_and_commit','stash','abort'];
+          const action = valid.includes(d.action) ? d.action : 'abort';
+          process.stdout.write(JSON.stringify({
+            action,
+            commitMessage: (d.commitMessage || 'chore: auto-commit').trim(),
+            stashMessage:  (d.stashMessage  || 'WIP').trim(),
+            paths:         Array.isArray(d.paths) && d.paths.length ? d.paths : ['.'],
+            reasoning:     (d.reasoning     || '').trim()
+          }));
+      env:
+        AGENT_RESP: "${steps.consultAgent.outputs.content}"
+      failOnError: true
+      output:
+        captureStdout: true
+        captureStderr: true
+
+  - id: logDecision
+    type: log
+    dependsOn: parseDecision
+    config:
+      level: info
+      message: "Agent decision: ${steps.parseDecision.outputs.stdout}"
+
+  # ── 4a. Abort ─────────────────────────────────────────────────────────────
+  - id: ifAbort
+    type: condition
+    dependsOn: logDecision
+    config:
+      condition: "JSON.parse(steps.parseDecision.stdout).action === 'abort'"
+      thenSteps:
+        - id: logAbort
+          type: log
+          config:
+            level: warn
+            message: "Agent decided to abort — nothing meaningful to commit or stash."
+
+  # ── 4b. Stash ─────────────────────────────────────────────────────────────
+  - id: ifStash
+    type: condition
+    dependsOn: logDecision
+    config:
+      condition: "JSON.parse(steps.parseDecision.stdout).action === 'stash'"
+      thenSteps:
+        - id: extractStashMsg
+          type: cli_command
+          config:
+            command: "node"
+            args:
+              - "-e"
+              - "process.stdout.write(JSON.parse(process.env.D).stashMessage)"
+            env:
+              D: "${steps.parseDecision.outputs.stdout}"
+            output:
+              captureStdout: true
+        - id: stashChanges
+          type: cli_command
+          dependsOn: extractStashMsg
+          config:
+            command: "git"
+            args: ["stash", "push", "-u", "-m", "${steps.extractStashMsg.outputs.stdout}"]
+            cwd: "${variables.cwd}"
+            output:
+              captureStdout: true
+              captureStderr: true
+        - id: logStash
+          type: log
+          dependsOn: stashChanges
+          config:
+            level: info
+            message: "Changes stashed: ${steps.extractStashMsg.outputs.stdout}"
+
+  # ── 4c. Stage and commit ──────────────────────────────────────────────────
+  - id: ifAddAndCommit
+    type: condition
+    dependsOn: logDecision
+    config:
+      condition: "JSON.parse(steps.parseDecision.stdout).action === 'add_and_commit'"
+      thenSteps:
+        - id: extractAddCommitMsg
+          type: cli_command
+          config:
+            command: "node"
+            args:
+              - "-e"
+              - "process.stdout.write(JSON.parse(process.env.D).commitMessage)"
+            env:
+              D: "${steps.parseDecision.outputs.stdout}"
+            output:
+              captureStdout: true
+        - id: stageFiles
+          type: cli_command
+          dependsOn: extractAddCommitMsg
+          config:
+            command: "git"
+            args: ["add", "."]
+            cwd: "${variables.cwd}"
+        - id: commitAfterStage
+          type: cli_command
+          dependsOn: stageFiles
+          config:
+            command: "git"
+            args: ["commit", "-m", "${steps.extractAddCommitMsg.outputs.stdout}"]
+            cwd: "${variables.cwd}"
+            output:
+              captureStdout: true
+              captureStderr: true
+        - id: logAddAndCommit
+          type: log
+          dependsOn: commitAfterStage
+          config:
+            level: info
+            message: "Staged and committed: ${steps.extractAddCommitMsg.outputs.stdout}"
+
+  # ── 4d. Commit already-staged changes ────────────────────────────────────
+  - id: ifCommit
+    type: condition
+    dependsOn: logDecision
+    config:
+      condition: "JSON.parse(steps.parseDecision.stdout).action === 'commit'"
+      thenSteps:
+        - id: extractCommitMsg
+          type: cli_command
+          config:
+            command: "node"
+            args:
+              - "-e"
+              - "process.stdout.write(JSON.parse(process.env.D).commitMessage)"
+            env:
+              D: "${steps.parseDecision.outputs.stdout}"
+            output:
+              captureStdout: true
+        - id: commitStaged
+          type: cli_command
+          dependsOn: extractCommitMsg
+          config:
+            command: "git"
+            args: ["commit", "-m", "${steps.extractCommitMsg.outputs.stdout}"]
+            cwd: "${variables.cwd}"
+            output:
+              captureStdout: true
+              captureStderr: true
+        - id: logCommit
+          type: log
+          dependsOn: commitStaged
+          config:
+            level: info
+            message: "Committed staged changes: ${steps.extractCommitMsg.outputs.stdout}"
