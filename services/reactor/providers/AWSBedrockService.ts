@@ -631,7 +631,7 @@ class AWSBedrockService extends AIProviderBase {
     if (!error) return false;
 
     const errorMessage = error.message?.toLowerCase() || "";
-    const errorCode = error.code?.toLowerCase() || "";
+    const errorCode = String(error.code || "").toLowerCase();
 
     const retryablePatterns = [
       "rate limit",

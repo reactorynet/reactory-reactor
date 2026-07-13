@@ -27,7 +27,11 @@ import {
   ReactorNode,
   ReactorNodeType,
   ReactorNodeCategory,
+  ReactorNodeLink,
+  ReactorLinkType,
 } from "@reactory/server-modules/reactory-reactor/types/model.types";
+import { ReactorNodeModel } from "@reactory/server-modules/reactory-reactor/models/ReactorGraphNode";
+import { ReactorNodeLinkModel } from "@reactory/server-modules/reactory-reactor/models/ReactorNodeLink";
 
 import OBJID from "@reactory/server-core/utils/ObjectId";
 
@@ -145,13 +149,125 @@ class ReactorSystemGraph {
   @query("ReactorNode")
   async ReactorNodeById(
     _: any,
-    args: { id: number, ancestry: string },
+    args: { id: number; key?: string; ancestry?: string },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>> {
     const graphSvc = context.getService<ISystemGraphManager>(
       "reactor.SystemGraphManager@1.0.0"
     );
-    return graphSvc.getNode(args.id, args.ancestry);    
+    return graphSvc.getNode(args.id, args.key || args.ancestry);
+  }
+
+  /**
+   * Resolve a node by its deterministic id. Checks the persisted graph first,
+   * then the lazy tree cache. Returns a minimal placeholder if neither has it
+   * (so non-null edge endpoints never crash the query).
+   */
+  private async resolveNodeById(
+    id: number,
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode>> {
+    const persisted = (await ReactorNodeModel.findOne({ id }).lean()) as any;
+    if (persisted) return persisted;
+    const cached = await context.getValue<ReactorNode>(`REACTOR_NODE_${id}`);
+    if (cached) return cached;
+    return {
+      id,
+      index: id,
+      key: `${id}`,
+      name: `#${id}`,
+      type: ReactorNodeType.PROCESS,
+      nameSpace: "reactor",
+      version: "1.0.0",
+      description: "Unresolved node",
+      children: [],
+    };
+  }
+
+  private async relatedNodes(
+    node: Partial<ReactorNode>,
+    context: Reactory.Server.IReactoryContext,
+    direction: "dependencies" | "dependents",
+    types?: string[]
+  ): Promise<Partial<ReactorNode>[]> {
+    if (!node?.id) return [];
+    const query: any =
+      direction === "dependencies" ? { source: node.id } : { target: node.id };
+    if (types && types.length) query.types = { $in: types };
+    const edges = (await ReactorNodeLinkModel.find(query).lean()) as any[];
+    const ids = edges.map((e) =>
+      direction === "dependencies" ? e.target : e.source
+    );
+    const unique = Array.from(new Set(ids));
+    return Promise.all(unique.map((id) => this.resolveNodeById(id, context)));
+  }
+
+  @property("ReactorNode", "dependencies")
+  async getNodeDependencies(
+    node: Partial<ReactorNode>,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode>[]> {
+    return this.relatedNodes(node, context, "dependencies", [
+      ReactorLinkType.DEPENDENCY,
+    ]);
+  }
+
+  @property("ReactorNode", "dependents")
+  async getNodeDependents(
+    node: Partial<ReactorNode>,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode>[]> {
+    return this.relatedNodes(node, context, "dependents", [
+      ReactorLinkType.DEPENDENCY,
+    ]);
+  }
+
+  @property("ReactorNode", "inputs")
+  async getNodeInputs(
+    node: Partial<ReactorNode>,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode>[]> {
+    return this.relatedNodes(node, context, "dependents", [ReactorLinkType.INPUT]);
+  }
+
+  @property("ReactorNode", "outputs")
+  async getNodeOutputs(
+    node: Partial<ReactorNode>,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode>[]> {
+    return this.relatedNodes(node, context, "dependencies", [ReactorLinkType.OUTPUT]);
+  }
+
+  @property("ReactorNode", "parent")
+  async getNodeParent(
+    node: Partial<ReactorNode>,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode> | null> {
+    if (node?.parentId === undefined || node?.parentId === null) return null;
+    return this.resolveNodeById(node.parentId, context);
+  }
+
+  @property("ReactorNodeLink", "source")
+  async getLinkSource(
+    link: ReactorNodeLink,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode>> {
+    return this.resolveNodeById(link.source, context);
+  }
+
+  @property("ReactorNodeLink", "target")
+  async getLinkTarget(
+    link: ReactorNodeLink,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode>> {
+    return this.resolveNodeById(link.target, context);
   }
 
   @property("ReactorNode", "children")
@@ -357,72 +473,72 @@ class ReactorSystemGraph {
 
 
 
-  @mutation("ReactorSyncCatalogNode")
-  async syncCatalogNode(
+  @mutation("ReactorSyncCatalogNodes")
+  async syncCatalogNodes(
     _: any,
-    args: { id: number },
+    args: { request: { ids: number[] } },
     context: Reactory.Server.IReactoryContext
-  ): Promise<CatalogNodeSyncResult> {
+  ): Promise<CatalogNodeSyncResult[]> {
     const graphSvc = context.getService<ISystemGraphManager>(
       "reactor.SystemGraphManager@1.0.0"
     );
-    try {
-      const project = await graphSvc.getProjectForCatalogNode({ id: args.id });
-      if (project) {
-        await graphSvc.catalogProject(project);
+    const ids = args?.request?.ids || [];
+    const results: CatalogNodeSyncResult[] = [];
+    for (const id of ids) {
+      try {
+        const project = await graphSvc.getProjectForCatalogNode({ id });
+        if (project) await graphSvc.catalogProject(project);
+        results.push({
+          node: await graphSvc.getCatalogNode(id),
+          message: "Catalog node sync complete",
+        });
+      } catch (e) {
+        let node: Partial<ReactorNode> = { id } as Partial<ReactorNode>;
+        try {
+          node = await graphSvc.getCatalogNode(id);
+        } catch {
+          /* node may not resolve if project missing */
+        }
+        results.push({ node, errors: [(e as Error).message] });
       }
-
-      return {
-        node: await graphSvc.getCatalogNode(args.id),
-        message: "Catalog node sync complete",
-      };
-    } catch (e) {
-      return {
-        node: await graphSvc.getCatalogNode(args.id),
-        errors: [e.message],
-      };
     }
+    return results;
   }
 
-  @mutation("ReactorIndexCatalogNodes")
-  async indexCatalogNodes(
+  @mutation("ReactorIndexNodes")
+  async indexNodes(
     _: any,
-    args: { ids: number[] },
-    context: Reactory.Server.IReactoryContext): 
-      Promise<ReactorNodeCatalogIndexResult> {
-       
-      if(!args || args?.ids.length === 0)  {
-        return {
-          __typename: "ReactorNodeCatalogIndexFailure",
-          errors: ["Process requires at least one node id to begin processing"]
-        }
-      }
+    args: { filter: ReactorProjectFilterArgs },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<PagedNodes> {
+    const graphSvc = context.getService<ISystemGraphManager>(
+      "reactor.SystemGraphManager@1.0.0"
+    );
+    const projectSvc = context.getService<ReactorProjectService>(
+      "reactor.ReactorProjectService@1.0.0"
+    );
 
-      const graphSvc = context.getService<ISystemGraphManager>("reactor.SystemGraphManager@1.0.0");
-      const projectNode = await graphSvc.getCatalogNode(args.ids[0]);
-      
-      if(projectNode) {
-        const catalogResult = await graphSvc.catalogProject(projectNode.data);
-        if(catalogResult && catalogResult.length > 0) {
-          return {
-            __typename: "ReactorNodeCatalogIndexSuccess", 
-            nodes: [projectNode],
-            message: "Catalog Node has been indexed",
-          }
-        } else {
-          return {
-            __typename: "ReactorNodeCatalogIndexFailure",
-            errors: ["Catalog yielded no searchable results"]
-          }  
-        }
-      } else {
-        return {
-          __typename: "ReactorNodeCatalogIndexFailure",
-          errors: [`Catalog node with id: [${args.ids[0]}]`]
-        }
+    const { projects } = await projectSvc.getProjects(args.filter);
+    for (const project of projects) {
+      try {
+        await projectSvc.index(project as IReactorProject);
+      } catch (e) {
+        context.error(
+          `Failed to index project ${project.name}: ${(e as Error).message}`
+        );
       }
-      
-      
+    }
+
+    const nodes = await graphSvc.getCatalogNodes();
+    return {
+      nodes,
+      paging: {
+        total: nodes.length,
+        hasNext: false,
+        page: 1,
+        pageSize: nodes.length,
+      },
+    };
   }
 
   @query("ReactorNodeCategory")
@@ -461,7 +577,15 @@ class ReactorSystemGraph {
     args: { type: string[] },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    // Not directly supported, so filter nodes by type
+    // Query the persisted graph first; fall back to catalog roots if nothing
+    // has been indexed yet.
+    const persisted = (await ReactorNodeModel.find({
+      type: { $in: args.type },
+    })
+      .limit(1000)
+      .lean()) as any[];
+    if (persisted && persisted.length) return persisted;
+
     const graphSvc = context.getService<ISystemGraphManager>(
       "reactor.SystemGraphManager@1.0.0"
     );
@@ -475,15 +599,25 @@ class ReactorSystemGraph {
     args: { term: string },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    // Not directly supported, so filter nodes by term in name, description, etc.
+    const term = args.term || "";
+    // Persisted regex search over name/description across all indexed nodes.
+    const rx = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    const persisted = (await ReactorNodeModel.find({
+      $or: [{ name: rx }, { description: rx }],
+    })
+      .limit(1000)
+      .lean()) as any[];
+    if (persisted && persisted.length) return persisted;
+
     const graphSvc = context.getService<ISystemGraphManager>(
       "reactor.SystemGraphManager@1.0.0"
     );
     const allNodes = await graphSvc.getCatalogNodes();
-    const term = args.term.toLowerCase();
-    return allNodes.filter((node) =>
-      (node.name && node.name.toLowerCase().includes(term)) ||
-      (node.description && node.description.toLowerCase().includes(term))
+    const lower = term.toLowerCase();
+    return allNodes.filter(
+      (node) =>
+        (node.name && node.name.toLowerCase().includes(lower)) ||
+        (node.description && node.description.toLowerCase().includes(lower))
     );
   }
 
@@ -500,114 +634,130 @@ class ReactorSystemGraph {
     return projects.find((p) => p.id === args.id);
   }
 
-  @mutation("ReactorCrawlCatalogNodes")
-  async ReactorCrawlCatalogNodes(
+  @mutation("ReactorCreateNodeLink")
+  async ReactorCreateNodeLink(
     _: any,
-    args: { request: { ids: number[] } },
-    context: Reactory.Server.IReactoryContext
-  ): Promise<CatalogNodeSyncResult[]> {
-    // Not implemented in SystemGraphManager
-    throw new Error("crawlCatalogNodes not implemented");
-  }
-
-  @mutation("ReactorNodeCategoryCreate")
-  async ReactorNodeCategoryCreate(
-    _: any,
-    args: { name: string; description?: string },
-    context: Reactory.Server.IReactoryContext
-  ): Promise<Partial<ReactorNodeCategory>> {
-    // Not implemented in SystemGraphManager
-    throw new Error("createNodeCategory not implemented");
-  }
-
-  @mutation("ReactorNodeCategoryUpdate")
-  async ReactorNodeCategoryUpdate(
-    _: any,
-    args: { id: number; name?: string; description?: string },
-    context: Reactory.Server.IReactoryContext
-  ): Promise<Partial<ReactorNodeCategory>> {
-    // Not implemented in SystemGraphManager
-    throw new Error("updateNodeCategory not implemented");
-  }
-
-  @mutation("ReactorNodeCategoryDelete")
-  async ReactorNodeCategoryDelete(
-    _: any,
-    args: { id: number },
-    context: Reactory.Server.IReactoryContext
-  ): Promise<Partial<ReactorNodeCategory>> {
-    // Not implemented in SystemGraphManager
-    throw new Error("deleteNodeCategory not implemented");
-  }
-
-  @mutation("ReactorNodeCreate")
-  async ReactorNodeCreate(
-    _: any,
-    args: { nameSpace: string; name: string; version: string; description?: string },
-    context: Reactory.Server.IReactoryContext
-  ): Promise<Partial<ReactorNode>> {
-    // Not implemented in SystemGraphManager
-    throw new Error("createNode not implemented");
-  }
-
-  @mutation("ReactorNodeUpdate")
-  async ReactorNodeUpdate(
-    _: any,
-    args: { id: number; nameSpace?: string; name?: string; version?: string; description?: string },
-    context: Reactory.Server.IReactoryContext
-  ): Promise<PagedNodes> {
-    // Not implemented in SystemGraphManager
-    throw new Error("updateNode not implemented");
-  }
-
-  @mutation("ReactorNodeDelete")
-  async ReactorNodeDelete(
-    _: any,
-    args: { id: number },
-    context: Reactory.Server.IReactoryContext
-  ): Promise<Partial<ReactorNode>> {
-    // Not implemented in SystemGraphManager
-    throw new Error("deleteNode not implemented");
-  }
-
-  @mutation("ReactorNodeLinkCreate")
-  async ReactorNodeLinkCreate(
-    _: any,
-    args: { createInput: any },
+    args: { input: { from: number; to: number; types?: string[]; title?: string; description?: string } },
     context: Reactory.Server.IReactoryContext
   ): Promise<any> {
-    // Not implemented in SystemGraphManager
-    throw new Error("createNodeLink not implemented");
+    const graphSvc = context.getService<ISystemGraphManager>(
+      "reactor.SystemGraphManager@1.0.0"
+    );
+    try {
+      const { from, to, types, title, description } = args.input;
+      const primaryType = (types && types[0]) || ReactorLinkType.DIRECT;
+      const link = await graphSvc.createLink(
+        { id: from } as ReactorNode,
+        primaryType,
+        { id: to } as ReactorNode
+      );
+      // Apply the full type set / labels supplied by the caller.
+      const updated = await graphSvc.updateLink({
+        ...link,
+        types: (types as ReactorLinkType[]) || link.types,
+        title: title ?? link.title,
+        description: description ?? link.description,
+      });
+      return {
+        __typename: "ReactorCreateNodeLinkSuccess",
+        link: updated,
+        message: "Link created",
+      };
+    } catch (e) {
+      return {
+        __typename: "ReactorCreateNodeLinkFailure",
+        link: { id: 0, source: args.input.from, target: args.input.to },
+        error: (e as Error).message,
+      };
+    }
   }
 
-  @mutation("ReactorNodeLinkDelete")
-  async ReactorNodeLinkDelete(
+  @mutation("ReactorUpdateNodeLink")
+  async ReactorUpdateNodeLink(
+    _: any,
+    args: { input: { from: number; to: number; types?: string[]; title?: string; description?: string } },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<any> {
+    const graphSvc = context.getService<ISystemGraphManager>(
+      "reactor.SystemGraphManager@1.0.0"
+    );
+    try {
+      const { from, to, types, title, description } = args.input;
+      const primaryType = (types && types[0]) || ReactorLinkType.DIRECT;
+      // Ensure the edge exists, then apply the incoming fields.
+      const link = await graphSvc.createLink(
+        { id: from } as ReactorNode,
+        primaryType,
+        { id: to } as ReactorNode
+      );
+      const updated = await graphSvc.updateLink({
+        ...link,
+        types: (types as ReactorLinkType[]) || link.types,
+        title: title ?? link.title,
+        description: description ?? link.description,
+      });
+      return {
+        __typename: "ReactorNodeLinkUpdateSuccess",
+        link: updated,
+        message: "Link updated",
+      };
+    } catch (e) {
+      return {
+        __typename: "ReactorNodeLinkUpdateFailure",
+        link: { id: 0, source: args.input.from, target: args.input.to },
+        error: (e as Error).message,
+      };
+    }
+  }
+
+  @mutation("ReactorDeleteNodeLink")
+  async ReactorDeleteNodeLink(
     _: any,
     args: { id: number },
     context: Reactory.Server.IReactoryContext
   ): Promise<any> {
-    // Not implemented in SystemGraphManager
-    throw new Error("deleteNodeLink not implemented");
-  }
-
-  @mutation("ReactorNodeLinkUpdate")
-  async ReactorNodeLinkUpdate(
-    _: any,
-    args: { updateInput: any },
-    context: Reactory.Server.IReactoryContext
-  ): Promise<any> {
-    // Not implemented in SystemGraphManager
-    throw new Error("updateNodeLink not implemented");
+    const graphSvc = context.getService<ISystemGraphManager>(
+      "reactor.SystemGraphManager@1.0.0"
+    );
+    try {
+      await graphSvc.deleteLink({ id: args.id } as ReactorNodeLink);
+      return { __typename: "ReactorDeleteNodeLinkSuccess", id: args.id, message: "Link deleted" };
+    } catch (e) {
+      return { __typename: "ReactorDeleteNodeLinkFailure", id: args.id, error: (e as Error).message };
+    }
   }
 
   @mutation("ReactorSaveSystemGraph")
   async ReactorSaveSystemGraph(
     _: any,
-    args: { graph: any[] },
+    args: { graph: { title?: string; share?: boolean; nodes?: number[]; links?: { id: number; types?: string[]; title?: string; description?: string }[] } },
     context: Reactory.Server.IReactoryContext
   ): Promise<any> {
-    // Not implemented in SystemGraphManager
-    throw new Error("saveSystemGraph not implemented");
+    const graphSvc = context.getService<ISystemGraphManager>(
+      "reactor.SystemGraphManager@1.0.0"
+    );
+    try {
+      const links = args.graph?.links || [];
+      for (const l of links) {
+        await graphSvc.updateLink({
+          id: l.id,
+          types: l.types as ReactorLinkType[],
+          title: l.title,
+          description: l.description,
+        } as ReactorNodeLink);
+      }
+      return {
+        __typename: "ReactorSystemGraphSaveSuccess",
+        success: true,
+        message: `Saved graph with ${links.length} link update(s)`,
+      };
+    } catch (e) {
+      return {
+        __typename: "ReactorSysteGraphSaveFailure",
+        id: 0,
+        error: (e as Error).message,
+      };
+    }
   }
 
   @query("ReactorProjectByName")

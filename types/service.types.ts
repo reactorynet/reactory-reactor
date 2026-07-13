@@ -1241,11 +1241,12 @@ export interface IProjectProcessor extends ProjectSynchronizer, AttributeProvide
   getFileSpecs(project: Partial<IReactorProject>): Partial<IReactorProjectFileSpec>[];
   setFileSpecs(project: Partial<IReactorProject>, specs: Partial<IReactorProjectFileSpec>[]): Promise<Partial<IReactorProject>>;
   /**
-   * Processes the project and returns a list of searchable items.
-   * This is used to index the project for search.
-   * @param project 
+   * Processes the project: discovers files, builds/persists nodes and writes
+   * searchables to the search index. Returns the (possibly enriched) project.
+   * May run asynchronously.
+   * @param project
    */
-  process(project: Partial<IReactorProject>): Partial<IReactorProject>;  
+  process(project: Partial<IReactorProject>): Partial<IReactorProject> | Promise<Partial<IReactorProject>>;
   /**
    * Returns true if the processor supports the project type.
    * @param project 

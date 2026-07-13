@@ -34,6 +34,22 @@ export interface McpConnectionEntry {
   /** Optional working directory for stdio transport. */
   cwd?: string;
 
+  /**
+   * OAuth / auth descriptor. When `type` is 'oauth' the connection is
+   * (re)hydrated with an SDK OAuthClientProvider instead of static headers.
+   * Mirrors `McpAuthConfig` from ./standard-config (kept structural to avoid a
+   * circular import).
+   */
+  auth?: {
+    type: 'none' | 'bearer' | 'oauth';
+    scopes?: string[];
+    issuer?: string;
+    authorizationUrl?: string;
+    tokenUrl?: string;
+    clientId?: string;
+    clientSecret?: string;
+  };
+
   status: 'active' | 'inactive' | 'error';
   connectedAt?: string;
   connectorRef?: string;

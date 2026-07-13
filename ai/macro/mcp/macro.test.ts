@@ -60,6 +60,7 @@ jest.mock("@modelcontextprotocol/sdk/client/stdio.js", () => ({
 // ── Test harness ───────────────────────────────────────────────────────────
 
 import { McpCli } from "./macro";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { McpCliProps } from "./types";
 import type { ChatState } from "../../openai/types/chat";
 import type { McpConnectionEntry } from "./session-config";
@@ -110,6 +111,12 @@ const writeMcpYaml = (sessionFolder: string, connections: Array<Record<string, u
   fs.writeFileSync(path.join(sessionFolder, "mcp.yaml"), yaml.dump({ version: "1.0", connections }), "utf8");
 };
 
+// Writes a standard `~/.reactor/mcp.yaml` (the `mcpServers` map format) to the
+// REACTOR_MCP_CONFIG path so tests never touch the developer's real home file.
+const writeStandardMcp = (mcpServers: Record<string, Record<string, unknown>>) => {
+  fs.writeFileSync(standardConfigPath, yaml.dump({ mcpServers }), "utf8");
+};
+
 const run = (props: McpCliProps, state: ChatState) =>
   McpCli(props, state) as Promise<McpCliResult>;
 
@@ -118,10 +125,15 @@ const run = (props: McpCliProps, state: ChatState) =>
 let tmpRoot: string;
 let dataRoot: string;
 let sessionFolder: string;
+let standardConfigPath: string;
 
 const ORIG_DATA = process.env.REACTORY_DATA;
 const ORIG_APP_DATA = process.env.APP_DATA_ROOT;
 const ORIG_STDIO = process.env.REACTORY_MCP_STDIO_ENABLED;
+const ORIG_MCP_CONFIG = process.env.REACTOR_MCP_CONFIG;
+const ORIG_HOME = process.env.HOME;
+const ORIG_DESKTOP = process.env.IS_DESKTOP_INSTALL;
+const ORIG_LOCAL_MODE = process.env.IS_LOCAL_MODE;
 
 beforeEach(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), `mcp-macro-${uuidv4()}-`));
@@ -132,6 +144,14 @@ beforeEach(() => {
   process.env.REACTORY_DATA = dataRoot;
   delete process.env.APP_DATA_ROOT; // prevent .env.local fallback from defeating REACTORY_DATA deletion
   delete process.env.REACTORY_MCP_STDIO_ENABLED;
+  // stdio gating now consults local-mode signals — neutralise them so the
+  // "stdio disabled by default" expectations hold regardless of the host env.
+  delete process.env.IS_DESKTOP_INSTALL;
+  delete process.env.IS_LOCAL_MODE;
+  // Point the standard-config loader at a per-test temp path (absent by default)
+  // so it never reads the developer's real ~/.reactor/mcp.yaml.
+  standardConfigPath = path.join(tmpRoot, "standard-mcp.yaml");
+  process.env.REACTOR_MCP_CONFIG = standardConfigPath;
   mockClientImpl = null;
   jest.clearAllMocks();
 });
@@ -144,6 +164,14 @@ afterEach(() => {
   else process.env.APP_DATA_ROOT = ORIG_APP_DATA;
   if (ORIG_STDIO === undefined) delete process.env.REACTORY_MCP_STDIO_ENABLED;
   else process.env.REACTORY_MCP_STDIO_ENABLED = ORIG_STDIO;
+  if (ORIG_MCP_CONFIG === undefined) delete process.env.REACTOR_MCP_CONFIG;
+  else process.env.REACTOR_MCP_CONFIG = ORIG_MCP_CONFIG;
+  if (ORIG_HOME === undefined) delete process.env.HOME;
+  else process.env.HOME = ORIG_HOME;
+  if (ORIG_DESKTOP === undefined) delete process.env.IS_DESKTOP_INSTALL;
+  else process.env.IS_DESKTOP_INSTALL = ORIG_DESKTOP;
+  if (ORIG_LOCAL_MODE === undefined) delete process.env.IS_LOCAL_MODE;
+  else process.env.IS_LOCAL_MODE = ORIG_LOCAL_MODE;
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -151,17 +179,17 @@ afterEach(() => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("McpCli — available", () => {
-  it("fails when REACTORY_DATA is unset", async () => {
+  it("succeeds with guidance when no source is configured at all", async () => {
     delete process.env.REACTORY_DATA;
     const result = await run({ command: "available" }, makeState({ sessionFolder }));
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/REACTORY_DATA/);
+    expect(result.success).toBe(true);
+    expect(result.data).toMatch(/No MCP services are defined/);
   });
 
-  it("fails when available.yaml is missing", async () => {
-    const result = await run({ command: "available" }, makeState({ sessionFolder }));
-    expect(result.success).toBe(false);
-    expect(result.error).toMatch(/available\.yaml/);
+  it("returns an empty list (not an error) when available.yaml is missing and no standard config", async () => {
+    const result = await run({ command: "available", format: "json" }, makeState({ sessionFolder }));
+    expect(result.success).toBe(true);
+    expect(result.data).toEqual([]);
   });
 
   it("returns http + stdio services from the catalog", async () => {
@@ -197,6 +225,172 @@ describe("McpCli — available", () => {
     const result = await run({ command: "available", format: "json" }, makeState({ sessionFolder }));
     const data = result.data as Array<{ transport: string }>;
     expect(data[0].transport).toBe("http");
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+//   standard ~/.reactor/mcp.yaml (mcpServers map) merged into the registry
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("McpCli — standard ~/.reactor/mcp.yaml", () => {
+  it("surfaces standard-config servers in `available` without an available.yaml", async () => {
+    // No curated catalog written at all.
+    writeStandardMcp({
+      "grafana-local": {
+        command: "uvx",
+        args: ["mcp-grafana"],
+        env: { GRAFANA_URL: "http://localhost:8003" },
+      },
+    });
+    const result = await run({ command: "available", format: "json" }, makeState({ sessionFolder }));
+    expect(result.success).toBe(true);
+    const data = result.data as Array<{ id: string; transport: string; source?: string }>;
+    const grafana = data.find((d) => d.id === "grafana-local")!;
+    expect(grafana).toBeDefined();
+    expect(grafana.transport).toBe("stdio");
+    expect(grafana.source).toBe("standard-config");
+  });
+
+  it("interpolates ${ENV} references in stdio env values", async () => {
+    process.env.GRAFANA_LOCAL_SERVICE_ACCOUNT_TOKEN = "tok-123";
+    writeStandardMcp({
+      "grafana-local": {
+        command: "uvx",
+        args: ["mcp-grafana"],
+        env: { GRAFANA_SERVICE_ACCOUNT_TOKEN: "${GRAFANA_LOCAL_SERVICE_ACCOUNT_TOKEN}" },
+      },
+    });
+    const result = await run({ command: "available", format: "json" }, makeState({ sessionFolder }));
+    const data = result.data as Array<{ id: string; env?: Record<string, string> }>;
+    const grafana = data.find((d) => d.id === "grafana-local")!;
+    expect(grafana.env?.GRAFANA_SERVICE_ACCOUNT_TOKEN).toBe("tok-123");
+    delete process.env.GRAFANA_LOCAL_SERVICE_ACCOUNT_TOKEN;
+  });
+
+  it("treats stdio as available in local mode (IS_DESKTOP_INSTALL=true)", async () => {
+    process.env.IS_DESKTOP_INSTALL = "true"; // REACTORY_MCP_STDIO_ENABLED deliberately left unset
+    writeStandardMcp({
+      "grafana-local": { command: "uvx", args: ["mcp-grafana"] },
+    });
+    const result = await run({ command: "available", format: "json" }, makeState({ sessionFolder }));
+    const data = result.data as Array<{ id: string; available: boolean }>;
+    const grafana = data.find((d) => d.id === "grafana-local")!;
+    expect(grafana.available).toBe(true);
+
+    // ...and add-connection stdio succeeds without REACTORY_MCP_STDIO_ENABLED.
+    const added = await run(
+      { command: "add-connection", id: "grafana-local", transport: "stdio" },
+      makeState({ sessionFolder })
+    );
+    expect(added.success).toBe(true);
+  });
+
+  it("lets a standard-config stdio server be added by id (gated on)", async () => {
+    process.env.REACTORY_MCP_STDIO_ENABLED = "true";
+    writeStandardMcp({
+      "grafana-local": { command: "uvx", args: ["mcp-grafana"] },
+    });
+    const state = makeState({ sessionFolder });
+    const result = await run(
+      { command: "add-connection", id: "grafana-local", transport: "stdio" },
+      state
+    );
+    expect(result.success).toBe(true);
+    const persisted = readMcpYaml(sessionFolder);
+    expect(persisted.connections[0].command).toBe("uvx");
+    expect(persisted.connections[0].args).toEqual(["mcp-grafana"]);
+  });
+
+  it("lets a standard-config http server be added by id (url from config)", async () => {
+    writeStandardMcp({
+      "remote-http": { url: "https://std.example/mcp", type: "http" },
+    });
+    const state = makeState({ sessionFolder });
+    const result = await run(
+      { command: "add-connection", id: "remote-http" },
+      state
+    );
+    expect(result.success).toBe(true);
+    const persisted = readMcpYaml(sessionFolder);
+    expect(persisted.connections[0].transport).toBe("http");
+    expect(persisted.connections[0].url).toBe("https://std.example/mcp");
+  });
+
+  it("lets the curated catalog win over a standard-config entry with the same id", async () => {
+    writeCatalog(dataRoot, [
+      { id: "dup", name: "Curated", description: "from available.yaml", transport: "http", url: "https://curated.example/mcp" },
+    ]);
+    writeStandardMcp({
+      "dup": { url: "https://standard.example/mcp", type: "http" },
+    });
+    const result = await run({ command: "available", format: "json" }, makeState({ sessionFolder }));
+    const data = result.data as Array<{ id: string; url: string; source?: string }>;
+    const dup = data.filter((d) => d.id === "dup");
+    expect(dup).toHaveLength(1);
+    expect(dup[0].url).toBe("https://curated.example/mcp");
+    expect(dup[0].source).toBe("available.yaml");
+  });
+
+  it("loads a JSON standard config (mcp.json)", async () => {
+    const jsonPath = path.join(tmpRoot, "standard-mcp.json");
+    process.env.REACTOR_MCP_CONFIG = jsonPath;
+    fs.writeFileSync(
+      jsonPath,
+      JSON.stringify({ mcpServers: { "grafana-local": { command: "uvx", args: ["mcp-grafana"] } } }),
+      "utf8"
+    );
+    const result = await run({ command: "available", format: "json" }, makeState({ sessionFolder }));
+    const data = result.data as Array<{ id: string; transport: string }>;
+    const grafana = data.find((d) => d.id === "grafana-local")!;
+    expect(grafana).toBeDefined();
+    expect(grafana.transport).toBe("stdio");
+  });
+
+  it("merges servers from BOTH mcp.json and mcp.yaml in ~/.reactor", async () => {
+    // Exercise the real discovery path: no REACTOR_MCP_CONFIG override, HOME sandboxed.
+    delete process.env.REACTOR_MCP_CONFIG;
+    const home = path.join(tmpRoot, "home");
+    const reactorDir = path.join(home, ".reactor");
+    fs.mkdirSync(reactorDir, { recursive: true });
+    process.env.HOME = home;
+    fs.writeFileSync(
+      path.join(reactorDir, "mcp.json"),
+      JSON.stringify({ mcpServers: { "from-json": { command: "uvx", args: ["x"] } } }),
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(reactorDir, "mcp.yaml"),
+      yaml.dump({ mcpServers: { "from-yaml": { url: "https://yaml.example/mcp" } } }),
+      "utf8"
+    );
+    const result = await run({ command: "available", format: "json" }, makeState({ sessionFolder }));
+    const data = result.data as Array<{ id: string }>;
+    // Regression: a server in mcp.yaml must NOT be hidden by mcp.json existing.
+    expect(data.some((d) => d.id === "from-json")).toBe(true);
+    expect(data.some((d) => d.id === "from-yaml")).toBe(true);
+  });
+
+  it("prefers mcp.json over mcp.yaml only on an id collision", async () => {
+    delete process.env.REACTOR_MCP_CONFIG;
+    const home = path.join(tmpRoot, "home");
+    const reactorDir = path.join(home, ".reactor");
+    fs.mkdirSync(reactorDir, { recursive: true });
+    process.env.HOME = home;
+    fs.writeFileSync(
+      path.join(reactorDir, "mcp.json"),
+      JSON.stringify({ mcpServers: { dup: { url: "https://json.example/mcp" } } }),
+      "utf8"
+    );
+    fs.writeFileSync(
+      path.join(reactorDir, "mcp.yaml"),
+      yaml.dump({ mcpServers: { dup: { url: "https://yaml.example/mcp" } } }),
+      "utf8"
+    );
+    const result = await run({ command: "available", format: "json" }, makeState({ sessionFolder }));
+    const data = result.data as Array<{ id: string; url: string }>;
+    const dup = data.filter((d) => d.id === "dup");
+    expect(dup).toHaveLength(1);
+    expect(dup[0].url).toBe("https://json.example/mcp");
   });
 });
 
@@ -520,5 +714,110 @@ describe("McpCli — session round-trip", () => {
     const state = makeState({ sessionFolder });
     const result = await run({ command: "connections" }, state);
     expect(result.data).toEqual([]);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+//   OAuth (auth.type = 'oauth')
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe("McpCli — OAuth", () => {
+  const ORIG_ENC_KEY = process.env.OAUTH_TOKEN_ENCRYPTION_KEY;
+  beforeAll(() => {
+    // Token store construction resolves an encryption key at build time.
+    process.env.OAUTH_TOKEN_ENCRYPTION_KEY =
+      process.env.OAUTH_TOKEN_ENCRYPTION_KEY || "oauth-unit-test-key-32-chars-minimum!!";
+  });
+  afterAll(() => {
+    if (ORIG_ENC_KEY === undefined) delete process.env.OAUTH_TOKEN_ENCRYPTION_KEY;
+    else process.env.OAUTH_TOKEN_ENCRYPTION_KEY = ORIG_ENC_KEY;
+  });
+
+  /** State whose context.user supports the authentications accessors the store needs. */
+  const makeOAuthState = () => {
+    const auths = new Map<string, { props?: Record<string, unknown> }>();
+    const user = {
+      id: "u1",
+      getAuthentication: (p: string) => auths.get(p) ?? null,
+      setAuthentication: ({ provider, props }: { provider: string; props: Record<string, unknown> }) => {
+        const existing = auths.get(provider);
+        auths.set(provider, { props: { ...(existing?.props ?? {}), ...props } });
+        return true;
+      },
+      removeAuthentication: (p: string) => auths.delete(p),
+    };
+    const ctx = { log: jest.fn(), user };
+    return { state: makeState({ sessionFolder, context: ctx as unknown as ChatState["context"] }), auths };
+  };
+
+  const OAUTH_SERVICE = {
+    id: "oauth-remote",
+    name: "OAuth Remote",
+    description: "needs consent",
+    transport: "http",
+    url: "https://oauth.example/mcp",
+    auth: { type: "oauth", scopes: ["read"] },
+  };
+
+  it("attaches an OAuth provider on add-connection for oauth-typed services", async () => {
+    writeCatalog(dataRoot, [OAUTH_SERVICE]);
+    const { state } = makeOAuthState();
+    const added = await run({ command: "add-connection", id: "oauth-remote" }, state);
+    expect(added.success).toBe(true);
+    expect((added.data as { oauth?: boolean }).oauth).toBe(true);
+    const client = state.mcpClients!.find((c) => c.name === "oauth-remote")!;
+    expect(client.authProvider).toBeDefined();
+    // The auth descriptor is persisted so a fresh state rehydrates as oauth.
+    const persisted = readMcpYaml(sessionFolder) as unknown as {
+      connections: Array<{ serverName: string; auth?: { type: string } }>;
+    };
+    expect(persisted.connections[0].auth?.type).toBe("oauth");
+  });
+
+  it("connect surfaces needsAuthorization + the consent URL on UnauthorizedError", async () => {
+    mockClientImpl = () => ({
+      connect: jest.fn().mockRejectedValue(new UnauthorizedError("authorization required")),
+    });
+    writeCatalog(dataRoot, [OAUTH_SERVICE]);
+    const { state } = makeOAuthState();
+    const added = await run({ command: "add-connection", id: "oauth-remote" }, state);
+    const connectionId = (added.data as { id: string }).id;
+
+    // Simulate the SDK having produced a consent URL via the provider.
+    const client = state.mcpClients!.find((c) => c.id === connectionId)!;
+    (client.authProvider as { pendingAuthorizationUrl?: string }).pendingAuthorizationUrl =
+      "https://idp.example/authorize?x=1";
+
+    const connected = await run({ command: "connect", id: connectionId }, state);
+    expect(connected.success).toBe(false);
+    const data = connected.data as { needsAuthorization?: boolean; authorizationUrl?: string };
+    expect(data.needsAuthorization).toBe(true);
+    expect(data.authorizationUrl).toBe("https://idp.example/authorize?x=1");
+    expect(connected.instructions).toMatch(/Authorization required/);
+    expect(connected.instructions).toContain("https://idp.example/authorize?x=1");
+  });
+
+  it("logout clears the stored grant for the connection", async () => {
+    writeCatalog(dataRoot, [OAUTH_SERVICE]);
+    const { state, auths } = makeOAuthState();
+    const added = await run({ command: "add-connection", id: "oauth-remote" }, state);
+    const connectionId = (added.data as { id: string }).id;
+
+    // Seed a stored token then clear it.
+    auths.set("mcp:oauth-remote", { props: { version: 1, encSalt: "x", secret: "y" } });
+    const out = await run({ command: "logout", id: connectionId }, state);
+    expect(out.success).toBe(true);
+    expect(auths.has("mcp:oauth-remote")).toBe(false);
+  });
+
+  it("non-oauth services still use the static-header path (no provider)", async () => {
+    writeCatalog(dataRoot, [
+      { id: "plain", name: "Plain", description: "", transport: "http", url: "https://plain.example/mcp" },
+    ]);
+    const { state } = makeOAuthState();
+    const added = await run({ command: "add-connection", id: "plain", url: "https://plain.example/mcp" }, state);
+    expect((added.data as { oauth?: boolean }).oauth).toBe(false);
+    const client = state.mcpClients!.find((c) => c.name === "plain")!;
+    expect(client.authProvider).toBeUndefined();
   });
 });

@@ -646,7 +646,7 @@ class OpenAIService extends AIProviderBase {
    */
   private isToolCallError(error: any): boolean {
     const msg = error?.message?.toLowerCase() || "";
-    const code = error?.code?.toLowerCase() || "";
+    const code = String(error?.code || "").toLowerCase();
     const mentionsTool =
       msg.includes("tool") || msg.includes("function") ||
       code.includes("tool") || code.includes("function");

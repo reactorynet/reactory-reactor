@@ -87,7 +87,7 @@ class BackStageProjectProcessor
     return project;
   }
 
-  process(project: Partial<IReactorProject>): Partial<IReactorProject> {
+  process(project: Partial<IReactorProject>): Promise<Partial<IReactorProject>> {
     return this.getProjectData(project);
   }
 
