@@ -499,10 +499,17 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       const content = fs.readFileSync(fileSpec.path, "utf-8");
       const lines = content.split("\n");
       const fileName = fileSpec.path.split(path.sep).pop();
-      const idString = `${projectFqn(project)}_${fileSpec.type}_${fileName}`;
+      // Key the searchable on the project-relative path, not the bare file name:
+      // large repos have many files that share a basename (e.g. index.ts), and a
+      // basename-only id collapses them to one id, so most get overwritten in the
+      // search index (thousands of files silently lost).
+      const relativePath = normalizeRelative(
+        path.relative(project.repoPath || "", fileSpec.path)
+      );
+      const idString = `${projectFqn(project)}_${fileSpec.type}_${relativePath}`;
       return {
         id: Hash(idString),
-        name: `${fileSpec.type}_${fileName}`,
+        name: `${fileSpec.type}_${relativePath}`,
         nameSpace: project.nameSpace,
         version: project.version,
         source: content.slice(0, MAX_SEARCHABLE_CONTENT),
@@ -520,33 +527,41 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     nodes: Partial<ReactorNode>[],
     edges: ReactorNodeLink[]
   ): Promise<void> {
+    // Build upsert operations, skipping any entry without a stable id (an
+    // id-less filter would match/replace an arbitrary document). `created` and
+    // `updated` are removed from the $set payload so they never collide with
+    // the $setOnInsert timestamps (MongoDB rejects a field that appears in both
+    // $set and $setOnInsert with "would create a conflict").
+    const toOp = <T extends { id?: number | string }>(entity: T) => {
+      const { created, updated, ...rest } = entity as T & {
+        created?: Date;
+        updated?: Date;
+      };
+      const now = new Date();
+      return {
+        updateOne: {
+          filter: { id: entity.id },
+          update: { $set: { ...rest, updated: now }, $setOnInsert: { created: now } },
+          upsert: true,
+        },
+      };
+    };
+
+    const nodeOps = nodes.filter((n) => n && n.id !== undefined && n.id !== null).map(toOp);
+    const edgeOps = edges.filter((e) => e && e.id !== undefined && e.id !== null).map(toOp);
+
     try {
-      if (nodes.length) {
-        await ReactorNodeModel.bulkWrite(
-          nodes.map((n) => ({
-            updateOne: {
-              filter: { id: n.id },
-              update: { $set: { ...n, updated: new Date() }, $setOnInsert: { created: new Date() } },
-              upsert: true,
-            },
-          })),
-          { ordered: false }
-        );
+      if (nodeOps.length) {
+        await ReactorNodeModel.bulkWrite(nodeOps, { ordered: false });
       }
-      if (edges.length) {
-        await ReactorNodeLinkModel.bulkWrite(
-          edges.map((e) => ({
-            updateOne: {
-              filter: { id: e.id },
-              update: { $set: { ...e, updated: new Date() }, $setOnInsert: { created: new Date() } },
-              upsert: true,
-            },
-          })),
-          { ordered: false }
-        );
+      if (edgeOps.length) {
+        await ReactorNodeLinkModel.bulkWrite(edgeOps, { ordered: false });
       }
     } catch (err) {
-      this.context.error(`persistGraph failed: ${(err as Error).message}`);
+      const e = err as Error;
+      this.context.error(
+        `persistGraph failed (nodes=${nodes.length}->${nodeOps.length} ops, edges=${edges.length}->${edgeOps.length} ops): ${e.message}\n${e.stack || ""}`
+      );
     }
   }
 

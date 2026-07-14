@@ -16,14 +16,16 @@ const DependencySchema = new Schema({
 }, { _id: false });
 
 const PathSpecSchema = new Schema({
-  id: ObjectId,
+  // Deterministic numeric hash id (see GraphIdentity / Hash()), not an ObjectId.
+  id: Number,
   path: String,
   filter: String,
   type: String,
 }, { _id: false });
 
 const FileSpecSchema = new Schema({
-  id: ObjectId,
+  // Deterministic numeric hash id (see listFiles -> Hash()), not an ObjectId.
+  id: Number,
   path: String,
   type: String,
   content: String,
@@ -132,6 +134,14 @@ const ReactorProjectSchema: Schema = new Schema({
   dashboards: [DashboardSchema],
   processor: String,
   processorOptions: Schema.Types.Mixed,
+  // Detected processor configs ({ id, processor, options }). The service works
+  // with the plural `processors` array; without this field it was silently
+  // dropped on save (only the legacy singular `processor` string persisted).
+  processors: [new Schema({
+    id: String,
+    processor: String,
+    options: Schema.Types.Mixed,
+  }, { _id: false })],
   owner: { type: ObjectId, ref: 'User' },
   ownerTeam: { type: ObjectId, ref: 'Team' },
   teams: [{ type: ObjectId, ref: 'Team' }],

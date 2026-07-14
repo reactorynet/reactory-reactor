@@ -3,10 +3,6 @@ import { fileAsString } from '@reactory/server-core/utils/io';
 import path from 'path';
 import { file } from 'pdfkit';
 
-const { 
-  NODE_ENV
-} = process.env;
-
 const modules: Reactory.Forms.IReactoryFormModule[] = [
   {
     compilerOptions: {},
@@ -18,7 +14,12 @@ const modules: Reactory.Forms.IReactoryFormModule[] = [
   {
     compilerOptions: {},
     id: 'core.ContentWidget@1.0.0',
-    src:  fileAsString(path.resolve(`${process.env.REACTORY_SERVER}/${NODE_ENV!=='production' ? 'src': 'app'}/modules/reactory-core/forms/Widgets/core.ContentWidget.tsx`)),
+    // __dirname-relative (not NODE_ENV-based): this file's own directory
+    // structure is preserved 1:1 between src/ and the compiled app/ output,
+    // so this resolves correctly either way without depending on NODE_ENV
+    // (which elsewhere in the codebase means something different — "am I
+    // really in a production deployment" — not "are files compiled").
+    src:  fileAsString(path.resolve(__dirname, '../../../reactory-core/forms/Widgets/core.ContentWidget.tsx')),
     compiler: 'rollup',
     fileType: 'tsx'
   },

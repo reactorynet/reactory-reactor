@@ -354,6 +354,7 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       dashboards: 1,
       processor: 1,
       processorOptions: 1,
+      processors: 1,
       ownerTeam: 1,
       teams: 1,
       engineers: 1,
@@ -415,6 +416,7 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       dashboards: 1,
       processor: 1,
       processorOptions: 1,
+      processors: 1,
       ownerTeam: 1,
       teams: 1,
       engineers: 1,
@@ -538,7 +540,13 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       }
 
       const created = await ReactorProjectModel.create(project);
-      return created as Partial<IReactorProject>;
+      // Return a plain object (mirroring getProject/updateProject which use
+      // .lean()). A raw Mongoose document loses all of its fields when spread
+      // ({ ...doc }), which the processing pipeline does — leaving name,
+      // repoPath, etc. undefined and producing an empty graph.
+      const plain = created.toObject() as Partial<IReactorProject>;
+      plain.id = created._id?.toString();
+      return plain;
     } catch (error) {
       logger.error(`Error creating project: ${error.message}`);
       throw new Error(`Failed to create project: ${error.message}`);
@@ -715,19 +723,37 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       project = await updateProjectFields(project, projectSpec);
     } else {
       project = await createNewProject(projectSpec);
+      // New projects go straight to processing; detect their type/processors
+      // here (updateProjectFields already does this for existing projects).
+      if (project.repoPath && !project.repoUrl) {
+        project.projectTypes = await this.detectProjectTypes(project);
+        const processors = await this.detectProjectProcessors(project);
+        if (processors && processors.length > 0) {
+          project.processors = processors;
+        }
+      }
     }
 
     // Process the project with all applicable processors
     project = await this.processProject(project);
     project.lastSync = new Date();
-    // Ensure the project is saved after processing
+    // Persist the processed project. Strip immutable / derived identity fields
+    // from the update payload so Mongo does not reject the write, and await the
+    // result so any failure is caught here rather than surfacing as an opaque
+    // rejection to the caller.
+    const projectId = `${project._id || project.id}`;
     try {
-      return this.updateProject(project._id, project);
+      const { _id, id, ...updates } = project as Partial<IReactorProject> & {
+        _id?: any;
+        id?: any;
+      };
+      const saved = await this.updateProject(projectId, updates);
+      return saved || project;
     } catch (error) {
       this.context.error(
-        `Error processing project ${project.name}: ${error.message}`
+        `Error saving processed project ${project.name} (${projectId}): ${error.message}\n${error.stack || ""}`
       );
-      return project; // Return the project even if processing fails
+      return project; // Return the project even if the final save fails
     }
   }
   /**
