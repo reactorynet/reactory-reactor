@@ -124,6 +124,45 @@ describe('AgentConversationStep', () => {
     expect(result.outputs.sessionId).toBe('existing-99');
   });
 
+  it('starts a NEW session when sessionId is an unresolved optional template', async () => {
+    // When the workflow does not supply the optional `sessionId` input, the
+    // YAML "${input.sessionId}" reference is left intact by resolveTemplate.
+    // The step must treat that leftover token as "no session" and create a
+    // fresh conversation, NOT try to resume "${input.sessionId}".
+    const service = makeService();
+    const step = new AgentConversationStep('chat', {
+      personaId: 'reactor',
+      message: 'hi',
+      sessionId: '${input.sessionId}',
+    });
+
+    const result = await step.execute(makeContext(service));
+
+    expect(result.success).toBe(true);
+    expect(service.startChatSession).toHaveBeenCalledTimes(1);
+    expect(service.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ chatSessionId: 'sess-1' }),
+    );
+    expect(result.outputs.sessionId).toBe('sess-1');
+  });
+
+  it('starts a NEW session when sessionId resolves to an empty string', async () => {
+    const service = makeService();
+    const ctx = makeContext(service);
+    ctx.workflowInputs.sessionId = '';
+    const step = new AgentConversationStep('chat', {
+      personaId: 'reactor',
+      message: 'hi',
+      sessionId: '${input.sessionId}',
+    });
+
+    const result = await step.execute(ctx);
+
+    expect(result.success).toBe(true);
+    expect(service.startChatSession).toHaveBeenCalledTimes(1);
+    expect(result.outputs.sessionId).toBe('sess-1');
+  });
+
   it('resolves template values from variables', async () => {
     const service = makeService();
     const ctx = makeContext(service);

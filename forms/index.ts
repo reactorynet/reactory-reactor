@@ -13,13 +13,14 @@ import ReactorProjectIncidentsForm from "./projectIncidents";
 import ReactorProjectTeamForm from "./projectTeamPanel";
 import ReactorProjectDeploymentsForm from "./projectDeployments";
 import ProviderConfigForm from "./providerConfig";
-
+import ReactorAgentGitCommitForm from "./AgentGitCommit";
 export default [
   GraphExplorerForm,
   ProjectIndexForm,  
   ServiceCatalogForm,
   ProjectsHomeForm,
   ProjectHomeForm,
+  ReactorAgentGitCommitForm,
   ReactorProjectsInfoPanelForm,
   ReactorProjectDocumentationForm,
   ReactorProjectOverviewForm,

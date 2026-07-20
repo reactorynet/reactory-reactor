@@ -99,6 +99,14 @@ export class AgentConversationStep extends BaseYamlStep {
       const toolApprovalMode = (config.toolApprovalMode as ToolApprovalMode) || ToolApprovalMode.AUTO;
     const promptMergeStrategy = config.promptMergeStrategy || 'append';
     let sessionId = config.sessionId ? this.resolveTemplate(config.sessionId, context) : undefined;
+    // `sessionId` is optional. When the caller does not supply it, the YAML
+    // reference (e.g. "${input.sessionId}") is left intact by resolveTemplate
+    // by design — unresolved optional tokens are passed through, not blanked.
+    // A leftover "${...}" token (or an empty string) means "no session", so
+    // start a fresh conversation instead of trying to resume an invalid id.
+    if (typeof sessionId === 'string' && (sessionId.trim() === '' || sessionId.includes('${'))) {
+      sessionId = undefined;
+    }
 
     const conversationService: any = this.getConversationService(context);
     if (!conversationService || typeof conversationService.sendMessage !== 'function') {

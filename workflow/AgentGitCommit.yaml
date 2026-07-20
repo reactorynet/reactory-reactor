@@ -40,11 +40,15 @@ inputs:
   personaId:
     type: string
     required: false
-    default: "ReactorAIPersona"
+    default: "GitGuardian"
     description: "Reactor AI persona to consult for the commit decision."
   hint:
     type: string
     required: false
+    default: ""
+    # Defaulting to "" ensures ${input.hint} resolves to an empty string when no
+    # hint is supplied, instead of leaking the literal "${input.hint}" token into
+    # the agent prompt (unresolved optional templates are passed through as-is).
     description: "Optional context hint for the agent (e.g. 'added unit tests for the payment module')."
   sessionId:
     type: string
