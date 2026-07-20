@@ -1,6 +1,11 @@
 #Overview
 The reactor module is an AI focussed module that integrates AI tools and frameworks in order to extend the Reactory eco system. The module allows for a multitenant, multi bot configuration that has deep context of the system it supports as well as the user execution context.
 
+## New Features
+
+### Git Commit Form Integration
+A new Git commit form has been added to facilitate automated commit message generation and management. This form integrates with the AgentGitCommit workflow and provides a user-friendly interface for generating commit messages with AI assistance.
+
 ## Engineer Flow
 
 ```mermaid

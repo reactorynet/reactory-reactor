@@ -27,6 +27,10 @@ The module includes preconfigured workflows that automate common tasks in your a
 
 The module provides ready-to-use forms for capturing user input. See the [forms documentation](https://reactory-platform.com/docs/forms) for more information.
 
+### Git Commit Form
+
+A new Git commit form has been added to facilitate automated commit message generation and management. This form integrates with the AgentGitCommit workflow.
+
 ### Services
 
 The module offers various services to extend the functionality of your application. See the [services documentation](https://reactory-platform.com/docs/services) for more information.
@@ -52,4 +56,3 @@ Set the following environment variables to configure the module:
 OPENAI_API_KEY=your-openai-api-key
 OPENAI_ORG_ID=your-openai-org-id
 ```
-
