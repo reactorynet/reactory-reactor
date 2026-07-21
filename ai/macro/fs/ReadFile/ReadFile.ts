@@ -131,30 +131,7 @@ export const ReadFile: Macro<ReadFileResult, ReadFileProps> = async (
       },
       tool: 'readFile',
       params: props,
-      instructions: `
-## File Read Results
-
-Successfully read file: **${pathModule.basename(targetPath)}**
-
-### File Information:
-- **Path**: ${targetPath}
-- **Size**: ${(stats.size / 1024).toFixed(2)}KB
-- **Type**: ${mime}
-- **Last Modified**: ${stats.mtime.toISOString()}
-
-### Available Data:
-- **content**: Raw file content as string
-- **codeBlock**: Formatted markdown code block with syntax highlighting
-- **metadata**: File statistics and properties
-
-### State Variables Available:
-- lastReadFile: Complete file information for future reference
-
-### Usage:
-- Use the \`content\` field for text processing or analysis
-- Use the \`codeBlock\` field for display in chat responses
-- Use \`metadata\` for file information and validation
-      `
+      instructions: ``
     };
 
   } catch (err) {
