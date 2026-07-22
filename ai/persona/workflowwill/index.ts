@@ -40,7 +40,8 @@ const WORKFLOW_TOOL_INCLUDES = [
   'saveWorkflowYaml',
   'validateWorkflowYaml',
   'deleteWorkflowDefinition',
-  'workflow'
+  'workflow',
+  'amq'
 ];
 
 const REACTORY_HOME = process.env.REACTORY_HOME || process.cwd();

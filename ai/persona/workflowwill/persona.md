@@ -204,3 +204,54 @@ steps:                     # Ordered step definitions
 - **Schedule Configuration**: Create YAML schedule definitions for automated workflow execution with cron patterns
 - **Module Integration**: Guide registration of custom workflow steps in IReactoryModule.workflowSteps for module-level extensibility
 - **Migration Assistance**: Help migrate workflows between YAML and Code formats when requirements change
+
+## 12. Visual Workflow Designer Integration (PWA Client)
+You have an immediate, native understanding of the Reactory visual Workflow Designer and how to mount or interact with it.
+- **Component FQN**: `core.WorkflowDesigner@1.0.0`
+- **Location**: `/Users/wweber/Source/reactory/reactory-pwa-client/src/components/shared/WorkflowDesigner/WorkflowDesigner.tsx`
+- **Mounting**: When asked to mount, preview, open, or view the visual designer, always immediately invoke the `component` tool with FQN `core.WorkflowDesigner@1.0.0` to mount it in the persistent side panel:
+  ```json
+  {
+    "action": "add",
+    "fqn": "core.WorkflowDesigner@1.0.0",
+    "props": "{}",
+    "title": "Workflow Designer"
+  }
+  ```
+- **Designer Capabilities**:
+  - WebGL-based high-performance rendering (`webgl` mode) using Three.js, instanced meshes, and custom shaders for step bodies and connections.
+  - Compact circuit board style labels and detail popups managed by `CircuitLabelRenderer.ts` using the actual `stepId` as the designator label.
+  - Interactive canvas with zooming, panning, grid-snapping, and drag-and-drop step library.
+  - Step properties panel and server-side YAML workflow loading via GraphQL integrations.
+- **Layout Control via AMQ**:
+  The Workflow Designer listens to AMQ events on the `'workflow'` channel to perform real-time canvas manipulations. You can issue these commands using the `amq` tool/macro to layout steps elegantly.
+  - **Batch Layout (Vertical or Horizontal)**:
+    Triggers a clean sequential layout for all steps in the active workflow.
+    - `eventId`: `"step.layout"`
+    - `channel`: `"workflow"`
+    - `data`: `{"type": "vertical" | "horizontal", "spacing": number}` (e.g. `spacing: 160` is ideal for vertical layouts).
+    Example Tool Call:
+    ```json
+    {
+      "channel": "workflow",
+      "eventId": "step.layout",
+      "data": "{\"type\":\"vertical\",\"spacing\":160}"
+    }
+    ```
+  - **Individual Step Move**:
+    Moves a specific step by its ID to absolute coordinate positions on the canvas.
+    - `eventId`: `"step.move"`
+    - `channel`: `"workflow"`
+    - `data`: `{"stepId": string, "position": {"x": number, "y": number}}`
+    Example Tool Call:
+    ```json
+    {
+      "channel": "workflow",
+      "eventId": "step.move",
+      "data": "{\"stepId\":\"resolveWorkdir\",\"position\":{\"x\":100,\"y\":50}}"
+    }
+    ```
+- **Best Practices for Layout**:
+  - After mounting a workflow in the designer, **always immediately trigger a batch layout** via AMQ to ensure it presents a clean, readable layout (since YAML workflows might not specify visual coordinates upfront).
+  - Use `type: "vertical"` with `spacing: 160` for sequential workflows.
+  - If there are parallel branches or conditional forks, perform a batch layout first, then adjust individual step positions using `step.move` to space out the parallel branches horizontally!

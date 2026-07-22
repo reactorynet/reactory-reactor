@@ -54,6 +54,14 @@ inputs:
     type: string
     required: false
     description: "Resume an existing agent session. Useful for engine retries so the same conversation is reused."
+  provider:
+    type: string
+    required: false
+    default: '${process.env.AGENT_GIT_COMMIT_WF_DEFAULT_PROVIDER || "google"}'
+  model:
+    type: string
+    required: false
+    default: '${process.env.AGENT_GIT_COMMIT_WF_DEFAULT_MODEL || "gemini-2.5-pro"}'
 
 steps:
   # ── 0. Resolve effective working directory ───────────────────────────────
@@ -164,6 +172,8 @@ steps:
       personaId: "${input.personaId}"
       sessionId: "${input.sessionId}"
       promptKey: commitDecisionPrompt
+      provider: "${input.provider || process.env.AGENT_GIT_COMMIT_WF_DEFAULT_PROVIDER || 'google'}"
+      model: "${input.model || process.env.AGENT_GIT_COMMIT_WF_DEFAULT_MODEL || 'gemini-2.5-pro'}"
       promptVariables:
         branch: "${steps.getBranch.outputs.stdout}"
         recentLog: "${steps.getRecentLog.outputs.stdout}"
