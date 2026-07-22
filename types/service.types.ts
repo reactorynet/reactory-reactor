@@ -2,7 +2,7 @@ import Reactory from '@reactorynet/reactory-core';
 import OpenAI from "openai"
 import GoogleGenAI from "google-genai";
 import { TReactorConversationDocument, TReactorConversationModel, ReactorConversationHistoryItem } from "../models/ReactorChatState"
-import { AIAudioChatParams, AIChatCompletion, AIChatParams, AIFile, AIFineTuningEvent, AIFineTuningJob, AIImage, AIImageGenerationParams, AIListResponse, AIModel, CreateAIFineTuningJobParams, ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorNodeType } from "./model.types"
+import { AIAudioChatParams, AIChatCompletion, AIChatParams, AIFile, AIFineTuningEvent, AIFineTuningJob, AIImage, AIImageGenerationParams, AIListResponse, AIModel, CreateAIFineTuningJobParams, ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorNodeType, ReactorProviderConfig } from "./model.types"
 import { PagingRequest, PagingResult } from "@reactory/server-core/database/types"
 import { ObjectId } from "mongodb"
 import { ChatState, MacroComponentDefinition, MacroToolDefinition, Schema, ToolApprovalMode } from '../ai/openai/types/chat';
@@ -780,6 +780,28 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
     streamingMode: StreamingMode,
     toolApprovalMode?: ToolApprovalMode,
     parentSessionId?: string,
+    /** Optional normalized, provider-agnostic augmented config for this turn. */
+    providerConfig?: ReactorProviderConfig,
+  }): Promise<any>;
+
+  /**
+   * Send a message using one of the persona's named "canned prompts". The prompt
+   * template's content is rendered with `variables` and delegated to sendMessage.
+   * Returns a ReactorErrorResponse (not thrown) when the persona or prompt key is
+   * unknown, or when a template variable is missing.
+   */
+  sendCannedPrompt(args: {
+    personaId: string,
+    promptKey: string,
+    variables?: Record<string, any>,
+    chatSessionId?: string,
+    role?: string,
+    streamingMode?: StreamingMode,
+    modelId?: string,
+    providerId?: string,
+    toolApprovalMode?: ToolApprovalMode,
+    parentSessionId?: string,
+    providerConfig?: ReactorProviderConfig,
   }): Promise<any>;
 }
 
@@ -1295,6 +1317,13 @@ export interface IReactorProviderService extends Reactory.Service.IReactoryServi
    * Get adapter for provider
    */
   getAdapter(providerId: string): Promise<any>;
+
+  /**
+   * Whether the given provider/model can honour a structured-output request.
+   * Unwired providers return false; wired providers default to supported unless
+   * the model's registry capabilities opt out with `no-structured-output`.
+   */
+  modelSupportsStructuredOutput(providerId: string, modelId?: string): Promise<boolean>;
 
   /**
    * Get compatible models for a persona based on its capabilities.

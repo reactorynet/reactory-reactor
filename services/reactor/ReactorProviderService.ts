@@ -395,6 +395,53 @@ class ReactorProviderService implements IReactorProviderService {
   }
 
   /**
+   * Provider types that have a wired structured-output implementation.
+   * The OpenAI-compatible service also serves x-ai, copilot and azure-openai.
+   */
+  private static STRUCTURED_OUTPUT_PROVIDERS = new Set<string>([
+    "openai",
+    "xai",
+    "x-ai",
+    "copilot",
+    "azure-openai",
+    "google",
+    "anthropic",
+    "ollama",
+  ]);
+
+  /**
+   * Whether the given provider/model can honour a structured-output request.
+   *
+   * - The provider must have a wired implementation (unwired providers such as
+   *   amazon/cohere/deepseek return false — the request would fail at the SDK).
+   * - A model may explicitly opt in by listing `structured-output` in its
+   *   registry `capabilities`, or opt out with `no-structured-output`. Absent
+   *   either flag, a wired provider defaults to supported (the SDKs support it
+   *   broadly), matching the permissive default used for function calling.
+   */
+  async modelSupportsStructuredOutput(
+    providerId: string,
+    modelId?: string,
+  ): Promise<boolean> {
+    const normalized = (providerId || "").toLowerCase();
+    if (!ReactorProviderService.STRUCTURED_OUTPUT_PROVIDERS.has(normalized)) {
+      return false;
+    }
+    if (!modelId) return true;
+    try {
+      const provider = await this.getProvider(normalized);
+      const model = provider?.models?.find((m) => m.id === modelId);
+      const caps = model?.capabilities;
+      if (caps?.includes("no-structured-output")) return false;
+      if (caps?.includes("structured-output")) return true;
+      return true; // wired provider default
+    } catch {
+      // Registry lookup failure should not block a wired provider.
+      return true;
+    }
+  }
+
+  /**
    * Returns the auth status for each provider for the current user, plus a
    * non-secret echo (endpoint, organization, maskedKeyHint) for providers the
    * user has configured. The echo is derived server-side via

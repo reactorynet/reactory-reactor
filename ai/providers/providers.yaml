@@ -40,6 +40,7 @@ providers:
           - code-generation
           - image-understanding
           - reasoning
+          - structured-output
         contextLength: 1050000
         rpm: null
         itpm: null
@@ -514,6 +515,7 @@ providers:
           - code-generation
           - reasoning
           - image-understanding
+          - structured-output
         contextLength: 1048576
         rpm: null
         itpm: null
@@ -906,6 +908,7 @@ providers:
           - code-generation
           - reasoning
           - image-understanding
+          - structured-output
         contextLength: 1000000
         rpm: 50
         itpm: 30000
@@ -1252,6 +1255,7 @@ providers:
           - text-generation
           - code-generation
           - reasoning
+          - structured-output
         contextLength: 131072
         rpm: null
         itpm: null

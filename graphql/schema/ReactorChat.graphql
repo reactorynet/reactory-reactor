@@ -146,7 +146,13 @@ type ReactorChatMessage {
   """
   content: Any
   """
-  The component of the message. This will be a Reactory.FQN type that follows the 
+  The parsed structured output for the message, present only when the request
+  included providerConfig.structuredOutput and the model returned valid JSON.
+  The raw JSON string is still available on `content`.
+  """
+  structuredContent: Any
+  """
+  The component of the message. This will be a Reactory.FQN type that follows the
   nameSpace.name@version format.
   """
   component: String
@@ -493,6 +499,12 @@ input ReactorSendMessageInput {
   Never persisted on the chat session.
   """
   providerAuthOverride: ReactorProviderAuthOverrideInput
+  """
+  Per-request, provider-agnostic augmented configuration (structured output,
+  reasoning effort, sampling, response modalities). Translated per-provider and
+  never persisted on the chat session.
+  """
+  providerConfig: ReactorProviderConfigInput
 }
 
 """

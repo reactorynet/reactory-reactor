@@ -14,6 +14,10 @@ import AIPersonaProvider from "../AIPersonaProvider";
 import AIProviderBase from "./AIProviderBase";
 import { AIProviderError } from "./AIProviderError";
 import {
+  toOllamaParams,
+  structuredOutputDisablesTools,
+} from "./providerConfigTranslators";
+import {
   MacroComponentDefinition,
   MacroToolDefinition,
   ToolApprovalMode,
@@ -173,8 +177,9 @@ class OllamaAIService extends AIProviderBase {
     messages: Message[];
     tools: Tool[];
     messageId?: string;
+    extra?: { format?: any; options?: Record<string, any> };
   }): Promise<AIChatCompletion> {
-    const { sessionId, model, messages, tools, messageId } = args;
+    const { sessionId, model, messages, tools, messageId, extra } = args;
     const ids: StreamingEventIds = {
       sessionId,
       conversationId: sessionId,
@@ -205,6 +210,8 @@ class OllamaAIService extends AIProviderBase {
         messages,
         tools: tools.length > 0 ? tools : undefined,
         stream: true,
+        ...(extra?.format !== undefined ? { format: extra.format } : {}),
+        ...(extra?.options ? { options: extra.options } : {}),
       });
     } catch (error: any) {
       const errorEvent = StreamingEventFactory.createErrorEvent(
@@ -340,13 +347,16 @@ class OllamaAIService extends AIProviderBase {
   private async handleNonStreamingRequest(
     model: string,
     messages: Message[],
-    tools: Tool[]
+    tools: Tool[],
+    extra?: { format?: any; options?: Record<string, any> }
   ): Promise<AIChatCompletion> {
     const response = await this.ai.chat({
       model,
       messages,
       tools: tools.length > 0 ? tools : undefined,
       stream: false,
+      ...(extra?.format !== undefined ? { format: extra.format } : {}),
+      ...(extra?.options ? { options: extra.options } : {}),
     });
 
     const msg = response.message;
@@ -473,6 +483,7 @@ class OllamaAIService extends AIProviderBase {
       message,
       persistState = true,
       streamingMode = StreamingMode.NONE,
+      providerConfig,
     } = params;
 
     this.streamingMode = streamingMode;
@@ -493,7 +504,11 @@ class OllamaAIService extends AIProviderBase {
         const userMessage =
           attempt > 1 ? this.modifyMessageForRetry(message, lastError) : message;
         const messages = this.buildMessages(userMessage);
-        const tools = await this.getToolDefinitions();
+        const allTools = await this.getToolDefinitions();
+        // Structured output (constrained `format`) is mutually exclusive with the
+        // tool loop — suppress tools when it is requested without an explicit tool.
+        const tools = structuredOutputDisablesTools(providerConfig) ? [] : allTools;
+        const extra = toOllamaParams(providerConfig);
 
         let completion: AIChatCompletion;
 
@@ -505,9 +520,10 @@ class OllamaAIService extends AIProviderBase {
             messages,
             tools,
             messageId: messageId.toString(),
+            extra,
           });
         } else {
-          completion = await this.handleNonStreamingRequest(model, messages, tools);
+          completion = await this.handleNonStreamingRequest(model, messages, tools, extra);
         }
 
         if (persistState) {

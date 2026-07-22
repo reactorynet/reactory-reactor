@@ -373,6 +373,40 @@ prompts:
     content: "${buildSystemPrompt()}"
     role: "system"
 
+  # Used by the reactor.AgentGitCommit workflow. Paired with a structured-output
+  # schema (providerConfig.structuredOutput) so the model returns a guaranteed
+  # JSON decision object — no prose, no markdown fences, no regex extraction.
+  commitDecisionPrompt:
+    role: "user"
+    content: |
+      You are deciding the correct git operation for an automated commit workflow.
+      Analyse the repository state below and choose exactly one action.
+
+      Decision rules:
+      • "commit"         — all worthwhile changes are already staged; commit as-is.
+      • "add_and_commit" — unstaged tracked changes are ready and should be committed.
+      • "stash"          — changes are clearly incomplete or experimental (WIP).
+      • "abort"          — nothing meaningful to do (clean tree, or only untracked noise).
+
+      "commitMessage" is required for "commit" and "add_and_commit" (imperative mood, ≤72 chars).
+      "stashMessage" is required for "stash". "paths" defaults to ["."] (stage everything).
+
+      Branch: ${branch}
+
+      Recent commits (newest first):
+      ${recentLog}
+
+      Working-tree status (M=modified, A=added, D=deleted, ??=untracked):
+      ${status}
+
+      Unstaged diff summary:
+      ${diffStat}
+
+      Already-staged diff summary:
+      ${stagedStat}
+
+      Context hint: ${hint}
+
   commitReviewPrompt:
     content: |
       Review the following staged changes and propose a conventional commit message.

@@ -18,6 +18,11 @@ import AIPersonaProvider from "../AIPersonaProvider";
 import AIProviderBase from "./AIProviderBase";
 import { AIProviderError } from "./AIProviderError";
 import {
+  toOpenAIParams,
+  structuredOutputDisablesTools,
+} from "./providerConfigTranslators";
+import { ReactorProviderConfig } from "../../../types/model.types";
+import {
   MacroComponentDefinition,
   MacroToolDefinition,
   ToolApprovalMode,
@@ -228,6 +233,7 @@ class OpenAIService extends AIProviderBase {
 
   private async createPrompt(
     message: string,
+    providerConfig?: ReactorProviderConfig,
   ): Promise<OpenAI.Chat.Completions.ChatCompletionCreateParams> {
     const { chatState } = this;
     const { history, modelId } = chatState;
@@ -300,21 +306,33 @@ class OpenAIService extends AIProviderBase {
       content: message,
     });
 
+    // Augmented per-request config (structured output, sampling, reasoning, tool_choice).
+    const augmented = toOpenAIParams(providerConfig);
+
     const tools = await this.getToolsDefinitions();
     const supportsFunctionCalling = await this.modelSupportsFunctionCalling();
-    if (supportsFunctionCalling && tools.length > 0) {
-      return {
-        model: modelId,
-        messages,
-        tools,
-        parallel_tool_calls: true,
-        tool_choice: "auto",
-      };
-    }
-    return {
-      model: modelId,
-      messages,
-    };
+    // Structured output is mutually exclusive with the tool loop — when a caller
+    // requests it (without an explicit tool choice) we do not attach tools.
+    const attachTools =
+      supportsFunctionCalling &&
+      tools.length > 0 &&
+      !structuredOutputDisablesTools(providerConfig);
+
+    const base: OpenAI.Chat.Completions.ChatCompletionCreateParams = attachTools
+      ? {
+          model: modelId,
+          messages,
+          tools,
+          parallel_tool_calls: true,
+          tool_choice: "auto",
+        }
+      : {
+          model: modelId,
+          messages,
+        };
+
+    // Merge augmented config last so callers can override defaults (e.g. tool_choice).
+    return { ...base, ...augmented };
   }
 
   // --- Streaming request handling ---
@@ -683,6 +701,7 @@ class OpenAIService extends AIProviderBase {
       role = "user",
       persistState = true,
       streamingMode = StreamingMode.NONE,
+      providerConfig,
     } = params;
 
     const maxRetries = 2;
@@ -705,7 +724,7 @@ class OpenAIService extends AIProviderBase {
           : message;
 
         const messageId = new ObjectId();
-        const prompt = await this.createPrompt(modifiedMessage);
+        const prompt = await this.createPrompt(modifiedMessage, providerConfig);
         const response = await this.getAIResponse(prompt, messageId.toString());
         const completion = this.normalizeCompletion(response);
 

@@ -153,62 +153,56 @@ steps:
                   captureStderr: false
 
   # ── 2. Consult the agent ──────────────────────────────────────────────────
+  # Uses the GitGuardian persona's `commitDecisionPrompt` canned prompt for the
+  # message, and constrains the response to a JSON schema via
+  # providerConfig.structuredOutput — so the agent returns a guaranteed, valid
+  # JSON decision object (no prose, no markdown fences, no regex extraction).
   - id: consultAgent
     type: agent_conversation
     dependsOn: gatherContext
     config:
       personaId: "${input.personaId}"
       sessionId: "${input.sessionId}"
-      instructions: |
-        You are a git workflow assistant embedded in an automated CI/CD system.
-        Your sole job is to analyse a git repository status report and decide on
-        the correct git operation to perform.
-
-        You MUST respond with ONLY a single JSON object — no prose, no markdown
-        code fences, no explanation before or after the JSON.
-
-        Required shape:
-        {
-          "action": "commit" | "add_and_commit" | "stash" | "abort",
-          "commitMessage": "<imperative-mood summary, ≤72 chars>",
-          "stashMessage":  "<brief WIP description>",
-          "paths":         ["."],
-          "reasoning":     "<one sentence>"
-        }
-
-        Decision rules:
-        • "commit"         — all worthwhile changes are already staged; commit as-is.
-        • "add_and_commit" — unstaged tracked changes are ready and should be committed.
-        • "stash"          — changes are clearly incomplete or experimental (WIP).
-        • "abort"          — nothing meaningful to do (clean tree, or only untracked noise).
-
-        "commitMessage" is required for "commit" and "add_and_commit".
-        "stashMessage"  is required for "stash".
-        "paths"         defaults to ["."] (stage everything).
-        Commit messages must use imperative mood (e.g. "Add", "Fix", "Refactor").
-      message: |
-        Branch: ${steps.getBranch.outputs.stdout}
-
-        Recent commits (newest first):
-        ${steps.getRecentLog.outputs.stdout}
-
-        Working-tree status (M=modified, A=added, D=deleted, ??=untracked):
-        ${steps.getStatus.outputs.stdout}
-
-        Unstaged diff summary:
-        ${steps.getDiffStat.outputs.stdout}
-
-        Already-staged diff summary:
-        ${steps.getStagedStat.outputs.stdout}
-        ${input.hint}
-        Respond with the JSON decision object ONLY.
+      promptKey: commitDecisionPrompt
+      promptVariables:
+        branch: "${steps.getBranch.outputs.stdout}"
+        recentLog: "${steps.getRecentLog.outputs.stdout}"
+        status: "${steps.getStatus.outputs.stdout}"
+        diffStat: "${steps.getDiffStat.outputs.stdout}"
+        stagedStat: "${steps.getStagedStat.outputs.stdout}"
+        hint: "${input.hint}"
+      providerConfig:
+        structuredOutput:
+          name: git_decision
+          strict: true
+          schema:
+            type: object
+            additionalProperties: false
+            required: [action, commitMessage, stashMessage, paths, reasoning]
+            properties:
+              action:
+                type: string
+                enum: [commit, add_and_commit, stash, abort]
+              commitMessage:
+                type: string
+                description: "Imperative-mood summary, ≤72 chars. Required for commit / add_and_commit; empty string otherwise."
+              stashMessage:
+                type: string
+                description: "Brief WIP description. Required for stash; empty string otherwise."
+              paths:
+                type: array
+                items: { type: string }
+                description: "Paths to stage; defaults to ['.']"
+              reasoning:
+                type: string
+                description: "One-sentence justification for the chosen action."
       toolApprovalMode: auto
       promptMergeStrategy: append
 
-  # ── 3. Extract the JSON decision from the agent response ─────────────────
-  # Parses the first JSON object found in the agent's content, normalises the
-  # fields, and writes a compact JSON string to stdout for use in conditions
-  # and downstream steps.
+  # ── 3. Normalise the agent's JSON decision ────────────────────────────────
+  # Structured output guarantees `content` is a valid JSON object matching the
+  # schema, so we parse it directly (no regex/markdown-fence handling) and only
+  # apply defensive defaults for downstream steps.
   - id: parseDecision
     type: cli_command
     dependsOn: consultAgent
@@ -217,15 +211,13 @@ steps:
       args:
         - "-e"
         - |
-          const raw = process.env.AGENT_RESP || '';
-          const m = raw.match(/\{[\s\S]*\}/);
-          if (!m) {
-            process.stderr.write('No JSON object found in agent response.\nAgent said:\n' + raw + '\n');
+          const raw = process.env.AGENT_RESP_STRUCTURED || process.env.AGENT_RESP || '';
+          let d;
+          try { d = JSON.parse(raw); }
+          catch (e) {
+            process.stderr.write('Expected structured JSON from the agent but parse failed: ' + e.message + '\nAgent said:\n' + raw + '\n');
             process.exit(1);
           }
-          let d;
-          try { d = JSON.parse(m[0]); }
-          catch (e) { process.stderr.write('JSON.parse failed: ' + e.message + '\n'); process.exit(1); }
           const valid = ['commit','add_and_commit','stash','abort'];
           const action = valid.includes(d.action) ? d.action : 'abort';
           process.stdout.write(JSON.stringify({
@@ -237,6 +229,7 @@ steps:
           }));
       env:
         AGENT_RESP: "${steps.consultAgent.outputs.content}"
+        AGENT_RESP_STRUCTURED: "${steps.consultAgent.outputs.structuredContent}"
       failOnError: true
       output:
         captureStdout: true

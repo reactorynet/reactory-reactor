@@ -243,6 +243,54 @@ export interface AIImageGenerationParams {
 }
 
 /**
+ * Requested structured-output constraint for a chat turn.
+ *
+ * The `schema` is a JSON Schema (draft-07 subset) that each provider translates
+ * into its native mechanism:
+ * - OpenAI:    `response_format: { type: 'json_schema', json_schema: {...} }`
+ * - Gemini:    `generationConfig.responseMimeType` + `responseSchema`
+ * - Ollama:    top-level `format` set to the schema object
+ * - Anthropic: a forced `tool_choice` on a synthetic schema tool
+ */
+export interface ReactorStructuredOutput {
+  /** JSON Schema. Object schemas should set additionalProperties:false. */
+  schema: Record<string, any>;
+  /** Name for the schema/tool. Default "response". */
+  name?: string;
+  /** Strict schema adherence where the provider supports it. Default true. */
+  strict?: boolean;
+}
+
+/**
+ * Provider-agnostic, normalized configuration for a single chat turn.
+ *
+ * Callers set the normalized fields; each provider translates the subset it
+ * supports into its native SDK payload and ignores the rest (gated by model
+ * capability). `raw` is a per-provider escape hatch, shallow-merged LAST into
+ * the SDK payload — use sparingly.
+ */
+export interface ReactorProviderConfig {
+  /** Constrain the model's output to a JSON Schema. */
+  structuredOutput?: ReactorStructuredOutput;
+  /** Reasoning/thinking depth. */
+  reasoningEffort?: "low" | "medium" | "high";
+  /** Sampling temperature (several providers hardcode this today). */
+  temperature?: number;
+  /** Nucleus sampling. */
+  topP?: number;
+  /** Max output tokens for this turn. */
+  maxTokens?: number;
+  /** Stop sequences. */
+  stopSequences?: string[];
+  /** Tool selection. Interacts with structuredOutput (see provider notes). */
+  toolChoice?: "auto" | "none" | { name: string };
+  /** Multimodal output modalities (Gemini / OpenAI image output). */
+  responseModalities?: ("text" | "image")[];
+  /** Provider-specific escape hatch, shallow-merged into the SDK payload last. */
+  raw?: Record<string, any>;
+}
+
+/**
  * Generic chat params for AI provider abstraction.
  */
 export interface AIChatParams {
@@ -250,6 +298,8 @@ export interface AIChatParams {
   message: string;
   chatSessionId?: string;
   role?: "user" | "assistant" | "tool" | "system";
+  /** Optional normalized, provider-agnostic augmented config for this turn. */
+  providerConfig?: ReactorProviderConfig;
   [key: string]: any;
 }
 

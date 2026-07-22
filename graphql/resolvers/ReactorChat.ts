@@ -6,6 +6,7 @@ import {
 } from "@reactory/server-core/models/graphql/decorators/resolver";
 import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
 import { IReactorConversationsService } from "@reactory/server-modules/reactory-reactor/types/service.types";
+import { ReactorProviderConfig } from "@reactory/server-modules/reactory-reactor/types/model.types";
 import { ObjectId } from "mongodb";
 import { ChatSessionResourceManager } from "@reactory/server-modules/reactory-reactor/services/reactor/ChatSessionResourceManager";
 import {
@@ -723,6 +724,7 @@ class ReactorChatResolver {
           deploymentName?: string;
           apiVersion?: string;
         };
+        providerConfig?: ReactorProviderConfig;
       };
     },
     context: Reactory.Server.IReactoryContext
@@ -760,6 +762,7 @@ class ReactorChatResolver {
         continueAfterTools: args.message.continueAfterTools,
         images: args.message.images,
         providerAuthOverride: args.message.providerAuthOverride,
+        providerConfig: args.message.providerConfig,
       });
     } catch (error) {
       return {

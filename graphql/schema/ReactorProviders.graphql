@@ -110,6 +110,45 @@ input ReactorProviderAuthOverrideInput {
   apiVersion: String
 }
 
+"""
+Structured-output constraint for a chat turn. `schema` is a JSON Schema
+(draft-07 subset) the model must produce output conforming to. Each provider
+translates it into its native mechanism (OpenAI response_format, Gemini
+responseSchema, Ollama format, Anthropic forced tool_choice).
+"""
+input ReactorStructuredOutputInput {
+  "JSON Schema object. Object schemas should set additionalProperties:false."
+  schema: Any!
+  "Name for the schema/tool. Defaults to \"response\"."
+  name: String
+  "Strict schema adherence where the provider supports it. Defaults to true."
+  strict: Boolean
+}
+
+"""
+Provider-agnostic, normalized augmented configuration for a single chat turn.
+The server translates the subset each provider supports into its native SDK
+payload. Never persisted on the chat session — applies to the single request.
+"""
+input ReactorProviderConfigInput {
+  "Constrain the model's output to a JSON Schema."
+  structuredOutput: ReactorStructuredOutputInput
+  "Reasoning/thinking depth: low | medium | high."
+  reasoningEffort: String
+  "Sampling temperature."
+  temperature: Float
+  "Nucleus sampling (top_p)."
+  topP: Float
+  "Max output tokens for this turn."
+  maxTokens: Int
+  "Stop sequences."
+  stopSequences: [String!]
+  "Multimodal output modalities, e.g. [\"text\", \"image\"] (Gemini/OpenAI)."
+  responseModalities: [String!]
+  "Provider-specific escape hatch, shallow-merged into the SDK payload last."
+  raw: Any
+}
+
 extend type Query {
   """
   Returns the authentication status for each provider for the current user,
