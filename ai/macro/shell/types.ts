@@ -102,8 +102,6 @@ export interface ShellCommandResult {
     stdout: string;
     /** Standard error output from the command */
     stderr: string;
-    /** Combined output (stdout + stderr) */
-    output: string;
     /** Exit code of the command */
     exitCode: number;
     /** Whether the command completed successfully (exit code 0) */

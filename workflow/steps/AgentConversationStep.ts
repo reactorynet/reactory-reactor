@@ -15,7 +15,10 @@
  *
  * Config (from YAML `inputs` JSON):
  *   personaId:          "reactor"                 (required — the AI agent/persona id)
- *   message:            "Summarise ${steps.x.outputs.text}"  (required — the prompt)
+ *   message:            "Summarise ${steps.x.outputs.text}"  (required unless promptKey is set — the prompt)
+ *   promptKey:          "commitReviewPrompt"      (optional — use a named canned prompt from the persona instead of message)
+ *   promptVariables:    { branch: "${steps.b.outputs.stdout}" }  (optional — values for the canned prompt's ${...} placeholders)
+ *   providerConfig:     { structuredOutput: { schema: {...} }, reasoningEffort: "high" }  (optional — augmented per-turn config)
  *   instructions:       "You are a careful analyst…"          (optional — system prompt for the session)
  *   toolApprovalMode:   "auto"                    (optional — auto | safe_auto | prompt | plan; default auto)
  *   promptMergeStrategy:"append"                  (optional — append | prepend | replace; default append)
@@ -36,6 +39,7 @@ import {
 } from '@reactory/server-modules/reactory-core/workflow/YamlFlow/steps/interfaces/IYamlStep';
 import { ToolApprovalMode } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import { StreamingMode } from '@reactory/server-modules/reactory-reactor/services/reactor/types/streaming.types';
+import { ReactorProviderConfig } from '@reactory/server-modules/reactory-reactor/types/model.types';
 
 const CONVERSATION_SERVICE_ID = 'reactor.ReactorConversationService@1.0.0';
 
@@ -60,8 +64,21 @@ function describeErrorResponse(resp: any): string {
 export interface AgentConversationStepConfig {
   /** The AI agent/persona id to converse with. */
   personaId: string;
-  /** The message/prompt to send to the agent. */
-  message: string;
+  /** The message/prompt to send to the agent. Required unless `promptKey` is set. */
+  message?: string;
+  /**
+   * Use a named "canned prompt" from the persona's `prompts` map as the message
+   * body instead of an inline `message`. Rendered with `promptVariables`.
+   */
+  promptKey?: string;
+  /** Values for the canned prompt template's `${...}` placeholders (templatable). */
+  promptVariables?: Record<string, any>;
+  /**
+   * Provider-agnostic augmented config for the turn: structured output, reasoning
+   * effort, sampling, response modalities. Passed straight through to the
+   * conversation service.
+   */
+  providerConfig?: ReactorProviderConfig;
   /** System-prompt instructions for the conversation. */
   instructions?: string;
   /** Tool approval mode — default 'auto' (execute all tools without prompting). */
@@ -94,7 +111,16 @@ export class AgentConversationStep extends BaseYamlStep {
     }
 
     const personaId = this.resolveTemplate(config.personaId, context);
-    const message = this.resolveTemplate(config.message, context);
+    const message = config.message ? this.resolveTemplate(config.message, context) : '';
+    const promptKey = config.promptKey ? this.resolveTemplate(config.promptKey, context) : undefined;
+    // Resolve each canned-prompt variable value (values may reference step outputs).
+    const promptVariables: Record<string, any> = {};
+    if (config.promptVariables && typeof config.promptVariables === 'object') {
+      for (const [k, v] of Object.entries(config.promptVariables)) {
+        promptVariables[k] = typeof v === 'string' ? this.resolveTemplate(v, context) : v;
+      }
+    }
+    const providerConfig = config.providerConfig;
     const instructions = config.instructions ? this.resolveTemplate(config.instructions, context) : '';
       const toolApprovalMode = (config.toolApprovalMode as ToolApprovalMode) || ToolApprovalMode.AUTO;
     const promptMergeStrategy = config.promptMergeStrategy || 'append';
@@ -115,6 +141,14 @@ export class AgentConversationStep extends BaseYamlStep {
         error: `Conversation service (${CONVERSATION_SERVICE_ID}) is not available`,
         outputs: {},
         metadata: { personaId },
+      };
+    }
+    if (promptKey && typeof conversationService.sendCannedPrompt !== 'function') {
+      return {
+        success: false,
+        error: `Conversation service (${CONVERSATION_SERVICE_ID}) does not support canned prompts (sendCannedPrompt)`,
+        outputs: {},
+        metadata: { personaId, promptKey },
       };
     }
 
@@ -170,13 +204,27 @@ export class AgentConversationStep extends BaseYamlStep {
         context.logger.info(`Resuming agent conversation "${sessionId}" with persona "${personaId}"`);
       }
 
-      const response: any = await conversationService.sendMessage({
-        message,
-        personaId,
-        chatSessionId: sessionId,
-        streamingMode: StreamingMode.NONE,
-        toolApprovalMode,
-      });
+      // When a canned prompt key is supplied, render it from the persona's prompt
+      // library via sendCannedPrompt; otherwise send the inline message. Both honour
+      // the optional providerConfig (structured output, reasoning effort, sampling).
+      const response: any = promptKey
+        ? await conversationService.sendCannedPrompt({
+            personaId,
+            promptKey,
+            variables: promptVariables,
+            chatSessionId: sessionId,
+            streamingMode: StreamingMode.NONE,
+            toolApprovalMode,
+            providerConfig,
+          })
+        : await conversationService.sendMessage({
+            message,
+            personaId,
+            chatSessionId: sessionId,
+            streamingMode: StreamingMode.NONE,
+            toolApprovalMode,
+            providerConfig,
+          });
 
       if (response?.__typename === 'ReactorErrorResponse') {
         const detail = describeErrorResponse(response);
@@ -195,6 +243,12 @@ export class AgentConversationStep extends BaseYamlStep {
         (typeof response === 'string' ? response : undefined) ||
         '';
 
+      // When a structured-output request was made and the provider returned valid
+      // JSON, the conversation service exposes the parsed object as
+      // `structuredContent`. Surface it so downstream steps can use it directly
+      // (the raw JSON string is still available on `content`).
+      const structuredContent = response?.structuredContent;
+
       context.logger.info(`Agent "${personaId}" responded (session: ${sessionId})`);
 
       // IMPORTANT: only return serializable essentials. Workflow step outputs are
@@ -205,7 +259,11 @@ export class AgentConversationStep extends BaseYamlStep {
       // step forever. `content` (the agent's text) + `sessionId` are all callers need.
       return {
         success: true,
-        outputs: { sessionId, content },
+        outputs: {
+          sessionId,
+          content,
+          ...(structuredContent !== undefined ? { structuredContent } : {}),
+        },
         metadata: { personaId, sessionId, toolApprovalMode },
       };
     } catch (err) {
@@ -226,8 +284,14 @@ export class AgentConversationStep extends BaseYamlStep {
     if (!config.personaId || typeof config.personaId !== 'string') {
       errors.push('personaId is required and must be a string');
     }
-    if (!config.message || typeof config.message !== 'string') {
-      errors.push('message is required and must be a string');
+    // Either an inline message or a canned prompt key must be supplied.
+    const hasMessage = typeof config.message === 'string' && config.message.length > 0;
+    const hasPromptKey = typeof config.promptKey === 'string' && config.promptKey.length > 0;
+    if (!hasMessage && !hasPromptKey) {
+      errors.push('either message or promptKey is required (message must be a string; promptKey a persona prompt name)');
+    }
+    if (config.promptVariables !== undefined && (typeof config.promptVariables !== 'object' || Array.isArray(config.promptVariables))) {
+      errors.push('promptVariables must be an object map of variable names to values');
     }
     if (config.toolApprovalMode !== undefined && !VALID_TOOL_MODES.includes(config.toolApprovalMode)) {
       errors.push(`toolApprovalMode must be one of: ${VALID_TOOL_MODES.join(', ')}`);

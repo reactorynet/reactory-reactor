@@ -44,6 +44,7 @@ export interface ProviderConfig {
   credentialRequirements?: string[];
   credentialEnvVars?: Record<string, string>;
   authComponentFqn?: string;
+  roles?: string[];
   rateLimits?: {
     requestsPerMinute?: number;
     tokensPerMinute?: number;
@@ -65,6 +66,7 @@ interface ProviderYamlEntry {
   credentialRequirements?: string[];
   credentialEnvVars?: Record<string, string>;
   authComponentFqn?: string;
+  roles?: string[];
   models?: ProviderModelConfig[];
 }
 
@@ -123,6 +125,8 @@ function toProviderConfig(entry: ProviderYamlEntry): ProviderConfig {
     credentialRequirements: entry.credentialRequirements || [],
     credentialEnvVars: entry.credentialEnvVars,
     authComponentFqn: entry.authComponentFqn,
+    roles: entry?.roles || ['USER'], // default to adding user role if not specified
+    // TODO: add realtime status checks for availability, uptime, response time, error rate, etc.
     status: {
       available: resolveAvailability(entry),
       lastChecked: new Date(),
@@ -156,7 +160,7 @@ export function loadProviders(yamlPath?: string): ProviderConfig[] {
     }
   } catch (error) {
     // If user file cannot be read, continue with just default providers
-    console.warn(`Warning: Could not read user providers file at ${userFilePath}:`);
+    console.info(`Info: User provider file does not exist ${userFilePath} - ${error}`);
   }
 
   // Combine default providers with user providers

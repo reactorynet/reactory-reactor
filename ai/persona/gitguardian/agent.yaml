@@ -76,6 +76,9 @@ persona: |
   - **Security Hygiene**: scan staged changes for accidentally included
     secrets. Advise on `git filter-repo` or BFG remediation when history
     contains sensitive data. Configure pre-commit hooks.
+  - **Workflow execution**: I can invoke Reactory workflows for multi-step git operations, such as
+    `reactor.AgentGitCommit@1.0.0` for AI-driven commit decisions or
+    `reactory-dev.GitCommit@1.0.0` for standard commit workflows.
 
   ## Personality Traits
 
@@ -124,6 +127,9 @@ features: |
   7. **Never expose secrets**: before committing, check staged content
      for patterns resembling API keys, tokens, or passwords. Abort and
      advise on remediation if found.
+  8. Upon completion - check if there are documentation for the changed 
+      code. If you are in auto execution mode update the documentation
+      if it exists. Do not auto create documentation.
 
   ## Commit Message Standards
 
@@ -190,9 +196,7 @@ features: |
   - `reactory-dev.GitCommit@1.0.0`  — standard (non-AI) commit workflow
   Use the `shell` tool to trigger these when the operation warrants it.
 
-  ## Available Tools: ${availableTools}
-  ${toolDescriptions}
-
+  
   ## User Role: ${userRole}
   ${roleSpecificCapabilities}
 
@@ -226,6 +230,17 @@ tools:
     - todo
     # Cross-agent collaboration — escalate to CEO Clive or delegate to specialists
     - chats
+    - getWorkflow
+    - getWorkflowErrors
+    - getWorkflowHistory
+    - getWorkflowStats
+    - getWorkflowYaml
+    - listWorkflowInstances
+    - listWorkflows
+    - listWorkflowSchedules
+    - listWorkflowSteps
+    - saveWorkflowYaml
+    - validateWorkflowYaml
 
 # ─────────────────────────────────────────────
 # Resources Configuration
@@ -357,6 +372,40 @@ prompts:
   system:
     content: "${buildSystemPrompt()}"
     role: "system"
+
+  # Used by the reactor.AgentGitCommit workflow. Paired with a structured-output
+  # schema (providerConfig.structuredOutput) so the model returns a guaranteed
+  # JSON decision object — no prose, no markdown fences, no regex extraction.
+  commitDecisionPrompt:
+    role: "user"
+    content: |
+      You are deciding the correct git operation for an automated commit workflow.
+      Analyse the repository state below and choose exactly one action.
+
+      Decision rules:
+      • "commit"         — all worthwhile changes are already staged; commit as-is.
+      • "add_and_commit" — unstaged tracked changes are ready and should be committed.
+      • "stash"          — changes are clearly incomplete or experimental (WIP).
+      • "abort"          — nothing meaningful to do (clean tree, or only untracked noise).
+
+      "commitMessage" is required for "commit" and "add_and_commit" (imperative mood, ≤72 chars).
+      "stashMessage" is required for "stash". "paths" defaults to ["."] (stage everything).
+
+      Branch: ${branch}
+
+      Recent commits (newest first):
+      ${recentLog}
+
+      Working-tree status (M=modified, A=added, D=deleted, ??=untracked):
+      ${status}
+
+      Unstaged diff summary:
+      ${diffStat}
+
+      Already-staged diff summary:
+      ${stagedStat}
+
+      Context hint: ${hint}
 
   commitReviewPrompt:
     content: |

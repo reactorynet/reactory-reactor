@@ -256,7 +256,8 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
     return {
       success: true,
       data: {
-        stdout: result.stdout, stderr: result.stderr, output: `${result.stdout}${result.stderr}`.trim(),
+        stdout: result.stdout, 
+        stderr: result.stderr,        
         exitCode: result.exitCode, success: commandSuccess,
         command: shellCommand, workingDir, shell, templateId,
         sudo: sudo === 'true', executionTime: result.executionTime, timedOut: result.timedOut, pid: result.pid

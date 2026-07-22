@@ -152,24 +152,41 @@ export const WriteFile: Macro<WriteFileResult, WriteFileProps> = async (
     }
 
     if (fileExisted && mode === 'insert') {
-      const lines = finalContent.split('\n');
       const existing = (await fs.readFile(targetPath, 'utf-8')).toString().split('\n');
       const startLine = Number(start);
       const endLine = Number(end);
 
-      if (endLine < startLine) {
+      // Validate startLine is a positive integer >= 1 to prevent negative slicing/duplication
+      if (isNaN(startLine) || startLine < 1) {
         return {
           success: false,
-          error: 'Invalid start and end line parameters',
+          error: `Invalid start line parameter: '${start}' must be a positive integer >= 1`,
           errorCode: MacroErrorCode.VALIDATION_INVALID_PARAM,
           tool: 'writeFile',
           params: props
         };
       }
 
+      // Validate endLine. Allow endLine === startLine - 1 for pure insertions.
+      if (isNaN(endLine) || endLine < startLine - 1) {
+        return {
+          success: false,
+          error: `Invalid end line parameter: '${end}' cannot be less than startLine - 1 (${startLine - 1})`,
+          errorCode: MacroErrorCode.VALIDATION_INVALID_PARAM,
+          tool: 'writeFile',
+          params: props
+        };
+      }
+
+      // Split content into lines, trimming trailing blank line to prevent line bloat
+      let contentLines = finalContent.split('\n');
+      if (contentLines.length > 0 && contentLines[contentLines.length - 1] === '') {
+        contentLines.pop();
+      }
+
       const modifiedLines = [
         ...existing.slice(0, startLine - 1),
-        ...lines,
+        ...contentLines,
         ...existing.slice(endLine)
       ];
       finalContent = modifiedLines.join('\n');

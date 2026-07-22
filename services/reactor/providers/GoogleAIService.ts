@@ -26,6 +26,11 @@ import {
 import AIPersonaProvider from "../AIPersonaProvider";
 import AIProviderBase from "./AIProviderBase";
 import { AIProviderError } from "./AIProviderError";
+import {
+  toGeminiConfig,
+  structuredOutputDisablesTools,
+} from "./providerConfigTranslators";
+import { ReactorProviderConfig } from "../../../types/model.types";
 import { ObjectId } from "mongodb";
 import ReactorMacroService from "./ReactorMacroService";
 import {
@@ -720,7 +725,10 @@ class GoogleAIService extends AIProviderBase {
     return parts;
   }
 
-  private async createChatSession(history: ReactorConversationHistoryItem[]) {
+  private async createChatSession(
+    history: ReactorConversationHistoryItem[],
+    providerConfig?: ReactorProviderConfig,
+  ) {
     try {
       if (!this.model) {
         throw new AIProviderError("Google AI model not initialized");
@@ -882,9 +890,11 @@ class GoogleAIService extends AIProviderBase {
         };
       }
 
-      // Only add tools if the model supports function calling
+      // Only add tools if the model supports function calling. Gemini does not
+      // allow responseSchema together with function-calling tools, so structured
+      // output (without an explicit tool choice) suppresses tools for the turn.
       const supportsFunctionCalling = await this.modelSupportsFunctionCalling();
-      if (supportsFunctionCalling) {
+      if (supportsFunctionCalling && !structuredOutputDisablesTools(providerConfig)) {
         const tools = await this.getAITools();
         chatConfig.tools = tools;
         chatConfig.toolConfig = {
@@ -898,6 +908,10 @@ class GoogleAIService extends AIProviderBase {
       if (isImageModel) {
         chatConfig.responseModalities = [Modality.TEXT, Modality.IMAGE];
       }
+
+      // Merge the normalized augmented config last (structured output, sampling,
+      // response modalities). Caller-provided values override the defaults above.
+      Object.assign(chatConfig, toGeminiConfig(providerConfig));
 
       return this.ai.chats.create({
         model: this.model.name,
@@ -1356,7 +1370,8 @@ class GoogleAIService extends AIProviderBase {
   private async getAIResponse(
     message: string | any[],
     role: "user" | "assistant" | "tool" | "system" = "user",
-    messageId?: string
+    messageId?: string,
+    providerConfig?: ReactorProviderConfig,
   ): Promise<AIChatCompletion> {
     try {
       // Use the persona already resolved and stored in chatState by initialize().
@@ -1387,7 +1402,7 @@ class GoogleAIService extends AIProviderBase {
           historyForSession.push(this.chatState.history[j]);
         }
 
-        const chat = await this.createChatSession(historyForSession);
+        const chat = await this.createChatSession(historyForSession, providerConfig);
         if (!chat) {
           throw new AIProviderError("Failed to create chat session");
         }
@@ -1480,7 +1495,7 @@ class GoogleAIService extends AIProviderBase {
       // Handle user messages
       if (role === "user") {
         // Create a chat session with history
-        const chat = await this.createChatSession(this.chatState.history);
+        const chat = await this.createChatSession(this.chatState.history, providerConfig);
         if (!chat) {
           throw new AIProviderError("Failed to create chat session");
         }
@@ -1851,6 +1866,7 @@ class GoogleAIService extends AIProviderBase {
       tool_call_id,
       persistState = true, // Default to true for backward compatibility
       streamingMode = StreamingMode.NONE,
+      providerConfig,
     } = params;
 
     const maxRetries = 3;
@@ -1882,7 +1898,8 @@ class GoogleAIService extends AIProviderBase {
         const response = await this.getAIResponse(
           modifiedMessage,
           role,
-          messageId.toString()
+          messageId.toString(),
+          providerConfig
         );
 
         // Add AI response to history

@@ -6,7 +6,12 @@ import {
   AIAudioChatParams,
   AIChatCompletion,
   AIChatCompletionUsage,
+  ReactorProviderConfig,
 } from "../../../types/model.types";
+import {
+  toAnthropicParams,
+  structuredOutputDisablesTools,
+} from "./providerConfigTranslators";
 import {
   AICompletionStreamingData,
   AIErrorStreamingData,
@@ -601,10 +606,24 @@ class AnthropicService extends AIProviderBase {
   private buildRequestParams(
     messages: Anthropic.Messages.MessageParam[],
     persona: IAIPersona,
-    options?: { stream?: boolean }
+    options?: { stream?: boolean; providerConfig?: ReactorProviderConfig }
   ): Anthropic.Messages.MessageCreateParams {
-    const tools = this.convertToolsToAnthropicFormat(persona.tools);
-    const enableThinking = this.supportsThinking() && persona.modelConfig?.enableThinking !== false;
+    const providerConfig = options?.providerConfig;
+    // Normalized augmented config → synthetic schema tool, tool_choice, sampling.
+    const augmented = toAnthropicParams(providerConfig);
+    const personaTools = this.convertToolsToAnthropicFormat(persona.tools);
+
+    // Extended thinking disallows temperature/top_p and forced tool_choice, so
+    // disable it whenever the caller requests sampling overrides or structured output.
+    const wantsSampling =
+      !!providerConfig &&
+      (providerConfig.temperature != null || providerConfig.topP != null);
+    const enableThinking =
+      this.supportsThinking() &&
+      persona.modelConfig?.enableThinking !== false &&
+      !providerConfig?.structuredOutput &&
+      !wantsSampling;
+
     const params: Anthropic.Messages.MessageCreateParams = {
       model: this.modelId,
       max_tokens: persona.modelConfig?.maxTokens || 16000,
@@ -618,18 +637,37 @@ class AnthropicService extends AIProviderBase {
         type: "enabled",
         budget_tokens: persona.modelConfig?.thinkingBudget || 10000,
       };
-    } else {
-      // Anthropic does not allow both temperature and top_p simultaneously
+    } else if (!wantsSampling && !providerConfig?.structuredOutput) {
+      // Persona-driven sampling (only when the caller hasn't supplied its own).
+      // Anthropic does not allow both temperature and top_p simultaneously.
       if (persona.modelConfig?.topP != null && persona.modelConfig?.temperature == null) {
         (params as any).top_p = persona.modelConfig.topP;
       } else {
         params.temperature = persona.modelConfig?.temperature ?? 0.7;
       }
     }
+    // else: sampling (if any) comes from the caller's providerConfig, merged below.
 
-    if (tools && tools.length > 0) {
-      params.tools = tools;
+    // Tools: structured output (without an explicit tool choice) replaces the
+    // persona tools with the single forced schema tool.
+    if (structuredOutputDisablesTools(providerConfig)) {
+      params.tools = augmented.tool ? [augmented.tool as any] : undefined;
+    } else {
+      const merged = [
+        ...(personaTools || []),
+        ...(augmented.tool ? [augmented.tool as any] : []),
+      ];
+      if (merged.length > 0) {
+        params.tools = merged;
+      }
     }
+
+    if (augmented.tool_choice) {
+      (params as any).tool_choice = augmented.tool_choice;
+    }
+
+    // Caller sampling / max_tokens / stop_sequences override persona defaults.
+    Object.assign(params, augmented.params);
 
     if (options?.stream) {
       (params as any).stream = true;
@@ -647,8 +685,10 @@ class AnthropicService extends AIProviderBase {
     persona: IAIPersona;
     history: ReactorConversationHistory;
     messageId?: string;
+    providerConfig?: ReactorProviderConfig;
   }): Promise<{ content: string; finishReason: string; toolCalls: any[]; reasoning?: string; assistantPersisted?: boolean; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
-    const { sessionId, message, persona, history, messageId } = args;
+    const { sessionId, message, persona, history, messageId, providerConfig } = args;
+    const structuredToolName = toAnthropicParams(providerConfig).structuredToolName;
 
     const messages = this.convertHistoryToAnthropicFormat(history);
     messages.push({ role: "user", content: message });
@@ -664,7 +704,7 @@ class AnthropicService extends AIProviderBase {
     // Track current content blocks being streamed
     const currentBlocks: Map<number, { type: string; id?: string; name?: string; inputJson: string }> = new Map();
 
-    const params = this.buildRequestParams(messages, persona, { stream: true });
+    const params = this.buildRequestParams(messages, persona, { stream: true, providerConfig });
     const stream = await this.anthropic.messages.create(params as any);
 
     for await (const chunk of stream as AsyncIterable<any>) {
@@ -741,6 +781,13 @@ class AnthropicService extends AIProviderBase {
           const index = chunk.index;
           const block = currentBlocks.get(index);
           if (block?.type === "tool_use" && block.id && block.name) {
+            // Structured-output terminal bypass: the forced schema tool's accumulated
+            // JSON is the response content, not an executable tool call.
+            if (structuredToolName && block.name === structuredToolName) {
+              accumulatedText += block.inputJson;
+              currentBlocks.delete(index);
+              break;
+            }
             const parsedInput = this.safeParseJSON(block.inputJson);
             collectedToolCalls.push({
               id: block.id,
@@ -841,6 +888,7 @@ class AnthropicService extends AIProviderBase {
     persona: IAIPersona,
     sessionId?: string,
     messageId?: string,
+    providerConfig?: ReactorProviderConfig,
   ): Promise<{
     content: string;
     finishReason: string;
@@ -852,9 +900,12 @@ class AnthropicService extends AIProviderBase {
     let totalCompletionTokens = 0;
     const allToolCalls: any[] = [];
     const allToolResults: any[] = [];
+    // When structured output is requested we force a synthetic schema tool. Its
+    // tool_use is the structured result — never an executable macro.
+    const structuredToolName = toAnthropicParams(providerConfig).structuredToolName;
 
     for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
-      const params = this.buildRequestParams(messages, persona);
+      const params = this.buildRequestParams(messages, persona, { providerConfig });
       const response = await this.anthropic.messages.create(params);
 
       // Accumulate usage
@@ -872,6 +923,23 @@ class AnthropicService extends AIProviderBase {
       // Store tool calls in history format
       if (toolUseBlocks.length > 0) {
         allToolCalls.push(...this.toolUseBlocksToToolCalls(toolUseBlocks));
+      }
+
+      // Structured-output terminal bypass: surface the forced schema tool's input
+      // as the JSON result instead of dispatching it to the macro executor.
+      if (structuredToolName) {
+        const structuredBlock = toolUseBlocks.find(
+          (b: any) => b.name === structuredToolName,
+        );
+        if (structuredBlock) {
+          return {
+            content: JSON.stringify((structuredBlock as any).input ?? {}),
+            finishReason: "end_turn",
+            toolCalls: allToolCalls,
+            toolResults: allToolResults,
+            usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens },
+          };
+        }
       }
 
       // If no tool calls or stop reason is not tool_use, we're done
@@ -955,7 +1023,8 @@ class AnthropicService extends AIProviderBase {
   private async getAIResponse(
     message: string,
     role: "user" | "assistant" | "tool" | "system" = "user",
-    messageId?: string
+    messageId?: string,
+    providerConfig?: ReactorProviderConfig
   ): Promise<AIChatCompletion> {
     try {
       // Use the persona already resolved and stored in chatState by initialize().
@@ -971,7 +1040,7 @@ class AnthropicService extends AIProviderBase {
       // Handle tool results - feed them back into the tool loop
       if (role === "tool") {
         const messages = this.convertHistoryToAnthropicFormat(this.chatState.history);
-        const result = await this.runToolLoop(messages, persona, this.chatState.id, messageId);
+        const result = await this.runToolLoop(messages, persona, this.chatState.id, messageId, providerConfig);
         const toolLoopUsage: AIChatCompletionUsage | undefined = result.usage ? {
           promptTokens: result.usage.promptTokens,
           completionTokens: result.usage.completionTokens,
@@ -1001,6 +1070,7 @@ class AnthropicService extends AIProviderBase {
             persona,
             history: this.chatState.history,
             messageId,
+            providerConfig,
           });
 
           // When streaming via SSE, tool_call events have already been sent
@@ -1024,7 +1094,7 @@ class AnthropicService extends AIProviderBase {
         }
 
         // Non-streaming path with tool loop
-        const result = await this.runToolLoop(messages, persona, this.chatState.id, messageId);
+        const result = await this.runToolLoop(messages, persona, this.chatState.id, messageId, providerConfig);
         const loopUsage: AIChatCompletionUsage | undefined = result.usage ? {
           promptTokens: result.usage.promptTokens,
           completionTokens: result.usage.completionTokens,
@@ -1094,6 +1164,7 @@ class AnthropicService extends AIProviderBase {
       tool_call_id,
       persistState = true,
       streamingMode = StreamingMode.NONE,
+      providerConfig,
     } = params;
 
     let lastError: any;
@@ -1115,7 +1186,7 @@ class AnthropicService extends AIProviderBase {
         }
 
         const messageId = new ObjectId();
-        const response = await this.getAIResponse(message, role, messageId.toString());
+        const response = await this.getAIResponse(message, role, messageId.toString(), providerConfig);
 
         // Add AI response to history (only when NOT already persisted by
         // handleStreamingRequest — otherwise we create duplicate entries

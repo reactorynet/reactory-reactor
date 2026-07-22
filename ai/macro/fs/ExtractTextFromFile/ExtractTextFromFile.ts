@@ -129,7 +129,6 @@ export const ExtractTextFromFile: Macro<ExtractTextFromFileResult, ExtractTextFr
           sizeFormatted: `${(stats.size / 1024).toFixed(2)}KB`,
           lastModified: stats.mtime
         },
-        formattedOutput
       },
       tool: 'extractTextFromFile',
       params: props,
@@ -167,7 +166,6 @@ Successfully extracted text from: **${pathModule.basename(targetPath)}**
 - Use the \`extractedText\` field for text processing or analysis
 - Use \`lineRange\` for line number context
 - Use \`fileInfo\` for file metadata
-- Use \`formattedOutput\` for display in chat responses
       `
     };
 

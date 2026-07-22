@@ -20,6 +20,8 @@ import ReactorConversationModel, {
   ValidProviderResponseTypes,
 } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import AIPersonaProvider from "./AIPersonaProvider";
+import { ReactorProviderConfig } from "../../types/model.types";
+import { parseStructuredContent } from "./providers/providerConfigTranslators";
 import ReactorMessageProcessingService from "./ReactorMessageProcessingService";
 import nodePath from "path";
 import fs from "fs";
@@ -2996,6 +2998,30 @@ export default class ReactorConversationService
    * @param chatArgs - The chat arguments
    * @returns The AI provider response
    */
+  /**
+   * When a structured-output request was made, parse the (JSON) response body
+   * and expose it on the adapted chat message as `structuredContent`. The raw
+   * string remains on `content` for backward compatibility. No-op for error
+   * responses, non-structured requests, or content that isn't valid JSON.
+   */
+  private attachStructuredContent(
+    adapted: any,
+    providerConfig?: ReactorProviderConfig,
+  ): any {
+    if (
+      !providerConfig?.structuredOutput ||
+      !adapted ||
+      adapted.__typename !== "ReactorChatMessage"
+    ) {
+      return adapted;
+    }
+    const parsed = parseStructuredContent(adapted.content, providerConfig);
+    if (parsed !== undefined) {
+      adapted.structuredContent = parsed;
+    }
+    return adapted;
+  }
+
   private async executeProviderChat(
     provider: string,
     chatSessionId: string | undefined,
@@ -3009,8 +3035,24 @@ export default class ReactorConversationService
       tool_args?: any;
       tool_call_id?: string;
       streamingMode?: StreamingMode;
+      providerConfig?: ReactorProviderConfig;
     }
   ): Promise<any> {
+    // Capability gate: fail fast (and clearly) when structured output is requested
+    // on a provider/model that cannot honour it, instead of an opaque SDK 400.
+    if (chatArgs.providerConfig?.structuredOutput) {
+      const supported = await this.providerService.modelSupportsStructuredOutput(
+        provider,
+        persona?.modelId,
+      );
+      if (!supported) {
+        throw new Error(
+          `Model ${persona?.modelId ?? "(unknown)"} on provider ${provider} does not support structured output. ` +
+          `Use a supported provider/model, or add the "structured-output" capability to the model in the registry.`,
+        );
+      }
+    }
+
     // Provider IDs from the registry (e.g. providers.yaml) may be cased
     // arbitrarily (e.g. "Ollama"). Normalize so routing is case-insensitive;
     // otherwise a mismatch silently falls through to the OpenAI-compatible default.
@@ -3045,6 +3087,123 @@ export default class ReactorConversationService
           persistState: false, // Don't persist here since we handle it in ReactorConversationService
         });
     }
+  }
+
+  /**
+   * Send a message to an AI persona using one of the persona's *canned prompts*
+   * — a named entry in the persona's `prompts` map (e.g. "commitReviewPrompt").
+   *
+   * The prompt template's `content` is rendered with the supplied `variables`
+   * using the same `${var}` interpolation the system prompt uses, then delegated
+   * to {@link sendMessage}, so tool execution, persistence, provider selection
+   * and structured output (`providerConfig`) all behave exactly as for a normal
+   * message.
+   *
+   * Like the rest of the service, failures are returned as a
+   * `ReactorErrorResponse` (not thrown) so callers can branch on `__typename`.
+   *
+   * @param args.personaId  The AI persona id.
+   * @param args.promptKey  The key into the persona's `prompts` map.
+   * @param args.variables  Values for the template's `${...}` placeholders.
+   * @param args.role       Message role (default "user").
+   * @since 1.0.0
+   */
+  async sendCannedPrompt(args: {
+    personaId: string;
+    promptKey: string;
+    variables?: Record<string, any>;
+    chatSessionId?: string;
+    role?: string;
+    streamingMode?: StreamingMode;
+    modelId?: string;
+    providerId?: string;
+    continueAfterTools?: boolean;
+    images?: string[];
+    toolApprovalMode?: ToolApprovalMode;
+    parentSessionId?: string;
+    providerAuthOverride?: {
+      apiKey?: string;
+      endpoint?: string;
+      organization?: string;
+      deploymentName?: string;
+      apiVersion?: string;
+    };
+    providerConfig?: ReactorProviderConfig;
+  }): Promise<any> {
+    const { personaId, promptKey, variables = {}, role, ...rest } = args;
+
+    if (!personaId || !promptKey) {
+      return this.createErrorResponse(
+        ReactorErrorCode.MISSING_REQUIRED_FIELD,
+        "sendCannedPrompt requires both personaId and promptKey",
+        { operation: "sendCannedPrompt", recoverable: false },
+      );
+    }
+
+    // Resolve the persona (and its prompts map).
+    let persona: IAIPersona;
+    try {
+      persona = await this.context
+        .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0", {
+          chatSessionId: rest.chatSessionId,
+        })
+        .getPersona(personaId);
+    } catch (e: any) {
+      return this.createErrorResponse(
+        ReactorErrorCode.PERSONA_NOT_FOUND,
+        `Persona "${personaId}" could not be resolved: ${e?.message ?? e}`,
+        { operation: "sendCannedPrompt", recoverable: false },
+      );
+    }
+
+    const template = persona?.prompts?.[promptKey];
+    if (!template || !template.content) {
+      const available = persona?.prompts
+        ? Object.keys(persona.prompts).join(", ") || "(none)"
+        : "(none)";
+      return this.createErrorResponse(
+        ReactorErrorCode.INVALID_INPUT,
+        `Canned prompt "${promptKey}" not found for persona "${personaId}". Available prompts: ${available}`,
+        { operation: "sendCannedPrompt", recoverable: false },
+      );
+    }
+
+    // Render the template with the same ${var} interpolation used for system
+    // prompts (see AIProviderBase.createSystemPrompt). Missing variables throw a
+    // ReferenceError which we surface as a clear, actionable error.
+    let message: string;
+    try {
+      message = this.context.utils.lodash.template(template.content)({
+        persona,
+        tools: persona.tools,
+        macros: persona.macros,
+        user: {
+          id: this.context.user?.id,
+          fullName: this.context.user?.fullName?.(false),
+          firstName: this.context.user?.firstName,
+          lastName: this.context.user?.lastName,
+        },
+        date: new Date().toISOString(),
+        ...variables,
+      });
+    } catch (e: any) {
+      return this.createErrorResponse(
+        ReactorErrorCode.INVALID_INPUT,
+        `Failed to render canned prompt "${promptKey}" for persona "${personaId}": ${e?.message ?? e}. Ensure all template variables are supplied.`,
+        {
+          operation: "sendCannedPrompt",
+          recoverable: false,
+          details: { promptKey, providedVariables: Object.keys(variables) },
+        },
+      );
+    }
+
+    return this.sendMessage({
+      ...rest,
+      personaId,
+      message,
+      role: role || "user",
+    });
   }
 
   /**
@@ -3133,6 +3292,7 @@ export default class ReactorConversationService
       deploymentName?: string;
       apiVersion?: string;
     };
+    providerConfig?: ReactorProviderConfig;
   }): Promise<any> {
     const {
       personaId,
@@ -3151,6 +3311,7 @@ export default class ReactorConversationService
       toolApprovalMode: toolApprovalModeOverride,
       parentSessionId,
       providerAuthOverride,
+      providerConfig,
     } = args;
     const { user } = this.context;
 
@@ -3514,6 +3675,7 @@ export default class ReactorConversationService
             tool_args,
             tool_call_id,
             streamingMode,
+            providerConfig,
           }
         );
 
@@ -3790,6 +3952,7 @@ export default class ReactorConversationService
                 message: '',
                 role: 'tool',
                 streamingMode,
+                providerConfig,
               }
             );
             response = await this.processAIResponse(
@@ -3851,7 +4014,7 @@ export default class ReactorConversationService
                 }, effectiveConversationId, personaId);
               }
               // Skip the normal completion event — the client will handle the limit event
-              return adapter.adaptResponse(response);
+              return this.attachStructuredContent(adapter.adaptResponse(response), providerConfig);
             }
 
             // For non-streaming mode, flag the response so the client can detect it
@@ -3954,7 +4117,7 @@ export default class ReactorConversationService
         }
 
         // Return adapted response
-        return adapter.adaptResponse(response);
+        return this.attachStructuredContent(adapter.adaptResponse(response), providerConfig);
       } catch (error: any) {
         lastError = error;
 

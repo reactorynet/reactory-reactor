@@ -40,6 +40,7 @@ providers:
           - code-generation
           - image-understanding
           - reasoning
+          - structured-output
         contextLength: 1050000
         rpm: null
         itpm: null
@@ -504,7 +505,8 @@ providers:
           - text
           - image
           - video
-          - audio    
+          - audio
+          - pdf    
       - id: gemini-3.1-pro-preview
         name: Gemini 3.1 Pro Preview
         version: "3.1"
@@ -513,6 +515,7 @@ providers:
           - code-generation
           - reasoning
           - image-understanding
+          - structured-output
         contextLength: 1048576
         rpm: null
         itpm: null
@@ -905,6 +908,7 @@ providers:
           - code-generation
           - reasoning
           - image-understanding
+          - structured-output
         contextLength: 1000000
         rpm: 50
         itpm: 30000
@@ -1251,6 +1255,7 @@ providers:
           - text-generation
           - code-generation
           - reasoning
+          - structured-output
         contextLength: 131072
         rpm: null
         itpm: null

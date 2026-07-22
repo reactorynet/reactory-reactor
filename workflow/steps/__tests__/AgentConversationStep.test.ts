@@ -14,6 +14,7 @@ function makeService(overrides: any = {}) {
   return {
     startChatSession: jest.fn(async () => ({ id: 'sess-1' })),
     sendMessage: jest.fn(async () => ({ content: 'hello from agent', sessionId: 'sess-1' })),
+    sendCannedPrompt: jest.fn(async () => ({ content: 'canned reply', sessionId: 'sess-1' })),
     setChatMaxToolIterations: jest.fn(async () => undefined),
     setChatModelProvider: jest.fn(async () => undefined),
     ...overrides,
@@ -200,7 +201,7 @@ describe('AgentConversationStep', () => {
     expect(result.outputs.sessionId).toBe('sess-1'); // created before the failure
   });
 
-  it('validates personaId and message are required', () => {
+  it('validates personaId and message/promptKey are required', () => {
     const step = new AgentConversationStep('chat', {} as any);
     const v = step.validateConfig({});
     expect(v.valid).toBe(false);
@@ -213,6 +214,106 @@ describe('AgentConversationStep', () => {
     const v = step.validateConfig({ personaId: 'r', message: 'm', toolApprovalMode: 'yolo' });
     expect(v.valid).toBe(false);
     expect(v.errors.join(' ')).toContain('toolApprovalMode');
+  });
+
+  it('accepts a promptKey in place of an inline message', () => {
+    const step = new AgentConversationStep('chat', {} as any);
+    const v = step.validateConfig({ personaId: 'GitGuardian', promptKey: 'commitReviewPrompt' });
+    expect(v.valid).toBe(true);
+  });
+
+  it('rejects a non-object promptVariables', () => {
+    const step = new AgentConversationStep('chat', {} as any);
+    const v = step.validateConfig({ personaId: 'r', promptKey: 'p', promptVariables: 'nope' });
+    expect(v.valid).toBe(false);
+    expect(v.errors.join(' ')).toContain('promptVariables');
+  });
+
+  it('passes providerConfig through to sendMessage', async () => {
+    const service = makeService();
+    const providerConfig = {
+      structuredOutput: { schema: { type: 'object', properties: {} } },
+      reasoningEffort: 'high',
+    };
+    const step = new AgentConversationStep('chat', {
+      personaId: 'reactor',
+      message: 'decide',
+      providerConfig,
+    });
+
+    await step.execute(makeContext(service));
+    expect(service.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ providerConfig }),
+    );
+    expect(service.sendCannedPrompt).not.toHaveBeenCalled();
+  });
+
+  it('uses sendCannedPrompt with resolved variables + providerConfig when promptKey is set', async () => {
+    const service = makeService();
+    const ctx = makeContext(service);
+    ctx.variables.branch = 'feature/x';
+    const providerConfig = { structuredOutput: { schema: { type: 'object' } } };
+    const step = new AgentConversationStep('chat', {
+      personaId: 'GitGuardian',
+      promptKey: 'commitReviewPrompt',
+      promptVariables: { branch: '${branch}', hint: 'static hint' },
+      providerConfig,
+    });
+
+    const result = await step.execute(ctx);
+
+    expect(result.success).toBe(true);
+    expect(result.outputs.content).toBe('canned reply');
+    expect(service.sendMessage).not.toHaveBeenCalled();
+    expect(service.sendCannedPrompt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        personaId: 'GitGuardian',
+        promptKey: 'commitReviewPrompt',
+        chatSessionId: 'sess-1',
+        providerConfig,
+        variables: { branch: 'feature/x', hint: 'static hint' },
+      }),
+    );
+  });
+
+  it('surfaces structuredContent in outputs when the response carries it', async () => {
+    const service = makeService({
+      sendMessage: jest.fn(async () => ({
+        content: '{"action":"commit"}',
+        structuredContent: { action: 'commit' },
+        sessionId: 'sess-1',
+      })),
+    });
+    const step = new AgentConversationStep('chat', {
+      personaId: 'GitGuardian',
+      message: 'decide',
+      providerConfig: { structuredOutput: { schema: { type: 'object' } } },
+    });
+
+    const result = await step.execute(makeContext(service));
+    expect(result.success).toBe(true);
+    expect(result.outputs.structuredContent).toEqual({ action: 'commit' });
+    expect(result.outputs.content).toBe('{"action":"commit"}');
+  });
+
+  it('omits structuredContent from outputs when absent', async () => {
+    const service = makeService();
+    const step = new AgentConversationStep('chat', { personaId: 'reactor', message: 'hi' });
+    const result = await step.execute(makeContext(service));
+    expect(result.success).toBe(true);
+    expect('structuredContent' in result.outputs).toBe(false);
+  });
+
+  it('fails when promptKey is set but the service lacks sendCannedPrompt', async () => {
+    const service = makeService({ sendCannedPrompt: undefined });
+    const step = new AgentConversationStep('chat', {
+      personaId: 'GitGuardian',
+      promptKey: 'commitReviewPrompt',
+    });
+
+    const result = await step.execute(makeContext(service));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('sendCannedPrompt');
   });
 });
 

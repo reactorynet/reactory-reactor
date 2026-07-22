@@ -134,7 +134,7 @@ describe('WriteFile', () => {
       expect(await readFile(filePath)).toBe('existing');
     });
 
-    it('rejects insert mode when end < start', async () => {
+    it('rejects insert mode when end < start - 1', async () => {
       const filePath = await seedFile('insert-bad-range.txt', 'a\nb\nc\n');
       const result = await WriteFile(
         { path: filePath, content: 'X', mode: 'insert', start: 3, end: 1 },
@@ -142,6 +142,17 @@ describe('WriteFile', () => {
       );
       expect(result.success).toBe(false);
       expect(result.errorCode).toBe(MacroErrorCode.VALIDATION_INVALID_PARAM);
+    });
+
+    it('rejects insert mode when start < 1', async () => {
+      const filePath = await seedFile('insert-bad-start.txt', 'a\nb\nc\n');
+      const result = await WriteFile(
+        { path: filePath, content: 'X', mode: 'insert', start: 0, end: 0 },
+        state,
+      );
+      expect(result.success).toBe(false);
+      expect(result.errorCode).toBe(MacroErrorCode.VALIDATION_INVALID_PARAM);
+      expect(result.error).toMatch(/start line parameter.*must be a positive integer >= 1/i);
     });
   });
 
@@ -218,6 +229,39 @@ describe('WriteFile', () => {
 
       expect(result.success).toBe(true);
       expect(await readFile(filePath)).toBe('a\nX\nY\nd\ne');
+    });
+
+    it('insert supports pure insertion after a specific line (end = start - 1)', async () => {
+      const filePath = await seedFile('insert-pure.txt', 'a\nb\nc\nd\ne');
+      const result = await WriteFile(
+        { path: filePath, content: 'X\nY', mode: 'insert', start: 4, end: 3 },
+        state,
+      );
+
+      expect(result.success).toBe(true);
+      expect(await readFile(filePath)).toBe('a\nb\nc\nX\nY\nd\ne');
+    });
+
+    it('insert supports pure insertion at the start of the file (start = 1, end = 0)', async () => {
+      const filePath = await seedFile('insert-start.txt', 'a\nb\nc\nd\ne');
+      const result = await WriteFile(
+        { path: filePath, content: 'X\nY', mode: 'insert', start: 1, end: 0 },
+        state,
+      );
+
+      expect(result.success).toBe(true);
+      expect(await readFile(filePath)).toBe('X\nY\na\nb\nc\nd\ne');
+    });
+
+    it('insert trims trailing newline from payload to prevent blank line accumulation', async () => {
+      const filePath = await seedFile('insert-newline.txt', 'a\nb\nc\nd\ne');
+      const result = await WriteFile(
+        { path: filePath, content: 'X\nY\n', mode: 'insert', start: 3, end: 3 },
+        state,
+      );
+
+      expect(result.success).toBe(true);
+      expect(await readFile(filePath)).toBe('a\nb\nX\nY\nd\ne');
     });
   });
 
