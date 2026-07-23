@@ -13,6 +13,14 @@ import {
   structuredOutputDisablesTools,
 } from "./providerConfigTranslators";
 import {
+  loadProviders,
+  findModelById,
+  resolveSamplingSupport,
+  resolveThinkingSupport,
+  type ProviderConfig,
+  type ModelThinkingMode,
+} from "../../../ai/providers/provider-loader";
+import {
   AICompletionStreamingData,
   AIErrorStreamingData,
   AIStreamingCapabilities,
@@ -37,6 +45,51 @@ import { StreamingSessionManager } from "../StreamingSessionManager";
 import { StreamingTransportManager } from "../StreamingTransportManager";
 
 const MAX_TOOL_ITERATIONS = 25;
+
+// Provider/model registry is loaded from providers.yaml once and cached for the
+// process. It's the source of truth for per-model capabilities such as which
+// sampling parameters a model accepts (see resolveSamplingSupport).
+let cachedProviderRegistry: ProviderConfig[] | null = null;
+function getProviderRegistry(): ProviderConfig[] {
+  if (cachedProviderRegistry === null) {
+    try {
+      cachedProviderRegistry = loadProviders();
+    } catch {
+      cachedProviderRegistry = [];
+    }
+  }
+  return cachedProviderRegistry;
+}
+
+// Fallback deny-list for models whose config isn't found in providers.yaml.
+// The Anthropic Opus 4.7+/Sonnet 5/Fable 5 (and Mythos 5) family reject
+// temperature/top_p/top_k with a 400. Matched by substring against the model id.
+const NO_SAMPLING_MODEL_PATTERNS = [
+  "claude-opus-4-8",
+  "claude-opus-4-7",
+  "claude-sonnet-5",
+  "claude-fable-5",
+  "claude-mythos-5",
+];
+
+// Fallback thinking classification for models not found in providers.yaml.
+// Adaptive families use `thinking: {type: "adaptive"}`; legacy families use
+// `budget_tokens`. Anything else defaults to no thinking. Matched by substring.
+const ADAPTIVE_THINKING_MODEL_PATTERNS = [
+  "claude-opus-4-8",
+  "claude-opus-4-7",
+  "claude-opus-4-6",
+  "claude-sonnet-5",
+  "claude-sonnet-4-6",
+  "claude-fable-5",
+  "claude-mythos-5",
+];
+const BUDGET_THINKING_MODEL_PATTERNS = [
+  "claude-sonnet-4-5",
+  "claude-sonnet-4",
+  "claude-3-7-sonnet",
+  "claude-3-5-sonnet",
+];
 
 @service({
   id: "reactor.AnthropicService@1.0.0",
@@ -598,9 +651,44 @@ class AnthropicService extends AIProviderBase {
   /**
    * Check if the current model supports extended thinking.
    */
-  private supportsThinking(): boolean {
-    const thinkingModels = ["claude-sonnet-4", "claude-3-7-sonnet", "claude-3-5-sonnet"];
-    return thinkingModels.some((m) => this.modelId.includes(m));
+  /**
+   * Resolves how the current model does thinking (adaptive / budget / none),
+   * plus adaptive effort/display. Consults providers.yaml first; on a config
+   * miss, falls back to substring pattern matching. Cached per process.
+   */
+  private getThinkingSupport(): {
+    mode: ModelThinkingMode;
+    effort?: "low" | "medium" | "high" | "xhigh" | "max";
+    display?: "summarized" | "omitted";
+  } {
+    const found = findModelById(getProviderRegistry(), this.modelId);
+    if (found) {
+      return resolveThinkingSupport(found.model);
+    }
+    // Config miss — classify by known model families.
+    if (ADAPTIVE_THINKING_MODEL_PATTERNS.some((m) => this.modelId.includes(m))) {
+      return { mode: "adaptive", effort: "high", display: "summarized" };
+    }
+    if (BUDGET_THINKING_MODEL_PATTERNS.some((m) => this.modelId.includes(m))) {
+      return { mode: "budget" };
+    }
+    return { mode: "none" };
+  }
+
+  /**
+   * Resolves which sampling parameters (temperature / top_p / top_k) the current
+   * model accepts. Consults providers.yaml first (the source of truth); if the
+   * model isn't found there, falls back to a substring deny-list of known
+   * families that reject sampling params with a 400. Cached per process.
+   */
+  private getSamplingSupport(): { temperature: boolean; topP: boolean; topK: boolean } {
+    const found = findModelById(getProviderRegistry(), this.modelId);
+    if (found) {
+      return resolveSamplingSupport(found.model);
+    }
+    // Config miss — deny sampling for known no-sampling families, allow otherwise.
+    const denied = NO_SAMPLING_MODEL_PATTERNS.some((m) => this.modelId.includes(m));
+    return { temperature: !denied, topP: !denied, topK: !denied };
   }
 
   private buildRequestParams(
@@ -613,16 +701,28 @@ class AnthropicService extends AIProviderBase {
     const augmented = toAnthropicParams(providerConfig);
     const personaTools = this.convertToolsToAnthropicFormat(persona.tools);
 
-    // Extended thinking disallows temperature/top_p and forced tool_choice, so
-    // disable it whenever the caller requests sampling overrides or structured output.
+    // Which sampling params this model accepts (temperature/top_p/top_k). Newer
+    // Anthropic models (Opus 4.7+, Sonnet 5, Fable 5) reject them with a 400.
+    const samplingSupport = this.getSamplingSupport();
+
+    // How this model does thinking (adaptive / budget / none). Thinking is
+    // disabled for structured output (forced tool_choice conflicts with it) and
+    // whenever the caller's requested sampling will actually be sent — thinking
+    // and explicit temperature/top_p are mutually exclusive. If the requested
+    // sampling isn't supported by the model it gets stripped below, so it poses
+    // no conflict and thinking stays on.
+    const thinkingSupport = this.getThinkingSupport();
     const wantsSampling =
       !!providerConfig &&
       (providerConfig.temperature != null || providerConfig.topP != null);
+    const samplingActuallyApplies =
+      (providerConfig?.temperature != null && samplingSupport.temperature) ||
+      (providerConfig?.topP != null && samplingSupport.topP);
     const enableThinking =
-      this.supportsThinking() &&
+      thinkingSupport.mode !== "none" &&
       persona.modelConfig?.enableThinking !== false &&
       !providerConfig?.structuredOutput &&
-      !wantsSampling;
+      !samplingActuallyApplies;
 
     const params: Anthropic.Messages.MessageCreateParams = {
       model: this.modelId,
@@ -631,18 +731,35 @@ class AnthropicService extends AIProviderBase {
       system: this.createSystemPrompt(persona).content,
     };
 
-    if (enableThinking) {
-      // Extended thinking requires budget_tokens and disallows temperature/top_p
-      (params as any).thinking = {
-        type: "enabled",
-        budget_tokens: persona.modelConfig?.thinkingBudget || 10000,
-      };
+    if (enableThinking && thinkingSupport.mode === "adaptive") {
+      // Adaptive thinking: Claude decides depth. budget_tokens is rejected (400);
+      // depth is controlled via output_config.effort. display defaults to
+      // "omitted" (empty reasoning text) on newer models, so honour the config.
+      const thinking: Record<string, unknown> = { type: "adaptive" };
+      if (thinkingSupport.display) thinking.display = thinkingSupport.display;
+      (params as any).thinking = thinking;
+      if (thinkingSupport.effort) {
+        (params as any).output_config = { effort: thinkingSupport.effort };
+      }
+    } else if (enableThinking && thinkingSupport.mode === "budget") {
+      // Legacy extended thinking. budget_tokens must be < max_tokens (min 1024).
+      const requested = persona.modelConfig?.thinkingBudget || 10000;
+      const budget = Math.max(
+        1024,
+        Math.min(requested, (params.max_tokens as number) - 1024)
+      );
+      (params as any).thinking = { type: "enabled", budget_tokens: budget };
     } else if (!wantsSampling && !providerConfig?.structuredOutput) {
       // Persona-driven sampling (only when the caller hasn't supplied its own).
-      // Anthropic does not allow both temperature and top_p simultaneously.
-      if (persona.modelConfig?.topP != null && persona.modelConfig?.temperature == null) {
+      // Anthropic does not allow both temperature and top_p simultaneously, and
+      // only sends a sampling param the model actually accepts.
+      if (
+        samplingSupport.topP &&
+        persona.modelConfig?.topP != null &&
+        persona.modelConfig?.temperature == null
+      ) {
         (params as any).top_p = persona.modelConfig.topP;
-      } else {
+      } else if (samplingSupport.temperature) {
         params.temperature = persona.modelConfig?.temperature ?? 0.7;
       }
     }
@@ -668,6 +785,31 @@ class AnthropicService extends AIProviderBase {
 
     // Caller sampling / max_tokens / stop_sequences override persona defaults.
     Object.assign(params, augmented.params);
+
+    // Defensive final sweep: strip any sampling param the model rejects. This
+    // catches both persona defaults and caller-supplied overrides merged above,
+    // so an unsupported temperature/top_p/top_k can never reach the API (which
+    // returns a 400 "`temperature` is deprecated for this model" on newer models).
+    const stripped: string[] = [];
+    if (!samplingSupport.temperature && (params as any).temperature != null) {
+      delete (params as any).temperature;
+      stripped.push("temperature");
+    }
+    if (!samplingSupport.topP && (params as any).top_p != null) {
+      delete (params as any).top_p;
+      stripped.push("top_p");
+    }
+    if (!samplingSupport.topK && (params as any).top_k != null) {
+      delete (params as any).top_k;
+      stripped.push("top_k");
+    }
+    if (stripped.length > 0) {
+      this.context.debug(
+        `Stripped unsupported sampling param(s) [${stripped.join(", ")}] for model ${this.modelId}`,
+        {},
+        "AnthropicService.buildRequestParams"
+      );
+    }
 
     if (options?.stream) {
       (params as any).stream = true;

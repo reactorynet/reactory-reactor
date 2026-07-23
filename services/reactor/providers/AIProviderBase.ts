@@ -211,12 +211,24 @@ abstract class AIProviderBase implements IAIProviderService {
     const promptTemplate: IAIPersonaPromptTemplate = persona.prompts["system"];
     return {
       role: "system",
-      content: this.context.utils.lodash.template(promptTemplate.content)({
+      // Interpolate only the classic <%= ... %> delimiter, NOT the ES ${...}
+      // delimiter that lodash enables by default. Persona prompt content is
+      // already fully rendered at load time (see each persona's buildSystemPrompt,
+      // which uses this same interpolate option) and the rendered text legitimately
+      // contains literal ${...} examples documenting the workflow template syntax.
+      // Leaving lodash's default ES interpolation on would try to compile those
+      // literals — e.g. `${...}` throws "Unexpected token ')'" at compile time and
+      // `${env.VAR_NAME}` throws a ReferenceError at runtime — corrupting or crashing
+      // the system prompt. Overriding `interpolate` with a fresh regex disables the
+      // ES delimiter (lodash only enables it when the default interpolate regex is used).
+      content: this.context.utils.lodash.template(promptTemplate.content, {
+        interpolate: /<%=([\s\S]+?)%>/g,
+      })({
         persona: persona,
         tools: persona.tools,
         macros: persona.macros,
         user: {
-          id: this.context.user.id, 
+          id: this.context.user.id,
           fullName: this.context.user.fullName(false),
           firstName: this.context.user.firstName,
           lastName: this.context.user.lastName,

@@ -903,6 +903,16 @@ providers:
       - id: claude-fable-5
         name: Claude Fable 5
         version: "5"
+        # temperature/top_p/top_k removed on Fable 5 — sending any returns 400.
+        sampling:
+          temperature: false
+          topP: false
+          topK: false
+        # Fable 5 thinks always-on; use adaptive (budget_tokens returns 400).
+        thinking:
+          mode: adaptive
+          effort: high
+          display: summarized
         capabilities:
           - text-generation
           - code-generation
@@ -924,6 +934,16 @@ providers:
       - id: claude-opus-4-8
         name: Claude Opus 4.8
         version: "4.8"
+        # temperature/top_p/top_k removed on Opus 4.8 — sending any returns 400.
+        sampling:
+          temperature: false
+          topP: false
+          topK: false
+        # Adaptive thinking only on Opus 4.8 (budget_tokens returns 400).
+        thinking:
+          mode: adaptive
+          effort: high
+          display: summarized
         capabilities:
           - text-generation
           - code-generation
@@ -945,6 +965,16 @@ providers:
       - id: claude-opus-4-7
         name: Claude Opus 4.7
         version: "4.7"
+        # temperature/top_p/top_k removed on Opus 4.7 — sending any returns 400.
+        sampling:
+          temperature: false
+          topP: false
+          topK: false
+        # Adaptive thinking only on Opus 4.7 (budget_tokens returns 400).
+        thinking:
+          mode: adaptive
+          effort: high
+          display: summarized
         capabilities:
           - text-generation
           - code-generation
@@ -966,6 +996,16 @@ providers:
       - id: claude-sonnet-5
         name: Claude Sonnet 5
         version: "5"
+        # Non-default temperature/top_p/top_k rejected on Sonnet 5 — returns 400.
+        sampling:
+          temperature: false
+          topP: false
+          topK: false
+        # Adaptive thinking only on Sonnet 5 (budget_tokens returns 400).
+        thinking:
+          mode: adaptive
+          effort: high
+          display: summarized
         capabilities:
           - text-generation
           - code-generation
@@ -987,6 +1027,16 @@ providers:
       - id: claude-sonnet-4-6
         name: Claude Sonnet 4.6
         version: "4.6"
+        # Sonnet 4.6 still accepts temperature/top_p/top_k.
+        sampling:
+          temperature: true
+          topP: true
+          topK: true
+        # Sonnet 4.6 recommends adaptive thinking (budget_tokens is deprecated).
+        thinking:
+          mode: adaptive
+          effort: high
+          display: summarized
         capabilities:
           - text-generation
           - code-generation
@@ -1008,6 +1058,15 @@ providers:
       - id: claude-haiku-4-5
         name: Claude Haiku 4.5
         version: "4.5"
+        # Haiku 4.5 still accepts temperature/top_p/top_k.
+        sampling:
+          temperature: true
+          topP: true
+          topK: true
+        # Fast tier — thinking off by default. Haiku 4.5 supports budget-mode
+        # thinking (no effort/adaptive); switch mode to `budget` to enable it.
+        thinking:
+          mode: none
         capabilities:
           - text-generation
           - code-generation

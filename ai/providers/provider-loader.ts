@@ -2,6 +2,42 @@ import * as yaml from 'js-yaml';
 import * as fs from 'fs';
 import * as path from 'path';
 
+/**
+ * Declares which sampling parameters a model accepts. Newer models (e.g. the
+ * Anthropic Opus 4.7+/Sonnet 5/Fable 5 family) have removed `temperature`,
+ * `top_p`, and `top_k` and return a 400 if any are sent. When a sub-field is
+ * omitted the parameter is treated as supported (legacy default), so only
+ * models that reject a parameter need to declare it `false`.
+ */
+export interface ModelSamplingSupport {
+  temperature?: boolean;
+  topP?: boolean;
+  topK?: boolean;
+}
+
+/**
+ * How a model exposes extended/adaptive thinking.
+ * - `adaptive`: send `thinking: {type: "adaptive"}` and control depth via
+ *   `output_config.effort`. `budget_tokens` is rejected (400). Used by the
+ *   Anthropic Opus 4.6+/Sonnet 4.6+/Fable 5 family.
+ * - `budget`: legacy extended thinking — `thinking: {type: "enabled", budget_tokens: N}`
+ *   with N < max_tokens. Used by older models (Sonnet 4.5, 3.7 Sonnet, …).
+ * - `none`: the model does not support (or should not use) thinking.
+ */
+export type ModelThinkingMode = "adaptive" | "budget" | "none";
+
+/**
+ * Per-model thinking capability. `mode` selects the request shape; `effort`
+ * and `display` apply only to `adaptive` mode. Absent → `mode: "none"`.
+ */
+export interface ModelThinkingSupport {
+  mode?: ModelThinkingMode;
+  /** Adaptive only: thinking depth / token spend. */
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  /** Adaptive only: `summarized` returns readable reasoning; API default is `omitted` (empty). */
+  display?: "summarized" | "omitted";
+}
+
 export interface ProviderModelConfig {
   id: string;
   providerId?: string;
@@ -21,6 +57,16 @@ export interface ProviderModelConfig {
   supportsStreaming?: boolean;
   supportedTools?: string[];
   supportedMediaTypes?: string[];
+  /**
+   * Per-model sampling capability overrides. Absent → all sampling params
+   * supported. See {@link resolveSamplingSupport} for how this is read.
+   */
+  sampling?: ModelSamplingSupport;
+  /**
+   * Per-model thinking capability. Absent → `mode: "none"`.
+   * See {@link resolveThinkingSupport} for how this is read.
+   */
+  thinking?: ModelThinkingSupport;
 }
 
 export interface ProviderStatusConfig {
@@ -211,4 +257,43 @@ export function getCompatibleModels(
     }
   }
   return results;
+}
+
+/**
+ * Resolves a model's sampling support into a fully-populated set of booleans.
+ * A missing `sampling` block, or a missing sub-field within it, defaults to
+ * `true` (supported) — preserving legacy behaviour for models that haven't
+ * declared overrides. Providers/models that reject a sampling parameter should
+ * set it to `false` in providers.yaml so callers can guard before sending it.
+ */
+export function resolveSamplingSupport(
+  model?: ProviderModelConfig | null
+): Required<ModelSamplingSupport> {
+  const s = model?.sampling;
+  return {
+    temperature: s?.temperature !== false,
+    topP: s?.topP !== false,
+    topK: s?.topK !== false,
+  };
+}
+
+/**
+ * Resolves a model's thinking support. A missing `thinking` block defaults to
+ * `mode: "none"` (no thinking) — the safe default, since thinking is opt-in and
+ * an unsupported request shape (e.g. `budget_tokens` on an adaptive-only model)
+ * returns a 400. Models that support thinking declare it in providers.yaml.
+ */
+export function resolveThinkingSupport(
+  model?: ProviderModelConfig | null
+): {
+  mode: ModelThinkingMode;
+  effort?: ModelThinkingSupport["effort"];
+  display?: ModelThinkingSupport["display"];
+} {
+  const t = model?.thinking;
+  return {
+    mode: t?.mode ?? "none",
+    effort: t?.effort,
+    display: t?.display,
+  };
 }

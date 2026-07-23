@@ -5945,12 +5945,17 @@ export default class ReactorConversationService
 
       if (systemPromptTemplate && !hasSystemMessage) {
         // The prompt content may already be fully compiled (e.g. from buildSystemPrompt()).
-        // Attempt lodash template interpolation for user/persona context, but fall back
-        // to the raw content if it contains literal ${...} patterns that fail to compile.
+        // Interpolate for user/persona context using ONLY the classic <%= ... %> delimiter.
+        // lodash enables the ES ${...} delimiter by default, which would try to compile the
+        // literal ${...} workflow-syntax examples the prompt documents — `${...}` throws
+        // "Unexpected token ')'" at compile time and `${env.VAR}` throws a ReferenceError at
+        // runtime. Overriding `interpolate` with a fresh regex disables the ES delimiter and
+        // leaves those literals intact. The try/catch below remains as a defensive fallback.
         let promptText: string;
         try {
           promptText = this.context.utils.lodash.template(
-            systemPromptTemplate.content
+            systemPromptTemplate.content,
+            { interpolate: /<%=([\s\S]+?)%>/g }
           )({
             user: {
               _id: this.context?.user?._id?.toString() || "unknown_user",

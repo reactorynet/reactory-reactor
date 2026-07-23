@@ -36,15 +36,21 @@ const SCHEMA = {
 
 function createService(opts?: {
   personaTools?: any[];
-  supportsThinking?: boolean;
+  modelId?: string;
+  thinking?: { mode: "adaptive" | "budget" | "none"; effort?: string; display?: string };
+  sampling?: { temperature: boolean; topP: boolean; topK: boolean };
 }) {
   const svc: any = new AnthropicService({ apiKey: "x" }, mockContext);
-  svc.modelId = "claude-sonnet-4-5-20250929";
+  svc.modelId = opts?.modelId ?? "claude-sonnet-4-5-20250929";
   svc.streamingMode = "NONE";
   svc.convertToolsToAnthropicFormat = jest.fn(
     () => opts?.personaTools,
   );
-  svc.supportsThinking = jest.fn(() => opts?.supportsThinking ?? false);
+  // Stub capability resolvers so tests don't depend on providers.yaml.
+  svc.getThinkingSupport = jest.fn(() => opts?.thinking ?? { mode: "budget" });
+  svc.getSamplingSupport = jest.fn(
+    () => opts?.sampling ?? { temperature: true, topP: true, topK: true },
+  );
   svc.createSystemPrompt = jest.fn(() => ({ content: "system" }));
   svc.executeToolCall = jest.fn(async () => ({
     type: "tool_result",
@@ -63,7 +69,7 @@ describe("AnthropicService — providerConfig / structured output", () => {
     it("injects a forced schema tool + tool_choice and suppresses persona tools", () => {
       const svc = createService({
         personaTools: [{ name: "get_weather", input_schema: {} }],
-        supportsThinking: true,
+        thinking: { mode: "adaptive", effort: "high", display: "summarized" },
       });
       const providerConfig: ReactorProviderConfig = {
         structuredOutput: { schema: SCHEMA, name: "extraction" },
@@ -76,10 +82,14 @@ describe("AnthropicService — providerConfig / structured output", () => {
       expect(params.tool_choice).toEqual({ type: "tool", name: "extraction" });
       // thinking is disabled for structured output
       expect(params.thinking).toBeUndefined();
+      expect((params as any).output_config).toBeUndefined();
     });
 
     it("applies caller sampling and disables thinking", () => {
-      const svc = createService({ supportsThinking: true });
+      const svc = createService({
+        thinking: { mode: "budget" },
+        sampling: { temperature: true, topP: true, topK: true },
+      });
       const params = svc.buildRequestParams([], persona, {
         providerConfig: { temperature: 0.2, maxTokens: 500 },
       });
@@ -88,10 +98,37 @@ describe("AnthropicService — providerConfig / structured output", () => {
       expect(params.max_tokens).toBe(500);
     });
 
-    it("keeps persona thinking behaviour when no augmented config is supplied", () => {
-      const svc = createService({ supportsThinking: true });
+    it("keeps legacy budget thinking when no augmented config is supplied", () => {
+      const svc = createService({ thinking: { mode: "budget" } });
       const params = svc.buildRequestParams([], persona, {});
       expect(params.thinking).toEqual({ type: "enabled", budget_tokens: 10000 });
+    });
+
+    it("uses adaptive thinking + effort and never budget_tokens for adaptive models", () => {
+      const svc = createService({
+        modelId: "claude-opus-4-8",
+        thinking: { mode: "adaptive", effort: "high", display: "summarized" },
+        sampling: { temperature: false, topP: false, topK: false },
+      });
+      const params = svc.buildRequestParams([], persona, {});
+      expect(params.thinking).toEqual({ type: "adaptive", display: "summarized" });
+      expect((params as any).thinking.budget_tokens).toBeUndefined();
+      expect((params as any).output_config).toEqual({ effort: "high" });
+      expect(params.temperature).toBeUndefined();
+    });
+
+    it("strips caller temperature on adaptive models that reject it and keeps thinking", () => {
+      const svc = createService({
+        modelId: "claude-opus-4-8",
+        thinking: { mode: "adaptive", effort: "high", display: "summarized" },
+        sampling: { temperature: false, topP: false, topK: false },
+      });
+      const params = svc.buildRequestParams([], persona, {
+        providerConfig: { temperature: 0.5 },
+      });
+      // unsupported sampling stripped; adaptive thinking preserved
+      expect(params.temperature).toBeUndefined();
+      expect(params.thinking).toEqual({ type: "adaptive", display: "summarized" });
     });
   });
 
