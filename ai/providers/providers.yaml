@@ -889,7 +889,7 @@ providers:
     name: Anthropic
     endpointUrl: "${ANTHROPIC_API_BASE_URL:-https://api.anthropic.com}"
     apiVersion: v1
-    defaultModel: claude-sonnet-4-6
+    defaultModel: claude-opus-4-8
     capabilities:
       - text-generation
       - code-generation
@@ -900,6 +900,90 @@ providers:
     credentialEnvVars:
       apiKey: ANTHROPIC_API_KEY
     models:
+      - id: claude-fable-5
+        name: Claude Fable 5
+        version: "5"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+          - structured-output
+        contextLength: 1000000
+        rpm: 50
+        itpm: 30000
+        otpm: 8000
+        inputCostPerTokenUsdCents: 0.001
+        outputCostPerTokenUsdCents: 0.005
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: claude-opus-4-8
+        name: Claude Opus 4.8
+        version: "4.8"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+          - structured-output
+        contextLength: 1000000
+        rpm: 50
+        itpm: 30000
+        otpm: 8000
+        inputCostPerTokenUsdCents: 0.0005
+        outputCostPerTokenUsdCents: 0.0025
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: claude-opus-4-7
+        name: Claude Opus 4.7
+        version: "4.7"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+          - structured-output
+        contextLength: 1000000
+        rpm: 50
+        itpm: 30000
+        otpm: 8000
+        inputCostPerTokenUsdCents: 0.0005
+        outputCostPerTokenUsdCents: 0.0025
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: claude-sonnet-5
+        name: Claude Sonnet 5
+        version: "5"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+          - structured-output
+        contextLength: 1000000
+        rpm: 50
+        itpm: 30000
+        otpm: 8000
+        inputCostPerTokenUsdCents: 0.0003
+        outputCostPerTokenUsdCents: 0.0015
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
       - id: claude-sonnet-4-6
         name: Claude Sonnet 4.6
         version: "4.6"
@@ -935,105 +1019,6 @@ providers:
         otpm: 10000
         inputCostPerTokenUsdCents: 0.0001
         outputCostPerTokenUsdCents: 0.0005
-        supportsStreaming: true
-        supportedTools:
-          - function-calling
-        supportedMediaTypes:
-          - text
-          - image
-      - id: claude-opus-4-6
-        name: Claude Opus 4.6
-        version: "4.6"
-        capabilities:
-          - text-generation
-          - code-generation
-          - reasoning
-          - image-understanding
-        contextLength: 200000
-        rpm: 50
-        itpm: 30000
-        otpm: 8000
-        inputCostPerTokenUsdCents: 0.0005
-        outputCostPerTokenUsdCents: 0.0025
-        supportsStreaming: true
-        supportedTools: 
-          - function-calling
-        supportedMediaTypes:
-          - image
-          - text
-      - id: claude-sonnet-4-5
-        name: Claude Sonnet 4.5
-        version: "4.5"
-        capabilities:
-          - text-generation
-          - code-generation
-          - reasoning
-          - image-understanding
-        contextLength: 200000
-        rpm: 50
-        itpm: 30000
-        otpm: 8000
-        inputCostPerTokenUsdCents: 0.0003
-        outputCostPerTokenUsdCents: 0.0015
-        supportedTools:
-          - function-calling
-        supportedMediaTypes:
-          - text
-          - image
-      - id: claude-3-opus
-        name: Claude 3 Opus
-        version: "3.0"
-        capabilities:
-          - text-generation
-          - code-generation
-          - reasoning
-          - image-understanding
-        contextLength: 200000
-        rpm: 50
-        itpm: 30000
-        otpm: 8000
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
-        supportsStreaming: true
-        supportedTools:
-          - function-calling
-        supportedMediaTypes:
-          - text
-          - image
-      - id: claude-3-sonnet
-        name: Claude 3 Sonnet
-        version: "3.0"
-        capabilities:
-          - text-generation
-          - code-generation
-          - reasoning
-          - image-understanding
-        contextLength: 200000
-        rpm: 50
-        itpm: 30000
-        otpm: 8000
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
-        supportsStreaming: true
-        supportedTools:
-          - function-calling
-        supportedMediaTypes:
-          - text
-          - image
-      - id: claude-3-haiku
-        name: Claude 3 Haiku
-        version: "3.0"
-        capabilities:
-          - text-generation
-          - code-generation
-          - reasoning
-          - image-understanding
-        contextLength: 200000
-        rpm: 50
-        itpm: 50000
-        otpm: 10000
-        inputCostPerTokenUsdCents: null
-        outputCostPerTokenUsdCents: null
         supportsStreaming: true
         supportedTools:
           - function-calling

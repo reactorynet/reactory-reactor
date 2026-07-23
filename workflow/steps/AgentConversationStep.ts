@@ -122,7 +122,7 @@ export class AgentConversationStep extends BaseYamlStep {
     }
     const providerConfig = config.providerConfig;
     const instructions = config.instructions ? this.resolveTemplate(config.instructions, context) : '';
-      const toolApprovalMode = (config.toolApprovalMode as ToolApprovalMode) || ToolApprovalMode.AUTO;
+    const toolApprovalMode = (config.toolApprovalMode as ToolApprovalMode) || ToolApprovalMode.AUTO;
     const promptMergeStrategy = config.promptMergeStrategy || 'append';
     let sessionId = config.sessionId ? this.resolveTemplate(config.sessionId, context) : undefined;
     // `sessionId` is optional. When the caller does not supply it, the YAML
@@ -133,6 +133,9 @@ export class AgentConversationStep extends BaseYamlStep {
     if (typeof sessionId === 'string' && (sessionId.trim() === '' || sessionId.includes('${'))) {
       sessionId = undefined;
     }
+
+    const model = config.model ? this.resolveTemplate(config.model, context) : undefined;
+    const provider = config.provider ? this.resolveTemplate(config.provider, context) : undefined;
 
     const conversationService: any = this.getConversationService(context);
     if (!conversationService || typeof conversationService.sendMessage !== 'function') {
@@ -197,8 +200,8 @@ export class AgentConversationStep extends BaseYamlStep {
         if (typeof config.maxToolIterations === 'number' && typeof conversationService.setChatMaxToolIterations === 'function') {
           await conversationService.setChatMaxToolIterations(sessionId, config.maxToolIterations).catch(() => undefined);
         }
-        if ((config.model || config.provider) && typeof conversationService.setChatModelProvider === 'function') {
-          await conversationService.setChatModelProvider(sessionId, config.model, config.provider).catch(() => undefined);
+        if ((model || provider) && typeof conversationService.setChatModelProvider === 'function') {
+          await conversationService.setChatModelProvider(sessionId, model, provider).catch(() => undefined);
         }
       } else {
         context.logger.info(`Resuming agent conversation "${sessionId}" with persona "${personaId}"`);
