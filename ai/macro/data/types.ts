@@ -3,7 +3,7 @@
  */
 import { MacroErrorCode } from '../errors';
 
-export type DatabaseVariant = 'postgres' | 'mysql' | 'mongo' | 'mssql' | 'redis';
+export type DatabaseVariant = 'postgres' | 'mysql' | 'mongo' | 'mssql' | 'databricks' | 'redis';
 
 /**
  * Output format types for database results
