@@ -25,6 +25,21 @@
  *   sessionId:          "${convId}"               (optional — resume an existing conversation for idempotent retries; ${convId} is a bare workflow-variable reference)
  *   maxToolIterations:  25                        (optional — cap the auto tool loop)
  *   model / provider:   "claude-opus-4-8"         (optional — model/provider override)
+ *   role:               "tool"                    (optional — user | tool | assistant | system; default user, or tool when toolCallId is set)
+ *   toolCallId:         "call_abc123"             (optional — reply to a pending tool call: `message` becomes that call's result, sent back to the LLM)
+ *   toolName:           "search_database"         (optional — the name of the tool being answered; pairs with toolCallId)
+ *   toolArgs:           { query: "…" }            (optional — the args the tool was invoked with; recorded alongside the result)
+ *
+ * Resuming (sessionId): the turn is appended to the existing conversation AND the
+ * session's per-turn settings (toolApprovalMode, model/provider, maxToolIterations)
+ * are re-applied — the auto tool loop keys off the STORED session mode, so without
+ * re-applying it a resumed turn would silently run under the session's old mode.
+ *
+ * Tool results (toolCallId): when the previous assistant turn requested a client-side
+ * tool call, supply `toolCallId` (+ `toolName`) with `message` set to the tool's
+ * result. The step sends it as a role="tool" message so the LLM receives it as the
+ * answer to that call and continues the turn. Requires `sessionId` (you are answering
+ * a call the agent made in an existing conversation).
  *
  * Output: { sessionId, content, response }
  *   - sessionId: persist this (e.g. via set_variable) and feed back as `sessionId`
@@ -45,6 +60,7 @@ const CONVERSATION_SERVICE_ID = 'reactor.ReactorConversationService@1.0.0';
 
 const VALID_TOOL_MODES = ['auto', 'safe_auto', 'prompt', 'plan'];
 const VALID_MERGE_STRATEGIES = ['append', 'prepend', 'replace'];
+const VALID_ROLES = ['user', 'tool', 'assistant', 'system'];
 
 /**
  * The conversation service returns a `{ __typename: 'ReactorErrorResponse', ... }`
@@ -92,6 +108,21 @@ export interface AgentConversationStepConfig {
   /** Optional model / provider override for the session. */
   model?: string;
   provider?: string;
+  /**
+   * Message role — 'user' (default), 'tool', 'assistant' or 'system'. When
+   * `toolCallId` is supplied and `role` is omitted, it defaults to 'tool'.
+   */
+  role?: string;
+  /**
+   * Reply to a pending tool call: the id of the tool call the agent made on a
+   * previous turn. When set, `message` is sent as that call's result (role
+   * 'tool') and forwarded to the LLM. Requires an existing `sessionId`.
+   */
+  toolCallId?: string;
+  /** The name of the tool being answered — pairs with `toolCallId`. */
+  toolName?: string;
+  /** The arguments the tool was invoked with — recorded alongside the result. */
+  toolArgs?: any;
   enabled?: boolean;
 }
 
@@ -136,6 +167,25 @@ export class AgentConversationStep extends BaseYamlStep {
 
     const model = config.model ? this.resolveTemplate(config.model, context) : undefined;
     const provider = config.provider ? this.resolveTemplate(config.provider, context) : undefined;
+
+    // Tool-call reply: when `toolCallId` is present this turn is the RESULT of a
+    // tool call the agent made previously, sent back to the LLM as a role="tool"
+    // message. `role` defaults to 'tool' in that case, otherwise 'user'.
+    // Like `sessionId`, an unsupplied optional input leaves its "${...}" token
+    // intact — treat a leftover token (or empty string) as "not provided" so it
+    // does not wrongly flip the turn into tool-result mode.
+    const cleanOptional = (v: string | undefined): string | undefined => {
+      const resolved = v ? this.resolveTemplate(v, context) : undefined;
+      if (typeof resolved === 'string' && (resolved.trim() === '' || resolved.includes('${'))) {
+        return undefined;
+      }
+      return resolved;
+    };
+    const toolCallId = cleanOptional(config.toolCallId);
+    const toolName = cleanOptional(config.toolName);
+    const toolArgs =
+      typeof config.toolArgs === 'string' ? cleanOptional(config.toolArgs) : config.toolArgs;
+    const role = cleanOptional(config.role) || (toolCallId ? 'tool' : 'user');
 
     const conversationService: any = this.getConversationService(context);
     if (!conversationService || typeof conversationService.sendMessage !== 'function') {
@@ -196,15 +246,24 @@ export class AgentConversationStep extends BaseYamlStep {
             metadata: { personaId },
           };
         }
-
-        if (typeof config.maxToolIterations === 'number' && typeof conversationService.setChatMaxToolIterations === 'function') {
-          await conversationService.setChatMaxToolIterations(sessionId, config.maxToolIterations).catch(() => undefined);
-        }
-        if ((model || provider) && typeof conversationService.setChatModelProvider === 'function') {
-          await conversationService.setChatModelProvider(sessionId, model, provider).catch(() => undefined);
-        }
       } else {
         context.logger.info(`Resuming agent conversation "${sessionId}" with persona "${personaId}"`);
+      }
+
+      // Apply per-turn session settings for BOTH new and resumed conversations.
+      // This matters most on resume: the server-side auto tool loop keys off the
+      // STORED conversation.toolApprovalMode (sendMessage does not update it when
+      // appending to history), so without re-applying it here a resumed turn would
+      // run under whatever mode the session was last left in — e.g. tools that
+      // should auto-execute would instead pause for approval.
+      if (typeof conversationService.setChatToolApprovalMode === 'function') {
+        await conversationService.setChatToolApprovalMode(sessionId, toolApprovalMode).catch(() => undefined);
+      }
+      if (typeof config.maxToolIterations === 'number' && typeof conversationService.setChatMaxToolIterations === 'function') {
+        await conversationService.setChatMaxToolIterations(sessionId, config.maxToolIterations).catch(() => undefined);
+      }
+      if ((model || provider) && typeof conversationService.setChatModelProvider === 'function') {
+        await conversationService.setChatModelProvider(sessionId, model, provider).catch(() => undefined);
       }
 
       // When a canned prompt key is supplied, render it from the persona's prompt
@@ -227,6 +286,13 @@ export class AgentConversationStep extends BaseYamlStep {
             streamingMode: StreamingMode.NONE,
             toolApprovalMode,
             providerConfig,
+            role,
+            // Tool-call reply fields — only meaningful when answering a pending
+            // tool call (role 'tool'). Passed through to be persisted in history
+            // and forwarded to the provider so the LLM links the result to the call.
+            ...(toolCallId ? { tool_call_id: toolCallId } : {}),
+            ...(toolName ? { tool_name: toolName } : {}),
+            ...(toolArgs !== undefined ? { tool_args: toolArgs } : {}),
           });
 
       if (response?.__typename === 'ReactorErrorResponse') {
@@ -267,7 +333,7 @@ export class AgentConversationStep extends BaseYamlStep {
           content,
           ...(structuredContent !== undefined ? { structuredContent } : {}),
         },
-        metadata: { personaId, sessionId, toolApprovalMode },
+        metadata: { personaId, sessionId, toolApprovalMode, role, ...(toolCallId ? { toolCallId } : {}) },
       };
     } catch (err) {
       const messageText = err instanceof Error ? err.message : String(err);
@@ -310,6 +376,14 @@ export class AgentConversationStep extends BaseYamlStep {
       (typeof config.maxToolIterations !== 'number' || config.maxToolIterations < 1)
     ) {
       errors.push('maxToolIterations must be a positive number');
+    }
+    if (config.role !== undefined && !VALID_ROLES.includes(config.role)) {
+      errors.push(`role must be one of: ${VALID_ROLES.join(', ')}`);
+    }
+    // Tool-call replies flow through sendMessage (the canned-prompt path has no
+    // notion of a tool result), so toolCallId and promptKey are mutually exclusive.
+    if (config.toolCallId !== undefined && typeof config.promptKey === 'string' && config.promptKey.length > 0) {
+      errors.push('toolCallId cannot be combined with promptKey — a tool result must be sent as a message');
     }
 
     return { valid: errors.length === 0, errors };

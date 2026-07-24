@@ -28,6 +28,14 @@ inputs:
     type: string
     required: false
     description: "Optional. A system prompt to provide context for a new conversation."
+  toolCallId:
+    type: string
+    required: false
+    description: "Optional. Reply to a pending tool call: `instruction` becomes that call's result, sent back to the LLM. Requires sessionId."
+  toolName:
+    type: string
+    required: false
+    description: "Optional. The name of the tool being answered — pairs with toolCallId."
 outputs:
   agentResponse:
     type: string
@@ -55,6 +63,8 @@ steps:
       instructions: "${input.systemPrompt}"
       toolApprovalMode: "auto"
       promptMergeStrategy: "append"
+      toolCallId: "${input.toolCallId}"
+      toolName: "${input.toolName}"
     onError:
       action: fail
       message: "The agent conversation step failed."

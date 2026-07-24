@@ -17,6 +17,7 @@ function makeService(overrides: any = {}) {
     sendCannedPrompt: jest.fn(async () => ({ content: 'canned reply', sessionId: 'sess-1' })),
     setChatMaxToolIterations: jest.fn(async () => undefined),
     setChatModelProvider: jest.fn(async () => undefined),
+    setChatToolApprovalMode: jest.fn(async () => undefined),
     ...overrides,
   };
 }
@@ -120,9 +121,105 @@ describe('AgentConversationStep', () => {
     expect(result.success).toBe(true);
     expect(service.startChatSession).not.toHaveBeenCalled();
     expect(service.sendMessage).toHaveBeenCalledWith(
-      expect.objectContaining({ chatSessionId: 'existing-99', message: 'follow up' }),
+      expect.objectContaining({ chatSessionId: 'existing-99', message: 'follow up', role: 'user' }),
     );
     expect(result.outputs.sessionId).toBe('existing-99');
+  });
+
+  it('re-applies the tool approval mode when resuming (the auto tool loop keys off the stored mode)', async () => {
+    const service = makeService();
+    const step = new AgentConversationStep('chat', {
+      personaId: 'reactor',
+      message: 'follow up',
+      sessionId: 'existing-99',
+      toolApprovalMode: 'auto',
+    });
+
+    const result = await step.execute(makeContext(service));
+
+    expect(result.success).toBe(true);
+    expect(service.startChatSession).not.toHaveBeenCalled();
+    // Without re-applying this on resume, a session left in PROMPT mode would
+    // pause instead of auto-running tools.
+    expect(service.setChatToolApprovalMode).toHaveBeenCalledWith('existing-99', 'auto');
+  });
+
+  it('applies model/provider + maxToolIterations overrides when resuming', async () => {
+    const service = makeService();
+    const step = new AgentConversationStep('chat', {
+      personaId: 'reactor',
+      message: 'follow up',
+      sessionId: 'existing-99',
+      model: 'claude-opus-4-8',
+      provider: 'anthropic',
+      maxToolIterations: 10,
+    });
+
+    await step.execute(makeContext(service));
+
+    expect(service.setChatModelProvider).toHaveBeenCalledWith('existing-99', 'claude-opus-4-8', 'anthropic');
+    expect(service.setChatMaxToolIterations).toHaveBeenCalledWith('existing-99', 10);
+  });
+
+  it('sends a tool result (role=tool) back to the LLM when toolCallId is set', async () => {
+    const service = makeService();
+    const step = new AgentConversationStep('chat', {
+      personaId: 'reactor',
+      sessionId: 'existing-99',
+      message: '{"temp":21}',
+      toolCallId: 'call_abc123',
+      toolName: 'get_weather',
+      toolArgs: { city: 'Cape Town' },
+    });
+
+    const result = await step.execute(makeContext(service));
+
+    expect(result.success).toBe(true);
+    expect(service.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatSessionId: 'existing-99',
+        message: '{"temp":21}',
+        role: 'tool',
+        tool_call_id: 'call_abc123',
+        tool_name: 'get_weather',
+        tool_args: { city: 'Cape Town' },
+      }),
+    );
+    expect(result.metadata.toolCallId).toBe('call_abc123');
+  });
+
+  it('treats an unresolved toolCallId template as not provided (stays a user message)', async () => {
+    // When the workflow does not supply the optional toolCallId input, the YAML
+    // "${input.toolCallId}" reference is left intact. The step must NOT flip into
+    // tool-result mode using the literal token as the id.
+    const service = makeService();
+    const step = new AgentConversationStep('chat', {
+      personaId: 'reactor',
+      message: 'hi',
+      sessionId: 'existing-99',
+      toolCallId: '${input.toolCallId}',
+      toolName: '${input.toolName}',
+    });
+
+    await step.execute(makeContext(service));
+
+    const args = service.sendMessage.mock.calls[0][0];
+    expect(args.role).toBe('user');
+    expect('tool_call_id' in args).toBe(false);
+    expect('tool_name' in args).toBe(false);
+  });
+
+  it('does not send tool fields for an ordinary user message', async () => {
+    const service = makeService();
+    const step = new AgentConversationStep('chat', { personaId: 'reactor', message: 'hi' });
+
+    await step.execute(makeContext(service));
+
+    const args = service.sendMessage.mock.calls[0][0];
+    expect(args.role).toBe('user');
+    expect('tool_call_id' in args).toBe(false);
+    expect('tool_name' in args).toBe(false);
+    expect('tool_args' in args).toBe(false);
   });
 
   it('starts a NEW session when sessionId is an unresolved optional template', async () => {
@@ -214,6 +311,20 @@ describe('AgentConversationStep', () => {
     const v = step.validateConfig({ personaId: 'r', message: 'm', toolApprovalMode: 'yolo' });
     expect(v.valid).toBe(false);
     expect(v.errors.join(' ')).toContain('toolApprovalMode');
+  });
+
+  it('rejects an invalid role', () => {
+    const step = new AgentConversationStep('chat', {} as any);
+    const v = step.validateConfig({ personaId: 'r', message: 'm', role: 'robot' });
+    expect(v.valid).toBe(false);
+    expect(v.errors.join(' ')).toContain('role');
+  });
+
+  it('rejects toolCallId combined with promptKey', () => {
+    const step = new AgentConversationStep('chat', {} as any);
+    const v = step.validateConfig({ personaId: 'r', promptKey: 'p', toolCallId: 'call_1' });
+    expect(v.valid).toBe(false);
+    expect(v.errors.join(' ')).toContain('toolCallId');
   });
 
   it('accepts a promptKey in place of an inline message', () => {
