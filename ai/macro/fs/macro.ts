@@ -10,6 +10,7 @@ export * from './InsertSnippet/InsertSnippet';
 export * from './MakeDirectory/MakeDirectory';
 export * from './DeleteDirectory/DeleteDirectory';
 export * from './CreateModuleStructure/CreateModuleStructure';
+export * from './SafeEditFile/SafeEditFile';
 
 import { ReadFileComponentRegister } from './ReadFile/ReadFile';
 import { ReadChatFileComponentRegister } from './ReadChatFile/ReadChatFile';
@@ -21,6 +22,7 @@ import { InsertSnippetComponentRegister } from './InsertSnippet/InsertSnippet';
 import { MakeDirectoryComponentRegister } from './MakeDirectory/MakeDirectory';
 import { DeleteDirectoryComponentRegister } from './DeleteDirectory/DeleteDirectory';
 import { CreateModuleStructureComponentRegister } from './CreateModuleStructure/CreateModuleStructure';
+import { SafeEditFileComponentRegister } from './SafeEditFile/SafeEditFile';
 
 export const FileMacros = [
   ReadFileComponentRegister,
@@ -33,4 +35,5 @@ export const FileMacros = [
   MakeDirectoryComponentRegister,
   DeleteDirectoryComponentRegister,
   CreateModuleStructureComponentRegister,
+  SafeEditFileComponentRegister,
 ];

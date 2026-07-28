@@ -14,6 +14,7 @@ const REACTOR_TOOL_INCLUDES = [
   'readFile',  
   'todo',
   'writeFile',
+  'safeEditFile',
   'http',
   'httpPost',
   'httpGet',
