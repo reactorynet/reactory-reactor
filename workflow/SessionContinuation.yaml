@@ -1,0 +1,59 @@
+nameSpace: reactor
+name: SessionContinuation
+version: 1.0.0
+description: "Automatically resumes and notifies active chat sessions upon server restart."
+tags: [system, startup, chat, session]
+autoStart: true
+
+steps:
+  - id: resumeSessions
+    type: cli_command
+    config:
+      command: "node"
+      args:
+        - "-e"
+        - |
+          const mongoose = require('mongoose');
+          const { ObjectId } = mongoose.Types;
+          
+          const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017/reactory';
+          
+          mongoose.connect(mongoUri)
+            .then(async () => {
+              console.log('Connected to MongoDB');
+              
+              const collections = mongoose.connection.db.collection('reactorconversations');
+              const recentChats = await collections.find({})
+                .sort({ updated: -1 })
+                .limit(5)
+                .toArray();
+                
+              console.log(`Found ${recentChats.length} recent sessions to notify.`);
+              
+              for (const chat of recentChats) {
+                console.log(`Notifying session: ${chat._id}`);
+                
+                await collections.updateOne(
+                  { _id: chat._id },
+                  {
+                    $push: {
+                      history: {
+                        id: new ObjectId(),
+                        role: 'system',
+                        content: 'System: Reactory server restarted and re-established session successfully.',
+                        timestamp: new Date(),
+                        tool_results: []
+                      }
+                    },
+                    $set: { updated: new Date() }
+                  }
+                );
+              }
+              
+              await mongoose.disconnect();
+              process.exit(0);
+            })
+            .catch(err => {
+              console.error('Failed to connect to MongoDB:', err);
+              process.exit(1);
+            });
