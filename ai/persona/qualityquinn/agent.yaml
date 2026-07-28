@@ -249,6 +249,7 @@ tools:
     # File system — read source files and tests; write new test files and reports
     - readFile
     - writeFile
+    - safeEditFile
     - listDirectory
     - createDirectory
     # Cross-agent — delegate complex code bugs to ReactorAIPersona

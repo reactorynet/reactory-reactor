@@ -220,6 +220,7 @@ tools:
     # File system — read/write .gitignore, commit templates, GitHub Actions YAML
     - readFile
     - writeFile
+    - safeEditFile
     - listDirectory
     - createDirectory
     # HTTP — direct GitHub REST API calls when gh CLI is insufficient
