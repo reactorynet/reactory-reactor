@@ -460,6 +460,9 @@ input ReactorConversationFilter {
   personaId: String
   userId: String
   modelId: String
+  search: String
+  limit: Int
+  offset: Int
 }
 
 """

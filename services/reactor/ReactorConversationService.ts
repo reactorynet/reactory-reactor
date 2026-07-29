@@ -2634,7 +2634,7 @@ export default class ReactorConversationService
       userId: this.context.user?._id,
     });
 
-    const { personaId, modelId } = filter || {};
+    const { personaId, modelId, search, limit = 50, offset = 0 } = filter || {};
     const query: any = {};
 
     // check if the user is logged in or an anoymous user.
@@ -2648,6 +2648,13 @@ export default class ReactorConversationService
     if (personaId) query.personaId = personaId;
     if (modelId) query.modelId = modelId;
 
+    if (search && typeof search === 'string' && search.trim() !== '') {
+      query.$or = [
+        { title: { $regex: search, $options: 'i' } },
+        { 'history.content': { $regex: search, $options: 'i' } }
+      ];
+    }
+
     // ensure the query doesn't return any
     // results that don't have an _id.
     query._id = { $ne: null };
@@ -2659,7 +2666,8 @@ export default class ReactorConversationService
     return await ReactorConversationModel.find(query)
       .select("-history")
       .sort({ updated: -1 })
-      .limit(50)
+      .skip(offset)
+      .limit(limit)
       .populate("user")      
       .exec();
   }
