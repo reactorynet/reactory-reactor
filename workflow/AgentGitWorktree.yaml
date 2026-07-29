@@ -1,0 +1,293 @@
+# reactor.AgentGitWorktree@1.0.0
+#
+# AI-driven git worktree creator.
+#
+# Gathers repository context, consults GitGuardian (Gwen) to decide the correct
+# branch name and worktree path, and executes 'git worktree add' safely.
+#
+# Standard branch naming approach is strictly enforced:
+#   feature/<description>
+#   bug/<description>
+#   chore/<description>
+#
+# Worktree path/name is short, readable, and placed in a sibling directory (../reactory-worktrees/)
+# to prevent nested repository issues.
+nameSpace: reactor
+name: AgentGitWorktree
+version: 1.0.0
+description: "AI-driven git worktree: gathers repo context, consults GitGuardian, and creates a worktree safely."
+tags: [dev, git, agent, ai, worktree]
+metadata:
+  timeout: 300000
+  retryPolicy:
+    maxAttempts: 2
+    backoffStrategy: linear
+    initialDelay: 3000
+
+inputs:
+  workdir:
+    type: string
+    required: false
+    description: "Absolute path of the git repository root. Defaults to the server process cwd."
+  task:
+    type: string
+    required: true
+    description: "Description of the task to be performed (e.g. 'Implement PKCE flow', 'Fix queue retries')."
+  taskType:
+    type: string
+    required: true
+    description: "The type of task: 'feature', 'bug', or 'chore'."
+  personaId:
+    type: string
+    required: false
+    default: "GitGuardian"
+    description: "Reactor AI persona to consult for the worktree decision."
+  sessionId:
+    type: string
+    required: false
+    description: "Resume an existing agent session."
+  provider:
+    type: string
+    required: false
+  model:
+    type: string
+    required: false
+
+outputs:
+  branchName:
+    type: string
+    source: "${steps.parseDecision.outputs.branch}"
+    description: "The generated branch name."
+  worktreePath:
+    type: string
+    source: "${steps.parseDecision.outputs.worktreePath}"
+    description: "The generated worktree path."
+
+steps:
+  # ── 0. Resolve effective working directory ───────────────────────────────
+  - id: resolveWorkdir
+    type: cli_command
+    config:
+      command: "node"
+      args:
+        - "-e"
+        - |
+          const wd = process.env.WD;
+          const effective = (wd && !wd.startsWith('${')) ? wd : process.cwd();
+          process.stdout.write(effective);
+      env:
+        WD: "${input.workdir}"
+      output:
+        captureStdout: true
+        captureStderr: false
+
+  - id: setCwd
+    type: set_variable
+    dependsOn: resolveWorkdir
+    config:
+      action: set
+      key: cwd
+      source: step_output
+      sourcePath: resolveWorkdir.outputs.stdout
+
+  # ── 1. Gather git context (parallel) ─────────────────────────────────────
+  - id: gatherContext
+    type: parallel
+    dependsOn: setCwd
+    config:
+      branches:
+        - name: branch
+          steps:
+            - id: getBranch
+              type: cli_command
+              config:
+                command: "git branch --show-current"
+                cwd: "${variables.cwd}"
+                failOnError: false
+                expectedExitCodes: [0, 1]
+                output:
+                  captureStdout: true
+                  captureStderr: false
+        - name: status
+          steps:
+            - id: getStatus
+              type: cli_command
+              config:
+                command: "git status --short"
+                cwd: "${variables.cwd}"
+                failOnError: false
+                expectedExitCodes: [0, 1]
+                output:
+                  captureStdout: true
+                  captureStderr: false
+
+  # ── 2. Consult the agent ──────────────────────────────────────────────────
+  - id: consultAgent
+    type: agent_conversation
+    dependsOn: gatherContext
+    config:
+      personaId: "${input.personaId}"
+      sessionId: "${input.sessionId}"
+      message: |
+        You are Git Guardian Gwen. Decide the correct git worktree configuration to prepare for the following task:
+        
+        Task Description: "${input.task}"
+        Task Type: "${input.taskType}"
+        
+        Current Repository Context:
+        - Current Branch: ${branch}
+        - Working-tree status:
+        ${status}
+        
+        Instructions:
+        1. Determine the branch name. It MUST follow the format: `<taskType>/<short-description>`
+           - For taskType "feature", use: `feature/<description>`
+           - For taskType "bug", use: `bug/<description>`
+           - For taskType "chore", use: `chore/<description>`
+           - The description must be short, lowercase, and kebab-case or snake-case (e.g., `feature/pkce-flow` or `bug/rate-limit-fix`).
+        2. Determine a short, readable worktree directory name/path related to the change.
+           - Place worktrees in a sibling folder under `../reactory-worktrees/` to prevent nesting inside the main repo.
+           - Example path: `../reactory-worktrees/feature-pkce-flow` or `../reactory-worktrees/bug-rate-limit-fix`
+        
+        Return a structured JSON object matching the requested schema.
+      provider: "${input.provider || 'google'}"
+      model: "${input.model || 'gemini-2.5-pro'}"
+      promptVariables:
+        branch: "${steps.getBranch.outputs.stdout}"
+        status: "${steps.getStatus.outputs.stdout}"
+      providerConfig:
+        structuredOutput:
+          name: worktree_decision
+          strict: true
+          schema:
+            type: object
+            additionalProperties: false
+            required: [branch, worktreePath, reasoning]
+            properties:
+              branch:
+                type: string
+                description: "The branch name matching standard conventions: feature/<desc>, bug/<desc>, or chore/<desc>."
+              worktreePath:
+                type: string
+                description: "The target worktree path in sibling directory, e.g., '../reactory-worktrees/feature-pkce-flow'."
+              reasoning:
+                type: string
+                description: "One-sentence justification for the branch name and worktree path chosen."
+      toolApprovalMode: auto
+      promptMergeStrategy: append
+
+  # ── 3. Normalise the agent's JSON decision ────────────────────────────────
+  - id: parseDecision
+    type: cli_command
+    dependsOn: consultAgent
+    config:
+      command: "node"
+      args:
+        - "-e"
+        - |
+          const raw = process.env.AGENT_RESP_STRUCTURED || process.env.AGENT_RESP || '';
+          let d;
+          try { d = JSON.parse(raw); }
+          catch (e) {
+            process.stderr.write('Expected structured JSON from the agent but parse failed: ' + e.message + '\nAgent said:\n' + raw + '\n');
+            process.exit(1);
+          }
+          
+          // Clean up branch name to ensure lowercase kebab-case
+          let branch = (d.branch || '').trim().toLowerCase();
+          if (!branch.startsWith('feature/') && !branch.startsWith('bug/') && !branch.startsWith('chore/')) {
+            const taskType = (process.env.TASK_TYPE || 'feature').toLowerCase();
+            const cleanDesc = branch.replace(/[^a-z0-9_-]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
+            branch = `${taskType}/${cleanDesc || 'worktree-task'}`;
+          }
+          
+          // Clean up worktreePath
+          let wp = (d.worktreePath || '').trim();
+          if (!wp) {
+            const cleanName = branch.replace(/\//g, '-');
+            wp = `../reactory-worktrees/${cleanName}`;
+          }
+
+          process.stdout.write(JSON.stringify({
+            branch,
+            worktreePath: wp,
+            reasoning: (d.reasoning || '').trim()
+          }));
+      env:
+        AGENT_RESP: "${steps.consultAgent.outputs.content}"
+        AGENT_RESP_STRUCTURED: "${steps.consultAgent.outputs.structuredContent}"
+        TASK_TYPE: "${input.taskType}"
+      failOnError: true
+      output:
+        captureStdout: true
+        captureStderr: true
+
+  - id: logDecision
+    type: log
+    dependsOn: parseDecision
+    config:
+      level: info
+      message: "Agent worktree decision: ${steps.parseDecision.outputs.stdout}"
+
+  # ── 4. Create the target directory's parent if needed ────────────────────
+  - id: prepareParentDir
+    type: cli_command
+    dependsOn: logDecision
+    config:
+      command: "node"
+      args:
+        - "-e"
+        - |
+          const fs = require('fs');
+          const path = require('path');
+          const d = JSON.parse(process.env.DECISION);
+          const absolutePath = path.resolve(process.env.CWD, d.worktreePath);
+          const parent = path.dirname(absolutePath);
+          if (!fs.existsSync(parent)) {
+            fs.mkdirSync(parent, { recursive: true });
+            console.log(`Created parent directory: ${parent}`);
+          } else {
+            console.log(`Parent directory exists: ${parent}`);
+          }
+      env:
+        DECISION: "${steps.parseDecision.outputs.stdout}"
+        CWD: "${variables.cwd}"
+      output:
+        captureStdout: true
+        captureStderr: true
+
+  # ── 5. Execute git worktree add ──────────────────────────────────────────
+  - id: createWorktree
+    type: cli_command
+    dependsOn: prepareParentDir
+    config:
+      command: "node"
+      args:
+        - "-e"
+        - |
+          const { execSync } = require('child_process');
+          const d = JSON.parse(process.env.DECISION);
+          const cmd = `git worktree add "${d.worktreePath}" -b "${d.branch}"`;
+          console.log(`Executing: ${cmd}`);
+          try {
+            const out = execSync(cmd, { cwd: process.env.CWD, stdio: 'pipe' });
+            console.log(out.toString());
+            process.exit(0);
+          } catch (e) {
+            console.error(`Failed to create worktree: ${e.message}`);
+            if (e.stderr) console.error(e.stderr.toString());
+            process.exit(1);
+          }
+      env:
+        DECISION: "${steps.parseDecision.outputs.stdout}"
+        CWD: "${variables.cwd}"
+      output:
+        captureStdout: true
+        captureStderr: true
+
+  - id: logSuccess
+    type: log
+    dependsOn: createWorktree
+    config:
+      level: info
+      message: "Successfully prepared worktree at '${JSON.parse(steps.parseDecision.outputs.stdout).worktreePath}' on branch '${JSON.parse(steps.parseDecision.outputs.stdout).branch}'."

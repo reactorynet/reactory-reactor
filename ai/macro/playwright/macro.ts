@@ -60,7 +60,7 @@ function errorResult(tool: string, params: unknown, error: string, startTime: nu
     metadata: {
       executionTime: Date.now() - startTime,
       timestamp: new Date(),
-      user: state.user?.id as string,
+      user: state.user?.fullName ?? state.user?.id?.toString() ?? 'unknown',
     },
   };
 }

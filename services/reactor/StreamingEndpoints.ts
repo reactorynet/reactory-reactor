@@ -4,6 +4,9 @@ import { StreamingSessionManager } from './StreamingSessionManager';
 import { SSETransport } from './StreamingTransport';
 import { StreamingEvent, StreamingSession } from './types/streaming.types';
 import { ChatSessionResourceManager } from './ChatSessionResourceManager';
+import { ShellSessionManager } from './ShellSessionManager';
+import safeUrl from '@reactory/server-core/utils/url/safeUrl';
+import Helpers from 'authentication/strategies/helpers';
 
 /**
  * Helper: log to both context and the chat session file logger.
@@ -43,6 +46,10 @@ export class StreamingEndpoints {
     // Event sending endpoint
     app.post('/reactor-chat/streaming/events/:sessionId', this.handleSendEvent.bind(this));
 
+    // Standalone streaming-session creation (used by the shell widget / workflow
+    // console to obtain a dedicated SSE channel independent of a chat turn).
+    app.post('/reactor-chat/streaming/session', this.handleCreateSession.bind(this));
+
     // Session management endpoints
     app.get('/reactor-chat/streaming/session/:sessionId/status', this.handleSessionStatus.bind(this));
     app.delete('/reactor-chat/streaming/session/:sessionId', this.handleCloseSession.bind(this));
@@ -54,7 +61,101 @@ export class StreamingEndpoints {
     // Debug endpoint for troubleshooting
     app.get('/reactor-chat/streaming/debug', this.handleDebug.bind(this));
 
+    // ── Interactive shell (PTY) session I/O ─────────────────────────────
+    // Output flows OUT over the SSE transport as `shell` events; these routes
+    // carry the IN direction (open / keystrokes / resize / kill) + listing.
+    app.post('/reactor-chat/shell/session', this.handleShellOpen.bind(this));
+    app.get('/reactor-chat/shell/sessions', this.handleShellList.bind(this));
+    app.post('/reactor-chat/shell/session/:shellSessionId/input', this.handleShellInput.bind(this));
+    app.post('/reactor-chat/shell/session/:shellSessionId/resize', this.handleShellResize.bind(this));
+    app.delete('/reactor-chat/shell/session/:shellSessionId', this.handleShellClose.bind(this));
+
     console.log('[StreamingEndpoints] All streaming routes set up successfully');
+  }
+
+  /**
+   * Open a new interactive shell session. The session streams its output onto
+   * the SSE channel identified by `channelId` (the chat conversation id) as
+   * `shell` events. Returns the `shellSessionId` used for subsequent I/O.
+   */
+  static async handleShellOpen(req: Reactory.Server.ReactoryExpressRequest, res: Response): Promise<void> {
+    const { context } = req;
+    try {
+      const shellManager = context.getService<ShellSessionManager>('reactor.ShellSessionManager@1.0.0');
+      const { channelId, shell, cwd, cols, rows, env } = req.body || {};
+      if (!channelId || typeof channelId !== 'string') {
+        res.status(400).json({ error: 'channelId is required' });
+        return;
+      }
+      const result = await shellManager.create({ channelId, shell, cwd, cols, rows, env }, context);
+      res.json(result);
+    } catch (error: any) {
+      const message = error?.message || 'Unknown error';
+      const status = /unauthorized/i.test(message) ? 403 : /node-pty/i.test(message) ? 501 : 500;
+      res.status(status).json({ error: 'Failed to open shell session', details: message });
+    }
+  }
+
+  /** Write keystrokes / input to a shell session's PTY. */
+  static async handleShellInput(req: Reactory.Server.ReactoryExpressRequest, res: Response): Promise<void> {
+    const { context } = req;
+    const { shellSessionId } = req.params;
+    try {
+      const shellManager = context.getService<ShellSessionManager>('reactor.ShellSessionManager@1.0.0');
+      const { data } = req.body || {};
+      if (typeof data !== 'string') {
+        res.status(400).json({ error: 'data (string) is required' });
+        return;
+      }
+      shellManager.write(shellSessionId, data, context);
+      res.json({ status: 'ok' });
+    } catch (error: any) {
+      const message = error?.message || 'Unknown error';
+      const status = /unauthorized/i.test(message) ? 403 : /not found/i.test(message) ? 404 : 500;
+      res.status(status).json({ error: 'Failed to write to shell session', details: message });
+    }
+  }
+
+  /** Resize a shell session's PTY. */
+  static async handleShellResize(req: Reactory.Server.ReactoryExpressRequest, res: Response): Promise<void> {
+    const { context } = req;
+    const { shellSessionId } = req.params;
+    try {
+      const shellManager = context.getService<ShellSessionManager>('reactor.ShellSessionManager@1.0.0');
+      const { cols, rows } = req.body || {};
+      shellManager.resize(shellSessionId, Number(cols), Number(rows), context);
+      res.json({ status: 'ok' });
+    } catch (error: any) {
+      const message = error?.message || 'Unknown error';
+      const status = /unauthorized/i.test(message) ? 403 : /not found/i.test(message) ? 404 : 500;
+      res.status(status).json({ error: 'Failed to resize shell session', details: message });
+    }
+  }
+
+  /** Terminate a shell session. */
+  static async handleShellClose(req: Reactory.Server.ReactoryExpressRequest, res: Response): Promise<void> {
+    const { context } = req;
+    const { shellSessionId } = req.params;
+    try {
+      const shellManager = context.getService<ShellSessionManager>('reactor.ShellSessionManager@1.0.0');
+      shellManager.kill(shellSessionId, context);
+      res.json({ status: 'closed', shellSessionId });
+    } catch (error: any) {
+      const message = error?.message || 'Unknown error';
+      const status = /unauthorized/i.test(message) ? 403 : 500;
+      res.status(status).json({ error: 'Failed to close shell session', details: message });
+    }
+  }
+
+  /** List the requesting user's active shell sessions. */
+  static async handleShellList(req: Reactory.Server.ReactoryExpressRequest, res: Response): Promise<void> {
+    const { context } = req;
+    try {
+      const shellManager = context.getService<ShellSessionManager>('reactor.ShellSessionManager@1.0.0');
+      res.json({ sessions: shellManager.list(context) });
+    } catch (error: any) {
+      res.status(500).json({ error: 'Failed to list shell sessions', details: error?.message || 'Unknown error' });
+    }
   }
 
   /**
@@ -171,6 +272,55 @@ export class StreamingEndpoints {
           res.end();
         }
       }
+    }
+  }
+
+  /**
+   * Create a standalone streaming session for an arbitrary channel id.
+   * Returns the streaming session UUID; the client builds the SSE endpoint URL
+   * (`/reactor-chat/streaming/sse/:sessionId` + auth query params) and connects
+   * an EventSource. Used by the interactive shell widget and the workflow
+   * console, both of which need their own persistent channel separate from the
+   * chat conversation's SSE transport.
+   */
+  static async handleCreateSession(req: Reactory.Server.ReactoryExpressRequest, res: Response): Promise<void> {
+    const { context } = req;
+    try {
+      const sessionManager = context.getService<StreamingSessionManager>('reactor.StreamingSessionManager@1.0.0');
+      const { channelId } = req.body || {};
+      if (!channelId || typeof channelId !== 'string') {
+        res.status(400).json({ error: 'channelId is required' });
+        return;
+      }
+      const userId = context.user?._id ? String(context.user._id) : 'anonymous';
+      const session = await sessionManager.createSession({
+        conversationId: channelId,
+        userId,
+        transport: 'sse',
+        capabilities: { supportsTokenStreaming: true, supportsToolStreaming: true },
+      });
+
+      // Build a fully-authenticated SSE URL, mirroring
+      // ReactorConversationService.createInitiateSSEResponse. Auth travels as
+      // query params because EventSource cannot set headers, and x-client-pwd
+      // is a server-only secret the browser cannot supply itself.
+      const sseUrl = new URL(safeUrl([process.env.API_URI_ROOT || 'http://localhost:4000', `reactor-chat/streaming/sse/${session.sessionId}`]));
+      const partnerKey = context.partner?.key?.toUpperCase().replace(/-/g, '_') || '';
+      sseUrl.searchParams.set('transport', 'sse');
+      sseUrl.searchParams.set('no-upgrade', 'true');
+      sseUrl.searchParams.set('jwt', Helpers.getJwtTokenForUser(context.user));
+      sseUrl.searchParams.set('expiry', new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString());
+      sseUrl.searchParams.set('x-client-key', (process.env[`${partnerKey}_APPLICATION_USERNAME`] as string) || '');
+      sseUrl.searchParams.set('x-client-pwd', (process.env[`${partnerKey}_APPLICATION_PASSWORD`] as string) || '');
+
+      res.json({
+        sessionId: session.sessionId,
+        channelId,
+        endpoint: sseUrl.toString(),
+        expiresAt: session.expiresAt,
+      });
+    } catch (error: any) {
+      res.status(500).json({ error: 'Failed to create streaming session', details: error?.message || 'Unknown error' });
     }
   }
 

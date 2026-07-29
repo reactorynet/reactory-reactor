@@ -43,6 +43,7 @@ import ReactorConversationModel, {
 import { CompletionStreamingEvent, ErrorStreamingEvent, ReasoningStreamingEvent, RetryStreamingEvent, StreamingEvent, StreamingEventType, StreamingMode, TokenStreamingEvent, ToolCallStreamingEvent } from "../types/streaming.types";
 import { StreamingSessionManager } from "../StreamingSessionManager";
 import { StreamingTransportManager } from "../StreamingTransportManager";
+import { StreamingEventFactory } from "../streaming/StreamingEventFactory";
 
 const MAX_TOOL_ITERATIONS = 25;
 
@@ -578,7 +579,9 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
       type: "function",
       function: {
         name: block.name,
-        arguments: JSON.stringify(block.input),
+        // Default to {} so a no-argument tool never yields JSON.stringify(undefined)
+        // === the JS value undefined (not a string), which is invalid downstream.
+        arguments: JSON.stringify(block.input ?? {}),
       },
     }));
   }
@@ -593,13 +596,13 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
     isComplete: boolean = false,
     sessionId?: string
   ): TokenStreamingEvent {
-    const tokenData: AITokenStreamingData = {
-      content,
+    // Delegate to the shared factory so the emitted event matches the shape all
+    // other providers produce (flat data + conversationId populated).
+    return StreamingEventFactory.createTokenEvent(
       delta,
       position,
-      isComplete,
-    };
-    return this.createStreamingEvent(StreamingEventType.TOKEN, tokenData, sessionId) as TokenStreamingEvent;
+      { sessionId, conversationId: sessionId },
+    );
   }
 
   /**
@@ -612,13 +615,11 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
     isComplete: boolean = false,
     sessionId?: string
   ): ReasoningStreamingEvent {
-    const data: AITokenStreamingData = {
-      content,
+    return StreamingEventFactory.createReasoningEvent(
       delta,
       position,
-      isComplete,
-    };
-    return this.createStreamingEvent(StreamingEventType.REASONING, data, sessionId) as ReasoningStreamingEvent;
+      { sessionId, conversationId: sessionId },
+    );
   }
 
   /**
@@ -632,14 +633,14 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
     result?: any,
     sessionId?: string
   ): ToolCallStreamingEvent {
-    const toolData: AIToolCallStreamingData = {
+    return StreamingEventFactory.createToolCallEvent(
       id,
       name,
-      arguments: toolArguments,
+      toolArguments,
       isComplete,
       result,
-    };
-    return this.createStreamingEvent(StreamingEventType.TOOL_CALL, toolData, sessionId) as ToolCallStreamingEvent;
+      { sessionId, conversationId: sessionId },
+    );
   }
 
   /**
@@ -732,14 +733,22 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
       completionTokens: number;
       finishReason: string;
       model: string;
+      thinking?: string;
     },
     sessionId?: string
   ): CompletionStreamingEvent {
-    const completionData: AICompletionStreamingData = {
+    // Delegate to the shared factory. The client's CompletionStreamingEvent
+    // expects a FLAT { content, finishReason, thinking? } payload — the old
+    // nested { content, metadata } shape caused the client to read an undefined
+    // finishReason/thinking and fail to finalize the streamed message. Token
+    // counts / model are carried on the method's return value and persisted
+    // separately, so they are intentionally omitted from the SSE event.
+    return StreamingEventFactory.createCompletionEvent(
       content,
-      metadata,
-    };
-    return this.createStreamingEvent(StreamingEventType.COMPLETE, completionData, sessionId) as CompletionStreamingEvent;
+      metadata.finishReason || "stop",
+      metadata.thinking,
+      { sessionId, conversationId: sessionId },
+    );
   }
 
   /**
@@ -755,11 +764,13 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
     return {
       type,
       timestamp: new Date(),
-      sessionId,
-      messageId,
+      sessionId: sessionId ?? "",
+      // Default conversationId to the sessionId (matches StreamingEventFactory
+      // and the other providers) so the client can route/group the event.
+      conversationId: conversationId ?? sessionId ?? "",
+      messageId: messageId ?? "",
       data,
-      conversationId,
-    };
+    } as StreamingEvent;
   }
 
   /**
@@ -1047,20 +1058,29 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
               currentBlocks.delete(index);
               break;
             }
-            const parsedInput = this.safeParseJSON(block.inputJson);
+            // Anthropic emits NO input_json_delta events for a tool_use block
+            // that takes no arguments, so block.inputJson stays "". Emitting
+            // arguments:"" produces invalid JSON downstream — the client and
+            // executeMacro both call JSON.parse(arguments), and JSON.parse("")
+            // throws "Unexpected end of JSON input". Normalize empty/whitespace
+            // accumulations to "{}" so arguments is ALWAYS a valid JSON string.
+            const normalizedArgs =
+              block.inputJson && block.inputJson.trim().length > 0
+                ? block.inputJson
+                : "{}";
             collectedToolCalls.push({
               id: block.id,
               type: "function",
               function: {
                 name: block.name,
-                arguments: block.inputJson,
+                arguments: normalizedArgs,
               },
             });
             // Emit tool call complete event
             const toolEvent = this.createToolCallEvent(
               block.id,
               block.name,
-              block.inputJson,
+              normalizedArgs,
               true,
               undefined,
               sessionId

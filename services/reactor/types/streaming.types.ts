@@ -115,8 +115,26 @@ export enum StreamingEventType {
   TOOL_ITERATION_LIMIT = 'tool_iteration_limit',
   RETRY = 'retry',
   COMPACTION = 'compaction',
-  INTERRUPTED = 'interrupted'
+  INTERRUPTED = 'interrupted',
+  SHELL = 'shell'
 }
+
+/**
+ * The lifecycle phase of a shell stream event.
+ * - `start`  : a command / interactive session began (carries `command`, `cwd`, `pid`)
+ * - `stdout` : an incremental chunk of standard output (carries `chunk`)
+ * - `stderr` : an incremental chunk of standard error (carries `chunk`)
+ * - `exit`   : the process terminated (carries `exitCode`)
+ */
+export type ShellStreamPhase = 'start' | 'stdout' | 'stderr' | 'exit';
+
+/**
+ * Identifies where a shell stream originates so the UI can route/group it:
+ * - `macro`    : a one-shot `shell` tool call executed by the LLM
+ * - `widget`   : an interactive PTY session driven by a human via the shell widget
+ * - `workflow` : a `cli_command` step running inside the YamlFlow workflow engine
+ */
+export type ShellStreamSource = 'macro' | 'widget' | 'workflow';
 /**
  * Base streaming event interface
  */
@@ -282,7 +300,38 @@ export interface InterruptedStreamingEvent extends StreamingEventBase {
   };
 }
 
-export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent | ToolIterationLimitStreamingEvent | RetryStreamingEvent | CompactionStreamingEvent | InterruptedStreamingEvent;
+/**
+ * Shell streaming event — emitted while a shell process (one-shot macro,
+ * interactive PTY widget session, or workflow cli_command step) produces
+ * output. Every event carries a `shellSessionId` so a single streaming
+ * channel (chat conversation or workflow run) can multiplex many terminals;
+ * the client filters/groups by that id.
+ */
+export interface ShellStreamingEvent extends StreamingEventBase {
+  type: StreamingEventType.SHELL;
+  data: {
+    /** Terminal identity — groups all events for one process/session */
+    shellSessionId: string;
+    /** Lifecycle phase of this event */
+    phase: ShellStreamPhase;
+    /** Origin of the stream (drives UI grouping / affordances) */
+    source: ShellStreamSource;
+    /** Incremental output bytes (stdout / stderr phases) */
+    chunk?: string;
+    /** The command line that started the process (start phase) */
+    command?: string;
+    /** Working directory the process runs in (start phase) */
+    cwd?: string;
+    /** OS process id, when known (start phase) */
+    pid?: number;
+    /** Process exit code (exit phase) */
+    exitCode?: number;
+    /** Whether the process timed out (exit phase) */
+    timedOut?: boolean;
+  };
+}
+
+export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent | ToolIterationLimitStreamingEvent | RetryStreamingEvent | CompactionStreamingEvent | InterruptedStreamingEvent | ShellStreamingEvent;
 
 /**
  * Per-persona token pacing configuration.

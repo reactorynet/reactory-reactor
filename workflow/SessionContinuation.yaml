@@ -16,9 +16,19 @@ steps:
           const mongoose = require('mongoose');
           const { ObjectId } = mongoose.Types;
           
-          const mongoUri = process.env.MONGO_URI || 'mongodb://localhost:27017/reactory';
+          const mongoUri = process.env.MONGOOSE || process.env.MONGO_URI || 'mongodb://localhost:27017/reactory';
+          const options = {};
+          if (process.env.MONGO_USER) {
+            options.user = process.env.MONGO_USER;
+          }
+          if (process.env.MONGO_PASSWORD) {
+            options.pass = process.env.MONGO_PASSWORD;
+          }
+          if (process.env.SERVER_ID && process.env.DOMAIN_NAME) {
+            options.appName = `reactory[${process.env.SERVER_ID}@${process.env.DOMAIN_NAME}]]`;
+          }
           
-          mongoose.connect(mongoUri)
+          mongoose.connect(mongoUri, options)
             .then(async () => {
               console.log('Connected to MongoDB');
               

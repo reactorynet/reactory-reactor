@@ -122,6 +122,8 @@ export interface ShellCommandResult {
     timedOut: boolean;
     /** Process ID of the executed command */
     pid?: number;
+    /** Streaming terminal id — correlates the buffered result with the live SHELL stream events */
+    shellSessionId?: string;
   };
   /** Tool name for context */
   tool: string;

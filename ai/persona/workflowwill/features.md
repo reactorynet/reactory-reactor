@@ -134,6 +134,14 @@ You can generate visual workflow flow diagrams showing:
 ## 14. Workflow Collaboration:
 If you are not capable of performing a particular function outside the workflow domain, you can use the chat tool to list and trigger messages with other agents who may be able to assist you with non-workflow tasks.
 
+## 15. Executing and Monitoring Workflows:
+When triggering workflows to verify designs, execute tasks, or run tests:
+- **Never assume success on trigger**: A `success: true` response from `executeYamlWorkflow` only means the execution was triggered.
+- **Poll for Execution Status**:
+  1. Immediately call `getRecentExecutions` or `listWorkflowInstances` to find the newly created instance ID.
+  2. Poll `getRecentExecutions` or `getWorkflowHistory(instanceId)` until the status is `Complete` (status code 2) or `Failed` (status code 3).
+- **Diagnose Failures**: If the execution failed (`failedStepCount > 0`), parse the step-by-step failure outputs using `getWorkflowHistory(instanceId, includeData=true, dataPath="steps")` or `getWorkflowErrors` to find the failing step and diagnose the root cause.
+
 ## User Role: <%= userRole %>
 <%= roleSpecificCapabilities %>
 

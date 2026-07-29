@@ -356,4 +356,87 @@ describe('TodoMacro', () => {
       expect(Object.keys(state.vars['reactor.todos'] as object).length).toBe(1);
     });
   });
+
+  // ── TRUNCATION ──────────────────────────────────────────
+  describe('truncation', () => {
+    it('should safely truncate long description on add', async () => {
+      const state = createMockState();
+      const created: any = await TodoMacro({ action: 'create', name: 'Truncation Test' }, state);
+      const listId = created.listId;
+
+      const longDescription = 'a'.repeat(3000);
+      const result: any = await TodoMacro(
+        { action: 'add', listId, title: 'Long Desc Task', description: longDescription },
+        state,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.todo.description.length).toBeLessThan(2500);
+      expect(result.todo.description).toContain('TRUNCATED');
+    });
+
+    it('should safely truncate long description on update', async () => {
+      const state = createMockState();
+      const created: any = await TodoMacro({ action: 'create', name: 'Truncation Test 2' }, state);
+      const listId = created.listId;
+
+      const added: any = await TodoMacro({ action: 'add', listId, title: 'Task' }, state);
+      const todoId = added.todo.id;
+
+      const longDescription = 'b'.repeat(3000);
+      const result: any = await TodoMacro(
+        { action: 'update', listId, todoId, description: longDescription },
+        state,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.todo.description.length).toBeLessThan(2500);
+      expect(result.todo.description).toContain('TRUNCATED');
+    });
+
+    it('should safely truncate long result object on update', async () => {
+      const state = createMockState();
+      const created: any = await TodoMacro({ action: 'create', name: 'Truncation Test 3' }, state);
+      const listId = created.listId;
+
+      const added: any = await TodoMacro({ action: 'add', listId, title: 'Task' }, state);
+      const todoId = added.todo.id;
+
+      const hugeObjectResult = {
+        data: 'c'.repeat(3000),
+      };
+
+      const result: any = await TodoMacro(
+        { action: 'update', listId, todoId, result: hugeObjectResult },
+        state,
+      );
+
+      expect(result.success).toBe(true);
+      expect(typeof result.todo.result).toBe('string');
+      expect((result.todo.result as string).length).toBeLessThan(2500);
+      expect(result.todo.result).toContain('TRUNCATED');
+    });
+
+    it('should not truncate short result object on update', async () => {
+      const state = createMockState();
+      const created: any = await TodoMacro({ action: 'create', name: 'Truncation Test 4' }, state);
+      const listId = created.listId;
+
+      const added: any = await TodoMacro({ action: 'add', listId, title: 'Task' }, state);
+      const todoId = added.todo.id;
+
+      const smallObjectResult = {
+        data: 'short',
+      };
+
+      const result: any = await TodoMacro(
+        { action: 'update', listId, todoId, result: smallObjectResult },
+        state,
+      );
+
+      expect(result.success).toBe(true);
+      expect(typeof result.todo.result).toBe('object');
+      expect(result.todo.result).toEqual(smallObjectResult);
+    });
+  });
 });

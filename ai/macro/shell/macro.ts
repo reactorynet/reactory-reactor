@@ -1,5 +1,6 @@
 import { ChatState, Macro, MacroComponentDefinition } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import { ChildProcess, ExecOptions, spawn } from "child_process";
+import { ObjectId } from "mongodb";
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -7,6 +8,7 @@ import Reactory from "@reactorynet/reactory-core";
 import { ComponentDomain, FeatureType } from "@reactorynet/reactory-core";
 import { ShellCommandProps, ShellCommandResult } from './types';
 import logger from "@reactory/server-core/logging";
+import { ShellStreamPublisher } from "@reactory/server-modules/reactory-reactor/services/reactor/streaming/ShellStreamPublisher";
 
 const DEFAULT_SHELL_TEMPLATE = `
 <%- environmentVars%>
@@ -117,7 +119,7 @@ const getShellCommandText = async (templateId: string, command: string, state: C
 /**
  * A macro that writes a shell command to a temporary .sh file and executes it.
  */
-export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async (props: ShellCommandProps, state: ChatState): Promise<ShellCommandResult> => {
+export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async (props: ShellCommandProps, state: ChatState, context?: Reactory.Server.IReactoryContext): Promise<ShellCommandResult> => {
   const startTime = Date.now();
   const {
     command: shellCommand,
@@ -128,6 +130,19 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
     format = 'string',
     shell = '/bin/bash'
   } = props;
+
+  // Unique terminal id for this one-shot invocation. Streamed to the client so
+  // the shell widget can render this command's output as its own terminal pane
+  // and correlate it with the final tool-call result.
+  const shellSessionId = new ObjectId().toString();
+  // The macro receives `context` only when run through the conversation service
+  // AUTO loop; on the CLI / tool-only path it is undefined and streaming no-ops.
+  const publisher = ShellStreamPublisher.fromContext(context ?? (state as any)?.context, {
+    channelId: (state as any)?.id ? String((state as any).id) : '',
+    shellSessionId,
+    source: 'macro',
+    messageId: (state as any)?.vars?.currentMessageId,
+  });
 
   if (!shellCommand || shellCommand.trim().length === 0) {
     return {
@@ -208,15 +223,18 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
       let timedOut = false;
       let exitCode = 0;
 
+      let exitEmitted = false;
       const cleanExit = () => {
         clearTimeout(timer);
         if (childProcess) childProcess.removeAllListeners();
         removeTmpFile();
+        if (!exitEmitted) { exitEmitted = true; publisher.exit(exitCode, timedOut); }
         resolve({ stdout: shellOut.join('\n').trim(), stderr: shellErr.join('\n').trim(), exitCode, timedOut, pid: childProcess?.pid, executionTime: Date.now() - commandStartTime });
       };
 
       try {
         childProcess = spawn(command, [], execOptions);
+        publisher.start(shellCommand, workingDir, childProcess?.pid);
         timer = setTimeout(() => { timedOut = true; shellErr.push(`Process timed out after ${timeoutInSeconds} seconds`); childProcess?.kill('SIGTERM'); cleanExit(); }, Number(timeoutInSeconds) * 1000);
 
         const exitHandler = (code: number, signal: string) => {
@@ -225,11 +243,16 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
           cleanExit();
         };
 
-        childProcess.stdout.on('data', (data) => shellOut.push(typeof data?.toString === 'function' ? data.toString() : data));
+        childProcess.stdout.on('data', (data) => {
+          const stringData = typeof data?.toString === 'function' ? data.toString() : data;
+          shellOut.push(stringData);
+          publisher.stdout(stringData);
+        });
         childProcess.stderr.on('data', (data) => {
           const stringData = typeof data?.toString === 'function' ? data.toString() : data;
-          if (/failed|failure|error|crash/i.test(stringData)) { shellErr.push(stringData); return; }
+          if (/failed|failure|error|crash/i.test(stringData)) { shellErr.push(stringData); publisher.stderr(stringData); return; }
           shellOut.push(stringData);
+          publisher.stdout(stringData);
         });
         ["close", "exit", "error", "disconnect"].forEach((evt) => childProcess.on(evt, exitHandler));
       } catch (err: any) {
@@ -256,11 +279,12 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
     return {
       success: true,
       data: {
-        stdout: result.stdout, 
-        stderr: result.stderr,        
+        stdout: result.stdout,
+        stderr: result.stderr,
         exitCode: result.exitCode, success: commandSuccess,
         command: shellCommand, workingDir, shell, templateId,
-        sudo: sudo === 'true', executionTime: result.executionTime, timedOut: result.timedOut, pid: result.pid
+        sudo: sudo === 'true', executionTime: result.executionTime, timedOut: result.timedOut, pid: result.pid,
+        shellSessionId
       },
       tool: 'shell', params: props,
       metadata: { executionTime: totalExecutionTime, timestamp: new Date() }
