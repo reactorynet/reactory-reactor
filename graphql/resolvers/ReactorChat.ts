@@ -702,6 +702,26 @@ class ReactorChatResolver {
     }));
   }
 
+  @property("ReactorChatState", "active")
+  async ReactorChatStateActive(
+    chatState: ChatState,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ) {
+    try {
+      const conversationService = context.getService<any>(
+        "reactor.ReactorConversationService@1.0.0"
+      );
+      if (!conversationService || !chatState?.id) return false;
+      const sseSessionId = conversationService.streamingSessionManager.getSessionId(chatState.id);
+      if (!sseSessionId) return false;
+      const hasTransport = await conversationService.streamingTransportManager.hasTransport(sseSessionId);
+      return !!hasTransport;
+    } catch {
+      return false;
+    }
+  }
+
   @mutation("ReactorSendMessage")
   async ReactorSendMessage(
     _: any,
@@ -732,7 +752,7 @@ class ReactorChatResolver {
     if (
       !args ||
       !args.message ||
-      (!args.message.continueAfterTools && !args.message.message) ||
+      (!args.message.continueAfterTools && args.message.message !== "" && !args.message.message) ||
       !args.message.personaId
     ) {
       return {
