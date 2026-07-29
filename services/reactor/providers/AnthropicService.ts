@@ -43,6 +43,7 @@ import ReactorConversationModel, {
 import { CompletionStreamingEvent, ErrorStreamingEvent, ReasoningStreamingEvent, RetryStreamingEvent, StreamingEvent, StreamingEventType, StreamingMode, TokenStreamingEvent, ToolCallStreamingEvent } from "../types/streaming.types";
 import { StreamingSessionManager } from "../StreamingSessionManager";
 import { StreamingTransportManager } from "../StreamingTransportManager";
+import { StreamingEventFactory } from "../streaming/StreamingEventFactory";
 
 const MAX_TOOL_ITERATIONS = 25;
 
@@ -176,7 +177,80 @@ class AnthropicService extends AIProviderBase {
    * - A single message can contain multiple content blocks (text + tool_use)
    * - tool_use_id must match between tool_use and tool_result blocks
    */
-  private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[]): Anthropic.Messages.MessageParam[] {
+    /**
+   * Translate OpenAI-style/generic content blocks to Anthropic-compatible content blocks.
+   * Specifically, translates type: "image_url" to type: "image" with base64 source.
+   */
+  private translateContentBlocks(content: any): any {
+    if (!content) return "";
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      return content.map(block => {
+        if (typeof block === "string") {
+          return { type: "text", text: block };
+        }
+        if (block.type === "text") {
+          return block;
+        }
+        if (block.type === "image_url" && block.image_url?.url) {
+          const url = block.image_url.url;
+          if (url.startsWith("data:")) {
+            const match = url.match(/^data:([^;]+);base64,(.+)$/);
+            if (match) {
+              const media_type = match[1];
+              const data = match[2];
+              return {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: media_type as any,
+                  data: data,
+                },
+              };
+            }
+          }
+          // Fallback if it is a standard HTTP URL (not supported directly by Anthropic Messages API)
+          return {
+            type: "text",
+            text: `[Image: ${url}]`,
+          };
+        }
+        return block;
+      });
+    }
+    if (typeof content === "object") {
+      if (content.type === "image_url" && content.image_url?.url) {
+        const url = content.image_url.url;
+        if (url.startsWith("data:")) {
+          const match = url.match(/^data:([^;]+);base64,(.+)$/);
+          if (match) {
+            const media_type = match[1];
+            const data = match[2];
+            return [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: media_type as any,
+                  data: data,
+                },
+              }
+            ];
+          }
+        }
+        return [
+          {
+            type: "text",
+            text: `[Image: ${url}]`,
+          }
+        ];
+      }
+      return content;
+    }
+    return content;
+  }
+
+private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[]): Anthropic.Messages.MessageParam[] {
     const messages: Anthropic.Messages.MessageParam[] = [];
 
     // Track tool_use_ids that already have a tool_result so we never
@@ -262,9 +336,9 @@ class AnthropicService extends AIProviderBase {
       }
 
       // Handle regular user messages
-      const textContent = this.extractTextContent(msg.content);
-      if (textContent) {
-        messages.push({ role: "user", content: textContent });
+      const translatedContent = this.translateContentBlocks(msg.content);
+      if (translatedContent) {
+        messages.push({ role: "user", content: translatedContent });
       }
     }
 
@@ -273,7 +347,7 @@ class AnthropicService extends AIProviderBase {
 
     // Strip orphaned tool_result blocks whose tool_use_id doesn't appear
     // in the immediately preceding assistant message. Anthropic rejects these.
-    return this.sanitizeToolResults(alternated);
+    return this.sanitizeToolCallsAndResults(alternated);
   }
 
   /**
@@ -286,51 +360,93 @@ class AnthropicService extends AIProviderBase {
    * - tool_results merged with text blocks by ensureMessageAlternation
    * - empty messages after filtering
    */
-  private sanitizeToolResults(messages: Anthropic.Messages.MessageParam[]): Anthropic.Messages.MessageParam[] {
+  /**
+   * Ensure all tool_use blocks in assistant messages have a matching tool_result
+   * block in the immediately following user message. Strips any unpaired tool_use
+   * or tool_result blocks to ensure Anthropic never rejects the history.
+   */
+  private sanitizeToolCallsAndResults(messages: Anthropic.Messages.MessageParam[]): Anthropic.Messages.MessageParam[] {
     const result: Anthropic.Messages.MessageParam[] = [];
 
     for (let i = 0; i < messages.length; i++) {
       const msg = messages[i];
 
-      if (msg.role === "user" && Array.isArray(msg.content)) {
-        const hasToolResults = (msg.content as any[]).some(
-          (block: any) => block.type === "tool_result",
-        );
+      if (msg.role === "assistant" && Array.isArray(msg.content)) {
+        const nextMsg = messages[i + 1];
+        const validToolUseIds = new Set<string>();
 
-        if (hasToolResults) {
-          // Collect valid tool_use IDs from the immediately preceding assistant message
-          const prev = result[result.length - 1];
-          const validToolUseIds = new Set<string>();
-          if (prev?.role === "assistant" && Array.isArray(prev.content)) {
-            for (const block of prev.content as any[]) {
-              if (block.type === "tool_use" && block.id) {
-                validToolUseIds.add(block.id);
-              }
+        // Collect all valid tool_result IDs from the immediately following user message (if any)
+        if (nextMsg && nextMsg.role === "user" && Array.isArray(nextMsg.content)) {
+          for (const block of nextMsg.content as any[]) {
+            if (block.type === "tool_result" && block.tool_use_id) {
+              validToolUseIds.add(block.tool_use_id);
             }
           }
-
-          // Keep only tool_result blocks with valid IDs, plus any non-tool_result blocks
-          const filtered = (msg.content as any[]).filter((block: any) => {
-            if (block.type === "tool_result") {
-              const valid = validToolUseIds.has(block.tool_use_id);
-              if (!valid) {
-                this.context.log(
-                  `Removing orphaned tool_result block with tool_use_id=${block.tool_use_id} at message index ${i}`,
-                  { validToolUseIds: [...validToolUseIds] },
-                  "AnthropicService.sanitizeToolResults",
-                );
-              }
-              return valid;
-            }
-            return true;
-          });
-
-          // Skip the message entirely if nothing remains after filtering
-          if (filtered.length > 0) {
-            result.push({ ...msg, content: filtered });
-          }
-          continue;
         }
+
+        // Keep only tool_use blocks that have a matching tool_result in the next message,
+        // plus any non-tool_use blocks (like text)
+        const filteredContent = (msg.content as any[]).filter((block: any) => {
+          if (block.type === "tool_use") {
+            const hasResult = validToolUseIds.has(block.id);
+            if (!hasResult) {
+              this.context.log(
+                `Stripping uncompleted tool_use block with id=${block.id} (name=${block.name}) because no matching tool_result was found in the next message.`,
+                {},
+                "AnthropicService.sanitizeToolCallsAndResults"
+              );
+            }
+            return hasResult;
+          }
+          return true;
+        });
+
+        // If the assistant message has non-empty content after filtering, push it
+        if (filteredContent.length > 0) {
+          result.push({ ...msg, content: filteredContent });
+        } else {
+          this.context.log(
+            `Removing empty assistant message at index ${i} after filtering uncompleted tool calls.`,
+            {},
+            "AnthropicService.sanitizeToolCallsAndResults"
+          );
+        }
+        continue;
+      }
+
+      if (msg.role === "user" && Array.isArray(msg.content)) {
+        // Collect valid tool_use IDs from the immediately preceding assistant message (if any)
+        const prevMsg = result[result.length - 1];
+        const validToolUseIds = new Set<string>();
+        if (prevMsg && prevMsg.role === "assistant" && Array.isArray(prevMsg.content)) {
+          for (const block of prevMsg.content as any[]) {
+            if (block.type === "tool_use" && block.id) {
+              validToolUseIds.add(block.id);
+            }
+          }
+        }
+
+        // Keep only tool_result blocks that have a matching tool_use in the preceding message,
+        // plus any non-tool_result blocks
+        const filteredContent = (msg.content as any[]).filter((block: any) => {
+          if (block.type === "tool_result") {
+            const hasUse = validToolUseIds.has(block.tool_use_id);
+            if (!hasUse) {
+              this.context.log(
+                `Stripping orphaned tool_result block with tool_use_id=${block.tool_use_id} because no matching tool_use was found in the preceding assistant message.`,
+                {},
+                "AnthropicService.sanitizeToolCallsAndResults"
+              );
+            }
+            return hasUse;
+          }
+          return true;
+        });
+
+        if (filteredContent.length > 0) {
+          result.push({ ...msg, content: filteredContent });
+        }
+        continue;
       }
 
       result.push(msg);
@@ -338,6 +454,8 @@ class AnthropicService extends AIProviderBase {
 
     return result;
   }
+
+
 
   /**
    * Extract text content from various content formats
@@ -461,7 +579,9 @@ class AnthropicService extends AIProviderBase {
       type: "function",
       function: {
         name: block.name,
-        arguments: JSON.stringify(block.input),
+        // Default to {} so a no-argument tool never yields JSON.stringify(undefined)
+        // === the JS value undefined (not a string), which is invalid downstream.
+        arguments: JSON.stringify(block.input ?? {}),
       },
     }));
   }
@@ -476,13 +596,13 @@ class AnthropicService extends AIProviderBase {
     isComplete: boolean = false,
     sessionId?: string
   ): TokenStreamingEvent {
-    const tokenData: AITokenStreamingData = {
-      content,
+    // Delegate to the shared factory so the emitted event matches the shape all
+    // other providers produce (flat data + conversationId populated).
+    return StreamingEventFactory.createTokenEvent(
       delta,
       position,
-      isComplete,
-    };
-    return this.createStreamingEvent(StreamingEventType.TOKEN, tokenData, sessionId) as TokenStreamingEvent;
+      { sessionId, conversationId: sessionId },
+    );
   }
 
   /**
@@ -495,13 +615,11 @@ class AnthropicService extends AIProviderBase {
     isComplete: boolean = false,
     sessionId?: string
   ): ReasoningStreamingEvent {
-    const data: AITokenStreamingData = {
-      content,
+    return StreamingEventFactory.createReasoningEvent(
       delta,
       position,
-      isComplete,
-    };
-    return this.createStreamingEvent(StreamingEventType.REASONING, data, sessionId) as ReasoningStreamingEvent;
+      { sessionId, conversationId: sessionId },
+    );
   }
 
   /**
@@ -515,14 +633,14 @@ class AnthropicService extends AIProviderBase {
     result?: any,
     sessionId?: string
   ): ToolCallStreamingEvent {
-    const toolData: AIToolCallStreamingData = {
+    return StreamingEventFactory.createToolCallEvent(
       id,
       name,
-      arguments: toolArguments,
+      toolArguments,
       isComplete,
       result,
-    };
-    return this.createStreamingEvent(StreamingEventType.TOOL_CALL, toolData, sessionId) as ToolCallStreamingEvent;
+      { sessionId, conversationId: sessionId },
+    );
   }
 
   /**
@@ -615,14 +733,22 @@ class AnthropicService extends AIProviderBase {
       completionTokens: number;
       finishReason: string;
       model: string;
+      thinking?: string;
     },
     sessionId?: string
   ): CompletionStreamingEvent {
-    const completionData: AICompletionStreamingData = {
+    // Delegate to the shared factory. The client's CompletionStreamingEvent
+    // expects a FLAT { content, finishReason, thinking? } payload — the old
+    // nested { content, metadata } shape caused the client to read an undefined
+    // finishReason/thinking and fail to finalize the streamed message. Token
+    // counts / model are carried on the method's return value and persisted
+    // separately, so they are intentionally omitted from the SSE event.
+    return StreamingEventFactory.createCompletionEvent(
       content,
-      metadata,
-    };
-    return this.createStreamingEvent(StreamingEventType.COMPLETE, completionData, sessionId) as CompletionStreamingEvent;
+      metadata.finishReason || "stop",
+      metadata.thinking,
+      { sessionId, conversationId: sessionId },
+    );
   }
 
   /**
@@ -638,11 +764,13 @@ class AnthropicService extends AIProviderBase {
     return {
       type,
       timestamp: new Date(),
-      sessionId,
-      messageId,
+      sessionId: sessionId ?? "",
+      // Default conversationId to the sessionId (matches StreamingEventFactory
+      // and the other providers) so the client can route/group the event.
+      conversationId: conversationId ?? sessionId ?? "",
+      messageId: messageId ?? "",
       data,
-      conversationId,
-    };
+    } as StreamingEvent;
   }
 
   /**
@@ -833,7 +961,7 @@ class AnthropicService extends AIProviderBase {
     const structuredToolName = toAnthropicParams(providerConfig).structuredToolName;
 
     const messages = this.convertHistoryToAnthropicFormat(history);
-    messages.push({ role: "user", content: message });
+    messages.push({ role: "user", content: this.translateContentBlocks(message) });
 
     let accumulatedText = "";
     let accumulatedReasoning = "";
@@ -930,20 +1058,29 @@ class AnthropicService extends AIProviderBase {
               currentBlocks.delete(index);
               break;
             }
-            const parsedInput = this.safeParseJSON(block.inputJson);
+            // Anthropic emits NO input_json_delta events for a tool_use block
+            // that takes no arguments, so block.inputJson stays "". Emitting
+            // arguments:"" produces invalid JSON downstream — the client and
+            // executeMacro both call JSON.parse(arguments), and JSON.parse("")
+            // throws "Unexpected end of JSON input". Normalize empty/whitespace
+            // accumulations to "{}" so arguments is ALWAYS a valid JSON string.
+            const normalizedArgs =
+              block.inputJson && block.inputJson.trim().length > 0
+                ? block.inputJson
+                : "{}";
             collectedToolCalls.push({
               id: block.id,
               type: "function",
               function: {
                 name: block.name,
-                arguments: block.inputJson,
+                arguments: normalizedArgs,
               },
             });
             // Emit tool call complete event
             const toolEvent = this.createToolCallEvent(
               block.id,
               block.name,
-              block.inputJson,
+              normalizedArgs,
               true,
               undefined,
               sessionId

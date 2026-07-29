@@ -21,4 +21,6 @@ export interface ChatsMacroProps {
   provider?: string;
   /** Number of recent history items to return for the followup action (default: 2) */
   historyCount?: number;
+  /** Optional provider configuration (e.g. structured output schemas) */
+  providerConfig?: any;
 }

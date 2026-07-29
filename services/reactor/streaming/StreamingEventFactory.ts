@@ -9,6 +9,7 @@ import {
   ErrorStreamingEvent,
   ToolIterationLimitStreamingEvent,
   CompactionStreamingEvent,
+  ShellStreamingEvent,
 } from "../types/streaming.types";
 import {
   AITokenStreamingData,
@@ -246,6 +247,28 @@ export class StreamingEventFactory {
       { phase: 'error', errorMessage },
       opts,
     ) as CompactionStreamingEvent;
+  }
+
+  // ── Shell ────────────────────────────────────────────────────────────
+
+  /**
+   * Create a shell streaming event. Used by the one-shot `shell` macro, the
+   * interactive PTY widget (ShellSessionManager) and the workflow
+   * `cli_command` step to stream stdout/stderr/lifecycle to the client.
+   *
+   * @param data Shell payload — `shellSessionId`, `phase` and `source` are
+   *             required; `chunk`/`command`/`cwd`/`pid`/`exitCode` depend on phase.
+   * @param opts Streaming channel identifiers (conversation / workflow run).
+   */
+  static createShellEvent(
+    data: ShellStreamingEvent["data"],
+    opts: StreamingEventIds = {},
+  ): ShellStreamingEvent {
+    return StreamingEventFactory.base(
+      StreamingEventType.SHELL,
+      data,
+      opts,
+    ) as ShellStreamingEvent;
   }
 
   // ── Internal ─────────────────────────────────────────────────────────

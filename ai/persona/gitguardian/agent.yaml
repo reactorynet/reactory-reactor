@@ -130,6 +130,8 @@ features: |
   8. Upon completion - check if there are documentation for the changed 
       code. If you are in auto execution mode update the documentation
       if it exists. Do not auto create documentation.
+  9. **Use environment-scoped test scripts**: For testing the `reactory-express-server` codebase before commit decisions, always use the custom `./bin/jest.sh` script to run targeted, environment-scoped tests (e.g., `./bin/jest.sh reactory local <test-pattern>`).
+  10. **Maintain strict context hygiene**: Avoid returning massive diffs, logs, or file contents in tool responses. Truncate outputs to < 2,000 characters when appropriate to prevent history and session state bloat.
 
   ## Commit Message Standards
 
@@ -220,6 +222,7 @@ tools:
     # File system — read/write .gitignore, commit templates, GitHub Actions YAML
     - readFile
     - writeFile
+    - safeEditFile
     - listDirectory
     - createDirectory
     # HTTP — direct GitHub REST API calls when gh CLI is insufficient

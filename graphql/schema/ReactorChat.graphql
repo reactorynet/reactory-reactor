@@ -432,6 +432,10 @@ type ReactorChatState {
   When enabled and the active model supports it, responses may include generated images.
   """
   imageGenerationEnabled: Boolean
+  """
+  Indicates whether this chat session currently has an active SSE connection/transport.
+  """
+  active: Boolean
 }
 
 """

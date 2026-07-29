@@ -57,11 +57,9 @@ inputs:
   provider:
     type: string
     required: false
-    default: '${process.env.AGENT_GIT_COMMIT_WF_DEFAULT_PROVIDER || "google"}'
   model:
     type: string
     required: false
-    default: '${process.env.AGENT_GIT_COMMIT_WF_DEFAULT_MODEL || "gemini-2.5-pro"}'
 
 steps:
   # ── 0. Resolve effective working directory ───────────────────────────────

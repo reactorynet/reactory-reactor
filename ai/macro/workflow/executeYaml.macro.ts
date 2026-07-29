@@ -64,7 +64,15 @@ export const executeYamlWorkflow: Macro<unknown, ExecuteYamlWorkflowProps> = asy
     }
 
     // 6. Execute the workflow
-    const result = await workflowService.workflowRunner.startWorkflow(fqn, definition.version, inputs, state.context);
+    let parsedInputs = inputs;
+    if (typeof inputs === 'string' && inputs.trim().length > 0) {
+      try {
+        parsedInputs = JSON.parse(inputs);
+      } catch (e) {
+        parsedInputs = {};
+      }
+    }
+    const result = await workflowService.workflowRunner.startWorkflow(fqn, definition.version, parsedInputs, state.context);
 
     // 7. Return the result
     return {

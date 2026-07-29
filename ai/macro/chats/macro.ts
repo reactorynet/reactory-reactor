@@ -96,7 +96,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
   state: ChatState
 ): Promise<unknown> => {
   const { context, modelId, providerId } = state;
-  const { action, id, message, files, model = modelId, provider = providerId} = props;
+  const { action, id, message, files, model = modelId, provider = providerId, providerConfig } = props;
 
   
 
@@ -283,6 +283,11 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
           // delegating so the sub-agent provider lookup succeeds.
           const resolved = await resolveModelAndProvider(context, model, provider);
 
+          // Defensively parse stringified providerConfig if passed as string
+          let parsedProviderConfig = providerConfig;
+          if (typeof providerConfig === 'string' && providerConfig.trim().length > 0) {
+            try { parsedProviderConfig = JSON.parse(providerConfig); } catch (e) {}
+          }
           const response = await conversationService.sendMessage({
             personaId: persona.id,
             message,
@@ -293,6 +298,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
             tool_results: undefined,
             toolApprovalMode: existingChatId ? undefined : subagentToolMode,
             parentSessionId: existingChatId ? undefined : state.id,
+            providerConfig: parsedProviderConfig,
           });
 
           // Store the sub-agent conversation ID in vars for future follow-ups
@@ -362,11 +368,17 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
           const conversationService = state.context.getService<IReactorConversationsService>(
             "reactor.ReactorConversationService@1.0.0"
           );
+          // Defensively parse stringified providerConfig if passed as string
+          let parsedProviderConfig = providerConfig;
+          if (typeof providerConfig === 'string' && providerConfig.trim().length > 0) {
+            try { parsedProviderConfig = JSON.parse(providerConfig); } catch (e) {}
+          }
           const response = await conversationService.sendMessage({
             personaId: existingConv.personaId,
             message,
             chatSessionId: conversationId,
             streamingMode: StreamingMode.NONE,
+            providerConfig: parsedProviderConfig,
           });
 
           const content = response?.content || response?.message || JSON.stringify(response);
@@ -575,6 +587,10 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
             historyCount: {
               type: "number",
               description: "Number of recent history items to return for the 'followup' action (default: 2).",
+            },
+            providerConfig: {
+              type: "object",
+              description: "Optional provider configuration (e.g. structuredOutput schema).",
             },
           },
           required: ["action"],

@@ -188,4 +188,111 @@ describe("AnthropicService — providerConfig / structured output", () => {
       expect(result.content).toBe("done");
     });
   });
+  describe("translateContentBlocks", () => {
+    it("translates OpenAI-style image_url content blocks to Anthropic-compatible image content blocks", () => {
+      const svc = createService();
+      
+      const input = [
+        { type: "text", text: "Here is an image" },
+        { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA" } }
+      ];
+      
+      const output = svc.translateContentBlocks(input);
+      
+      expect(output).toEqual([
+        { type: "text", text: "Here is an image" },
+        {
+          type: "image",
+          source: {
+            type: "base64",
+            media_type: "image/png",
+            data: "iVBORw0KGgoAAAANSUhEUgAA"
+          }
+        }
+      ]);
+    });
+
+    it("leaves regular text messages unchanged", () => {
+      const svc = createService();
+      const input = "Hello, world!";
+      const output = svc.translateContentBlocks(input);
+      expect(output).toBe(input);
+    });
+  });
+
+  describe("sanitizeToolCallsAndResults", () => {
+    it("preserves paired tool_use and tool_result blocks", () => {
+      const svc = createService();
+      
+      const input = [
+        { role: "user", content: "Hello" },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Let me check" },
+            { type: "tool_use", id: "t1", name: "get_weather", input: {} }
+          ]
+        },
+        {
+          role: "user",
+          content: [
+            { type: "tool_result", tool_use_id: "t1", content: "sunny" }
+          ]
+        }
+      ];
+
+      const output = svc.sanitizeToolCallsAndResults(input);
+      expect(output).toEqual(input);
+    });
+
+    it("strips uncompleted tool_use blocks", () => {
+      const svc = createService();
+      
+      const input = [
+        { role: "user", content: "Hello" },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Let me check" },
+            { type: "tool_use", id: "t1", name: "get_weather", input: {} }
+          ]
+        },
+        { role: "user", content: "Wait, do something else instead" } // No tool_result!
+      ];
+
+      const output = svc.sanitizeToolCallsAndResults(input);
+      expect(output).toEqual([
+        { role: "user", content: "Hello" },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Let me check" }
+          ]
+        },
+        { role: "user", content: "Wait, do something else instead" }
+      ]);
+    });
+
+    it("removes empty assistant messages if all tool_uses are stripped and no text is left", () => {
+      const svc = createService();
+      
+      const input = [
+        { role: "user", content: "Hello" },
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "t1", name: "get_weather", input: {} }
+          ]
+        },
+        { role: "user", content: "Wait, do something else instead" }
+      ];
+
+      const output = svc.sanitizeToolCallsAndResults(input);
+      expect(output).toEqual([
+        { role: "user", content: "Hello" },
+        { role: "user", content: "Wait, do something else instead" }
+      ]);
+    });
+  });
+
 });

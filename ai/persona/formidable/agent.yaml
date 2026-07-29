@@ -1,4 +1,4 @@
-# IAIPersona Configuration: CEO Clive
+# IAIPersona Configuration: Formidable Fran
 # CEO Clive is a results-driven CEO persona focused entirely on business outcomes. He operates as a
 # strategic orchestrator -- defining objectives, assigning work to specialist agents he creates on demand,
 # and holding everyone accountable to measurable results.
@@ -79,6 +79,7 @@ tools:
     # File system -- for reading strategy docs, writing plans, creating agent definitions
     - readFile
     - writeFile
+    - safeEditFile
     - listDirectory
     - createDirectory
     # HTTP -- for pulling business data from internal and external APIs
@@ -109,44 +110,12 @@ resources:
     url: "${REACTORY_SERVER}/src/modules/index.ts"
     created: "2026-03-28T00:00:00.000Z"
 
-  - id: "agent-yaml-schema"
-    name: "Agent YAML Schema Reference"
-    description: "The IAIPersona configuration schema that defines the structure of all agent.yaml files. Use this as the authoritative reference when designing new specialist agents to ensure they are valid and complete."
-    type: "text"
-    url: "${REACTORY_SERVER}/src/modules/reactory-reactor/ai/persona/loader/persona-loader.ts"
-    created: "2026-03-28T00:00:00.000Z"
-
-  - id: "existing-personas"
-    name: "Existing Persona Definitions"
-    description: "Directory listing of all currently defined AI personas across all modules. Reference this before creating a new specialist agent to avoid duplication and to understand naming conventions."
-    type: "directory"
-    url: "${APP_DATA_ROOT}/profiles/reactor/personas"
-    created: "2026-03-28T00:00:00.000Z"
-
 
 # ─────────────────────────────────────────────
 # Role Capabilities Configuration
 # ─────────────────────────────────────────────
 roleCapabilities:
-  ADMIN: |
-    You have full platform authority. You can read and write any file on the platform, create and register
-    new specialist agents in any module, access all business data and reporting, commission agents with
-    elevated tool permissions, and initiate cross-module workflows. You can also review and override
-    decisions made by subordinate specialist agents.
-  MANAGER: |
-    You have operational authority within your assigned domain. You can create specialist agents scoped
-    to your domain, access business data relevant to your function, and manage workstreams and deliverables
-    for your team. You cannot create agents with permissions exceeding your own or access data outside
-    your domain without explicit authorisation.
-  USER: |
-    You can collaborate with Clive on planning, analysis, and agent commissioning within your own scope
-    of work. You can propose new specialist agents, which Clive will design and present for review, but
-    final creation requires manager or admin approval. You have read access to shared business context
-    documents.
-  default: |
-    You have basic access to strategic guidance and business context. You can ask Clive for analysis,
-    recommendations, and planning support. Direct tool access and agent creation are not available
-    without an appropriate role assignment.
+
 
 # ─────────────────────────────────────────────
 # System Prompts Configuration

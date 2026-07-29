@@ -19,6 +19,31 @@ function generateId(): string {
 }
 
 /**
+ * Truncates a string or object to a safe length to prevent context and storage bloat.
+ */
+function safeTruncate(val: unknown, maxChars = 2000): unknown {
+  if (val === undefined || val === null) return val;
+  if (typeof val === 'string') {
+    if (val.length > maxChars) {
+      return `${val.slice(0, maxChars)}... [TRUNCATED - Original length: ${val.length} chars. Use files for large content]`;
+    }
+    return val;
+  }
+  if (typeof val === 'object') {
+    try {
+      const str = JSON.stringify(val);
+      if (str.length > maxChars) {
+        return `${str.slice(0, maxChars)}... [TRUNCATED - Original stringified length: ${str.length} chars. Use files/variables for large content]`;
+      }
+      return val;
+    } catch {
+      return '[Unserializable Object]';
+    }
+  }
+  return val;
+}
+
+/**
  * Retrieve all todo lists from state vars.
  */
 function getTodoLists(state: ChatState): Record<string, TodoList> {
@@ -149,7 +174,7 @@ export const TodoMacro: Macro<unknown, TodoMacroProps> = async (
         const todoItem: TodoItem = {
           id: generateId(),
           title: props.title,
-          description: props.description,
+          description: safeTruncate(props.description) as string | undefined,
           status: 'pending',
           assignee: props.assignee,
           createdAt: now,
@@ -194,8 +219,8 @@ export const TodoMacro: Macro<unknown, TodoMacroProps> = async (
         }
 
         if (props.status) item.status = props.status;
-        if (props.description !== undefined) item.description = props.description;
-        if (props.result !== undefined) item.result = props.result;
+        if (props.description !== undefined) item.description = safeTruncate(props.description) as string | undefined;
+        if (props.result !== undefined) item.result = safeTruncate(props.result);
         if (props.assignee !== undefined) item.assignee = props.assignee;
         item.updatedAt = now;
         list.updatedAt = now;
