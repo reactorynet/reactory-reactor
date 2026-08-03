@@ -983,6 +983,31 @@ class ReactorSystemGraph {
       };
     }
   }
+
+  @mutation("ReactorUpdateNode")
+  async ReactorUpdateNode(
+    _: any,
+    args: { id: number; data: any },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode>> {
+    const { id, data } = args;
+    const node = await ReactorNodeModel.findOneAndUpdate(
+      { id },
+      { 
+        $set: { 
+          data,
+          updated: new Date()
+        } 
+      },
+      { new: true }
+    ).lean();
+
+    if (!node) {
+      throw new Error(`Node not found with ID ${id}`);
+    }
+
+    return node as unknown as Partial<ReactorNode>;
+  }
 }
 
 export default ReactorSystemGraph;

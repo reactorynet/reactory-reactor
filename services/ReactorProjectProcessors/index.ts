@@ -6,3 +6,5 @@ export { default as PythonProjectProcessor } from './Python/PythonProjectProcess
 export { default as ReactNativeProjectProcessor } from './ReactNative/ReactNativeProjectProcessor';
 export { default as TSqlProjectProcessor } from './TSql/TSqlProjectProcessor';
 export { default as BackStageProjectProcessor } from './BackStage/BackStageProjectProcessor';
+export { default as DevOpsProjectProcessor } from './DevOps/DevOpsProjectProcessor';
+export { default as MarkdownProjectProcessor } from './Markdown/MarkdownProjectProcessor';

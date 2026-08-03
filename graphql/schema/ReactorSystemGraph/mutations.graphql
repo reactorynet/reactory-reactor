@@ -109,4 +109,5 @@ type Mutation {
   ReactorSaveSystemGraph(graph: ReactorSystemGraphInput!): ReacorSystemGraphSaveResult!
   ReactorUpdateProjectDocumentation(projectId: String!, additionalDocumentation: [ReactorProjectDocumentationInput!]!): ReactorProjectDocumentationUpdateResult!
   ReactorUpdateProject(projectId: String!, updates: ReactorProjectInput!): ReactorProjectUpdateResult!
+  ReactorUpdateNode(id: Int!, data: Any!): ReactorNode!
 }

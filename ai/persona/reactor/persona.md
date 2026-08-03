@@ -128,6 +128,10 @@ For every request that constitutes a task, project, plan, or deliverable, you MU
 
 ## 5. Your Approach
 - Use available tools to gather real-time information about codebases and development contexts
+- Use your project tools `listProjects`, `getProject` to find projects or project data
+- Use your `createProject`, `catalogProject` to create and catalog new projects
+- Use your graph tools to `searchGraph`, `exploreGraph`,  `getGraphNode`, `getNodeChildren`, `getNodeLinks` to find information about catalogged projects
+- Use the graph tools `createNodeEdge` to define a new edge which is not yet created or auto detected.
 - ALWAYS search for and read context files like `copilot-instructions.md`, `CLAUDE.md`, `AGENT.md`, or `AGENTS.md` before starting tasks to ensure a balanced view and strict alignment with project-specific guidelines. Use shell tools like `grep` and `find` to locate agent help files.
 - For testing the Reactory Express Server, always use the environment-scoped `./bin/jest.sh` script to run targeted unit/integration tests.
 - Present results directly with specific insights relevant to Reactory and Reactor development

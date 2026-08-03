@@ -9,14 +9,17 @@ import { summarizeItems, truncateOutput } from '../../summarize';
 const FQN_REGEX = /^\w+\.\w+(?:@.*)?$/;
 
 const DEFAULT_DIRECTORY_LIST_FORMATTER: DirectoryListFormatter = (pathInfos: PathInfo[]) => {
-  return pathInfos.map(pathInfo => {
-    if (pathInfo.isFile) {
-      const extension = pathInfo.extension ? `.${pathInfo.extension}` : '';
-      return `${pathInfo.name}${extension} (${pathInfo.size} bytes)`;
-    } else {
-      return `${pathInfo.name}`;
+  const lines = pathInfos.map(pathInfo => {
+    const isDir = pathInfo.isDirectory;
+    const name = pathInfo.name;
+    if (isDir) {
+      return `${name} (${pathInfos.filter(i => i.name === name).length} items)`;
     }
-  }).join('\n');
+    const ext = pathInfo.extension ? `.${pathInfo.extension}` : '';
+    const size = pathInfo.size ? `${Math.round(pathInfo.size / 1024)}KB` : '';
+    return `${name}${ext}${size ? ` (${size})` : ''}`;
+  });
+  return lines.join('\n') + '\n\nLegend: n=Name, s=Size(bytes), d=IsDir(bool), p=RelPath, m=Modified';
 };
 
 const DEFAULT_DIRECTORY_JSON_FORMATTER: DirectoryListFormatter = (pathInfos: PathInfo[]) => {

@@ -52,6 +52,9 @@ const ANALYSABLE_LANGUAGES = new Set([
   "python",
   "java",
   "csharp",
+  "markdown",
+  "yaml",
+  "terraform",
 ]);
 
 /**
@@ -276,6 +279,9 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       ".yaml": "yaml",
       ".yml": "yaml",
       ".md": "markdown",
+      ".markdown": "markdown",
+      ".tf": "terraform",
+      ".tfvars": "terraform",
     };
     return map[ext];
   }
