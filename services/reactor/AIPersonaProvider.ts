@@ -184,7 +184,7 @@ class AIPersonaProvider
           for (const persona of personas) {
             try {
               // Register under the loaded reactor module (or first loaded module) so it is visible to getModels()
-              const reactorModule = modules.find(m => m.nameSpace === "reactor") || modules[0];
+              const reactorModule = modules.find(m => m.nameSpace === "reactory" || m.nameSpace === "reactor") || modules[0];
               this.registerPersona(persona, reactorModule || { id: "user", name: "User", nameSpace: "user" } as Reactory.Server.IReactoryModule);
               totalLoaded++;
               log(
