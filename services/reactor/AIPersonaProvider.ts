@@ -107,12 +107,12 @@ class AIPersonaProvider
     this.personaLoader = personaLoader;
   }
 
-  async onStartup(): Promise<void> {
+  async reloadPersonas(): Promise<{ success: boolean; totalLoaded: number }> {
     const { log } = this.context;
     const modules = this.context.modules || [];
     let totalLoaded = 0;
 
-    log(`AIPersonaProvider starting up — scanning ${modules.length} module(s) for AI personas...`, {}, "info", "reactor.AIPersonaProvider");
+    log(`AIPersonaProvider reloading personas — scanning ${modules.length} module(s) for AI personas...`, {}, "info", "reactor.AIPersonaProvider");
 
     for (const mod of modules) {
       if (!mod.id) continue;
@@ -186,7 +186,7 @@ class AIPersonaProvider
               this.registerPersona(persona, { id: "user", name: "User", nameSpace: "user" } as Reactory.Server.IReactoryModule);
               totalLoaded++;
               log(
-                `Registered user AI persona "${persona.name}" (${persona.id}) from user directory (subdirectory ${subdir.name})`,
+                `Registered user AI persona "\ ${persona.name}" (${persona.id}) from user directory (subdirectory ${subdir.name})`,
                 {},
                 "debug",
                 "reactor.AIPersonaProvider",
@@ -223,11 +223,17 @@ class AIPersonaProvider
       }
     }
     log(
-      `AIPersonaProvider startup complete — loaded ${totalLoaded} persona(s) across ${modules.length} module(s)`,
+      `AIPersonaProvider reload complete — loaded ${totalLoaded} persona(s) across ${modules.length} module(s)`,
       {},
       "info",
       "reactor.AIPersonaProvider",
     );
+
+    return { success: true, totalLoaded };
+  }
+
+  async onStartup(): Promise<void> {
+    await this.reloadPersonas();
   }
 
   private applyUserOverrides(persona: IAIPersona): IAIPersona {
