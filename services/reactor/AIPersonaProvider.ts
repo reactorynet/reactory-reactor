@@ -7,6 +7,10 @@ import {
   IAIPersonaProviderService,
 } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import PersonaLoaderService from "@reactory/server-modules/reactory-reactor/ai/persona/loader/persona-loader";
+import {
+  buildSystemPrompt,
+  DEFAULT_ROLE_CAPABILITIES,
+} from "@reactory/server-modules/reactory-reactor/ai/persona/loader/system-prompt";
 
 export type PersonaProviderProps = {};
 export type PersonaProviderContext = Reactory.Server.IReactoryContext & {};
@@ -226,12 +230,150 @@ class AIPersonaProvider
     );
   }
 
+  private applyUserOverrides(persona: IAIPersona): IAIPersona {
+    if (!persona) return persona;
+
+    const userPersonaDir = path.join(
+      process.env.HOME || process.env.USERPROFILE || "",
+      ".reactor",
+      "ai",
+      "persona"
+    );
+
+    if (!fs.existsSync(userPersonaDir)) return persona;
+
+    // We check three candidate directories for the agent ID:
+    // 1. Exact ID (e.g., "ReactorAIPersona")
+    // 2. Lowercase ID (e.g., "reactoraipersona")
+    // 3. Normalized ID (e.g., "reactor" for "ReactorAIPersona" or "Reactor")
+    const candidates = [
+      persona.id,
+      persona.id.toLowerCase(),
+      persona.id.replace(/aipersona/i, "").toLowerCase(),
+    ];
+
+    let overrideDir = "";
+    for (const cand of candidates) {
+      const dir = path.join(userPersonaDir, cand);
+      if (fs.existsSync(dir)) {
+        overrideDir = dir;
+        break;
+      }
+    }
+
+    if (!overrideDir) return persona;
+
+    const personaOverridePath = path.join(overrideDir, "persona.md");
+    const featuresOverridePath = path.join(overrideDir, "features.md");
+    const agentYamlPath = fs.existsSync(path.join(overrideDir, "agent.yaml"))
+      ? path.join(overrideDir, "agent.yaml")
+      : fs.existsSync(path.join(overrideDir, "agent.yml"))
+        ? path.join(overrideDir, "agent.yml")
+        : "";
+
+    let modified = false;
+    let updatedPersona = { ...persona };
+
+    if (agentYamlPath) {
+      try {
+        const yamlContent = fs.readFileSync(agentYamlPath, "utf8");
+        // baseDir lets the override resolve relative prompts.<key>.files entries
+        // against its own directory (~/.reactor/ai/persona/<agent>).
+        updatedPersona = this.personaLoader.mergeWithExisting(updatedPersona, yamlContent, {
+          baseDir: path.dirname(agentYamlPath),
+        });
+        modified = true;
+        this.context.log?.(
+          `AIPersonaProvider: Applied user agent.yaml override for "${persona.id}" from ${agentYamlPath}`,
+          {},
+          "debug",
+          "reactor.AIPersonaProvider"
+          );
+      } catch (err: any) {
+        this.context.error?.(`Failed to merge user agent.yaml override from ${agentYamlPath}: ${err.message}`);
+      }
+    }
+
+    if (fs.existsSync(personaOverridePath)) {
+      try {
+        const customPersonaText = fs.readFileSync(personaOverridePath, "utf8");
+        if (customPersonaText.trim().length > 0) {
+          updatedPersona.persona = customPersonaText;
+          modified = true;
+          this.context.log?.(
+            `AIPersonaProvider: Applied user persona override for "${persona.id}" from ${personaOverridePath}`,
+            {},
+            "debug",
+            "reactor.AIPersonaProvider"
+          );
+        }
+      } catch (err: any) {
+        this.context.error?.(`Failed to read user persona override from ${personaOverridePath}: ${err.message}`);
+      }
+    }
+
+    if (fs.existsSync(featuresOverridePath)) {
+      try {
+        const customFeaturesText = fs.readFileSync(featuresOverridePath, "utf8");
+        if (customFeaturesText.trim().length > 0) {
+          updatedPersona.features = customFeaturesText;
+          modified = true;
+          this.context.log?.(
+            `AIPersonaProvider: Applied user features override for "${persona.id}" from ${featuresOverridePath}`,
+            {},
+            "debug",
+            "reactor.AIPersonaProvider"
+          );
+        }
+      } catch (err: any) {
+        this.context.error?.(`Failed to read user features override from ${featuresOverridePath}: ${err.message}`);
+      }
+    }
+
+    // If we modified either the persona prompt or features, and the persona has a system prompt template,
+    // we must rebuild the prompt content dynamically to reflect the overrides!
+    if (modified && updatedPersona.prompts?.system) {
+      try {
+        const userRoles = (this.context.user?.roles as string[]) || ["USER"];
+
+        // Rebuilt with the same helper the persona loader uses to materialise
+        // ${buildSystemPrompt()} — so overrides get the identical variable set
+        // (date, userRole, roleSpecificCapabilities, toolDescriptions,
+        // resourceDescription, availableTools) regardless of persona flavour.
+        const compiledPrompt = buildSystemPrompt({
+          persona: updatedPersona.persona,
+          features: updatedPersona.features,
+          tools: updatedPersona.tools || [],
+          resources: updatedPersona.resources || [],
+          roleCapabilities: DEFAULT_ROLE_CAPABILITIES,
+          userRoles,
+          onWarning: (message: string) =>
+            this.context.log?.(
+              `AIPersonaProvider: ${persona.id} — ${message}`,
+              {},
+              "warning",
+              "reactor.AIPersonaProvider",
+            ),
+        });
+
+        updatedPersona.prompts.system = {
+          ...updatedPersona.prompts.system,
+          content: compiledPrompt,
+        };
+      } catch (promptErr: any) {
+        this.context.error?.(`Failed to re-compile system prompt after overrides: ${promptErr.message}`);
+      }
+    }
+
+    return updatedPersona;
+  }
+
   async listPersonas(): Promise<IAIPersona[]> {
     let personas: IAIPersona[] = await this.modelRegistry.getModels<IAIPersona>({
       name: "*aipersona",
     });
 
-    return personas;
+    return personas.map(p => this.applyUserOverrides(p));
   }
 
   async getPersona(id: string): Promise<IAIPersona> {

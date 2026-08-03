@@ -15,7 +15,10 @@ import {
   TSqlProjectProcessor,
   CSharpProjectProcessor,
   NodeJSProjectProcessor,
-  ReactNativeProjectProcessor
+  ReactNativeProjectProcessor,
+  PythonProjectProcessor,
+  BackStageProjectProcessor,
+  FileProjectProcessor
 } from './SystemGraphProjectProviders';
 import DocumentChunkingService from "./reactor/DocumentChunkingService";
 import { StreamingSessionManager } from "./reactor/StreamingSessionManager";
@@ -44,6 +47,9 @@ export default [
   CSharpProjectProcessor,
   NodeJSProjectProcessor,
   ReactNativeProjectProcessor,
+  PythonProjectProcessor,
+  BackStageProjectProcessor,
+  FileProjectProcessor,
   DocumentChunkingService,
   MCPRegistryService,
   StreamingSessionManager,

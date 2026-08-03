@@ -61,6 +61,13 @@ export enum ReactorLinkType {
   IMPLEMENTS = 'IMPLEMENTS',
   /** A references B (generic symbol reference). */
   REFERENCE = 'REFERENCE',
+  /** A is a symlink resolving to B (filesystem symbolic link). */
+  SYMLINK = 'SYMLINK',
+  /**
+   * A contains B (parent → child containment). Synthesized in subgraph
+   * responses from `parentId` — never persisted to reactor_node_links.
+   */
+  CONTAINS = 'CONTAINS',
 }
 
 export interface ReactorNodeLink {
@@ -121,8 +128,76 @@ export interface ReactorNode extends Reactory.IComponentFqnDefinition {
   data: any
 }
 
-export interface ReactorDataNode<T> extends ReactorNode { 
+export interface ReactorDataNode<T> extends ReactorNode {
   data: T
+}
+
+/**
+ * Options controlling a bounded traversal of the persisted system graph.
+ * All numeric options are clamped server-side to their documented caps.
+ */
+export interface ReactorSubgraphOptions {
+  /** BFS depth from the root node. Default 2, hard cap 5. */
+  depth?: number
+  /** Which edge directions to follow from the frontier. Default 'both'. */
+  direction?: 'in' | 'out' | 'both'
+  /** Restrict traversal to edges carrying at least one of these types. */
+  linkTypes?: (ReactorLinkType | string)[]
+  /** Restrict result nodes to these types (root is always included). */
+  nodeTypes?: (ReactorNodeType | string)[]
+  /** Maximum number of nodes in the result. Default 500, hard cap 2000. */
+  limit?: number
+  /** Synthesize CONTAINS edges from parentId relationships. Default true. */
+  includeContainment?: boolean
+  /**
+   * When true, lazily materialize filesystem children for frontier nodes that
+   * have no persisted children, up to `materializeBudget` expansions.
+   * Default false — persisted-graph only.
+   */
+  materialize?: boolean
+  /** Maximum lazy children expansions when `materialize` is true. Default 200. */
+  materializeBudget?: number
+}
+
+/**
+ * A saved explorer view: node positions, expanded node set and camera.
+ * Supersedes ReactorNodeUI (which was never wired to any resolver).
+ */
+export interface ReactorGraphPerspective {
+  id?: string | ObjectId
+  name: string
+  /** Owning user id — always resolved server-side. */
+  owner: string | ObjectId
+  projectId?: string
+  rootNodeId?: number
+  nodePositions: { nodeId: number; x: number; y: number; z?: number }[]
+  expandedKeys?: string[]
+  viewport?: {
+    cameraX?: number
+    cameraY?: number
+    cameraZ?: number
+    targetX?: number
+    targetY?: number
+    targetZ?: number
+    zoom?: number
+  }
+  share?: boolean
+  created?: Date
+  updated?: Date
+}
+
+/** Result of a bounded subgraph traversal. */
+export interface ReactorSubgraph {
+  rootId: number
+  nodes: Partial<ReactorNode>[]
+  links: Partial<ReactorNodeLink>[]
+  /** True when the traversal stopped because a limit or budget was reached. */
+  truncated: boolean
+  stats?: {
+    nodeCount: number
+    linkCount: number
+    depthReached: number
+  }
 }
 
 export interface ReactorNodePosition {

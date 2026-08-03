@@ -17,6 +17,7 @@ import {
 } from "../../../types/model.types";
 import { IAIPersona, IAIPersonaPromptTemplate, IAIProviderService } from "../../../types/service.types";
 import { AIProviderError } from "./AIProviderError";
+import { resolvePromptDirectives } from "../../../ai/persona/loader/system-prompt";
 
 abstract class AIProviderBase implements IAIProviderService {
   context: Reactory.Server.IReactoryContext;
@@ -169,8 +170,8 @@ abstract class AIProviderBase implements IAIProviderService {
         persona,
         vars: chatSession.vars || {},
         sseSession: chatSession.sseSessionId,
-        macros: chatSession.macros || [],
-        tools: chatSession.tools || [],
+        macros: chatSession.macros,
+        tools: chatSession.tools,
         files: chatSession.files || [],
         toolApprovalMode: chatSession.toolApprovalMode || (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
         apiKey: undefined,
@@ -209,6 +210,17 @@ abstract class AIProviderBase implements IAIProviderService {
     }
     
     const promptTemplate: IAIPersonaPromptTemplate = persona.prompts["system"];
+    // YAML personas declare their system prompt as ${buildSystemPrompt()}; the
+    // PersonaLoaderService resolves that at load time. This call is a no-op for
+    // already-resolved content and a safety net for personas that bypassed the loader.
+    const promptContent = resolvePromptDirectives(promptTemplate.content || "", {
+      persona: persona.persona,
+      features: persona.features,
+      tools: persona.tools || [],
+      resources: persona.resources || [],
+      userRoles: (this.context.user?.roles as string[]) || ["USER"],
+    });
+
     return {
       role: "system",
       // Interpolate only the classic <%= ... %> delimiter, NOT the ES ${...}
@@ -221,7 +233,7 @@ abstract class AIProviderBase implements IAIProviderService {
       // `${env.VAR_NAME}` throws a ReferenceError at runtime — corrupting or crashing
       // the system prompt. Overriding `interpolate` with a fresh regex disables the
       // ES delimiter (lodash only enables it when the default interpolate regex is used).
-      content: this.context.utils.lodash.template(promptTemplate.content, {
+      content: this.context.utils.lodash.template(promptContent, {
         interpolate: /<%=([\s\S]+?)%>/g,
       })({
         persona: persona,

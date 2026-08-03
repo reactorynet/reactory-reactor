@@ -127,6 +127,7 @@ type ReactorMacro {
   description: String
   alias: String
   icon: String
+  category: String
   params: Any
   roles: [String]
   runat: ReactorMacroRunAt!  
@@ -157,6 +158,7 @@ type ReactorToolDefinition {
   propsMap: Any
   function: ReactorFunction
   roles: [String]
+  category: String
   runat: ReactorMacroRunAt
   """
   Which tool-approval modes this tool is available in.

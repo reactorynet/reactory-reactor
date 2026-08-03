@@ -4,6 +4,7 @@ import ReactorPersona from './ReactorPersona';
 import ReactorMacro from './ReactorMacro';
 import ReactorTool from './ReactorTool';
 import ReactorSystemGraph from './ReactorSystemGraph';
+import ReactorGraphPerspective from './ReactorGraphPerspective';
 import ReactorSystem from './Platform/ReactorSystem';
 import ReactorProviders from './ReactorProviders';
 import MCPRegistryResolvers from '../mcp/resolvers';
@@ -13,6 +14,7 @@ import ReactorProviderAuth from './ReactorProviderAuth';
 export default mergeGraphResolver([
   ReactorChat,
   ReactorSystemGraph,
+  ReactorGraphPerspective,
   ReactorPersona,
   ReactorMacro,
   ReactorTool,

@@ -10,7 +10,8 @@ extend type Query {
   ReactorNodesByTerm(term: String!): [ReactorNode!]
   ReactorNodesByNameAndNameSpace(name: String!, nameSpace: String!, term: String, paging: PagingRequest): ReactorPagedNodes
   ReactorProjects(filter: ReactorProjectFilter): ReactorPagedProjects
-  ReactorProject(id: Int!): ReactorProject
+  # id is the project's ObjectId string, FQN, name or repo path.
+  ReactorProject(id: String!): ReactorProject
   ReactorProjectByName(name: String!): ReactorProject
   ReactorProjectMetrics(projectMetricsQuery: ReactorProjectMetricsQueryInput!): [ReactorProjectMetrics]      
 }

@@ -45,6 +45,7 @@ import { StreamingTransportManager } from "./StreamingTransportManager";
 import { StreamingEventFactory } from "./streaming/StreamingEventFactory";
 import { ChatSessionResourceManager } from "./ChatSessionResourceManager";
 import { loadSessionMcpConfig } from "../../ai/macro/mcp/session-config";
+import { resolvePromptDirectives } from "../../ai/persona/loader/system-prompt";
 /**
  * Enhanced error response interface with correlation tracking
  */
@@ -289,6 +290,46 @@ export default class ReactorConversationService
    * Checked at each iteration of the AUTO tool execution loop.
    */
   private static interruptedSessions: Map<string, string> = new Map();
+
+  /**
+   * Tracks pending visual neuron background graphing timeouts.
+   * Key: conversationId, Value: NodeJS.Timeout.
+   */
+  private static graphingSchedules: Map<string, NodeJS.Timeout> = new Map();
+
+  /** Cancel any pending visual neuron background graphing timeout for a conversation */
+  private cancelGraphingSchedule(conversationId: string): void {
+    const pending = ReactorConversationService.graphingSchedules.get(conversationId);
+    if (pending) {
+      clearTimeout(pending);
+      ReactorConversationService.graphingSchedules.delete(conversationId);
+      this.sessionLog("info", "Cancelled pending graphing workflow schedule for conversation", { conversationId });
+    }
+  }
+
+  /** Schedule the ProcessConversationWorkflow to run in 60 seconds */
+  private scheduleGraphing(conversationId: string): void {
+    this.cancelGraphingSchedule(conversationId);
+
+    const timeoutId = setTimeout(async () => {
+      try {
+        ReactorConversationService.graphingSchedules.delete(conversationId);
+        this.sessionLog("info", "Triggering async graphing workflow for conversation", { conversationId });
+        
+        const workflowService = this.context.getService<any>('core.ReactoryWorkflowService@1.0.0');
+        if (workflowService) {
+          await workflowService.startWorkflow('reactor.ProcessConversationWorkflow@1.0.0', {
+            conversationId,
+          });
+        }
+      } catch (err) {
+        this.sessionLog("error", "Failed to run async graphing workflow", { conversationId, error: (err as Error).message });
+      }
+    }, 60000);
+
+    ReactorConversationService.graphingSchedules.set(conversationId, timeoutId);
+    this.sessionLog("info", "Scheduled async graphing workflow for conversation in 60s", { conversationId });
+  }
 
   /**
    * Initialize the ReactorConversationService with dependencies
@@ -1418,12 +1459,12 @@ export default class ReactorConversationService
     }
 
     // Remove messages from the beginning (oldest) until we're under the limit
-    const messagesToKeep = [];
-    const messagesToMove = [];
+    // We keep a contiguous suffix of non-system messages. Once we hit the limit,
+    // we cannot keep any older non-system messages to prevent gaps in the timeline.
+    const keptNonSystemMessages: any[] = [];
+    const archivedNonSystemMessages: any[] = [];
     let tokensUsed = systemTokens;
-
-    // Add system messages first
-    messagesToKeep.push(...systemMessages);
+    let hitLimit = false;
 
     // Add recent messages, working backwards
     for (let i = nonSystemMessages.length - 1; i >= 0; i--) {
@@ -1432,16 +1473,33 @@ export default class ReactorConversationService
         message as ReactorConversationHistoryItem
       );
 
-      if (tokensUsed + messageTokens <= targetTokens) {
-        messagesToKeep.unshift(message); // Add to beginning to maintain order
+      if (!hitLimit && tokensUsed + messageTokens <= targetTokens) {
+        keptNonSystemMessages.unshift(message);
         tokensUsed += messageTokens;
       } else {
-        // Move message to truncated history instead of discarding
-        messagesToMove.unshift(message);
+        hitLimit = true;
+        archivedNonSystemMessages.unshift(message);
         removedMessages++;
         movedToTruncated++;
       }
     }
+
+    // Ensure the first non-system message (oldest kept) is a 'user' message.
+    // This avoids broken sequences (e.g. starting with tool results or assistant responses)
+    // which break LLM completion APIs.
+    while (keptNonSystemMessages.length > 0 && keptNonSystemMessages[0].role !== "user") {
+      const msgToRemove = keptNonSystemMessages.shift();
+      const msgTokens = this.estimateHistoryItemTokens(
+        msgToRemove as ReactorConversationHistoryItem
+      );
+      tokensUsed -= msgTokens;
+      archivedNonSystemMessages.push(msgToRemove); // Move to archived (maintaining chronological order)
+      removedMessages++;
+      movedToTruncated++;
+    }
+
+    const messagesToKeep = [...systemMessages, ...keptNonSystemMessages];
+    const messagesToMove = archivedNonSystemMessages;
 
     // Combine existing truncated history with new messages to move
     const updatedTruncatedHistory = [
@@ -1651,23 +1709,42 @@ export default class ReactorConversationService
     }
 
     // Walk non-system messages newest-first, accumulating tokens for the "keep" set.
+    // We keep a contiguous suffix of non-system messages. Once we hit the limit,
+    // we cannot keep any older non-system messages to prevent gaps in the timeline.
     // Leave room for the summary message (~2000 tokens estimated).
     const summaryBudget = 2000;
     const keepBudget = targetTokens - systemTokens - summaryBudget;
-    const messagesToKeep: any[] = [];
-    const messagesToArchive: any[] = [];
+    const keptNonSystemMessages: any[] = [];
+    const archivedNonSystemMessages: any[] = [];
     let keepTokens = 0;
+    let hitLimit = false;
 
     for (let i = nonSystemMessages.length - 1; i >= 0; i--) {
       const msg = nonSystemMessages[i];
       const msgTokens = this.estimateHistoryItemTokens(msg as ReactorConversationHistoryItem);
-      if (keepTokens + msgTokens <= keepBudget) {
-        messagesToKeep.unshift(msg);
+      if (!hitLimit && keepTokens + msgTokens <= keepBudget) {
+        keptNonSystemMessages.unshift(msg);
         keepTokens += msgTokens;
       } else {
-        messagesToArchive.unshift(msg);
+        hitLimit = true;
+        archivedNonSystemMessages.unshift(msg);
       }
     }
+
+    // Ensure the first non-system message (oldest kept) is a 'user' message.
+    // This avoids broken sequences (e.g. starting with tool results or assistant responses)
+    // which break LLM completion APIs.
+    while (keptNonSystemMessages.length > 0 && keptNonSystemMessages[0].role !== "user") {
+      const msgToRemove = keptNonSystemMessages.shift();
+      const msgTokens = this.estimateHistoryItemTokens(
+        msgToRemove as ReactorConversationHistoryItem
+      );
+      keepTokens -= msgTokens;
+      archivedNonSystemMessages.push(msgToRemove); // Move to archived (maintaining chronological order)
+    }
+
+    const messagesToKeep = keptNonSystemMessages;
+    const messagesToArchive = archivedNonSystemMessages;
 
     if (messagesToArchive.length === 0) {
       this.sessionLog("info", "No messages to archive — skipping compaction", {
@@ -2106,6 +2183,39 @@ export default class ReactorConversationService
     }
 
     return chatState;
+  }
+
+  async updateChatTools(
+    chatSessionId: string,
+    toolNames: string[]
+  ): Promise<any> {
+    this.validateChatSessionId(chatSessionId, "updateChatTools");
+
+    this.sessionLog("info", "Updating session tools", {
+      chatSessionId,
+      toolNames,
+      userId: this.context.user?._id,
+    }, chatSessionId);
+
+    const conversation = await ReactorConversationModel.findOne({
+      _id: chatSessionId,
+      user: this.context.user
+    }).exec();
+
+    if (!conversation) {
+      throw new Error(
+        `Chat session with id ${chatSessionId} not found or you do not have permission to modify it.`
+      );
+    }
+
+    const resolvedTools = this.personaLoader.resolveTools({ includes: toolNames });
+    const resolvedMacros = this.personaLoader.resolveMacros({ includes: toolNames });
+
+    conversation.tools = resolvedTools;
+    conversation.macros = resolvedMacros;
+    await conversation.save();
+
+    return conversation;
   }
 
   /**
@@ -2893,6 +3003,39 @@ export default class ReactorConversationService
       return lastConversation;
     }
 
+    let maxTokens = persona.maxTokens;
+    if (!maxTokens && persona.modelId) {
+      try {
+        const provider = persona.providerId
+          ? await this.providerService.getProvider(persona.providerId)
+          : null;
+        const model = provider?.models?.find((m: any) => m.id === persona.modelId);
+        if (model?.contextLength) {
+          maxTokens = model.contextLength;
+        } else {
+          // Model not found on specified provider — search across all providers
+          const allProviders = await this.providerService.getProviders();
+          for (const p of allProviders) {
+            const found = p.models?.find((m: any) => m.id === persona.modelId);
+            if (found?.contextLength) {
+              maxTokens = found.contextLength;
+              break;
+            }
+          }
+        }
+      } catch (err) {
+        this.context.warn?.(
+          `[getNewConversation] Failed to resolve contextLength for model ${persona.modelId}: ${(err as Error)?.message}`,
+          {},
+          "ReactorConversationService.getNewConversation"
+        );
+      }
+    }
+
+    if (!maxTokens) {
+      maxTokens = TOKEN_LIMITS.DEFAULT_MAX_TOKENS;
+    }
+
     const conversationData: any = {
       personaId: persona.id,
       user: this.context.user,
@@ -2909,7 +3052,7 @@ export default class ReactorConversationService
       started: new Date(),
       toolApprovalMode: ToolApprovalMode.PROMPT,
       tokenCount: 0,
-      maxTokens: persona.maxTokens || TOKEN_LIMITS.DEFAULT_MAX_TOKENS,
+      maxTokens,
     };
 
     try {
@@ -2932,7 +3075,7 @@ export default class ReactorConversationService
         started: new Date(),
         toolApprovalMode: ToolApprovalMode.PROMPT,
         tokenCount: 0,
-        maxTokens: persona.maxTokens || TOKEN_LIMITS.DEFAULT_MAX_TOKENS,
+        maxTokens,
         sseSessionId: sessionId.toString(),
         updated: new Date(),
       };
@@ -3326,6 +3469,7 @@ export default class ReactorConversationService
     // Validate chatSessionId if provided
     if (chatSessionId) {
       this.validateChatSessionId(chatSessionId, "sendMessage");
+      this.cancelGraphingSchedule(chatSessionId);
     }
 
     this.sessionLog("debug", "Sending message", {
@@ -4366,6 +4510,11 @@ export default class ReactorConversationService
     response.sessionId = sessionId;
     if (!response.__typename) {
       response.__typename = 'ReactorChatMessage';
+    }
+
+    // Schedule async conversation graphing 60s after message completion
+    if (sessionId) {
+      this.scheduleGraphing(sessionId);
     }
 
     return response;
@@ -5443,6 +5592,105 @@ export default class ReactorConversationService
     }
   }
 
+  async pinGraphPerspectiveToSession(
+    sessionId: string,
+    perspective: {
+      label: string;
+      kind?: string;
+      rootId?: number;
+      nodeId?: number;
+      nodeName?: string;
+      nodeType?: string;
+    }
+  ): Promise<any> {
+    this.sessionLog("info", "Pinning graph perspective to session", {
+      sessionId,
+      perspective,
+      userId: this.context.user?._id,
+    }, sessionId);
+
+    try {
+      this.validateChatSessionId(sessionId, "pinGraphPerspectiveToSession");
+      if (!perspective?.label) {
+        throw new Error("Perspective label is required");
+      }
+
+      const conversation = await ReactorConversationModel.findOne({
+        _id: sessionId,
+        user: this.context.user,
+      }).exec();
+
+      if (!conversation) {
+        throw new Error(
+          "Conversation not found or you do not have permission to access it"
+        );
+      }
+
+      const { label, kind, rootId, nodeId, nodeName, nodeType } = perspective;
+      const hasRoot = rootId !== undefined && rootId !== null;
+      const hasNode = nodeId !== undefined && nodeId !== null;
+
+      const lines: string[] = [
+        `I have pinned a system graph perspective for this chat session:`,
+        `- Perspective: "${label}"${hasRoot ? ` (graph root node id: ${rootId})` : ""}${kind ? ` [${kind}]` : ""}`,
+      ];
+      if (hasNode) {
+        lines.push(`- Focus node: "${nodeName || nodeId}" (node id: ${nodeId}${nodeType ? `, type: ${nodeType}` : ""})`);
+      }
+      lines.push(
+        "",
+        `When I ask questions, use the graph tools (searchGraph, getGraphNode, graphChildren, exploreGraph, graphLinks) to walk and search this perspective${hasRoot ? ` starting from root node ${rootId}` : ""}${hasNode ? `, prioritising the focus node ${nodeId}` : ""} before answering.`
+      );
+
+      const perspectiveMessage = {
+        id: new ObjectId(),
+        role: "user" as const,
+        content: lines.join("\n"),
+        timestamp: new Date(),
+      };
+
+      const updated = await ReactorConversationModel.findOneAndUpdate(
+        {
+          _id: sessionId,
+          user: this.context.user._id,
+        },
+        {
+          $push: { history: perspectiveMessage },
+          $set: { updated: new Date() },
+        },
+        { new: true, runValidators: true }
+      ).exec();
+
+      if (!updated) {
+        throw new Error("Failed to pin graph perspective to session");
+      }
+
+      return {
+        __typename: "ReactorPinPerspectiveResponse",
+        success: true,
+        message: "Graph perspective pinned to session",
+        sessionId,
+      };
+    } catch (error: any) {
+      this.context.error(`Error pinning graph perspective: ${error.message}`, {
+        error,
+        sessionId,
+        perspective,
+        correlationId: v4(),
+      });
+      return this.createErrorResponse(
+        ReactorErrorCode.FILE_ERROR,
+        error.message || "Error pinning graph perspective to session",
+        {
+          details: error,
+          operation: "pinGraphPerspectiveToSession",
+          conversationId: sessionId,
+          recoverable: true,
+        }
+      );
+    }
+  }
+
   async unpinFolderFromSession(sessionId: string, folderPath: string): Promise<any> {
     this.sessionLog("info", "Unpinning folder from session", {
       sessionId,
@@ -5959,10 +6207,26 @@ export default class ReactorConversationService
         // "Unexpected token ')'" at compile time and `${env.VAR}` throws a ReferenceError at
         // runtime. Overriding `interpolate` with a fresh regex disables the ES delimiter and
         // leaves those literals intact. The try/catch below remains as a defensive fallback.
+        // Personas loaded from YAML have their ${buildSystemPrompt()} directive
+        // materialised by the PersonaLoaderService. Should a persona reach us from a
+        // path that skipped the loader, resolve the directive here rather than
+        // sending the literal token to the model.
+        const systemPromptContent = resolvePromptDirectives(systemPromptTemplate.content || "", {
+          persona: persona.persona,
+          features: persona.features,
+          tools: persona.tools || [],
+          resources: persona.resources || [],
+          userRoles: (this.context.user?.roles as string[]) || ["USER"],
+          onWarning: (message: string) =>
+            this.sessionLog("warn", `System prompt directive: ${message}`, {
+              personaId: args.personaId,
+            }, conversation._id?.toString(), args.personaId),
+        });
+
         let promptText: string;
         try {
           promptText = this.context.utils.lodash.template(
-            systemPromptTemplate.content,
+            systemPromptContent,
             { interpolate: /<%=([\s\S]+?)%>/g }
           )({
             user: {
@@ -5976,6 +6240,8 @@ export default class ReactorConversationService
             session_id: conversation._id?.toString() || "unknown_session",
             user_id: this.context?.user?._id?.toString() || "unknown_user",
             persona_id: persona?.id || "unknown_persona",
+            partner_key: this.context?.partner?.key || "unknown_partner",
+            partner_name: this.context?.partner?.name || "unknown_partner",
             persona: persona,
             macros: macros,
             tools: tools,
@@ -5986,9 +6252,9 @@ export default class ReactorConversationService
           this.sessionLog("warn", "System prompt template interpolation failed, using raw content", {
             personaId: args.personaId,
             userId: this.context?.user?._id?.toString() || "unknown_user",
-            systemPromptContent: systemPromptTemplate.content,
+            systemPromptContent,
           }, conversation._id?.toString(), args.personaId);
-          promptText = systemPromptTemplate.content;
+          promptText = systemPromptContent;
         }
 
         conversation.history.push({

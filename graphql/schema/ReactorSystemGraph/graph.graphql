@@ -1,0 +1,82 @@
+# Graph traversal API — batch node fetch, edge listing, bounded subgraph
+# neighbourhoods and path finding. Backed by reactor.SystemGraphManager@1.0.0.
+
+enum ReactorLinkDirection {
+  IN
+  OUT
+  BOTH
+}
+
+type ReactorPagedLinks {
+  links: [ReactorNodeLink!]
+  paging: PagingResult
+}
+
+type ReactorSubgraph {
+  rootId: Int!
+  nodes: [ReactorNode!]!
+  links: [ReactorNodeLink!]!
+  # True when the traversal stopped early because a limit or budget was hit.
+  truncated: Boolean!
+  nodeCount: Int!
+  linkCount: Int!
+  depthReached: Int
+}
+
+type ReactorGraphPath {
+  found: Boolean!
+  nodes: [ReactorNode!]!
+  links: [ReactorNodeLink!]!
+}
+
+extend type Query {
+  """
+  Batch node resolution by deterministic id. Unknown ids resolve to a
+  minimal placeholder node rather than null.
+  """
+  ReactorNodes(ids: [Int!]!): [ReactorNode!]!
+
+  """
+  Edge listing filtered by source and/or target node ids and link types.
+  """
+  ReactorNodeLinks(
+    sources: [Int!]
+    targets: [Int!]
+    types: [ReactorLinkType!]
+    projectId: String
+    paging: PagingRequest
+  ): ReactorPagedLinks!
+
+  """
+  Bounded BFS neighbourhood from a root node. CONTAINS edges are synthesized
+  from parent/child relationships. `materialize: true` lazily expands
+  filesystem children for un-indexed projects (budgeted).
+  """
+  ReactorSubgraph(
+    rootId: Int!
+    depth: Int
+    direction: ReactorLinkDirection
+    nodeTypes: [ReactorNodeType!]
+    linkTypes: [ReactorLinkType!]
+    limit: Int
+    includeContainment: Boolean
+    materialize: Boolean
+  ): ReactorSubgraph!
+
+  """
+  Bounded shortest-path search between two nodes over persisted edges.
+  """
+  ReactorGraphPath(
+    sourceId: Int!
+    targetId: Int!
+    maxDepth: Int
+    linkTypes: [ReactorLinkType!]
+  ): ReactorGraphPath!
+}
+
+extend type ReactorNode {
+  """
+  Edges touching this node, optionally filtered by direction and type.
+  """
+  links(direction: ReactorLinkDirection, types: [ReactorLinkType!], limit: Int): [ReactorNodeLink!]
+}

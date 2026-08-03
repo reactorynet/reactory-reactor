@@ -7,6 +7,9 @@ const VERSION = '1.0.0';
 
 const YAML_WORKFLOWS = [
   'AgentGitCommit',
+  'AgentGitWorktree',
+  'GraphExplore',
+  'ProcessConversationWorkflow',
 ];
 
 const Workflows: Reactory.Workflow.IWorkflow[] = YAML_WORKFLOWS

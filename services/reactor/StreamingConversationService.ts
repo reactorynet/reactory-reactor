@@ -72,7 +72,7 @@ export class StreamingConversationService extends ReactorConversationService {
       expiry: new Date(Date.now() + 3600000), // 1 hour from now
       headers: {
         'Content-Type': 'text/event-stream',
-        'Cache-Control': 'no-cache',
+        'Cache-Control': 'no-cache, no-transform',
         'Connection': 'keep-alive'
       }
     };

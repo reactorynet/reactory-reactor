@@ -1,0 +1,78 @@
+nameSpace: reactor
+name: GraphExplore
+version: 1.0.0
+description: "Search the system graph for a term, expand the best match's neighbourhood, and summarise it with an AI agent."
+author: "Reactor"
+tags: ["graph", "reactor", "search", "ai", "agent"]
+metadata:
+  timeout: 300000
+  retryPolicy:
+    maxAttempts: 2
+    backoffStrategy: linear
+    initialDelay: 2000
+inputs:
+  term:
+    type: string
+    required: true
+    description: "What to look for in the system graph (file, symbol or free text)."
+  projectName:
+    type: string
+    required: false
+    description: "Optional project name — with nameSpace, searches the project's content index."
+  nameSpace:
+    type: string
+    required: false
+    description: "Optional project nameSpace, used with projectName."
+  personaId:
+    type: string
+    required: false
+    default: "ReactorAIPersona"
+    description: "The AI agent/persona used for the summary."
+outputs:
+  summary:
+    type: string
+    source: "step.summarise.outputs.content"
+    description: "The agent's summary of the graph neighbourhood."
+  nodeCount:
+    type: number
+    source: "step.expand.outputs.count"
+    description: "Number of nodes in the expanded neighbourhood."
+  rootNodeId:
+    type: number
+    source: "step.findNodes.outputs.firstNodeId"
+    description: "The node the neighbourhood was expanded from."
+steps:
+  - id: findNodes
+    name: "Search Graph"
+    type: graph_query
+    config:
+      operation: search
+      term: "${input.term}"
+      projectName: "${input.projectName}"
+      nameSpace: "${input.nameSpace}"
+      limit: 10
+  - id: expand
+    name: "Expand Neighbourhood"
+    type: graph_query
+    dependsOn: findNodes
+    config:
+      operation: subgraph
+      rootId: "${steps.findNodes.outputs.firstNodeId}"
+      depth: 2
+      limit: 150
+  - id: summarise
+    name: "Summarise Neighbourhood"
+    type: agent_conversation
+    dependsOn: expand
+    config:
+      personaId: "${input.personaId}"
+      toolApprovalMode: safe_auto
+      instructions: "You are a concise software-architecture analyst. You are given a neighbourhood of a code graph as node and edge lists."
+      message: |
+        Summarise this code-graph neighbourhood for the term "${input.term}".
+
+        Nodes (id, name, type, path): ${steps.expand.outputs.nodes}
+        Edges (source -type-> target): ${steps.expand.outputs.links}
+
+        Describe what this part of the system does, the key files/symbols and
+        how they relate. Note anything unusual (broken symlinks, isolated nodes).

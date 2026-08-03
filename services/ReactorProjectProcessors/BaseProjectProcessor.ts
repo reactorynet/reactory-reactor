@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import ignore from "ignore";
 import Reactory from "@reactorynet/reactory-core";
 import {
   IReactorProject,
@@ -10,6 +11,7 @@ import {
 } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import {
   ReactorDataNode,
+  ReactorLinkType,
   ReactorNode,
   ReactorNodeLink,
   ReactorNodeType,
@@ -19,6 +21,7 @@ import { PagingRequest } from "@reactory/server-core/database/types";
 import Hash from "@reactory/server-core/utils/hash";
 import {
   appendAncestry,
+  linkId,
   nodeId,
   normalizeRelative,
   pathLogicalKey,
@@ -62,9 +65,40 @@ export interface TreeNodeData {
   repoPath: string; // project root, propagated to every descendant
   projectFqn: string;
   projectId?: string | number;
-  kind: "folder" | "file" | "symbol";
+  kind: "folder" | "file" | "symbol" | "submodule" | "symlink";
   language?: string;
+  /** Symlink metadata — present when kind is 'symlink'. */
+  symlink?: {
+    target: string;
+    relativeTarget?: string;
+    resolvedNodeId?: number;
+    broken: boolean;
+  };
+  /** True for nodes that must never expand children (cycle guard). */
+  noExpand?: boolean;
   [key: string]: any;
+}
+
+/** Filesystem classification of a directory entry, symlink-aware. */
+export interface EntryClassification {
+  /** True when the entry (or a symlink's target) is a directory. */
+  isDir: boolean;
+  isSymlink: boolean;
+  /** True when a symlink's target cannot be resolved (ENOENT/ELOOP). */
+  broken: boolean;
+  /** Canonical (realpath) target of a symlink. */
+  realTarget?: string;
+  /** True when the symlink target resolves inside the repo. */
+  targetInRepo: boolean;
+  /** Repo-relative posix path of the target when in-repo. */
+  relativeTarget?: string;
+}
+
+/** A symlink discovered during the batch file walk. */
+interface SymlinkRecord {
+  fullPath: string;
+  entryName: string;
+  classification: EntryClassification;
 }
 
 /**
@@ -129,6 +163,55 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
   ) {
     this.props = props;
     this.context = context;
+  }
+
+  private gitignoreCache: Record<string, any> = {};
+
+  protected getGitignore(repoPath: string): any {
+    if (!repoPath) return null;
+    let realRepoPath = repoPath;
+    try {
+      realRepoPath = fs.realpathSync(repoPath);
+    } catch {
+      // fallback to original if realpath fails
+    }
+    if (this.gitignoreCache[realRepoPath] !== undefined) {
+      return this.gitignoreCache[realRepoPath];
+    }
+    const gitignorePath = path.join(realRepoPath, ".gitignore");
+    if (fs.existsSync(gitignorePath)) {
+      try {
+        const content = fs.readFileSync(gitignorePath, "utf8");
+        const ig = ignore().add(content);
+        this.gitignoreCache[realRepoPath] = ig;
+        return ig;
+      } catch (err) {
+        this.context.warn(`Failed to read .gitignore at ${realRepoPath}: ${(err as Error).message}`);
+      }
+    }
+    this.gitignoreCache[realRepoPath] = null;
+    return null;
+  }
+
+  protected isPathIgnored(repoPath: string, fullPath: string, isDirectory: boolean): boolean {
+    let realRepoPath = repoPath;
+    let realFullPath = fullPath;
+    try {
+      realRepoPath = fs.realpathSync(repoPath);
+    } catch {
+      // fallback
+    }
+    try {
+      realFullPath = fs.realpathSync(fullPath);
+    } catch {
+      // fallback
+    }
+    const ig = this.getGitignore(realRepoPath);
+    if (!ig) return false;
+    
+    const relativePath = path.relative(realRepoPath, realFullPath).split(path.sep).join("/");
+    const checkPath = relativePath + (isDirectory ? "/" : "");
+    return ig.ignores(checkPath);
   }
 
   // ---- Abstract / overridable language hooks -------------------------------
@@ -250,24 +333,92 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     return node;
   }
 
+  /**
+   * Classifies a directory entry, resolving symlinks to their real target.
+   * A symlink's `isDir` reflects the target's kind (false when broken).
+   */
+  protected classifyEntry(
+    entry: fs.Dirent,
+    fullPath: string,
+    realRepoPath: string
+  ): EntryClassification {
+    if (!entry.isSymbolicLink()) {
+      return {
+        isDir: entry.isDirectory(),
+        isSymlink: false,
+        broken: false,
+        targetInRepo: false,
+      };
+    }
+    try {
+      // statSync follows the link — throws on broken targets and ELOOP cycles.
+      const stat = fs.statSync(fullPath);
+      const realTarget = fs.realpathSync(fullPath);
+      const targetInRepo =
+        !!realRepoPath &&
+        (realTarget === realRepoPath ||
+          realTarget.startsWith(realRepoPath + path.sep));
+      return {
+        isDir: stat.isDirectory(),
+        isSymlink: true,
+        broken: false,
+        realTarget,
+        targetInRepo,
+        relativeTarget: targetInRepo
+          ? normalizeRelative(path.relative(realRepoPath, realTarget))
+          : undefined,
+      };
+    } catch {
+      return { isDir: false, isSymlink: true, broken: true, targetInRepo: false };
+    }
+  }
+
   private makeTreeNode(
     parent: Partial<ReactorNode>,
     entryName: string,
     fullPath: string,
     relativePath: string,
-    isDirectory: boolean
+    classification: EntryClassification
   ): ReactorNode {
     const fqn = this.fqnOf(parent);
     const id = nodeId(pathLogicalKey(fqn, relativePath));
+    const { isDir: isDirectory, isSymlink } = classification;
+    const isSubmodule =
+      isDirectory && !isSymlink && fs.existsSync(path.join(fullPath, ".git"));
     const data: TreeNodeData = {
       path: fullPath,
       relativePath,
       repoPath: this.repoPathOf(parent),
       projectFqn: fqn,
       projectId: parent?.data?.projectId,
-      kind: isDirectory ? "folder" : "file",
-      language: isDirectory ? undefined : this.languageForFile(entryName),
+      kind: isSymlink
+        ? "symlink"
+        : isSubmodule
+        ? "submodule"
+        : isDirectory
+        ? "folder"
+        : "file",
+      language: isDirectory || isSymlink ? undefined : this.languageForFile(entryName),
     };
+
+    if (isSymlink) {
+      data.symlink = {
+        target: classification.realTarget || "",
+        relativeTarget: classification.relativeTarget,
+        resolvedNodeId:
+          classification.targetInRepo && classification.relativeTarget
+            ? nodeId(pathLogicalKey(fqn, classification.relativeTarget))
+            : undefined,
+        broken: classification.broken,
+      };
+      // Never expand children through a link node — the real target (reachable
+      // via the SYMLINK edge) expands normally. This is the lazy-tree cycle guard.
+      data.noExpand = true;
+    }
+
+    const describe = isSymlink
+      ? `Symlink ${relativePath}${classification.relativeTarget ? ` -> ${classification.relativeTarget}` : classification.broken ? " (broken)" : ""}`
+      : `${isSubmodule ? "Submodule" : isDirectory ? "Folder" : "File"} ${relativePath}`;
 
     return {
       id,
@@ -275,7 +426,7 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       name: entryName,
       key: appendAncestry(parent.key, id),
       type: isDirectory ? ReactorNodeType.FOLDER : ReactorNodeType.FILE,
-      description: `${isDirectory ? "Folder" : "File"} ${relativePath}`,
+      description: describe,
       parentId: parent.id,
       providerId: parent.providerId,
       nameSpace: parent.nameSpace,
@@ -301,6 +452,10 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     paging: PagingRequest
   ): Promise<ReactorNode[]> {
     const { context } = this;
+
+    // Symlink (and other no-expand) nodes never expand through the link — the
+    // real target node expands normally. Cycle guard for the lazy tree.
+    if (node?.data?.noExpand === true) return [];
 
     // FILE nodes expand into symbols (if a language analyzer is provided).
     if (node.type === ReactorNodeType.FILE) {
@@ -334,20 +489,30 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       return [];
     }
 
+    let realRepoPath = repoPath;
+    try {
+      realRepoPath = fs.realpathSync(repoPath);
+    } catch {
+      // fallback to the raw path
+    }
+
     const children: ReactorNode[] = [];
     for (const entry of entries) {
-      const isDir = entry.isDirectory();
-      if (isDir && this.ignoredDirectories.has(entry.name)) continue;
-      if (!isDir && this.ignoredFiles.has(entry.name)) continue;
-      // The filter only narrows files, never folders (so the tree stays navigable).
-      if (!isDir && filter && !entry.name.match(filter)) continue;
-
       const fullPath = path.join(baseDir, entry.name);
+      const classification = this.classifyEntry(entry, fullPath, realRepoPath);
+      const isDir = classification.isDir && !classification.isSymlink;
+      if (isDir && this.ignoredDirectories.has(entry.name)) continue;
+      if (!isDir && !classification.isSymlink && this.ignoredFiles.has(entry.name)) continue;
+      // The filter only narrows files, never folders (so the tree stays navigable).
+      if (!isDir && !classification.isSymlink && filter && !entry.name.match(filter)) continue;
+
+      if (this.isPathIgnored(repoPath, fullPath, isDir)) continue;
+
       const relativePath = path
         .relative(repoPath, fullPath)
         .split(path.sep)
         .join("/");
-      children.push(this.makeTreeNode(node, entry.name, fullPath, relativePath, isDir));
+      children.push(this.makeTreeNode(node, entry.name, fullPath, relativePath, classification));
     }
 
     // Stable ordering: folders first, then files, alphabetical within each.
@@ -380,46 +545,141 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
    */
   protected listFiles(
     project: Partial<IReactorProject>,
-    maxFiles = 20000
+    maxFiles = 20000,
+    symlinks?: SymlinkRecord[]
   ): Partial<IReactorProjectFileSpec>[] {
     const specs: Partial<IReactorProjectFileSpec>[] = [];
     const roots: { dir: string; type: string; filter?: string }[] = [];
+    // Real (canonical) directories already walked — guards against symlink
+    // cycles and double-walking directories reachable via multiple links.
+    const visitedRealDirs = new Set<string>();
+
+    const realRepoPath = project.repoPath ? fs.realpathSync(project.repoPath) : "";
 
     if (project.pathSpecs && project.pathSpecs.length > 0) {
       project.pathSpecs.forEach((ps) =>
         roots.push({
           dir: path.isAbsolute(ps.path)
             ? ps.path
-            : path.join(project.repoPath || "", ps.path),
+            : path.join(realRepoPath || "", ps.path),
           type: ps.type,
           filter: ps.filter,
         })
       );
-    } else if (project.repoPath) {
-      roots.push({ dir: project.repoPath, type: "file" });
+    } else if (realRepoPath) {
+      roots.push({ dir: realRepoPath, type: "file" });
     }
 
-    const walk = (dir: string, type: string, filter?: string) => {
+    const ig = this.getGitignore(realRepoPath);
+
+    const walk = (
+      dir: string,
+      type: string,
+      filter?: string,
+      parentIg?: any,
+      gitignoreDir?: string
+    ) => {
       if (specs.length >= maxFiles) return;
+
+      let currentIg = parentIg;
+      let currentGitignoreDir = gitignoreDir;
+
+      let realDir = dir;
+      try {
+        realDir = fs.realpathSync(dir);
+      } catch {
+        // fallback
+      }
+
+      if (visitedRealDirs.has(realDir)) return;
+      visitedRealDirs.add(realDir);
+
+      const gitignorePath = path.join(realDir, ".gitignore");
+      if (fs.existsSync(gitignorePath)) {
+        try {
+          const content = fs.readFileSync(gitignorePath, "utf8");
+          currentIg = ignore().add(content);
+          currentGitignoreDir = realDir;
+        } catch {
+          // ignore
+        }
+      }
+
       let entries: fs.Dirent[];
       try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
+        entries = fs.readdirSync(realDir, { withFileTypes: true });
       } catch {
         return;
       }
+
       for (const entry of entries) {
         if (specs.length >= maxFiles) return;
-        const full = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
+        const full = path.join(realDir, entry.name);
+
+        // Symlinks are recorded (node + resolution edge material) but never
+        // recursed or spec'd through the link: in-repo targets are indexed at
+        // their real location; out-of-repo targets stay metadata only.
+        if (entry.isSymbolicLink()) {
+          if (symlinks) {
+            symlinks.push({
+              fullPath: full,
+              entryName: entry.name,
+              classification: this.classifyEntry(entry, full, realRepoPath),
+            });
+          }
+          continue;
+        }
+
+        let realFull = full;
+        try {
+          realFull = fs.realpathSync(full);
+        } catch {
+          // fallback
+        }
+        const isDirectory = entry.isDirectory();
+
+        if (isDirectory) {
           if (this.ignoredDirectories.has(entry.name)) continue;
-          walk(full, type, filter);
+
+          const relToRoot = path.relative(realRepoPath || "", realFull).split(path.sep).join("/");
+          const checkPath = relToRoot + "/";
+          if (ig && ig.ignores(checkPath)) continue;
+
+          if (currentIg && currentGitignoreDir && currentGitignoreDir !== realRepoPath) {
+            const relToGitignore = path.relative(currentGitignoreDir, realFull).split(path.sep).join("/");
+            if (currentIg.ignores(relToGitignore + "/")) continue;
+          }
+
+          // Check if it's a submodule or nested repository
+          const dotGitPath = path.join(realFull, ".git");
+          if (fs.existsSync(dotGitPath)) {
+            if (!project.submodules) {
+              project.submodules = [];
+            }
+            if (!project.submodules.includes(realFull)) {
+              project.submodules.push(realFull);
+            }
+            continue;
+          }
+
+          walk(realFull, type, filter, currentIg, currentGitignoreDir);
         } else {
           if (this.ignoredFiles.has(entry.name)) continue;
+
+          const relToRoot = path.relative(realRepoPath || "", realFull).split(path.sep).join("/");
+          if (ig && ig.ignores(relToRoot)) continue;
+
+          if (currentIg && currentGitignoreDir && currentGitignoreDir !== realRepoPath) {
+            const relToGitignore = path.relative(currentGitignoreDir, realFull).split(path.sep).join("/");
+            if (currentIg.ignores(relToGitignore)) continue;
+          }
+
           if (filter && !entry.name.match(filter)) continue;
+
           specs.push({
-            id: Hash(`${project.repoPath}-${full}-${type}`),
+            id: Hash(`${realRepoPath}-${realFull}-${type}`),
             type,
-            path: full,
+            path: realFull,
             content: "<NOTREAD>",
           });
         }
@@ -427,7 +687,15 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     };
 
     roots.forEach((r) => {
-      if (fs.existsSync(r.dir)) walk(r.dir, r.type, r.filter);
+      let realRDir = r.dir;
+      try {
+        if (fs.existsSync(r.dir)) {
+          realRDir = fs.realpathSync(r.dir);
+        }
+      } catch {
+        // fallback
+      }
+      if (fs.existsSync(realRDir)) walk(realRDir, r.type, r.filter, ig, realRepoPath);
       else this.context.warn(`Path ${r.dir} does not exist`);
     });
 
@@ -488,6 +756,67 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
         kind: "file",
         language: this.languageForFile(absPath),
       },
+    };
+  }
+
+  /** Builds a symlink node parented to the project root (used by batch process). */
+  private symlinkNodeForProcess(
+    root: Partial<ReactorNode>,
+    project: Partial<IReactorProject>,
+    record: SymlinkRecord
+  ): ReactorNode {
+    const fqn = projectFqn(project);
+    let realRepoPath = project.repoPath || "";
+    try {
+      realRepoPath = fs.realpathSync(project.repoPath || "");
+    } catch {
+      // fallback
+    }
+    const relativePath = normalizeRelative(
+      path.relative(realRepoPath, record.fullPath)
+    );
+    const id = nodeId(pathLogicalKey(fqn, relativePath));
+    const { classification } = record;
+    const resolvedNodeId =
+      classification.targetInRepo && classification.relativeTarget
+        ? nodeId(pathLogicalKey(fqn, classification.relativeTarget))
+        : undefined;
+
+    return {
+      id,
+      index: id,
+      name: record.entryName,
+      key: appendAncestry(root.key, id),
+      // The link node keeps its target's natural type; broken links are FILE.
+      type: classification.isDir ? ReactorNodeType.FOLDER : ReactorNodeType.FILE,
+      description: `Symlink ${relativePath}${classification.relativeTarget ? ` -> ${classification.relativeTarget}` : classification.broken ? " (broken)" : ""}`,
+      parentId: root.id,
+      providerId: this.fqn(),
+      nameSpace: project.nameSpace,
+      version: project.version,
+      source: record.fullPath,
+      categories: [],
+      children: [],
+      inputs: [],
+      outputs: [],
+      metrics: [],
+      created: new Date(),
+      updated: new Date(),
+      data: {
+        path: record.fullPath,
+        relativePath,
+        repoPath: project.repoPath,
+        projectFqn: fqn,
+        projectId: project.id,
+        kind: "symlink",
+        symlink: {
+          target: classification.realTarget || "",
+          relativeTarget: classification.relativeTarget,
+          resolvedNodeId,
+          broken: classification.broken,
+        },
+        noExpand: true,
+      } as TreeNodeData,
     };
   }
 
@@ -598,7 +927,19 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     project: Partial<IReactorProject>
   ): Promise<Partial<IReactorProject>> {
     const next = { ...project };
-    const fileSpecs = this.listFiles(next);
+    // Canonicalize the repo path so it agrees with the realpath'd file paths
+    // the walker produces — otherwise path.relative degrades to ../.. walks
+    // and analyzers drop resolved in-repo edges (e.g. /var vs /private/var
+    // on macOS).
+    if (next.repoPath) {
+      try {
+        next.repoPath = fs.realpathSync(next.repoPath);
+      } catch {
+        // keep the raw path — listFiles guards missing paths itself
+      }
+    }
+    const symlinkRecords: SymlinkRecord[] = [];
+    const fileSpecs = this.listFiles(next, 20000, symlinkRecords);
     next.files = fileSpecs as IReactorProjectFileSpec[];
 
     const root = await this.getProjectNode(next);
@@ -626,6 +967,36 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
           );
         }
       }
+    }
+
+    // Symlink nodes + resolution edges. Edges are only written for in-repo
+    // targets (deterministic target id) — out-of-repo stays metadata only.
+    for (const record of symlinkRecords) {
+      const symlinkNode = this.symlinkNodeForProcess(root, next, record);
+      nodes.push(symlinkNode);
+
+      const resolvedNodeId = (symlinkNode.data as TreeNodeData)?.symlink?.resolvedNodeId;
+      if (resolvedNodeId !== undefined) {
+        edges.push({
+          id: linkId(symlinkNode.id, resolvedNodeId, ReactorLinkType.SYMLINK),
+          source: symlinkNode.id,
+          target: resolvedNodeId,
+          types: [ReactorLinkType.SYMLINK],
+          title: record.classification.relativeTarget,
+          description: symlinkNode.description,
+          projectId: next.id as string | number,
+        } as ReactorNodeLink);
+      }
+
+      searchables.push({
+        id: Hash(`${projectFqn(next)}_symlink_${(symlinkNode.data as TreeNodeData).relativePath}`),
+        name: `symlink_${(symlinkNode.data as TreeNodeData).relativePath}`,
+        nameSpace: next.nameSpace,
+        version: next.version,
+        source: symlinkNode.description,
+        path: record.fullPath,
+        type: { id: "symlink", name: "symlink" },
+      } as Reactory.Models.ISearchable);
     }
 
     nodes.push(...externals.values());

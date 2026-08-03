@@ -23,15 +23,7 @@ const REACTOR_TOOL_INCLUDES = [
   'httpPatch',
   'listDirectory',
   'shell',
-  'codebase_search',
-  'grep_search',
-  'file_search',
-  'run_terminal_cmd',
-  'edit_file',
-  'search_replace',
-  'delete_file',
-  'list_dir',
-  // Playwright browser automation tools
+    // Playwright browser automation tools
   'playwright_open_session',
   'playwright_close_session',
   'playwright_navigate',
@@ -47,8 +39,22 @@ const REACTOR_TOOL_INCLUDES = [
   'playwright_pdf',
   'playwright_page_info',
   'playwright_list_sessions',
+  // skills
   'readSkill',
   'searchSkills',
+  // System graph traversal tools
+  'searchGraph',
+  'getGraphNode',
+  'graphChildren',
+  'exploreGraph',
+  'graphLinks',
+  'createNodeEdge',
+  // Atlassian macros
+  'jiraSearchIssues',
+  'jiraGetIssue',
+  'jiraCreateIssue',
+  'jiraAddComment',
+  'jiraTransitionIssue',
 ];
 
 const REACTOR_RESOURCES: IAIPersonaResource[] = [  
@@ -253,6 +259,57 @@ export const ReactoryPersona: IAIPersona = {
     project: process.env.GOOGLE_AI_STUDIO_PROJECT_ID,
   },
   tools: [...REACTOR_TOOLS],
+  toolProfiles: [
+    {
+      name: "Reactory Development Tools",
+      description: "A collection of tools for Reactory and Reactor development tasks, including code generation, file management, and system operations.",
+      tools: [
+        "writeFile",
+        "readFile",
+        "safeEditFile",
+        "http",
+        "httpPost",
+        "httpGet",
+        "httpPut",
+        "httpDelete",
+        "httpPatch",
+        "listDirectory",
+        "shell",
+      ],
+    },
+    {
+      name: "Playwright Browser Automation Tools",
+      description: "A set of tools for automating browser interactions using Playwright, enabling navigation, interaction, and data extraction from web pages.",
+      tools: [
+        "playwright_open_session",
+        "playwright_close_session",
+        "playwright_navigate",
+        "playwright_click",
+        "playwright_type",
+        "playwright_select",
+        "playwright_press_key",
+        "playwright_get_content",
+        "playwright_inspect",
+        "playwright_wait_for",
+        "playwright_evaluate",
+        "playwright_screenshot",
+        "playwright_pdf",
+        "playwright_page_info",
+        "playwright_list_sessions"
+      ],
+    },
+    {
+      name: "Atlassian Integration Tools",
+      description: "Tools for integrating with Atlassian products like Jira, allowing issue management and workflow automation.",
+      tools: [
+        "jiraSearchIssues",
+        "jiraGetIssue",
+        "jiraCreateIssue",
+        "jiraAddComment",
+        "jiraTransitionIssue"
+      ],
+    }
+  ],
   maxTokens: 1048576,
   // @ts-ignore
   macros: [

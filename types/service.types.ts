@@ -2,7 +2,7 @@ import Reactory from '@reactorynet/reactory-core';
 import OpenAI from "openai"
 import GoogleGenAI from "google-genai";
 import { TReactorConversationDocument, TReactorConversationModel, ReactorConversationHistoryItem } from "../models/ReactorChatState"
-import { AIAudioChatParams, AIChatCompletion, AIChatParams, AIFile, AIFineTuningEvent, AIFineTuningJob, AIImage, AIImageGenerationParams, AIListResponse, AIModel, CreateAIFineTuningJobParams, ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorNodeType, ReactorProviderConfig } from "./model.types"
+import { AIAudioChatParams, AIChatCompletion, AIChatParams, AIFile, AIFineTuningEvent, AIFineTuningJob, AIImage, AIImageGenerationParams, AIListResponse, AIModel, CreateAIFineTuningJobParams, ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorNodeType, ReactorProviderConfig, ReactorSubgraph, ReactorSubgraphOptions } from "./model.types"
 import { PagingRequest, PagingResult } from "@reactory/server-core/database/types"
 import { ObjectId } from "mongodb"
 import { ChatState, MacroComponentDefinition, MacroToolDefinition, Schema, ToolApprovalMode } from '../ai/openai/types/chat';
@@ -325,9 +325,27 @@ export interface IAIAppearance {
 
 export interface IAIPersonaPromptTemplate {
   /**
-   * The content of the prompt
+   * The content of the prompt.
+   *
+   * For YAML personas the content may contain loader directives — e.g.
+   * `${buildSystemPrompt()}` — which the PersonaLoaderService materialises at load
+   * time from the persona's `persona`/`features` markdown, tools, resources and
+   * role capabilities. Conversation-level variables (user, session, partner, …) are
+   * interpolated later, when the chat session starts.
    */
   content?: string;
+  /**
+   * Optional list of files whose contents are concatenated, in sequence, to form the
+   * prompt content. Relative paths resolve against the directory holding the
+   * persona's `agent.yaml`. When `content` is also present it is appended after the
+   * assembled files.
+   */
+  files?: string[];
+  /**
+   * String used to join the assembled `files` (and any trailing `content`).
+   * Defaults to a blank line (`"\n\n"`).
+   */
+  separator?: string;
   /**
    * The variables that are available in the prompt
    */
@@ -365,12 +383,22 @@ export interface IAIPersonaResource {
   created: Date;
 }
 
+export interface IToolProfile {
+  name: string;
+  description: string;
+  tools: string[];
+}
+
 /**
  * Defines the shape fo the AI Persona object
  */
 export interface IAIPersona {
   id: string;
   modelId?: string;
+  /**
+   * Tool profiles allow the agent to have different sets of tools enabled dynamically.
+   */
+  toolProfiles?: IToolProfile[];
   /**
    * Model configuration is model configuration specific to the provider used.
    */
@@ -554,6 +582,13 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
    * @param toolApprovalMode 
    */
   setChatToolApprovalMode(chatSessionId: string, toolApprovalMode: ToolApprovalMode): Promise<any>;
+
+  /**
+   * Updates the active tools list for a chat session.
+   * @param chatSessionId 
+   * @param toolNames 
+   */
+  updateChatTools(chatSessionId: string, toolNames: string[]): Promise<any>;
 
   /**
    * Persist the side panel state for a chat session.
@@ -767,6 +802,19 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
   pinFolderToSession(sessionId: string, folderPath: string, folderName: string): Promise<any>;
 
   unpinFolderFromSession(sessionId: string, folderPath: string): Promise<any>;
+
+  /**
+   * Pins a system graph perspective (and optionally a focus node) to the chat
+   * session by injecting a background user message — no inference is run.
+   */
+  pinGraphPerspectiveToSession(sessionId: string, perspective: {
+    label: string;
+    kind?: string;
+    rootId?: number;
+    nodeId?: number;
+    nodeName?: string;
+    nodeType?: string;
+  }): Promise<any>;
 
   /**
    * Sends a message to the chat session. If no chat session is found then a new one will be created.
@@ -1227,10 +1275,54 @@ export interface ISystemGraphManager extends Reactory.Service.IReactoryDefaultSe
   getLinks(sources: ReactorNode[], types: string[], targets: ReactorNode[]): Promise<ReactorNodeLink[]>;
 
   /**
+   * Batch node resolution by deterministic id. Falls back to the lazy tree
+   * cache and finally a minimal placeholder for unknown ids.
+   */
+  getNodes(ids: number[]): Promise<Partial<ReactorNode>[]>;
+
+  /**
+   * Direction-aware, bounded edge lookup for a set of nodes. Preferred over
+   * getLinks for new callers — always applies a result limit.
+   */
+  getNodeLinks(
+    nodeIds: number[],
+    opts?: {
+      direction?: 'in' | 'out' | 'both';
+      types?: string[];
+      limit?: number;
+      projectId?: string;
+    }
+  ): Promise<ReactorNodeLink[]>;
+
+  /**
+   * Bounded BFS neighbourhood traversal from a root node over the persisted
+   * graph, with optional CONTAINS synthesis and lazy fs materialization.
+   */
+  getSubgraph(rootId: number, opts?: ReactorSubgraphOptions): Promise<ReactorSubgraph>;
+
+  /**
+   * Search nodes by term — project search-index backed when scoped with
+   * nameSpace + name, otherwise regex over the persisted graph.
+   */
+  searchNodes(
+    term: string,
+    opts?: { nameSpace?: string; name?: string; limit?: number }
+  ): Promise<Partial<ReactorNode>[]>;
+
+  /**
+   * Bounded shortest-path search between two nodes over persisted edges.
+   */
+  findPath(
+    sourceId: number,
+    targetId: number,
+    opts?: { maxDepth?: number; linkTypes?: string[]; direction?: 'out' | 'both' }
+  ): Promise<{ found: boolean; nodeIds: number[]; links: ReactorNodeLink[] }>;
+
+  /**
    * Creates a link between two nodes
-   * @param source 
-   * @param type 
-   * @param target 
+   * @param source
+   * @param type
+   * @param target
    */
   createLink(source: ReactorNode, type: string, target: ReactorNode): Promise<ReactorNodeLink>;
 

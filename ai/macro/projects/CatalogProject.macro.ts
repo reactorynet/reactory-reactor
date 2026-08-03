@@ -109,8 +109,29 @@ const CatalogProjectMacro = async (
     // Catalog the project
     const catalogedProject = await reactorProjectService.catalogProject(projectSpec);
 
-    // Store in chat state for AI reference
-    chatState.vars.lastCatalogedProject = catalogedProject;
+    // Calculate file summary and strip the huge files array to prevent context / history bloat
+    const files = catalogedProject.files || [];
+    const filesCount = files.length;
+    const fileTypesBreakdown: Record<string, number> = {};
+    files.forEach(f => {
+      const type = f.type || 'unknown';
+      fileTypesBreakdown[type] = (fileTypesBreakdown[type] || 0) + 1;
+    });
+
+    const fileSummary = {
+      totalFiles: filesCount,
+      breakdown: fileTypesBreakdown
+    };
+
+    // Create a sanitized project object without the massive files list
+    const { files: _, ...sanitizedProject } = catalogedProject;
+    const projectWithSummary = {
+      ...sanitizedProject,
+      fileSummary
+    };
+
+    // Store in chat state for AI reference (using sanitized version to prevent history bloat)
+    chatState.vars.lastCatalogedProject = projectWithSummary;
 
     context.info(`Cataloged project`, {
       id: catalogedProject.id,
@@ -150,6 +171,10 @@ ${catalogedProject.processors?.map(proc => `- ${proc.processor}`).join('\n') || 
 ## Tags
 ${catalogedProject.tags?.map(tag => `- ${tag}`).join('\n') || '- N/A'}
 
+## File Summary
+- **Total Files**: ${fileSummary.totalFiles}
+${Object.entries(fileSummary.breakdown).map(([ext, count]) => `- **${ext}**: ${count} files`).join('\n') || '- N/A'}
+
 ## Catalog Information
 - **Created**: ${catalogedProject.created ? new Date(catalogedProject.created).toLocaleString() : 'N/A'}
 - **Updated**: ${catalogedProject.updated ? new Date(catalogedProject.updated).toLocaleString() : 'N/A'}
@@ -164,7 +189,8 @@ ${catalogedProject.tags?.map(tag => `- ${tag}`).join('\n') || '- N/A'}
             projectName: catalogedProject.name,
             catalogedAt: catalogedProject.updated || catalogedProject.created,
             detectedTypes: catalogedProject.projectTypes?.length || 0,
-            detectedProcessors: catalogedProject.processors?.length || 0
+            detectedProcessors: catalogedProject.processors?.length || 0,
+            fileSummary
           },
           project: {
             id: catalogedProject.id,
@@ -180,7 +206,8 @@ ${catalogedProject.tags?.map(tag => `- ${tag}`).join('\n') || '- N/A'}
             tags: catalogedProject.tags,
             lastSync: catalogedProject.lastSync,
             created: catalogedProject.created,
-            updated: catalogedProject.updated
+            updated: catalogedProject.updated,
+            fileSummary
           }
         };
         break;
@@ -193,9 +220,10 @@ ${catalogedProject.tags?.map(tag => `- ${tag}`).join('\n') || '- N/A'}
             projectName: catalogedProject.name,
             catalogedAt: catalogedProject.updated || catalogedProject.created,
             detectedTypes: catalogedProject.projectTypes?.length || 0,
-            detectedProcessors: catalogedProject.processors?.length || 0
+            detectedProcessors: catalogedProject.processors?.length || 0,
+            fileSummary
           },
-          project: catalogedProject
+          project: projectWithSummary
         };
     }
 
@@ -231,6 +259,11 @@ ${catalogedProject.projectTypes?.map(type => `  - ${type}`).join('\n') || '  - N
 - **Processors**: ${catalogedProject.processors?.length || 0} processors detected
 ${catalogedProject.processors?.map(proc => `  - ${proc.processor}`).join('\n') || '  - None detected'}
 
+### File Summary:
+- **Total Files**: ${fileSummary.totalFiles} files indexed in the project graph.
+- **File Breakdown**:
+${Object.entries(fileSummary.breakdown).map(([ext, count]) => `  - **${ext}**: ${count} files`).join('\n') || '  - No files indexed'}
+
 ### Tags:
 ${catalogedProject.tags?.map(tag => `- ${tag}`).join('\n') || '- N/A'}
 
@@ -239,9 +272,30 @@ ${catalogedProject.tags?.map(tag => `- ${tag}`).join('\n') || '- N/A'}
 - **Updated**: ${catalogedProject.updated ? new Date(catalogedProject.updated).toLocaleString() : 'N/A'}
 
 ### State Variables Available:
-- lastCatalogedProject: The cataloged project
+- lastCatalogedProject: The cataloged project (sanitized, files omitted to prevent history bloat)
 
-The project has been successfully cataloged and processed. Project types and processors have been automatically detected based on the repository content.
+### How to Inspect & Search the Project Graph:
+The files and symbols in this project have been cataloged into the Reactor system graph. To explore and inspect the project structure without context bloat, use the following tools:
+
+1. **Search the Graph**:
+   Use \`searchGraph\` to find specific files, folders, or code symbols and get their node IDs.
+   *Example*: \`searchGraph(term="MyComponent", projectName="${catalogedProject.name}", nameSpace="${catalogedProject.nameSpace}")\`
+
+2. **Get Node Details**:
+   Use \`getGraphNode\` with a node ID to retrieve details and incoming/outgoing connections.
+   *Example*: \`getGraphNode(id=12345)\`
+
+3. **Explore Children / Directory Structure**:
+   Use \`graphChildren\` with a folder or file node ID to expand its contents (folders expand to files, files expand to symbols/methods).
+   *Example*: \`graphChildren(id=12345)\`
+
+4. **Walk the Graph Neighborhood**:
+   Use \`exploreGraph\` with a root node ID to see a neighborhood of connected nodes (e.g., dependencies, call graph).
+   *Example*: \`exploreGraph(rootId=12345, depth=2)\`
+
+5. **List Typed Connections**:
+   Use \`graphLinks\` to list all relationships (e.g., DEPENDENCY, CALL, INHERITS) connected to a specific node.
+   *Example*: \`graphLinks(id=12345)\`
       `
     };
   } catch (error) {

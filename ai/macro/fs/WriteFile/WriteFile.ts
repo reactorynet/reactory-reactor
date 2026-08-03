@@ -322,6 +322,7 @@ export const WriteFileComponentRegister: MacroComponentDefinition<typeof WriteFi
   name: 'writeFile',
   nameSpace: 'reactor',
   version: '1.0.0',
+  category: 'File System',
   description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
   features: [],
   stem: 'file',
@@ -329,6 +330,7 @@ export const WriteFileComponentRegister: MacroComponentDefinition<typeof WriteFi
   tags: ['macro', 'file', 'write', 'save', 'output'],
   tools: [{
     type: "function",
+    category: 'File System',
     function: {
       name: "writeFile",
       description: "Writes content to a file with different modes and returns structured results",

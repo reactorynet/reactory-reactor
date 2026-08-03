@@ -181,14 +181,4 @@ const GridUISchema: Reactory.Schema.IUISchema = {
   }
 };
 
-export const GraphExplorerSchema = { 
-  ...baseUISchema,
-  nodes: {
-    'ui:widget': 'GraphExplorerWidget',
-    'ui:options': {
-      ...MaterialTableUIOptions
-    }
-  }
-}
-
 export default GridUISchema;

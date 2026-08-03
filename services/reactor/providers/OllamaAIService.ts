@@ -85,22 +85,33 @@ class OllamaAIService extends AIProviderBase {
 
   private async getToolDefinitions(): Promise<Tool[]> {
     const tools: Tool[] = [];
-    const macros = await this.macroService.listMacrosForPersona(this.chatState.personaId);
+    let chatTools = this.chatState?.tools;
 
-    macros.forEach((macro: MacroComponentDefinition<unknown>) => {
-      if (macro.tools) {
-        macro.tools.forEach((tool: MacroToolDefinition) => {
-          if (tool.type === "function") {
-            const { function: func } = tool;
-            tools.push({
-              type: "function",
-              function: {
-                name: func.name,
-                description: func.description || "",
-                parameters: func.parameters as Record<string, unknown>,
-              },
-            });
-          }
+    if (chatTools === undefined || chatTools === null) {
+      const macros = await this.macroService.listMacrosForPersona(this.chatState.personaId);
+      const dynamicTools: MacroToolDefinition[] = [];
+      macros.forEach((macro: MacroComponentDefinition<unknown>) => {
+        if (macro.tools) {
+          macro.tools.forEach((tool: MacroToolDefinition) => {
+            if (tool.type === "function") {
+              dynamicTools.push(tool);
+            }
+          });
+        }
+      });
+      chatTools = dynamicTools;
+    }
+
+    chatTools.forEach((tool: MacroToolDefinition) => {
+      if (tool.type === "function") {
+        const { function: func } = tool;
+        tools.push({
+          type: "function",
+          function: {
+            name: func.name,
+            description: func.description || "",
+            parameters: func.parameters as Record<string, unknown>,
+          },
         });
       }
     });

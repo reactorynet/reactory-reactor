@@ -4,6 +4,10 @@ type ReactorNodeLink {
   source: ReactorNode!
   types: [ReactorLinkType]!
   target: ReactorNode!
+  # Raw endpoint ids — prefer these over source/target when only geometry or
+  # adjacency is needed; they avoid a node resolution per edge.
+  sourceId: Int!
+  targetId: Int!
   title: String
   description: String
   data: Any

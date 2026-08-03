@@ -6,6 +6,7 @@ import Reactory from '@reactorynet/reactory-core';
 import { service } from '@reactory/server-core/application/decorators/service';
 import {
   IAIPersona,
+  IAIPersonaPromptTemplate,
   IAIPersonaResource,
 } from '@reactory/server-modules/reactory-reactor/types/service.types';
 import {
@@ -13,6 +14,11 @@ import {
   MacroToolDefinition,
 } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import ReactorMacroService from '@reactory/server-modules/reactory-reactor/services/reactor/providers/ReactorMacroService';
+import {
+  buildSystemPrompt,
+  resolvePromptDirectives,
+  SystemPromptBuildArgs,
+} from './system-prompt';
 
 export interface IAIPersonaConfig {
   id: string;
@@ -36,6 +42,7 @@ export interface IAIPersonaConfig {
     includes?: string[];
     custom?: any[];
   };
+  toolProfiles?: any[];
   resources?: IAIPersonaResource[];
   roleCapabilities?: {
     ADMIN?: string;
@@ -43,7 +50,7 @@ export interface IAIPersonaConfig {
     USER?: string;
     default?: string;
   };
-  prompts?: any;
+  prompts?: Record<string, IAIPersonaPromptTemplate>;
   merge?: {
     mode?: 'merge' | 'replace' | 'create';
     options?: {
@@ -73,6 +80,18 @@ export interface PersonaLoaderOptions {
   validateOnLoad?: boolean;
   processEnvironmentVars?: boolean;
   mergeMode?: 'merge' | 'replace' | 'create';
+  /**
+   * Directory that relative `prompts.<key>.files` entries are resolved against.
+   * `loadFromFile` / `loadFromDirectory` set this automatically to the directory
+   * holding the `agent.yaml`. Callers loading from a string should supply it when
+   * the YAML references prompt files on disk.
+   */
+  baseDir?: string;
+  /**
+   * Roles used when resolving `${roleCapabilities()}` / `${buildSystemPrompt()}`
+   * at load time. Defaults to `['USER']`, matching the TypeScript personas.
+   */
+  userRoles?: string[];
 }
 
 @service({
@@ -164,12 +183,18 @@ class PersonaLoaderService implements Reactory.Service.IReactoryService {
   // ─── YAML Loading ────────────────────────────────────────────────────
 
   /**
-   * Load a persona configuration from a YAML file
+   * Load a persona configuration from a YAML file.
+   *
+   * The file's directory becomes the `baseDir` for relative `prompts.<key>.files`
+   * entries, unless the caller supplies one explicitly.
    */
   loadFromFile(filePath: string, options: PersonaLoaderOptions = {}): IAIPersona {
     try {
       const fileContent = fs.readFileSync(filePath, 'utf8');
-      return this.loadFromString(fileContent, options);
+      return this.loadFromString(fileContent, {
+        ...options,
+        baseDir: options.baseDir || path.dirname(filePath),
+      });
     } catch (error) {
       this.context.error(`Failed to load persona from file ${filePath}: ${error}`, null, 'reactor.PersonaLoaderService');
       throw new Error(`Failed to load persona from file ${filePath}: ${error}`);
@@ -222,16 +247,25 @@ class PersonaLoaderService implements Reactory.Service.IReactoryService {
   // ─── Merge & Save ────────────────────────────────────────────────────
 
   /**
-   * Merge a YAML configuration with an existing IAIPersona
+   * Merge a YAML configuration with an existing IAIPersona.
+   *
+   * Supply `options.baseDir` when the override YAML references prompt files with
+   * relative paths (see `prompts.<key>.files`).
    */
   mergeWithExisting(
     existingPersona: IAIPersona,
     yamlConfig: string | IAIPersonaConfig,
     options: PersonaLoaderOptions = {}
   ): IAIPersona {
-    const config = typeof yamlConfig === 'string'
+    let config = typeof yamlConfig === 'string'
       ? yaml.load(yamlConfig) as IAIPersonaConfig
       : yamlConfig;
+
+    // Environment substitution applies to overrides too — prompt file paths and
+    // resource urls routinely reference ${REACTORY_SERVER} and friends.
+    if (options.processEnvironmentVars !== false) {
+      config = this.processEnvironmentVariables(config);
+    }
 
     const mergeMode = config.merge?.mode || options.mergeMode || 'merge';
 
@@ -323,7 +357,7 @@ class PersonaLoaderService implements Reactory.Service.IReactoryService {
       }
     }
 
-    return this.convertConfigToPersona(config);
+    return this.convertConfigToPersona(config, options);
   }
 
   private processEnvironmentVariables(config: IAIPersonaConfig): IAIPersonaConfig {
@@ -350,12 +384,33 @@ class PersonaLoaderService implements Reactory.Service.IReactoryService {
     return processValue(processedConfig);
   }
 
-  private convertConfigToPersona(config: IAIPersonaConfig): IAIPersona {
+  private convertConfigToPersona(config: IAIPersonaConfig, options: PersonaLoaderOptions = {}): IAIPersona {
     // Ensure registries are populated before resolving
     if (!this.registriesPopulated) {
       this.populateRegistries();
     }
     this.context.log(`Converting persona config ${config?.name || 'Unset - check persona config'} to persona interface`)
+    const tools = this.resolveTools(config.tools);
+    const resources = config.resources || [];
+    const prompts = this.resolvePrompts(config, options, tools, resources);
+
+    // A YAML persona that declares no system prompt still needs one — build it from
+    // the same elements ${buildSystemPrompt()} would have used.
+    if (!prompts.system?.content && (config.persona || config.features)) {
+      prompts.system = {
+        ...(prompts.system || {}),
+        role: 'system',
+        content: buildSystemPrompt({
+          persona: config.persona || '',
+          features: config.features || '',
+          tools,
+          resources,
+          roleCapabilities: (config.roleCapabilities as Record<string, string>) || {},
+          userRoles: options.userRoles?.length ? options.userRoles : ['USER'],
+        }),
+      };
+    }
+
     const persona: IAIPersona = {
       id: config.id,
       name: config.name,
@@ -368,13 +423,142 @@ class PersonaLoaderService implements Reactory.Service.IReactoryService {
       providerId: config.providerId || 'google',
       defaultGreeting: config.defaultGreeting || '',
       config: config.config || {},
-      tools: this.resolveTools(config.tools),
+      tools,
       macros: this.resolveMacros(config.tools, config.macros),
-      resources: config.resources || [],
-      prompts: config.prompts || {}
+      toolProfiles: config.toolProfiles || [],
+      resources,
+      prompts
     };
 
     return persona;
+  }
+
+  // ─── Prompt Resolution ───────────────────────────────────────────────
+
+  /**
+   * Resolves every prompt template declared by a YAML persona.
+   *
+   * Two things happen here, in order:
+   *
+   * 1. **File assembly** — when a prompt declares `files: [...]`, each file is read
+   *    (relative paths resolve against the agent.yaml's directory) and concatenated
+   *    in the order listed, joined by `separator` (default: a blank line). Any inline
+   *    `content` is appended after the assembled files, so a prompt can combine both.
+   * 2. **Directive resolution** — `${buildSystemPrompt()}` and the other directives in
+   *    {@link PROMPT_DIRECTIVES} are replaced with content built from the *same*
+   *    elements the TypeScript personas' `buildSystemPrompt()` helper uses: the
+   *    persona and features markdown, the resolved tool list, the declared resources
+   *    and the role capability map.
+   *
+   * Variable interpolation for the *conversation* (user, session, partner, …) is not
+   * performed here — that remains the responsibility of
+   * `ReactorConversationService.startChatSession` / `sendCannedPrompt`.
+   *
+   * @param config    The (environment-processed) persona configuration.
+   * @param options   Loader options — supplies `baseDir` and `userRoles`.
+   * @param tools     The resolved tool definitions for this persona.
+   * @param resources The resources declared by this persona.
+   * @returns A prompts map whose `content` values are fully materialised.
+   * @since 1.0.0
+   */
+  private resolvePrompts(
+    config: IAIPersonaConfig,
+    options: PersonaLoaderOptions,
+    tools: MacroToolDefinition[],
+    resources: IAIPersonaResource[],
+  ): Record<string, IAIPersonaPromptTemplate> {
+    const prompts = config.prompts || {};
+    const resolved: Record<string, IAIPersonaPromptTemplate> = {};
+
+    const directiveArgs: SystemPromptBuildArgs = {
+      persona: config.persona || '',
+      features: config.features || '',
+      tools,
+      resources,
+      roleCapabilities: (config.roleCapabilities as Record<string, string>) || {},
+      userRoles: options.userRoles?.length ? options.userRoles : ['USER'],
+      onWarning: (message: string) => {
+        this.context.warn(
+          `PersonaLoaderService [${config.id || 'unknown persona'}]: ${message}`,
+          null, 'reactor.PersonaLoaderService'
+        );
+      },
+    };
+
+    for (const [key, template] of Object.entries(prompts)) {
+      if (!template || typeof template !== 'object') {
+        resolved[key] = template as IAIPersonaPromptTemplate;
+        continue;
+      }
+
+      const assembled = this.assemblePromptContent(config, key, template, options.baseDir);
+      resolved[key] = {
+        ...template,
+        content: resolvePromptDirectives(assembled, directiveArgs),
+      };
+    }
+
+    return resolved;
+  }
+
+  /**
+   * Assembles the raw content for a single prompt template from its `files` array
+   * (read in sequence) and/or its inline `content`.
+   *
+   * Files that cannot be read are logged and skipped so that one missing include does
+   * not take down the whole persona.
+   *
+   * @param config    The persona configuration (used for log context only).
+   * @param key       The prompt key, e.g. "system".
+   * @param template  The prompt template declaration.
+   * @param baseDir   Directory relative paths resolve against.
+   * @returns The concatenated prompt content.
+   */
+  private assemblePromptContent(
+    config: IAIPersonaConfig,
+    key: string,
+    template: IAIPersonaPromptTemplate,
+    baseDir?: string,
+  ): string {
+    const files = template.files;
+    if (!Array.isArray(files) || files.length === 0) {
+      return template.content || '';
+    }
+
+    const separator = template.separator ?? '\n\n';
+    const segments: string[] = [];
+
+    for (const file of files) {
+      if (typeof file !== 'string' || file.trim().length === 0) continue;
+
+      const resolvedPath = path.isAbsolute(file)
+        ? file
+        : path.resolve(baseDir || process.cwd(), file);
+
+      try {
+        segments.push(fs.readFileSync(resolvedPath, 'utf8'));
+      } catch (error) {
+        this.context.error(
+          `PersonaLoaderService [${config.id || 'unknown persona'}]: could not read prompt file ` +
+          `"${file}" for prompt "${key}" (resolved to ${resolvedPath}): ${error}`,
+          null, 'reactor.PersonaLoaderService'
+        );
+      }
+    }
+
+    if (template.content) {
+      segments.push(template.content);
+    }
+
+    if (segments.length === 0) {
+      this.context.warn(
+        `PersonaLoaderService [${config.id || 'unknown persona'}]: prompt "${key}" declared ` +
+        `${files.length} file(s) but none could be read — the prompt will be empty.`,
+        null, 'reactor.PersonaLoaderService'
+      );
+    }
+
+    return segments.join(separator);
   }
 
   private convertPersonaToConfig(persona: IAIPersona): IAIPersonaConfig {
@@ -394,6 +578,7 @@ class PersonaLoaderService implements Reactory.Service.IReactoryService {
       macros: {
         includes: persona.macros?.map((m: any) => m.name).filter(Boolean) || []
       },
+      toolProfiles: persona.toolProfiles,
       resources: persona.resources,
       prompts: persona.prompts,
       metadata: {
@@ -410,7 +595,7 @@ class PersonaLoaderService implements Reactory.Service.IReactoryService {
    * Resolves tool references from the YAML `tools.includes` array
    * into actual MacroToolDefinition objects using the tool registry.
    */
-  private resolveTools(toolsConfig?: { includes?: string[]; custom?: any[] }): MacroToolDefinition[] {
+  public resolveTools(toolsConfig?: { includes?: string[]; custom?: any[] }): MacroToolDefinition[] {
     const tools: MacroToolDefinition[] = [];
 
     if (toolsConfig?.includes) {
@@ -446,7 +631,7 @@ class PersonaLoaderService implements Reactory.Service.IReactoryService {
    * For each tool that was resolved, its parent macro is also included so that
    * the conversation has the macro metadata needed for server-side execution.
    */
-  private resolveMacros(
+  public resolveMacros(
     toolsConfig?: { includes?: string[]; custom?: any[] },
     macrosConfig?: { includes?: string[]; custom?: any[] },
   ): MacroComponentDefinition<unknown>[] {
@@ -513,6 +698,23 @@ class PersonaLoaderService implements Reactory.Service.IReactoryService {
   private mergeConfigs(existing: IAIPersona, config: IAIPersonaConfig, options: PersonaLoaderOptions): IAIPersona {
     const mergeOptions = config.merge?.options || {};
 
+    const tools = mergeOptions.preserveExistingTools
+      ? [...(existing.tools || []), ...this.resolveTools(config.tools)]
+      : this.resolveTools(config.tools);
+
+    const resources = mergeOptions.preserveExistingResources
+      ? [...(existing.resources || []), ...(config.resources || [])]
+      : config.resources || [];
+
+    // Prompts declared by the override are resolved against the *merged* persona
+    // content, tools and resources, so `${buildSystemPrompt()}` in an override picks
+    // up whatever the override itself changed.
+    const mergedPromptSource: IAIPersonaConfig = {
+      ...config,
+      persona: config.persona || existing.persona,
+      features: config.features || existing.features,
+    };
+
     const merged: IAIPersona = {
       ...existing,
       name: config.name || existing.name,
@@ -523,16 +725,16 @@ class PersonaLoaderService implements Reactory.Service.IReactoryService {
       providerId: config.providerId || existing.providerId,
       defaultGreeting: config.defaultGreeting || existing.defaultGreeting,
       config: { ...existing.config, ...config.config },
-      tools: mergeOptions.preserveExistingTools
-        ? [...(existing.tools || []), ...this.resolveTools(config.tools)]
-        : this.resolveTools(config.tools),
+      tools,
       macros: mergeOptions.preserveExistingMacros
         ? [...(existing.macros || []), ...this.resolveMacros(config.tools, config.macros)]
         : this.resolveMacros(config.tools, config.macros),
-      resources: mergeOptions.preserveExistingResources
-        ? [...(existing.resources || []), ...(config.resources || [])]
-        : config.resources || [],
-      prompts: { ...existing.prompts, ...config.prompts }
+      toolProfiles: config.toolProfiles || existing.toolProfiles || [],
+      resources,
+      prompts: {
+        ...existing.prompts,
+        ...this.resolvePrompts(mergedPromptSource, options, tools, resources),
+      }
     };
 
     return merged;

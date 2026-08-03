@@ -1,0 +1,15 @@
+nameSpace: reactor
+name: ProcessConversationWorkflow
+version: 1.0.0
+description: ProcessConversationWorkflow — asynchronously analyze a conversation and register its references in the system graph.
+tags: [ai, conversation, graph, async]
+inputs:
+  conversationId:
+    type: string
+    required: true
+    description: The unique ID of the conversation to process and graph.
+steps:
+  - id: analyzeAndGraph
+    type: process_conversation
+    config:
+      conversationId: "${input.conversationId}"

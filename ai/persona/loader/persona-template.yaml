@@ -175,11 +175,38 @@ roleCapabilities:
   default: "You have basic access to core [Domain] functions and can assist with general [domain] inquiries, basic [domain] guidance, and [domain] support."
 
 # System Prompts Configuration
+#
+# Prompt content can be supplied three ways:
+#
+#   1. A loader directive — resolved when the agent.yaml is read from disk:
+#        ${buildSystemPrompt()}   persona + features, rendered with the standard
+#                                 variables (date, userRole, roleSpecificCapabilities,
+#                                 toolDescriptions, resourceDescription, availableTools)
+#        ${personaContent()} / ${featuresContent()} / ${toolDescriptions()} /
+#        ${resourceDescriptions()} / ${roleCapabilities()}
+#   2. An inline `content:` blob.
+#   3. A `files:` array — the files are read and concatenated in the order listed
+#      (relative paths resolve against this agent.yaml's directory). Any inline
+#      `content:` is appended last. Use `separator:` to change the joiner
+#      (default: a blank line).
+#
+# Variables that belong to the *conversation* (${user.name}, ${reviewArea}, …) are
+# left untouched by the loader and interpolated when the chat session starts.
 prompts:
   system:
     content: "${buildSystemPrompt()}"
     role: "system"
-  
+
+  # Example of an assembled prompt built from files, in sequence:
+  # onboardingPrompt:
+  #   files:
+  #     - "prompts/00-identity.md"
+  #     - "prompts/10-house-rules.md"
+  #     - "prompts/20-playbook.md"
+  #   separator: "\n\n---\n\n"
+  #   role: "system"
+
+
   catalogAndCategorizeMessages:
     content: |
       I have retrieved ${catalogedIds.length} messages from ${sourceType} source "${sourceId}". 

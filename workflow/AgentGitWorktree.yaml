@@ -56,11 +56,11 @@ inputs:
 outputs:
   branchName:
     type: string
-    source: "${steps.parseDecision.outputs.branch}"
+    source: "step.parseDecision.outputs.branch"
     description: "The generated branch name."
   worktreePath:
     type: string
-    source: "${steps.parseDecision.outputs.worktreePath}"
+    source: "step.parseDecision.outputs.worktreePath"
     description: "The generated worktree path."
 
 steps:

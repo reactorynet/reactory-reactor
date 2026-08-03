@@ -64,7 +64,7 @@ export class SSETransport implements StreamingTransport {
 
     // Set SSE headers
     this.response.setHeader('Content-Type', 'text/event-stream');
-    this.response.setHeader('Cache-Control', 'no-cache');
+    this.response.setHeader('Cache-Control', 'no-cache, no-transform');
     this.response.setHeader('Connection', 'keep-alive');
     this.response.setHeader('X-Accel-Buffering', 'no');
     this.response.setHeader('Access-Control-Allow-Origin', '*');

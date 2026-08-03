@@ -158,6 +158,70 @@ roleCapabilities:
   default: "You have basic access to core [Domain] functions..."
 ```
 
+### Prompts
+
+Prompt content is resolved **at load time** by the loader, so a YAML agent's prompts
+reach the model fully materialised — exactly like a TypeScript persona's
+`buildSystemPrompt()` output.
+
+#### Loader directives
+
+Zero-argument directives written as `${directive()}` are replaced while the agent.yaml
+is read from disk:
+
+| Directive | Resolves to |
+| --- | --- |
+| `${buildSystemPrompt()}` (alias `${buildSystemContent()}`) | `persona` + `features`, rendered with the standard variables |
+| `${personaContent()}` | the rendered `persona` block |
+| `${featuresContent()}` | the rendered `features` block |
+| `${toolDescriptions()}` | `- **tool**: description` list for the resolved tools |
+| `${resourceDescriptions()}` | `- **name**: description - url` list for the declared resources |
+| `${roleCapabilities()}` | capability blurb for the resolving roles |
+
+The variables available inside `persona` / `features` markdown are the same set the
+TypeScript personas supply: `date`, `userRole`, `roleSpecificCapabilities`,
+`toolDescriptions`, `resourceDescription`, `availableTools`, plus `tools` and
+`resources`. Unknown `${something()}` tokens and literal `${...}` code samples are left
+untouched.
+
+```yaml
+prompts:
+  system:
+    content: "${buildSystemPrompt()}"
+    role: "system"
+```
+
+If a persona declares no `prompts.system`, the loader synthesises one from `persona`
+and `features` automatically.
+
+#### Assembling prompts from files
+
+Instead of one inline blob, a prompt may list files that are read and concatenated **in
+sequence**. Relative paths resolve against the directory holding the `agent.yaml`;
+absolute paths and `${ENV_VAR}` prefixes are supported.
+
+```yaml
+prompts:
+  system:
+    files:
+      - "prompts/00-identity.md"
+      - "prompts/10-house-rules.md"
+      - "${REACTORY_SERVER}/src/modules/my-module/docs/playbook.md"
+    separator: "\n\n---\n\n"   # optional, defaults to a blank line
+    content: "Always answer in British English."   # optional, appended last
+    role: "system"
+```
+
+Files that cannot be read are logged and skipped, so a single missing include never
+takes the persona down. Directives inside the assembled files are resolved too.
+
+#### What the loader does *not* do
+
+Conversation-level variables — `${user.name}`, `${session_id}`, `${reviewArea}` and any
+other canned-prompt parameters — are deliberately left in place. They are interpolated
+later by `ReactorConversationService.startChatSession` (system prompt) and
+`sendCannedPrompt` (named prompts).
+
 ### Merge Configuration
 ```yaml
 merge:
@@ -263,6 +327,9 @@ interface PersonaLoaderOptions {
   validateOnLoad?: boolean;        // Default: true
   processEnvironmentVars?: boolean; // Default: true
   mergeMode?: 'merge' | 'replace' | 'create'; // Default: 'merge'
+  baseDir?: string;                // Directory relative prompt `files` resolve against.
+                                   // Set automatically by loadFromFile/loadFromDirectory.
+  userRoles?: string[];            // Roles used for ${roleCapabilities()}. Default: ['USER']
 }
 ```
 

@@ -193,6 +193,13 @@ type ReactorChatMessage {
   """
   tool_calls: [ReactorToolCall]
   """
+  When role is "tool", the id of the tool call this message answers. Lets a
+  client tell that this message's content is the same payload already surfaced
+  on the originating assistant message's tool_results, rather than additional
+  context.
+  """
+  tool_call_id: String
+  """
   The results from executed tool calls associated with this message.
   For assistant messages, these are correlated from subsequent tool-role messages in the history.
   """
@@ -436,6 +443,14 @@ type ReactorChatState {
   Indicates whether this chat session currently has an active SSE connection/transport.
   """
   active: Boolean
+  """
+  The effective system prompt for the conversation — the content of the first
+  system message in the history (i.e. what the model actually receives), falling
+  back to the persona prompt when the history has no system message yet.
+  Exposed for the debug inspector so the prompt can be reviewed without pulling
+  the whole history.
+  """
+  systemPrompt: String
 }
 
 """
@@ -654,6 +669,30 @@ type ReactorPinFolderResponse {
 union ReactorPinFolderResult = ReactorPinFolderResponse | ReactorErrorResponse
 union ReactorUnpinFolderResult = ReactorPinFolderResponse | ReactorErrorResponse
 
+input ReactorPinPerspectiveParam {
+  sessionId: String!
+  """Human-readable perspective label, e.g. 'reactory.reactory-pwa-client'"""
+  label: String!
+  """Perspective kind: conversation | agent | root | saved"""
+  kind: String
+  """System graph root node id backing the perspective (root/saved kinds)."""
+  rootId: Int
+  """Optional focus node id within the perspective."""
+  nodeId: Int
+  """Optional focus node name."""
+  nodeName: String
+  """Optional focus node type."""
+  nodeType: String
+}
+
+type ReactorPinPerspectiveResponse {
+  success: Boolean!
+  message: String!
+  sessionId: String!
+}
+
+union ReactorPinPerspectiveResult = ReactorPinPerspectiveResponse | ReactorErrorResponse
+
 """
 A single persisted side panel item.
 """
@@ -844,6 +883,14 @@ extend type Mutation {
   ): ReactorChatState
 
   """
+  Update the active tools list for a chat session by providing the list of enabled tool names.
+  """
+  ReactorUpdateChatTools(
+    chatSessionId: String!
+    toolNames: [String]!
+  ): ReactorChatState
+
+  """
   Set the maximum number of auto tool call iterations for a chat session.
   When set, the agent will pause after this many iterations and ask the user to continue.
   """
@@ -946,6 +993,13 @@ extend type Mutation {
   Removes a pinned folder from the chat session.
   """
   ReactorUnpinFolderFromSession(params: ReactorPinFolderParam!): ReactorUnpinFolderResult
+
+  """
+  Pins a system graph perspective (and optionally a focus node) to the chat
+  session context for the agent. Injects a background user message into the
+  conversation history; no inference is triggered.
+  """
+  ReactorPinGraphPerspectiveToSession(params: ReactorPinPerspectiveParam!): ReactorPinPerspectiveResult
 
   """
   Permanently removes a chat session and all its messages.

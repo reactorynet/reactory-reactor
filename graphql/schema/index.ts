@@ -13,6 +13,8 @@ const ReactorTypeDefinitions = loadGraphQLTypeDefinitions(
     'ReactorSystemGraph/platform',
     'ReactorSystemGraph/ui',
     'ReactorSystemGraph/links',
+    'ReactorSystemGraph/graph',
+    'ReactorSystemGraph/perspective',
     'ReactorSystemGraph/inputs',
     'ReactorSystemGraph/mutations',
     '../mcp/mcp',

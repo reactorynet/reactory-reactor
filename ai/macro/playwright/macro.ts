@@ -1,3 +1,6 @@
+import fs from 'fs';
+import path from 'path';
+import { safeCDNUrl } from '@reactory/server-core/utils/url/safeUrl';
 import {
   ChatState,
   Macro,
@@ -595,18 +598,37 @@ export const PlaywrightScreenshot: Macro<PlaywrightMacroResult, ScreenshotProps>
     const svc = getPlaywrightService(state);
     const sessionId = resolveSessionId(props.sessionId, state);
 
+    const dataRoot = process.env.REACTORY_DATA || process.env.APP_DATA_ROOT || '/tmp';
+    const personaId = state.personaId || 'reactor';
+    const workspaceDir = path.join(dataRoot, 'profiles', 'reactor', 'personas', personaId, 'workspace');
+
+    // Ensure the workspace directory exists
+    if (!fs.existsSync(workspaceDir)) {
+      fs.mkdirSync(workspaceDir, { recursive: true });
+    }
+
+    const format = (props.type as 'png' | 'jpeg') || 'png';
+    const filename = `screenshot_${Date.now()}.${format}`;
+    const screenshotPath = props.path || path.join(workspaceDir, filename);
+
     const result = await svc.screenshot(sessionId, {
       fullPage: props.fullPage === 'true',
-      path: props.path,
-      type: (props.type as 'png' | 'jpeg') || 'png',
+      path: screenshotPath,
+      type: format,
       quality: props.quality ? parseInt(props.quality, 10) : undefined,
     });
 
     const sizeKb = Math.round((result.base64.length * 3) / 4 / 1024);
 
+    let imageUrl: string | undefined;
+    if (screenshotPath.startsWith(dataRoot)) {
+      const relativePath = path.relative(dataRoot, screenshotPath);
+      imageUrl = safeCDNUrl(relativePath);
+    }
+
     return {
       success: true,
-      data: { base64: result.base64, path: result.path, sizeKb },
+      data: { url: imageUrl, path: screenshotPath, sizeKb },
       tool: 'playwright_screenshot',
       params: props,
       metadata: {
@@ -617,15 +639,11 @@ export const PlaywrightScreenshot: Macro<PlaywrightMacroResult, ScreenshotProps>
       },
       instructions: `## Screenshot Captured
 
-- **Format**: ${props.type || 'png'}
+- **Format**: ${format}
 - **Full Page**: ${props.fullPage === 'true'}
 - **Size**: ~${sizeKb} KB
-${result.path ? `- **Saved to**: ${result.path}` : '- **Returned as**: base64-encoded string in data.base64'}
-
-### Available Data:
-- **base64**: The screenshot as a base64-encoded string
-- **path**: File path if saved to disk
-- **sizeKb**: Approximate file size in KB
+- **Saved to**: ${screenshotPath}
+${imageUrl ? `- **View Image**: [Open in new tab](${imageUrl})\n\n![Screenshot](${imageUrl})` : ''}
 `,
     };
   } catch (err) {
@@ -644,12 +662,29 @@ export const PlaywrightPdf: Macro<PlaywrightMacroResult, PdfProps> = async (
     const svc = getPlaywrightService(state);
     const sessionId = resolveSessionId(props.sessionId, state);
 
-    const result = await svc.pdf(sessionId, { path: props.path });
+    const dataRoot = process.env.REACTORY_DATA || process.env.APP_DATA_ROOT || '/tmp';
+    const personaId = state.personaId || 'reactor';
+    const workspaceDir = path.join(dataRoot, 'profiles', 'reactor', 'personas', personaId, 'workspace');
+
+    // Ensure the workspace directory exists
+    if (!fs.existsSync(workspaceDir)) {
+      fs.mkdirSync(workspaceDir, { recursive: true });
+    }
+
+    const pdfPath = props.path || path.join(workspaceDir, `pdf_${Date.now()}.pdf`);
+
+    const result = await svc.pdf(sessionId, { path: pdfPath });
     const sizeKb = Math.round((result.base64.length * 3) / 4 / 1024);
+
+    let pdfUrl: string | undefined;
+    if (pdfPath.startsWith(dataRoot)) {
+      const relativePath = path.relative(dataRoot, pdfPath);
+      pdfUrl = safeCDNUrl(relativePath);
+    }
 
     return {
       success: true,
-      data: { base64: result.base64, path: result.path, sizeKb },
+      data: { url: pdfUrl, path: pdfPath, sizeKb },
       tool: 'playwright_pdf',
       params: props,
       metadata: {
@@ -661,7 +696,8 @@ export const PlaywrightPdf: Macro<PlaywrightMacroResult, PdfProps> = async (
       instructions: `## PDF Generated
 
 - **Size**: ~${sizeKb} KB
-${result.path ? `- **Saved to**: ${result.path}` : '- **Returned as**: base64-encoded string in data.base64'}
+- **Saved to**: ${pdfPath}
+${pdfUrl ? `- **Download PDF**: [Open PDF](${pdfUrl})` : ''}
 
 Note: PDF generation only works in Chromium headless mode.
 `,

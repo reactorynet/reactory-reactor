@@ -29,6 +29,8 @@ enum ReactorLinkType {
   INHERITS
   IMPLEMENTS
   REFERENCE
+  SYMLINK
+  CONTAINS
 }
 
 type ReactorNodeCategory {
@@ -70,7 +72,9 @@ type ReactorNode {
   name: String!
   version: String!
   description: String
-  providerId: String!
+  # Nullable: placeholder/unresolved nodes (e.g. edge endpoints that are not
+  # materialised) have no owning provider.
+  providerId: String
   attributes: [ReactorNodeAttributes!]
   metrics: [ReactorNodeMetric!]
   children(paging: PagingRequest, filter: String): [ReactorNode!]
@@ -79,6 +83,9 @@ type ReactorNode {
   dependents: [ReactorNode!]
   dependencies: [ReactorNode!]
   parent: ReactorNode
+  # Raw parent id — prefer over `parent` when only the id is needed (avoids a
+  # node resolution per row; null for catalog/root nodes).
+  parentId: Int
   source: String
   data: Any
 }

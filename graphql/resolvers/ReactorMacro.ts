@@ -76,6 +76,11 @@ class ReactorMacroResolver {
     return macro.runat || "server"
   }
 
+  @property("ReactorMacro", "category")
+  getMacroCategory(macro: Partial<MacroComponentDefinition<unknown>>): string | null {
+    return macro.category || null;
+  }
+
   @property("ReactorTool", "runat") 
   getToolRunat(tool: Partial<MacroToolDefinition>): string {
     return tool.runat || "server"

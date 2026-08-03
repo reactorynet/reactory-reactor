@@ -10,6 +10,7 @@ import WorkflowMacros from './workflow';
 import ChatsMacros from './chats';
 import MCPMacros from './mcp';
 import ProjectMacros from './projects';
+import GraphMacros from './graph';
 import DataMacros from './data';
 import ModuleMacros from './develop/module';
 import PlaywrightMacros from './playwright';
@@ -37,6 +38,7 @@ import {
 } from './develop/review/macro';
 
 import { PlaywrightNavigate, PlaywrightOpenSession } from './playwright/macro';
+import { AddToolsToSessionMacro, RemoveToolsFromSessionMacro } from './runtime/sessionTools.macro';
 
 import OpenAI from 'openai';
 import Hash from '@reactory/server-core/utils/hash';
@@ -71,6 +73,8 @@ const inputMacros: MacroFunctions = {
   playwright: PlaywrightNavigate,
   pw: PlaywrightNavigate,
   playwright_open: PlaywrightOpenSession,
+  addToolsToSession: AddToolsToSessionMacro,
+  removeToolsFromSession: RemoveToolsFromSessionMacro,
 };
 
 const outputMacros: MacroFunctions = {
@@ -99,6 +103,7 @@ export const MacroRegistry: MacroComponentDefinition<unknown>[] = [
   ...ChatsMacros,
   ...MCPMacros,
   ...ProjectMacros,
+  ...GraphMacros,
   ...DataMacros,
   ...ModuleMacros,
   ...PlaywrightMacros,

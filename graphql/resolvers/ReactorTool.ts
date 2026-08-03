@@ -67,6 +67,11 @@ class ReactorToolResolver {
   async getToolSafeForAutoExecution(tool: Partial<MacroToolDefinition>): Promise<boolean | null> {
     return tool.safeForAutoExecution ?? null;
   }
+
+  @property("ReactorToolDefinition", "category")
+  getToolCategory(tool: Partial<MacroToolDefinition>): string | null {
+    return tool.category || null;
+  }
 }
 
 export default ReactorToolResolver;

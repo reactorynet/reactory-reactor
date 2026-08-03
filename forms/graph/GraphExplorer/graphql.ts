@@ -28,13 +28,7 @@ const mainDBGraphQuery: Reactory.Forms.IReactoryFormQuery = {
     }
   `,
   resultType: 'object',
-  props: {
-    nameSpace: 'zepz',
-    name: 'maindb',
-  },
-  variables: {
-    'props.nameSpace': 'nameSpace',
-    'props.name': 'name',
+  variables: {    
     'formContext.formData.search': 'term',
     'paging.page': 'paging.page',
     'paging.pageSize': 'paging.pageSize',
@@ -161,7 +155,7 @@ const categoriesQuery: Reactory.Forms.IReactoryFormQuery = {
 
 const graphql: Reactory.Forms.IFormGraphDefinition = {
   mutation: {},
-  query: mainDBGraphQuery,
+  query: null,
   queries: {
     mainDBGraphQuery,
     categoriesQuery,

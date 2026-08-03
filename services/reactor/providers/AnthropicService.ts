@@ -827,7 +827,11 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
     const providerConfig = options?.providerConfig;
     // Normalized augmented config → synthetic schema tool, tool_choice, sampling.
     const augmented = toAnthropicParams(providerConfig);
-    const personaTools = this.convertToolsToAnthropicFormat(persona.tools);
+    
+    const toolsList = (this.chatState?.tools !== undefined && this.chatState?.tools !== null)
+      ? (this.chatState.tools as MacroToolDefinition[])
+      : persona.tools;
+    const personaTools = this.convertToolsToAnthropicFormat(toolsList);
 
     // Which sampling params this model accepts (temperature/top_p/top_k). Newer
     // Anthropic models (Opus 4.7+, Sonnet 5, Fable 5) reject them with a 400.

@@ -3,8 +3,8 @@ import ApiError from "@reactory/server-core/exceptions";
 
 import { IReactorProject, IProjectProcessor, ISystemGraphManager, PagedFilter, PageReactorProjectResult, ReactorProjectService } from "../types/service.types"
 import Hash from "@reactory/server-core/utils/hash";
-import { ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorLinkType, ReactorNodeType } from "../types/model.types";
-import { DefaultReactorNodeCategories } from '../models/ReactorGraphNode';
+import { ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorLinkType, ReactorNodeType, ReactorSubgraph, ReactorSubgraphOptions } from "../types/model.types";
+import { DefaultReactorNodeCategories, ReactorNodeModel } from '../models/ReactorGraphNode';
 import { ReactorNodeLinkModel } from '../models/ReactorNodeLink';
 import { linkId, nodeId, projectLogicalKey } from './graph/GraphIdentity';
 import { service } from "@reactory/server-core/application/decorators";
@@ -58,6 +58,11 @@ class SystemGraphManager implements ISystemGraphManager {
     this.catalogProject = this.catalogProject.bind(this);
     this.catalogProjects = this.catalogProjects.bind(this);
     this.getLinks = this.getLinks.bind(this);
+    this.getNodes = this.getNodes.bind(this);
+    this.getNodeLinks = this.getNodeLinks.bind(this);
+    this.getSubgraph = this.getSubgraph.bind(this);
+    this.searchNodes = this.searchNodes.bind(this);
+    this.findPath = this.findPath.bind(this);
     this.createLink = this.createLink.bind(this);
     this.updateLink = this.updateLink.bind(this);
     this.deleteLink = this.deleteLink.bind(this);
@@ -136,6 +141,341 @@ class SystemGraphManager implements ISystemGraphManager {
     if (or.length) query.$or = or;
     if (types && types.length) query.types = { $in: types };
     return ReactorNodeLinkModel.find(query).lean() as unknown as ReactorNodeLink[];
+  }
+
+  /**
+   * Batch node resolution by deterministic id. Resolution order per id:
+   * persisted graph (one $in query for the whole batch), lazy tree cache,
+   * then a minimal placeholder so non-null edge endpoints never crash.
+   */
+  async getNodes(ids: number[]): Promise<Partial<ReactorNode>[]> {
+    const { context } = this;
+    const unique = Array.from(new Set((ids || []).filter((id) => id !== undefined && id !== null)));
+    if (unique.length === 0) return [];
+
+    const persisted = (await ReactorNodeModel.find({ id: { $in: unique } }).lean()) as unknown as ReactorNode[];
+    const byId = new Map<number, Partial<ReactorNode>>(persisted.map((n) => [n.id, n]));
+
+    const misses = unique.filter((id) => !byId.has(id));
+    await Promise.all(
+      misses.map(async (id) => {
+        const cached = await context.getValue<ReactorNode>(`REACTOR_NODE_${id}`);
+        if (cached) byId.set(id, cached);
+      })
+    );
+
+    return unique.map(
+      (id) =>
+        byId.get(id) || {
+          id,
+          index: id,
+          key: `${id}`,
+          name: `#${id}`,
+          type: ReactorNodeType.PROCESS,
+          nameSpace: 'reactor',
+          version: '1.0.0',
+          description: 'Unresolved node',
+          children: [],
+        }
+    );
+  }
+
+  /**
+   * Direction-aware, bounded edge lookup for a set of nodes. Preferred over
+   * getLinks for new callers — always applies a result limit.
+   */
+  async getNodeLinks(
+    nodeIds: number[],
+    opts: {
+      direction?: 'in' | 'out' | 'both';
+      types?: string[];
+      limit?: number;
+      projectId?: string;
+    } = {}
+  ): Promise<ReactorNodeLink[]> {
+    const ids = Array.from(new Set((nodeIds || []).filter((id) => id !== undefined && id !== null)));
+    if (ids.length === 0) return [];
+
+    const { direction = 'both', types, projectId } = opts;
+    const limit = Math.min(Math.max(opts.limit ?? 500, 1), 2000);
+
+    const or: any[] = [];
+    if (direction === 'out' || direction === 'both') or.push({ source: { $in: ids } });
+    if (direction === 'in' || direction === 'both') or.push({ target: { $in: ids } });
+
+    const query: any = { $or: or };
+    if (types && types.length) query.types = { $in: types };
+    if (projectId) query.projectId = projectId;
+
+    return ReactorNodeLinkModel.find(query).limit(limit).lean() as unknown as ReactorNodeLink[];
+  }
+
+  /**
+   * Bounded BFS over the persisted graph starting at rootId. Returns the
+   * neighbourhood as flat node + link arrays. CONTAINS edges are synthesized
+   * from parentId relationships (never persisted). When `materialize` is set,
+   * frontier FOLDER/SYSTEM nodes without persisted children are lazily
+   * expanded via their provider, up to `materializeBudget` expansions.
+   */
+  async getSubgraph(rootId: number, opts: ReactorSubgraphOptions = {}): Promise<ReactorSubgraph> {
+    const depth = Math.min(Math.max(opts.depth ?? 2, 1), 5);
+    const limit = Math.min(Math.max(opts.limit ?? 500, 1), 2000);
+    const direction = opts.direction ?? 'both';
+    const includeContainment = opts.includeContainment !== false;
+    const materialize = opts.materialize === true;
+    const materializeBudget = Math.min(Math.max(opts.materializeBudget ?? 200, 0), 1000);
+
+    const nodeTypeFilter = opts.nodeTypes && opts.nodeTypes.length ? new Set(opts.nodeTypes.map(String)) : null;
+
+    const nodesById = new Map<number, Partial<ReactorNode>>();
+    const linksById = new Map<number, Partial<ReactorNodeLink>>();
+    let truncated = false;
+    let depthReached = 0;
+    let materializations = 0;
+
+    const [root] = await this.getNodes([rootId]);
+    nodesById.set(rootId, root);
+
+    let frontier: number[] = [rootId];
+
+    for (let level = 0; level < depth && frontier.length > 0; level++) {
+      const remaining = limit - nodesById.size;
+      if (remaining <= 0) {
+        truncated = true;
+        break;
+      }
+
+      const nextFrontier = new Set<number>();
+
+      // Persisted edges touching the frontier.
+      const edges = await this.getNodeLinks(frontier, {
+        direction,
+        types: opts.linkTypes as string[] | undefined,
+        // Fetch generously; node limit is what actually bounds the result.
+        limit: Math.min(remaining * 4, 2000),
+      });
+
+      for (const edge of edges) {
+        if (linksById.has(edge.id)) continue;
+        linksById.set(edge.id, edge);
+        for (const endpoint of [edge.source, edge.target]) {
+          if (!nodesById.has(endpoint)) nextFrontier.add(endpoint);
+        }
+      }
+
+      // Containment: children of the frontier via parentId.
+      if (includeContainment) {
+        const children = (await ReactorNodeModel.find({ parentId: { $in: frontier } })
+          .limit(Math.max(remaining, 1))
+          .lean()) as unknown as ReactorNode[];
+        for (const child of children) {
+          if (nodeTypeFilter && !nodeTypeFilter.has(String(child.type))) continue;
+          const containsId = linkId(child.parentId, child.id, ReactorLinkType.CONTAINS);
+          if (!linksById.has(containsId)) {
+            linksById.set(containsId, {
+              id: containsId,
+              source: child.parentId,
+              target: child.id,
+              types: [ReactorLinkType.CONTAINS],
+              title: 'contains',
+            });
+          }
+          if (!nodesById.has(child.id) && nodesById.size < limit) {
+            nodesById.set(child.id, child);
+            nextFrontier.add(child.id);
+          } else if (!nodesById.has(child.id)) {
+            truncated = true;
+          }
+        }
+      }
+
+      // Lazy materialization for frontier nodes with no persisted children.
+      if (materialize && materializations < materializeBudget) {
+        const frontierNodes = frontier
+          .map((id) => nodesById.get(id))
+          .filter((n): n is Partial<ReactorNode> => !!n && !!n.providerId && (n as any)?.data?.noExpand !== true);
+        for (const parent of frontierNodes) {
+          if (materializations >= materializeBudget || nodesById.size >= limit) {
+            truncated = truncated || materializations >= materializeBudget;
+            break;
+          }
+          const hasPersistedChild = Array.from(nodesById.values()).some((n) => n.parentId === parent.id);
+          if (hasPersistedChild) continue;
+          materializations++;
+          const children = await this.getChildren([parent as ReactorNode]);
+          for (const child of children) {
+            if (nodesById.size >= limit) {
+              truncated = true;
+              break;
+            }
+            if (nodeTypeFilter && !nodeTypeFilter.has(String(child.type))) continue;
+            if (!nodesById.has(child.id)) {
+              nodesById.set(child.id, child);
+              nextFrontier.add(child.id);
+            }
+            const containsId = linkId(parent.id, child.id, ReactorLinkType.CONTAINS);
+            if (includeContainment && !linksById.has(containsId)) {
+              linksById.set(containsId, {
+                id: containsId,
+                source: parent.id,
+                target: child.id,
+                types: [ReactorLinkType.CONTAINS],
+                title: 'contains',
+              });
+            }
+          }
+        }
+      }
+
+      // Resolve edge endpoints discovered this level.
+      const toResolve = Array.from(nextFrontier).filter((id) => !nodesById.has(id));
+      if (toResolve.length > 0) {
+        const budget = limit - nodesById.size;
+        if (toResolve.length > budget) {
+          truncated = true;
+          toResolve.length = Math.max(budget, 0);
+        }
+        const resolved = await this.getNodes(toResolve);
+        for (const node of resolved) {
+          if (nodeTypeFilter && !nodeTypeFilter.has(String(node.type))) {
+            nextFrontier.delete(node.id);
+            continue;
+          }
+          nodesById.set(node.id, node);
+        }
+      }
+
+      frontier = Array.from(nextFrontier).filter((id) => nodesById.has(id));
+      if (frontier.length > 0) depthReached = level + 1;
+    }
+
+    // Drop links whose endpoints were filtered/truncated out of the node set.
+    const links = Array.from(linksById.values()).filter(
+      (l) => nodesById.has(l.source) && nodesById.has(l.target)
+    );
+
+    return {
+      rootId,
+      nodes: Array.from(nodesById.values()),
+      links,
+      truncated,
+      stats: {
+        nodeCount: nodesById.size,
+        linkCount: links.length,
+        depthReached,
+      },
+    };
+  }
+
+  /**
+   * Search for nodes by term. When a project scope (nameSpace + name) is given
+   * the project's search index is used; otherwise an escaped-regex match over
+   * the persisted graph's name/description.
+   */
+  async searchNodes(
+    term: string,
+    opts: { nameSpace?: string; name?: string; limit?: number } = {}
+  ): Promise<Partial<ReactorNode>[]> {
+    const { context } = this;
+    const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
+
+    if (!term || term.trim().length === 0) return [];
+
+    if (opts.nameSpace && opts.name) {
+      const searchResults = await this.searchService.search<Partial<Reactory.Models.ISearchable>>(
+        `reactor_graph_${opts.nameSpace}_${opts.name}`,
+        term,
+        ['name', 'nameSpace', 'description'],
+        limit,
+        0
+      );
+      const ids = searchResults.results.map((r) => context.utils.hash(r.id));
+      const persisted = await this.getNodes(ids);
+      const persistedById = new Map(persisted.map((n) => [n.id, n]));
+      return searchResults.results.map((r, i) => {
+        const id = ids[i];
+        const node = persistedById.get(id);
+        if (node && node.description !== 'Unresolved node') return node;
+        return {
+          id,
+          index: id,
+          key: `${id}`,
+          name: r.name,
+          nameSpace: r.nameSpace,
+          version: r.version,
+          type: ReactorNodeType.FILE,
+          description: r.source,
+        } as Partial<ReactorNode>;
+      });
+    }
+
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const rx = new RegExp(escaped, 'i');
+    return ReactorNodeModel.find({
+      $or: [{ name: rx }, { description: rx }],
+    })
+      .limit(limit)
+      .lean() as unknown as Partial<ReactorNode>[];
+  }
+
+  /**
+   * Bounded shortest-path search between two nodes over the persisted edges.
+   * BFS with parent tracking; `direction: 'both'` treats edges as undirected.
+   */
+  async findPath(
+    sourceId: number,
+    targetId: number,
+    opts: { maxDepth?: number; linkTypes?: string[]; direction?: 'out' | 'both' } = {}
+  ): Promise<{ found: boolean; nodeIds: number[]; links: ReactorNodeLink[] }> {
+    const maxDepth = Math.min(Math.max(opts.maxDepth ?? 6, 1), 10);
+    const direction = opts.direction ?? 'both';
+    const MAX_VISITED = 5000;
+
+    if (sourceId === targetId) return { found: true, nodeIds: [sourceId], links: [] };
+
+    const visited = new Set<number>([sourceId]);
+    // nodeId -> the edge that discovered it (for path reconstruction)
+    const discoveredBy = new Map<number, ReactorNodeLink>();
+    let frontier: number[] = [sourceId];
+
+    for (let level = 0; level < maxDepth && frontier.length > 0; level++) {
+      if (visited.size > MAX_VISITED) break;
+
+      const edges = await this.getNodeLinks(frontier, {
+        direction: direction === 'both' ? 'both' : 'out',
+        types: opts.linkTypes,
+        limit: 2000,
+      });
+
+      const nextFrontier: number[] = [];
+      for (const edge of edges) {
+        const candidates =
+          direction === 'both' ? [edge.source, edge.target] : [edge.target];
+        for (const next of candidates) {
+          if (visited.has(next)) continue;
+          visited.add(next);
+          discoveredBy.set(next, edge);
+          if (next === targetId) {
+            // Reconstruct path.
+            const nodeIds: number[] = [targetId];
+            const links: ReactorNodeLink[] = [];
+            let current = targetId;
+            while (current !== sourceId) {
+              const via = discoveredBy.get(current);
+              if (!via) break;
+              links.unshift(via);
+              current = via.source === current ? via.target : via.source;
+              nodeIds.unshift(current);
+            }
+            return { found: true, nodeIds, links };
+          }
+          nextFrontier.push(next);
+        }
+      }
+      frontier = nextFrontier;
+    }
+
+    return { found: false, nodeIds: [], links: [] };
   }
 
   /**

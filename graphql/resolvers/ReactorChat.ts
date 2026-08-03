@@ -209,6 +209,42 @@ class ReactorChatResolver {
     }
   }
 
+  @mutation("ReactorUpdateChatTools")
+  async ReactorUpdateChatTools(
+    _: any,
+    args: { chatSessionId: string; toolNames: string[] },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!args || !args.chatSessionId || !args.toolNames) {
+      throw new ApiError("InvalidInputError", {
+        message: "chatSessionId and toolNames are required",
+        code: "INVALID_INPUT",
+        timestamp: new Date(),
+        recoverable: true,
+      });
+    }
+
+    const conversationService =
+      context.getService<IReactorConversationsService>(
+        "reactor.ReactorConversationService@1.0.0"
+      );
+    try {
+      return await conversationService.updateChatTools(
+        args.chatSessionId,
+        args.toolNames
+      );
+    } catch (error) {
+      throw new ApiError("ChatUpdateToolsError", {
+        message: error.message || "Error updating chat tools",
+        code: "CHAT_UPDATE_TOOLS_ERROR",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion:
+          "Check if the chat session exists and you have permission to modify it",
+      });
+    }
+  }
+
   @mutation("ReactorSetChatModelProvider")
   async ReactorSetChatModelProvider(
     _: any,
@@ -625,6 +661,33 @@ class ReactorChatResolver {
     return macroDefinitions;
   }
 
+  /**
+   * Property resolver for ReactorChatState.systemPrompt
+   *
+   * Returns the prompt the model actually receives: the content of the first
+   * system message in the history. Sessions that have not had their system
+   * message materialised yet fall back to the persona prompt so the debug
+   * inspector still has something to show.
+   */
+  @property("ReactorChatState", "systemPrompt")
+  async ReactorChatStateSystemPrompt(
+    chatState: ChatState,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ) {
+    const history = chatState?.history;
+    if (Array.isArray(history)) {
+      const systemMessage = history.find((msg: any) => msg?.role === "system");
+      if (systemMessage?.content) {
+        return typeof systemMessage.content === "string"
+          ? systemMessage.content
+          : JSON.stringify(systemMessage.content);
+      }
+    }
+
+    return (chatState as any)?.persona?.persona ?? null;
+  }
+
   @property("ReactorChatState", "tokenCount")
   async ReactorChatStateTokenCount(
     chatState: ChatState,
@@ -640,7 +703,7 @@ class ReactorChatResolver {
     _: any,
     context: Reactory.Server.IReactoryContext
   ) {
-    return chatState?.maxTokens || 8000;
+    return chatState?.maxTokens || 256000;
   }
 
   @property("ReactorChatState", "tokenPressure")
@@ -1021,6 +1084,45 @@ class ReactorChatResolver {
         __typename: "ReactorErrorResponse",
         code: "FOLDER_PIN_ERROR",
         message: error.message || "Error pinning folder",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion: "Please try again or contact support",
+      };
+    }
+  }
+
+  @mutation("ReactorPinGraphPerspectiveToSession")
+  async ReactorPinGraphPerspectiveToSession(
+    _: any,
+    args: {
+      params: {
+        sessionId: string;
+        label: string;
+        kind?: string;
+        rootId?: number;
+        nodeId?: number;
+        nodeName?: string;
+        nodeType?: string;
+      };
+    },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    try {
+      const conversationService =
+        context.getService<IReactorConversationsService>(
+          "reactor.ReactorConversationService@1.0.0"
+        );
+      const { sessionId, ...perspective } = args.params;
+      return await conversationService.pinGraphPerspectiveToSession(
+        sessionId,
+        perspective
+      );
+    } catch (error) {
+      logger.error("Error pinning graph perspective", error);
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "PERSPECTIVE_PIN_ERROR",
+        message: error.message || "Error pinning graph perspective",
         timestamp: new Date(),
         recoverable: true,
         suggestion: "Please try again or contact support",

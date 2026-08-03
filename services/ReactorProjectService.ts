@@ -349,7 +349,6 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       secondarySlackChannels: 1,
       dependencies: 1,
       pathSpecs: 1,
-      files: 1,
       deployments: 1,
       dashboards: 1,
       processor: 1,
@@ -737,6 +736,44 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
     // Process the project with all applicable processors
     project = await this.processProject(project);
     project.lastSync = new Date();
+
+    // Handle submodules
+    if (project.submodules && project.submodules.length > 0) {
+      this.context.info(`Cataloging ${project.submodules.length} detected submodules for project: ${project.name}`);
+      const subprojects: Partial<IReactorProject>[] = [];
+      for (const subPath of project.submodules) {
+        try {
+          const subName = path.basename(subPath);
+          const subSpec: Partial<IReactorProject> = {
+            name: `${project.name}-${subName}`,
+            nameSpace: project.nameSpace,
+            version: project.version,
+            repoPath: subPath,
+            projectStatus: 'ACTIVE' as any,
+            organization: project.organization,
+            businessUnit: project.businessUnit,
+            ownerTeam: project.ownerTeam,
+            tags: [...(project.tags || []), "submodule", project.name],
+          };
+          
+          const subproject = await this.catalogProject(subSpec);
+          subprojects.push(subproject);
+        } catch (err) {
+          this.context.error(`Failed to catalog submodule at ${subPath}: ${(err as Error).message}`);
+        }
+      }
+      
+      // Link the subprojects as dependencies of the parent project
+      if (!project.dependencies) {
+        project.dependencies = [];
+      }
+      for (const sub of subprojects) {
+        if (!project.dependencies.some((dep: any) => dep.id === sub.id || dep.fqn === sub.fqn)) {
+          project.dependencies.push(sub as IReactorProject);
+        }
+      }
+    }
+
     // Persist the processed project. Strip immutable / derived identity fields
     // from the update payload so Mongo does not reject the write, and await the
     // result so any failure is caught here rather than surfacing as an opaque
@@ -832,8 +869,28 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
   }
 
   async getAttributes(node: any): Promise<ReactorNodeAttributes[]> {
-    // Stub: Implement attribute retrieval as needed
-    return [];
+    // Project the node's data essentials as inspectable attributes.
+    const attributes: ReactorNodeAttributes[] = [];
+    const data = node?.data;
+    if (!data || typeof data !== 'object') return attributes;
+
+    const push = (key: string, value: any) => {
+      if (value === undefined || value === null || value === '') return;
+      attributes.push({
+        id: this.context.utils.hash(`${node.id}:${key}`),
+        key,
+        value: typeof value === 'string' ? value : JSON.stringify(value),
+      });
+    };
+
+    push('kind', data.kind);
+    push('language', data.language);
+    push('relativePath', data.relativePath);
+    if (data.symlink) {
+      push('symlink-target', data.symlink.target);
+      push('symlink-broken', data.symlink.broken === true ? 'true' : undefined);
+    }
+    return attributes;
   }
 
   

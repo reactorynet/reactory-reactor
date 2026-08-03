@@ -84,6 +84,48 @@ interface ReactorNodeCatalogIndexFailure {
 type ReactorNodeCatalogIndexResult = ReactorNodeCatalogIndexSuccess | 
   ReactorNodeCatalogIndexFailure
 
+/**
+ * Module-level helpers — the @query/@mutation/@property decorators copy
+ * UNBOUND function references into the resolver map (see mergeResolver.ts),
+ * so `this` inside a decorated method is Apollo's field object, never the
+ * class instance. Shared logic must live outside the class.
+ */
+const graphService = (context: Reactory.Server.IReactoryContext): ISystemGraphManager =>
+  context.getService<ISystemGraphManager>("reactor.SystemGraphManager@1.0.0");
+
+/**
+ * Resolve a node by its deterministic id. Delegates to the graph façade,
+ * which checks the persisted graph, then the lazy tree cache, and returns a
+ * minimal placeholder if neither has it (so non-null edge endpoints never
+ * crash the query).
+ */
+const resolveNodeById = async (
+  id: number,
+  context: Reactory.Server.IReactoryContext
+): Promise<Partial<ReactorNode>> => {
+  const [node] = await graphService(context).getNodes([id]);
+  return node;
+};
+
+const relatedNodes = async (
+  node: Partial<ReactorNode>,
+  context: Reactory.Server.IReactoryContext,
+  direction: "dependencies" | "dependents",
+  types?: string[]
+): Promise<Partial<ReactorNode>[]> => {
+  if (!node?.id) return [];
+  const graphSvc = graphService(context);
+  const edges = await graphSvc.getNodeLinks([node.id], {
+    direction: direction === "dependencies" ? "out" : "in",
+    types,
+  });
+  const ids = edges.map((e) =>
+    direction === "dependencies" ? e.target : e.source
+  );
+  const unique = Array.from(new Set(ids));
+  return graphSvc.getNodes(unique);
+};
+
 //@ts-ignore
 @resolver
 class ReactorSystemGraph {
@@ -158,57 +200,13 @@ class ReactorSystemGraph {
     return graphSvc.getNode(args.id, args.key || args.ancestry);
   }
 
-  /**
-   * Resolve a node by its deterministic id. Checks the persisted graph first,
-   * then the lazy tree cache. Returns a minimal placeholder if neither has it
-   * (so non-null edge endpoints never crash the query).
-   */
-  private async resolveNodeById(
-    id: number,
-    context: Reactory.Server.IReactoryContext
-  ): Promise<Partial<ReactorNode>> {
-    const persisted = (await ReactorNodeModel.findOne({ id }).lean()) as any;
-    if (persisted) return persisted;
-    const cached = await context.getValue<ReactorNode>(`REACTOR_NODE_${id}`);
-    if (cached) return cached;
-    return {
-      id,
-      index: id,
-      key: `${id}`,
-      name: `#${id}`,
-      type: ReactorNodeType.PROCESS,
-      nameSpace: "reactor",
-      version: "1.0.0",
-      description: "Unresolved node",
-      children: [],
-    };
-  }
-
-  private async relatedNodes(
-    node: Partial<ReactorNode>,
-    context: Reactory.Server.IReactoryContext,
-    direction: "dependencies" | "dependents",
-    types?: string[]
-  ): Promise<Partial<ReactorNode>[]> {
-    if (!node?.id) return [];
-    const query: any =
-      direction === "dependencies" ? { source: node.id } : { target: node.id };
-    if (types && types.length) query.types = { $in: types };
-    const edges = (await ReactorNodeLinkModel.find(query).lean()) as any[];
-    const ids = edges.map((e) =>
-      direction === "dependencies" ? e.target : e.source
-    );
-    const unique = Array.from(new Set(ids));
-    return Promise.all(unique.map((id) => this.resolveNodeById(id, context)));
-  }
-
   @property("ReactorNode", "dependencies")
   async getNodeDependencies(
     node: Partial<ReactorNode>,
     _: any,
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    return this.relatedNodes(node, context, "dependencies", [
+    return relatedNodes(node, context, "dependencies", [
       ReactorLinkType.DEPENDENCY,
     ]);
   }
@@ -219,7 +217,7 @@ class ReactorSystemGraph {
     _: any,
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    return this.relatedNodes(node, context, "dependents", [
+    return relatedNodes(node, context, "dependents", [
       ReactorLinkType.DEPENDENCY,
     ]);
   }
@@ -230,7 +228,7 @@ class ReactorSystemGraph {
     _: any,
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    return this.relatedNodes(node, context, "dependents", [ReactorLinkType.INPUT]);
+    return relatedNodes(node, context, "dependents", [ReactorLinkType.INPUT]);
   }
 
   @property("ReactorNode", "outputs")
@@ -239,7 +237,7 @@ class ReactorSystemGraph {
     _: any,
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    return this.relatedNodes(node, context, "dependencies", [ReactorLinkType.OUTPUT]);
+    return relatedNodes(node, context, "dependencies", [ReactorLinkType.OUTPUT]);
   }
 
   @property("ReactorNode", "parent")
@@ -249,7 +247,7 @@ class ReactorSystemGraph {
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode> | null> {
     if (node?.parentId === undefined || node?.parentId === null) return null;
-    return this.resolveNodeById(node.parentId, context);
+    return resolveNodeById(node.parentId, context);
   }
 
   @property("ReactorNodeLink", "source")
@@ -258,7 +256,7 @@ class ReactorSystemGraph {
     _: any,
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>> {
-    return this.resolveNodeById(link.source, context);
+    return resolveNodeById(link.source, context);
   }
 
   @property("ReactorNodeLink", "target")
@@ -267,7 +265,132 @@ class ReactorSystemGraph {
     _: any,
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>> {
-    return this.resolveNodeById(link.target, context);
+    return resolveNodeById(link.target, context);
+  }
+
+  @property("ReactorNodeLink", "sourceId")
+  getLinkSourceId(link: ReactorNodeLink): number {
+    return link.source;
+  }
+
+  @property("ReactorNodeLink", "targetId")
+  getLinkTargetId(link: ReactorNodeLink): number {
+    return link.target;
+  }
+
+  @property("ReactorNode", "links")
+  async getNodeLinks(
+    node: Partial<ReactorNode>,
+    args: { direction?: "IN" | "OUT" | "BOTH"; types?: string[]; limit?: number },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<ReactorNodeLink[]> {
+    if (!node?.id) return [];
+    return graphService(context).getNodeLinks([node.id], {
+      direction: (args.direction?.toLowerCase() as "in" | "out" | "both") || "both",
+      types: args.types,
+      limit: args.limit,
+    });
+  }
+
+  @query("ReactorNodes")
+  async ReactorNodes(
+    _: any,
+    args: { ids: number[] },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode>[]> {
+    const ids = (args.ids || []).slice(0, 500);
+    return graphService(context).getNodes(ids);
+  }
+
+  @query("ReactorNodeLinks")
+  async ReactorNodeLinks(
+    _: any,
+    args: {
+      sources?: number[];
+      targets?: number[];
+      types?: string[];
+      projectId?: string;
+      paging?: PagingRequest;
+    },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<{ links: ReactorNodeLink[]; paging: PagingResult }> {
+    const paging = args.paging || { page: 1, pageSize: 100 };
+    const page = Math.max(paging.page || 1, 1);
+    const pageSize = Math.min(Math.max(paging.pageSize || 100, 1), 1000);
+
+    const or: any[] = [];
+    if (args.sources && args.sources.length) or.push({ source: { $in: args.sources } });
+    if (args.targets && args.targets.length) or.push({ target: { $in: args.targets } });
+
+    const query: any = {};
+    if (or.length) query.$or = or;
+    if (args.types && args.types.length) query.types = { $in: args.types };
+    if (args.projectId) query.projectId = args.projectId;
+
+    const [links, total] = await Promise.all([
+      ReactorNodeLinkModel.find(query)
+        .skip((page - 1) * pageSize)
+        .limit(pageSize)
+        .lean() as unknown as Promise<ReactorNodeLink[]>,
+      ReactorNodeLinkModel.countDocuments(query),
+    ]);
+
+    return {
+      links,
+      paging: {
+        total,
+        page,
+        pageSize,
+        hasNext: page * pageSize < total,
+      },
+    };
+  }
+
+  @query("ReactorSubgraph")
+  async ReactorSubgraph(
+    _: any,
+    args: {
+      rootId: number;
+      depth?: number;
+      direction?: "IN" | "OUT" | "BOTH";
+      nodeTypes?: string[];
+      linkTypes?: string[];
+      limit?: number;
+      includeContainment?: boolean;
+      materialize?: boolean;
+    },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<any> {
+    const subgraph = await graphService(context).getSubgraph(args.rootId, {
+      depth: args.depth,
+      direction: (args.direction?.toLowerCase() as "in" | "out" | "both") || "both",
+      nodeTypes: args.nodeTypes,
+      linkTypes: args.linkTypes,
+      limit: args.limit,
+      includeContainment: args.includeContainment,
+      materialize: args.materialize,
+    });
+    return {
+      ...subgraph,
+      nodeCount: subgraph.stats?.nodeCount ?? subgraph.nodes.length,
+      linkCount: subgraph.stats?.linkCount ?? subgraph.links.length,
+      depthReached: subgraph.stats?.depthReached ?? 0,
+    };
+  }
+
+  @query("ReactorGraphPath")
+  async ReactorGraphPath(
+    _: any,
+    args: { sourceId: number; targetId: number; maxDepth?: number; linkTypes?: string[] },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<{ found: boolean; nodes: Partial<ReactorNode>[]; links: ReactorNodeLink[] }> {
+    const graphSvc = graphService(context);
+    const path = await graphSvc.findPath(args.sourceId, args.targetId, {
+      maxDepth: args.maxDepth,
+      linkTypes: args.linkTypes,
+    });
+    const nodes = path.found ? await graphSvc.getNodes(path.nodeIds) : [];
+    return { found: path.found, nodes, links: path.links };
   }
 
   @property("ReactorNode", "children")
@@ -627,11 +750,11 @@ class ReactorSystemGraph {
     args: { id: string },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<IReactorProject> | undefined> {
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
+    const projectService = context.getService<ReactorProjectService>(
+      "reactor.ReactorProjectService@1.0.0"
     );
-    const projects = (await graphSvc.getProjects()).projects;
-    return projects.find((p) => p.id === args.id);
+    // getProject resolves by ObjectId string, FQN, name or repo path.
+    return projectService.getProject(args.id);
   }
 
   @mutation("ReactorCreateNodeLink")

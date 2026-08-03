@@ -87,6 +87,7 @@ export type MacroToolDefinition = {
   runat?: "server" | "client",
   enabled?: boolean,
   roles?: string[],
+  category?: string,
   /**
    * Which tool-approval modes this tool is available in.
    * Omit (or pass all four) to make the tool available in every mode.
@@ -112,6 +113,7 @@ export type MacroComponentDefinition<TMacro> = Reactory.IReactoryComponentDefini
   runat?: "server" | "client"
   tools?: MacroToolDefinition[]
   parameters?: Schema
+  category?: string
   /**
    * An alias for a macro. The name of the macro and the alias won't always match.
    * We use this to provide a more human readable name for the macro.

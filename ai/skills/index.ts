@@ -31,6 +31,21 @@ export const ReactorSkills: ISkillDefinition[] = [
       '@readSkill(id: "reactory.analyzeLogs@1.0.0")',
     ],
   },
+  {
+    id: 'reactory.graphCatalogWalkAndLink@1.0.0',
+    name: 'graphCatalogWalkAndLink',
+    nameSpace: 'reactory',
+    version: '1.0.0',
+    description:
+      'Guides agents through the Reactor system graph tools: cataloging a project, walking nodes and edges (searchGraph, graphChildren, exploreGraph, graphLinks), analyzing the underlying content, and creating edges with createNodeEdge only for relationships confirmed by concrete evidence.',
+    filePath: require.resolve('./graph-exploration/catalog-walk-and-link.md'),
+    tags: ['graph', 'catalog', 'traversal', 'edges', 'linking', 'reactor', 'analysis'],
+    roles: ['USER', 'DEVELOPER', 'ADMIN'],
+    examples: [
+      '@searchSkills(query: "graph")',
+      '@readSkill(id: "reactory.graphCatalogWalkAndLink@1.0.0")',
+    ],
+  },
 ];
 
 export default ReactorSkills;

@@ -402,14 +402,15 @@ describe('Playwright Macros', () => {
   // ── PlaywrightScreenshot ──────────────────────────────────────────────────
 
   describe('PlaywrightScreenshot', () => {
-    it('returns base64 and sizeKb', async () => {
+    it('returns url, path and sizeKb', async () => {
       const b64 = Buffer.from('fake-image-data').toString('base64');
       mockPlaywrightSvc.screenshot.mockResolvedValue({ base64: b64 });
       const state = makeState({ vars: { playwrightSessionId: 'sess-1' } });
       const result = await macros.PlaywrightScreenshot({}, state);
       expect(result.success).toBe(true);
-      const data = result.data as { base64: string; sizeKb: number };
-      expect(data.base64).toBe(b64);
+      const data = result.data as { url: string; path: string; sizeKb: number };
+      expect(data.url).toContain('/cdn/profiles/reactor/personas/');
+      expect(data.path).toContain('workspace');
       expect(typeof data.sizeKb).toBe('number');
     });
 
@@ -431,14 +432,16 @@ describe('Playwright Macros', () => {
   // ── PlaywrightPdf ─────────────────────────────────────────────────────────
 
   describe('PlaywrightPdf', () => {
-    it('returns base64 and sizeKb', async () => {
+    it('returns url, path and sizeKb', async () => {
       const b64 = Buffer.from('fake-pdf-data').toString('base64');
       mockPlaywrightSvc.pdf.mockResolvedValue({ base64: b64 });
       const state = makeState({ vars: { playwrightSessionId: 'sess-1' } });
       const result = await macros.PlaywrightPdf({}, state);
       expect(result.success).toBe(true);
-      const data = result.data as { base64: string; sizeKb: number };
-      expect(data.base64).toBe(b64);
+      const data = result.data as { url: string; path: string; sizeKb: number };
+      expect(data.url).toContain('/cdn/profiles/reactor/personas/');
+      expect(data.path).toContain('workspace');
+      expect(typeof data.sizeKb).toBe('number');
     });
 
     it('passes path option when provided', async () => {

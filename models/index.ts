@@ -10,6 +10,7 @@ import {
   ReactorNodeCategoryModelComponentRegistryEntry
 } from './ReactorGraphNode';
 import { ReactorNodeLinkModelComponentRegistryEntry } from './ReactorNodeLink';
+import { ReactorGraphPerspectiveModelComponentRegistryEntry } from './ReactorGraphPerspective';
 import MCPRegistryModel from './MCPRegistry';
 import MCPInstalledConnectorModel from './MCPInstalledConnector';
 
@@ -34,6 +35,7 @@ export default [
   ReactorNodeMetricTypeModelComponentRegistryEntry,
   ReactorNodeCategoryModelComponentRegistryEntry,
   ReactorNodeLinkModelComponentRegistryEntry,
+  ReactorGraphPerspectiveModelComponentRegistryEntry,
   BookTutorPersonaComponentRegistryEntry,
   DataAnalyticsPersonaComponentRegistryEntry,
   InfrastructurePersonaComponentRegistryEntry,

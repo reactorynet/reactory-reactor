@@ -1,0 +1,76 @@
+# Graph perspectives — a saved view of the explorer: node positions, the
+# expanded node set and the camera. Supersedes the never-wired ReactorNodeUI.
+
+type ReactorGraphNodePosition {
+  nodeId: Int!
+  x: Float!
+  y: Float!
+  z: Float
+}
+
+type ReactorGraphViewport {
+  cameraX: Float
+  cameraY: Float
+  cameraZ: Float
+  targetX: Float
+  targetY: Float
+  targetZ: Float
+  zoom: Float
+}
+
+type ReactorGraphPerspective {
+  id: String!
+  name: String!
+  # Owning user id — resolved server-side, never client supplied.
+  owner: String!
+  projectId: String
+  rootNodeId: Int
+  nodePositions: [ReactorGraphNodePosition!]!
+  expandedKeys: [String!]
+  viewport: ReactorGraphViewport
+  share: Boolean
+  created: Date
+  updated: Date
+}
+
+input ReactorGraphNodePositionInput {
+  nodeId: Int!
+  x: Float!
+  y: Float!
+  z: Float
+}
+
+input ReactorGraphViewportInput {
+  cameraX: Float
+  cameraY: Float
+  cameraZ: Float
+  targetX: Float
+  targetY: Float
+  targetZ: Float
+  zoom: Float
+}
+
+input ReactorGraphPerspectiveInput {
+  # When present the perspective is updated, otherwise created.
+  id: String
+  name: String!
+  projectId: String
+  rootNodeId: Int
+  nodePositions: [ReactorGraphNodePositionInput!]
+  expandedKeys: [String!]
+  viewport: ReactorGraphViewportInput
+  share: Boolean
+}
+
+extend type Query {
+  """
+  Perspectives visible to the current user — their own plus shared ones.
+  """
+  ReactorGraphPerspectives(projectId: String, paging: PagingRequest): [ReactorGraphPerspective!]!
+  ReactorGraphPerspective(id: String!): ReactorGraphPerspective
+}
+
+extend type Mutation {
+  ReactorSaveGraphPerspective(perspective: ReactorGraphPerspectiveInput!): ReactorGraphPerspective!
+  ReactorDeleteGraphPerspective(id: String!): Boolean!
+}

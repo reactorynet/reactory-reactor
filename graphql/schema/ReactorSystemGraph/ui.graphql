@@ -11,6 +11,8 @@ type ReactorNodeOption {
   value: String!
 }
 
+# Deprecated — never wired to any query/mutation/resolver. Superseded by
+# ReactorGraphPerspective (perspective.graphql). Retained for compatibility.
 type ReactorNodeUI {
   id: Int!
   node: ReactorNode!

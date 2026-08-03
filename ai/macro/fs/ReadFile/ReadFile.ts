@@ -150,6 +150,7 @@ export const ReadFileComponentRegister: MacroComponentDefinition<typeof ReadFile
   name: 'readFile',
   nameSpace: 'reactor-macros',
   version: '1.0.0',
+  category: 'File System',
   description: readFileSync(require.resolve('./readme.md'), 'utf-8').toString(),
   features: [],
   roles: ['DEVELOPER', 'ADMIN'],
@@ -158,6 +159,7 @@ export const ReadFileComponentRegister: MacroComponentDefinition<typeof ReadFile
   tools: [{
     type: "function",
     safeForAutoExecution: true,
+    category: 'File System',
     function: {
       name: "readFile",
       description: "Reads a file and returns its content with metadata in a structured format for AI processing",
