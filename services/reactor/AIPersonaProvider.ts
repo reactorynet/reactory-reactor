@@ -183,7 +183,9 @@ class AIPersonaProvider
           const personas = this.personaLoader.loadFromDirectory(subdirPath) as unknown as IAIPersona[];
           for (const persona of personas) {
             try {
-              this.registerPersona(persona, { id: "user", name: "User", nameSpace: "user" } as Reactory.Server.IReactoryModule);
+              // Register under the loaded reactor module (or first loaded module) so it is visible to getModels()
+              const reactorModule = modules.find(m => m.nameSpace === "reactor") || modules[0];
+              this.registerPersona(persona, reactorModule || { id: "user", name: "User", nameSpace: "user" } as Reactory.Server.IReactoryModule);
               totalLoaded++;
               log(
                 `Registered user AI persona "\ ${persona.name}" (${persona.id}) from user directory (subdirectory ${subdir.name})`,
