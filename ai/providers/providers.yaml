@@ -471,7 +471,7 @@ providers:
     name: Google Gemini
     endpointUrl: "${GOOGLE_AI_API_URL:-https://generativelanguage.googleapis.com}"
     apiVersion: v1
-    defaultModel: gemini-3.1-pro-preview
+    defaultModel: gemini-3.6-flash
     capabilities:
       - text-generation
       - code-generation
@@ -483,7 +483,29 @@ providers:
     credentialEnvVars:
       apiKey: GOOGLE_AI_STUDIO_API_KEY
     models:
-          
+      - id: gemini-3.6-flash
+        name: Gemini 3.6 Flash
+        version: "3.6"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+        contextLength: 1048576
+        rpm: null
+        itpm: null
+        otpm: null
+        inputCostPerTokenUsdCents: 0.0002
+        outputCostPerTokenUsdCents: 0.0012
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+          - video
+          - audio
+          - pdf        
       - id: gemini-3.5-flash
         name: Gemini 3.5 Flash
         version: "3.5"
