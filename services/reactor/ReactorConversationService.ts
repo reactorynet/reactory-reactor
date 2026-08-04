@@ -3422,7 +3422,7 @@ export default class ReactorConversationService
    * @since 1.0.0
    */
   async sendMessage(args: {
-    personaId: string;
+    personaId?: string;
     chatSessionId?: string;
     message: string | any;
     role?: string;
@@ -3445,7 +3445,7 @@ export default class ReactorConversationService
     };
     providerConfig?: ReactorProviderConfig;
   }): Promise<any> {
-    const {
+    let {
       personaId,
       chatSessionId,
       message,
@@ -3465,6 +3465,14 @@ export default class ReactorConversationService
       providerConfig,
     } = args;
     const { user } = this.context;
+
+    // Fallback: If personaId is missing, attempt to resolve it from existing session
+    if (!personaId && chatSessionId) {
+      const existingSession = await this.getChatSession(chatSessionId);
+      if (existingSession) {
+        personaId = (existingSession as any).personaId || (existingSession as any).botId || (existingSession as any).persona?.id;
+      }
+    }
 
     // Validate chatSessionId if provided
     if (chatSessionId) {

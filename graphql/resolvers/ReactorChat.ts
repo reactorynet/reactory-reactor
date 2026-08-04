@@ -977,7 +977,7 @@ class ReactorChatResolver {
   @mutation("ReactorAskQuestionAudio")
   async ReactorAskQuestionAudio(
     _: any,
-    args: { audio: any; personaId: string; chatSessionId: string },
+    args: { audio: any; personaId?: string; chatSessionId: string },
     context: Reactory.Server.IReactoryContext
   ) {
     try {
@@ -1002,8 +1002,17 @@ class ReactorChatResolver {
         context.getService<IReactorConversationsService>(
           "reactor.ReactorConversationService@1.0.0"
         );
+
+      let personaId = args.personaId;
+      if (!personaId && args.chatSessionId) {
+        const session = await conversationService.getChatSession(args.chatSessionId);
+        if (session) {
+          personaId = (session as any).personaId || (session as any).botId || (session as any).persona?.id;
+        }
+      }
+
       return await conversationService.sendMessage({
-        personaId: args.personaId,
+        personaId,
         chatSessionId: args.chatSessionId,
         message: text,
       });
