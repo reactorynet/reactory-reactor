@@ -73,6 +73,15 @@ export type ReactorConversationHistoryItem = ChatHistoryItem & {
   tool_errors?: ReactorToolError[]
   /** Reasoning/thinking content from models with extended thinking (OpenAI o1/o3, Anthropic, Gemini) */
   thinking?: string
+  /**
+   * Provider-native reasoning content blocks, stored verbatim.
+   *
+   * Anthropic requires the thinking blocks that preceded a tool_use to be
+   * replayed unchanged (signature included) on the assistant turn carrying that
+   * tool_use when the tool results are sent back; the flattened `thinking`
+   * string above cannot satisfy that. Only populated for providers that need it.
+   */
+  thinking_blocks?: any[]
   /** Generated images from image-capable models */
   images?: Array<{ url?: string; b64_json?: string; mimeType?: string }>
 }
@@ -162,6 +171,7 @@ const ReactorConversationHistorySchema = new Schema({
   content: { type: Schema.Types.Mixed, default: null },
   refusal: String,
   thinking: String,
+  thinking_blocks: { type: [Schema.Types.Mixed], default: undefined },
   images: { type: [Schema.Types.Mixed], default: undefined },
   component: String,
   rating: Number,

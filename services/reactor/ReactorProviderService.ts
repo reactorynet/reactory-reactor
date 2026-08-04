@@ -238,6 +238,16 @@ class ReactorProviderService implements IReactorProviderService {
     // Anthropic adapter — handles content blocks
     const anthropicAdapter = {
       adaptResponse: (response: any): any => {
+        if (response === null || response === undefined) {
+          return {
+            __typename: "ReactorErrorResponse",
+            code: "PROVIDER_ERROR",
+            message: "No response from Anthropic",
+            timestamp: new Date(),
+            recoverable: false,
+          };
+        }
+
         if (response.error) {
           return {
             __typename: "ReactorErrorResponse",
@@ -246,6 +256,21 @@ class ReactorProviderService implements IReactorProviderService {
             timestamp: new Date(),
             recoverable: false,
           };
+        }
+
+        // Already normalized by processAIResponse — pass it through untouched.
+        // Re-wrapping it here rebuilt the object from scratch and dropped
+        // sessionId (declared `String!` in the schema), along with thinking,
+        // images, tool_results and tool_errors. It also returned null for an
+        // assistant turn that only made tool calls (empty content), which the
+        // union resolver cannot type. Both surfaced to the client as a GraphQL
+        // error at the very end of the turn, after the response had already
+        // been streamed and persisted. The openai/google adapters have had
+        // these passthrough guards all along; this one did not.
+        if (response.__typename === "ReactorChatMessage") return response;
+
+        if (response.role && response.content) {
+          return { __typename: "ReactorChatMessage", ...response };
         }
 
         if (response.content) {
@@ -261,11 +286,29 @@ class ReactorProviderService implements IReactorProviderService {
 
           return {
             __typename: "ReactorChatMessage",
+            sessionId: response.sessionId,
             id: response.id || Math.random().toString(36).substring(2, 15),
             role: "assistant",
             content: combinedContent,
+            thinking: response.thinking || response.reasoning || response.__reasoning || undefined,
+            images: response.images || response.__images || undefined,
             timestamp: new Date(),
             tool_calls: response.tool_calls || null,
+          };
+        }
+
+        // AIChatCompletion shape (buildCompletion output) — reached when the
+        // provider response has not been through processAIResponse yet.
+        if (response.choices && response.choices.length > 0) {
+          const message = response.choices[0].message;
+          return {
+            __typename: "ReactorChatMessage",
+            sessionId: response.sessionId,
+            id: response.id,
+            role: message.role,
+            content: message.content,
+            timestamp: new Date(),
+            tool_calls: message.tool_calls || null,
           };
         }
 

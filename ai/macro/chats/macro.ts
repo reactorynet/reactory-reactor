@@ -288,11 +288,14 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
           if (typeof providerConfig === 'string' && providerConfig.trim().length > 0) {
             try { parsedProviderConfig = JSON.parse(providerConfig); } catch (e) {}
           }
+          const targetModelId = resolved.modelId || (resolved.providerId ? state.modelId : persona.modelId) || state.modelId;
+          const targetProviderId = resolved.providerId || persona.providerId;
+
           const response = await conversationService.sendMessage({
             personaId: persona.id,
             message,
-            modelId: resolved.modelId || state.modelId,
-            providerId: resolved.providerId,
+            modelId: targetModelId,
+            providerId: targetProviderId,
             chatSessionId: existingChatId || undefined,
             streamingMode: StreamingMode.NONE,
             tool_results: undefined,

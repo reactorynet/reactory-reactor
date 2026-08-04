@@ -13,6 +13,8 @@ const WORKFLOW_FEATURES_TEXT = ingest(require.resolve('./features.md'));
 const WORKFLOW_TOOL_INCLUDES = [
   'readFile',
   'writeFile',
+  'safeEditFile',
+  'snip',
   'listDirectory',
   'shell',
   'todo',
@@ -41,7 +43,21 @@ const WORKFLOW_TOOL_INCLUDES = [
   'validateWorkflowYaml',
   'deleteWorkflowDefinition',
   'workflow',
-  'amq'
+  'amq',
+  // System graph traversal tools
+  'searchGraph',
+  'getGraphNode',
+  'graphChildren',
+  'exploreGraph',
+  'graphLinks',
+  'createNodeEdge',
+  'loadGraphPerspective',
+  // Project management & cataloging tools
+  'listProjects',
+  'getProject',
+  'createProject',
+  'updateProject',
+  'catalogProject'
 ];
 
 const REACTORY_HOME = process.env.REACTORY_HOME || process.cwd();
@@ -210,27 +226,26 @@ const buildSystemPrompt = (userRoles: string[] = ['USER'], availableTools: any[]
   const roleCapabilities = getRoleCapabilities(userRoles);
   const resourceDescription = buildResourceDescriptions(WORKFLOW_RESOURCES);
 
-  return lodash.template(WORKFLOW_PERSONA_TEXT + '\n\n' + WORKFLOW_FEATURES_TEXT, {
-    'interpolate': /<%=([\s\S]+?)%>/g
-  })({
-    date: new Date().toISOString(),
-    toolDescriptions,
-    resourceDescription,
-    userRole: userRoles.join(', '),
-    roleSpecificCapabilities: roleCapabilities
-  });
+  return (WORKFLOW_PERSONA_TEXT + '\n\n' + WORKFLOW_FEATURES_TEXT)
+    .replace(/<%= date %>/g, new Date().toISOString())
+    .replace(/<%= userRole %>/g, userRoles.join(', '))
+    .replace(/<%= roleSpecificCapabilities %>/g, roleCapabilities)
+    .replace(/<%= resourceDescription %>/g, resourceDescription)
+    .replace(/<%= toolDescriptions %>/g, toolDescriptions);
 };
 
 const systemPrompt = buildSystemPrompt();
 
 export const WorkflowWillPersona: IAIPersona = {
   id: "WorkflowWillAIPersona",
+  nameSpace: "reactor",
   name: "WorkflowWill",
+  version: "1.0.0",
   description: "WorkflowWill AI Persona - Specialized exclusively in designing, building, debugging, and optimizing YAML and Code-based workflows for the Reactory Workflow Engine",
   persona: WORKFLOW_PERSONA_TEXT,
   features: WORKFLOW_FEATURES_TEXT,
   appearance,
-  modelId: process.env.GOOGLE_AI_STUDIO_MODEL_ID || "gemini-3-pro-preview",
+  modelId: process.env.GOOGLE_AI_STUDIO_MODEL_ID || "gemini-2.5-pro",
   providerId: "google",
   defaultGreeting: "Hello, I am WorkflowWill, your dedicated workflow architect for the Reactory platform. I specialize exclusively in designing and building YAML and Code-based workflows for the Reactory Workflow Engine. Whether you need to create a new workflow, debug an existing one, build custom steps, or optimize execution patterns, I am here to help. What workflow challenge can I assist you with today?",
   prompts: {

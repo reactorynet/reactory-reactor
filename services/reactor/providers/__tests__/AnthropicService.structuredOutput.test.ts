@@ -295,4 +295,88 @@ describe("AnthropicService — providerConfig / structured output", () => {
     });
   });
 
+  describe("thinking block replay", () => {
+    // Anthropic rejects a tool-result turn whose assistant message dropped the
+    // thinking blocks that produced the tool_use ("Expected `thinking` or
+    // `redacted_thinking`, but found ..."), so they must survive the round trip
+    // through the persisted history.
+    const historyWithThinking = [
+      { role: "user", content: "What's the weather?" },
+      {
+        role: "assistant",
+        content: "Let me check",
+        thinking: "I should call the weather tool",
+        thinking_blocks: [
+          { type: "thinking", thinking: "I should call the weather tool", signature: "sig-abc" },
+        ],
+        tool_calls: [
+          { id: "t1", type: "function", function: { name: "get_weather", arguments: "{}" } },
+        ],
+      },
+      { role: "tool", tool_call_id: "t1", content: "sunny" },
+    ];
+
+    it("replays stored thinking blocks first on the assistant turn carrying the tool_use", () => {
+      const svc = createService();
+      const messages = svc.convertHistoryToAnthropicFormat(historyWithThinking);
+
+      const assistant = messages.find((m: any) => m.role === "assistant");
+      expect(assistant.content[0]).toEqual({
+        type: "thinking",
+        thinking: "I should call the weather tool",
+        signature: "sig-abc",
+      });
+      expect(assistant.content[1]).toEqual({ type: "text", text: "Let me check" });
+      expect(assistant.content[2]).toMatchObject({ type: "tool_use", id: "t1", name: "get_weather" });
+    });
+
+    it("drops unsigned thinking blocks, which the API would reject", () => {
+      const svc = createService();
+      const messages = svc.convertHistoryToAnthropicFormat([
+        ...historyWithThinking.slice(0, 1),
+        {
+          ...historyWithThinking[1],
+          thinking_blocks: [{ type: "thinking", thinking: "no signature here" }],
+        },
+        historyWithThinking[2],
+      ]);
+
+      const assistant = messages.find((m: any) => m.role === "assistant");
+      expect(assistant.content.some((b: any) => b.type === "thinking")).toBe(false);
+    });
+
+    it("keeps replayed thinking blocks when the request enables thinking", () => {
+      const svc = createService({
+        modelId: "claude-opus-4-8",
+        thinking: { mode: "adaptive", effort: "high", display: "summarized" },
+        sampling: { temperature: false, topP: false, topK: false },
+      });
+      const messages = svc.convertHistoryToAnthropicFormat(historyWithThinking);
+      const params = svc.buildRequestParams(messages, persona, {});
+
+      const assistant = params.messages.find((m: any) => m.role === "assistant");
+      expect(assistant.content[0].type).toBe("thinking");
+    });
+
+    it("strips replayed thinking blocks when thinking is off for the request", () => {
+      const svc = createService({
+        modelId: "claude-opus-4-8",
+        thinking: { mode: "adaptive", effort: "high", display: "summarized" },
+        sampling: { temperature: false, topP: false, topK: false },
+      });
+      const messages = svc.convertHistoryToAnthropicFormat(historyWithThinking);
+      // Structured output forces tool_choice, which disables thinking — sending
+      // thinking blocks alongside disabled thinking is itself a 400.
+      const params = svc.buildRequestParams(messages, persona, {
+        providerConfig: { structuredOutput: { schema: SCHEMA, name: "extraction" } },
+      });
+
+      expect(params.thinking).toBeUndefined();
+      const assistant = params.messages.find((m: any) => m.role === "assistant");
+      expect(assistant.content.some((b: any) => b.type === "thinking")).toBe(false);
+      // The rest of the turn survives the strip.
+      expect(assistant.content.some((b: any) => b.type === "tool_use")).toBe(true);
+    });
+  });
+
 });
