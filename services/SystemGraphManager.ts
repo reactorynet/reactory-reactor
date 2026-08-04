@@ -605,7 +605,15 @@ class SystemGraphManager implements ISystemGraphManager {
 
 
   async getProjectNode(project: Partial<IReactorProject>): Promise<ReactorDataNode<Partial<IReactorProject>>> {
-    const provider = this.context.getService<IProjectProcessor>(project?.processors?.[0]?.processor);
+    const processorFqn = project?.processors?.[0]?.processor;
+    let provider: IProjectProcessor | null = null;
+    if (processorFqn) {
+      try {
+        provider = this.context.getService<IProjectProcessor>(processorFqn);
+      } catch (err) {
+        this.context.warn(`getProjectNode: processor service "${processorFqn}" unavailable: ${(err as Error).message}`);
+      }
+    }
     if(provider && provider.getProjectNode) {
       return await provider.getProjectNode(project);
     } else {

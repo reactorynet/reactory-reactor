@@ -1027,7 +1027,7 @@ extend type Mutation {
   """
   Converts spoken audio to text and sends it as a message to the persona.
   """
-  ReactorAskQuestionAudio(audio: Upload!, chatSessionId: String!): ReactorChatResponse
+  ReactorAskQuestionAudio(audio: Upload!, chatSessionId: String!, personaId: String): ReactorChatResponse
 
   """
   Starts a voice-enabled chat session with TTS/STT configuration.

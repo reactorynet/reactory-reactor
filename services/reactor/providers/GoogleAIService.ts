@@ -690,6 +690,44 @@ class GoogleAIService extends AIProviderBase {
   }
 
   /**
+   * Reads files attached to the current chatState session and converts supported
+   * file types (PDFs, images, audio, text) to Google GenAI inlineData parts.
+   */
+  private getFilePartsForSession(): any[] {
+    const fileParts: any[] = [];
+    if (!this.chatState?.files || !Array.isArray(this.chatState.files)) {
+      return fileParts;
+    }
+
+    for (const f of this.chatState.files) {
+      const filePath = (f as any).path || (f as any).location;
+      if (filePath && fs.existsSync(filePath)) {
+        try {
+          const stats = fs.statSync(filePath);
+          // Inline base64 limit: 20MB
+          if (stats.size > 0 && stats.size <= 20 * 1024 * 1024) {
+            const buf = fs.readFileSync(filePath);
+            const base64Data = buf.toString("base64");
+            const mimeType = f.mimetype || (filePath.endsWith(".pdf") ? "application/pdf" : "application/octet-stream");
+            fileParts.push({
+              inlineData: {
+                mimeType,
+                data: base64Data,
+              },
+            });
+            this.slog("info", `Attached file ${f.filename || f.alias} (${mimeType}, ${stats.size} bytes) as inlineData part to Gemini`);
+          } else {
+            this.slog("warn", `File ${f.filename || f.alias} exceeds 20MB limit for inlineData (${stats.size} bytes)`);
+          }
+        } catch (err: any) {
+          this.slog("warn", `Failed to read file ${filePath} for inline attachment: ${err.message}`);
+        }
+      }
+    }
+    return fileParts;
+  }
+
+  /**
    * Converts a string or OpenAI-format content-parts array to Google GenAI Part[].
    */
   private convertMessageToGoogleParts(message: string | any[]): any[] {
@@ -719,9 +757,16 @@ class GoogleAIService extends AIProviderBase {
       tool_args?: any;
       tool_call_id?: string;
       tool_results?: ReactorToolResult[];
-    }
+    },
+    isLatestUserMessage: boolean = false
   ): any[] {
     const parts = this.convertMessageToGoogleParts(msg.content as string | any[]);
+    if (isLatestUserMessage) {
+      const fileParts = this.getFilePartsForSession();
+      if (fileParts.length > 0) {
+        parts.push(...fileParts);
+      }
+    }
     return parts;
   }
 
@@ -793,6 +838,8 @@ class GoogleAIService extends AIProviderBase {
       //   parts: [{ text: "I'm ready to help you with your request." }],
       // });
 
+      const lastUserMsgIdx = history.map((m) => m?.role).lastIndexOf("user");
+
       history.forEach((msg, idx) => {
         if (!msg) {
           this.context.warn(
@@ -855,7 +902,7 @@ class GoogleAIService extends AIProviderBase {
           if (msg.role === "system") return; // system is handled via systemInstruction
           googleRole = "user";
           //@ts-ignore
-          parts = this.getPartsForUserMessage(msg);
+          parts = this.getPartsForUserMessage(msg, idx === lastUserMsgIdx);
         }
 
         if (parts.length === 0) {

@@ -47,7 +47,8 @@ function isTextMimetype(mimetype: string): boolean {
 
 export const ReadChatFile: Macro<ReadChatFileResult, ReadChatFileProps> = async (
   props: ReadChatFileProps,
-  state: ChatState
+  state: ChatState,
+  context?: Reactory.Server.IReactoryContext
 ): Promise<ReadChatFileResult> => {
   const { fileId } = props;
 
@@ -90,6 +91,58 @@ export const ReadChatFile: Macro<ReadChatFileResult, ReadChatFileProps> = async 
       tool: 'readChatFile',
       params: props,
     };
+  }
+
+  if (mimetype === 'application/pdf' || filename.toLowerCase().endsWith('.pdf')) {
+    try {
+      if (!existsSync(filePath)) {
+        return {
+          success: false,
+          error: `File not found on disk: ${filePath}`,
+          errorCode: MacroErrorCode.IO_NOT_FOUND,
+          tool: 'readChatFile',
+          params: props,
+        };
+      }
+      let pdfService: any = context?.getService ? context.getService('pdf-manager.PdfService@1.0.0') : null;
+      if (!pdfService) {
+        try {
+          const PdfServiceClass = require('@reactory/server-modules/reactory-pdf-manager/services/PdfService').default;
+          pdfService = new PdfServiceClass({}, context);
+        } catch (e) {
+          // fallback
+        }
+      }
+      if (pdfService && typeof pdfService.toMarkdown === 'function') {
+        const markdown = await pdfService.toMarkdown(filePath);
+        const codeBlock = `\`\`\`markdown\n${markdown}\n\`\`\``;
+        return {
+          success: true,
+          data: {
+            content: markdown,
+            codeBlock,
+            metadata: {
+              fileId: fileIdStr,
+              filename,
+              path: filePath,
+              size: fileSize,
+              sizeFormatted: `${(fileSize / 1024).toFixed(2)}KB`,
+              mimeType: mimetype,
+            },
+          },
+          tool: 'readChatFile',
+          params: props,
+        };
+      }
+    } catch (pdfErr: any) {
+      logger.error(`Error extracting PDF text in ReadChatFile: ${pdfErr.message}`, { error: pdfErr });
+      return {
+        success: false,
+        error: `Failed to extract PDF text: ${pdfErr.message}`,
+        tool: 'readChatFile',
+        params: props,
+      };
+    }
   }
 
   if (!isTextMimetype(mimetype)) {
