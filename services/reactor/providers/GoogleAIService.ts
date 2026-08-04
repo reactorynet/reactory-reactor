@@ -650,12 +650,14 @@ class GoogleAIService extends AIProviderBase {
       }
     }
 
-    // If no parts were added, add an empty text part to avoid Google API errors
-    if (parts.length === 0) {
-      parts.push({ text: "" });
-    }
+    // Filter out empty text parts — Google API rejects empty text parts with 400 Bad Request
+    const cleanParts = parts.filter((p: any) => {
+      if (!p) return false;
+      if (p.text !== undefined && typeof p.text === "string" && p.text.trim() === "") return false;
+      return true;
+    });
 
-    return parts;
+    return cleanParts;
   }
 
   /**
@@ -732,18 +734,21 @@ class GoogleAIService extends AIProviderBase {
    */
   private convertMessageToGoogleParts(message: string | any[]): any[] {
     if (typeof message === "string") {
-      return [{ text: message }];
+      const str = message.trim();
+      return [{ text: str || " " }];
     }
     if (Array.isArray(message)) {
       const parts: any[] = [];
       for (const c of message) {
         const part = this.contentItemToGooglePart(c);
-        if (part !== null) parts.push(part);
+        if (part !== null && (part.text === undefined || (typeof part.text === "string" && part.text.trim() !== ""))) {
+          parts.push(part);
+        }
       }
-      if (parts.length === 0) parts.push({ text: "" });
-      return parts;
+      return parts.length > 0 ? parts : [{ text: " " }];
     }
-    return [{ text: String(message) }];
+    const str = String(message || "").trim();
+    return [{ text: str || " " }];
   }
 
   private getPartsForUserMessage(
@@ -918,6 +923,13 @@ class GoogleAIService extends AIProviderBase {
           googleHistory.push({ role: googleRole, parts });
         }
       });
+
+      // Gemini requires strict user/model role alternation. If googleHistory ends
+      // with a "user" role (e.g. from an interrupted/canceled turn), remove trailing
+      // user entries so that sendMessageStream(userMessage) alternates cleanly as model -> user.
+      while (googleHistory.length > 0 && googleHistory[googleHistory.length - 1].role === "user") {
+        googleHistory.pop();
+      }
 
       // Create chat session with generation config
       const isImageModel = await this.isImageGenerationModel();
