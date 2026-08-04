@@ -153,7 +153,16 @@ class ReactorMacroService implements Reactory.Service.IReactoryService {
     // Use the macro registry in this service
     const macro = this.getMacroFromTool(toolName);
     if (macro && typeof macro === "function") {
-      return await macro(params, state) as T;
+      // Bug fix: forward this service's own execution context both as the
+      // Macro signature's optional 3rd `context` param AND as a fallback on
+      // `state.context`. Role-gated macros (e.g. the `shell` macro's
+      // `secureShell`/`hasAnyRole` check) read `state.context`, not the 3rd
+      // param, so without the state fallback here a caller whose ChatState
+      // predates this fix (or omits context for any other reason) would
+      // still fail closed with a false 'Unauthorized' even though this
+      // service already holds a perfectly valid context via DI.
+      const stateWithContext: ChatState = state?.context ? state : { ...state, context: this.context };
+      return await macro(params, stateWithContext, this.context) as T;
     } else {
       throw new Error(`Tool ${toolName} not found`);
     }

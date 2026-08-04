@@ -14,6 +14,8 @@
  * regex/brace engine in `./legacyRegex`).
  */
 
+import path from "path";
+
 export type TreeSitterLanguageId = "java" | "csharp" | "kotlin";
 
 interface LoadResult {
@@ -44,9 +46,9 @@ const GRAMMAR_MODULE: Record<TreeSitterLanguageId, string> = {
 };
 
 /** Lazily requires and caches a grammar's Language object. Never throws. */
-const loadLanguage = (lang: TreeSitterLanguageId): LoadResult => {
+const loadLanguage = async (lang: TreeSitterLanguageId): Promise<LoadResult> => {
   const cached = languageCache.get(lang);
-  if (cached) return cached;
+  if (cached && cached.Language) return cached;
 
   const ParserCtor = getParserCtor();
   if (!ParserCtor) {
@@ -56,14 +58,68 @@ const loadLanguage = (lang: TreeSitterLanguageId): LoadResult => {
   }
 
   try {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const grammar = require(GRAMMAR_MODULE[lang]);
+    let grammar: any;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      grammar = require(GRAMMAR_MODULE[lang]);
+    } catch {
+      try {
+        // Direct prebuild .node require (for ESM-wrapped packages like tree-sitter-c-sharp in CJS runtimes)
+        const pkgDir = path.dirname(require.resolve(`${GRAMMAR_MODULE[lang]}/package.json`));
+        const nativeBinding = path.join(
+          pkgDir,
+          "prebuilds",
+          `${process.platform}-${process.arch}`,
+          `${GRAMMAR_MODULE[lang]}.node`
+        );
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        grammar = require(nativeBinding);
+      } catch {
+        try {
+          const pkgDir = path.dirname(require.resolve(`${GRAMMAR_MODULE[lang]}/package.json`));
+          // eslint-disable-next-line @typescript-eslint/no-var-requires
+          grammar = require("node-gyp-build")(pkgDir);
+        } catch {
+          const dynamicImport = new Function("modulePath", "return import(modulePath)");
+          grammar = await dynamicImport(GRAMMAR_MODULE[lang]);
+        }
+      }
+    }
     // Grammar packages export either the Language object directly, or
-    // { default: Language }, or (some builds) named export matching the
-    // language id — normalise defensively.
-    const Language = grammar?.default || grammar;
+    // { language: Language }, or { default: Language }, or (some builds like c_sharp) named export or function
+    let Language: any;
+    if (typeof grammar === "function") {
+      try {
+        Language = grammar();
+      } catch {
+        Language = grammar;
+      }
+    } else if (grammar && typeof grammar.c_sharp === "function") {
+      Language = grammar.c_sharp();
+    } else if (grammar && grammar.c_sharp) {
+      Language = grammar.c_sharp;
+    } else if (grammar && grammar.default) {
+      Language = grammar.default;
+    } else {
+      Language = grammar;
+    }
+
+    if (Language && !Language.nodeTypeInfo) {
+      try {
+        const pkgDir = path.dirname(require.resolve(`${GRAMMAR_MODULE[lang]}/package.json`));
+        const nodeTypesPath = path.join(pkgDir, "src", "node-types.json");
+        if (fs.existsSync(nodeTypesPath)) {
+          Language.nodeTypeInfo = JSON.parse(fs.readFileSync(nodeTypesPath, "utf-8"));
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     const result: LoadResult = { Parser: ParserCtor, Language };
-    languageCache.set(lang, result);
+    if (Language) {
+      languageCache.set(lang, result);
+    }
     return result;
   } catch (err) {
     const result: LoadResult = {
@@ -77,8 +133,8 @@ const loadLanguage = (lang: TreeSitterLanguageId): LoadResult => {
 };
 
 /** True when the given language's grammar is installed and loadable. */
-export const isTreeSitterAvailable = (lang: TreeSitterLanguageId): boolean => {
-  const { Parser, Language } = loadLanguage(lang);
+export const isTreeSitterAvailable = async (lang: TreeSitterLanguageId): Promise<boolean> => {
+  const { Parser, Language } = await loadLanguage(lang);
   return !!Parser && !!Language;
 };
 
@@ -87,18 +143,91 @@ export const isTreeSitterAvailable = (lang: TreeSitterLanguageId): boolean => {
  * grammar/core is unavailable or parsing throws — callers must treat `null`
  * as "fall back to the heuristic analyzer", never as an empty-file signal.
  */
-export const parseWithTreeSitter = (lang: TreeSitterLanguageId, source: string): any | null => {
-  const { Parser, Language } = loadLanguage(lang);
+export const parseWithTreeSitter = async (lang: TreeSitterLanguageId, source: string): Promise<any | null> => {
+  const { Parser, Language, error } = await loadLanguage(lang);
+  if (error) {
+    console.error(`loadLanguage failed for ${lang}: ${error}`);
+  }
   if (!Parser || !Language) return null;
   try {
     const parser = new Parser();
     parser.setLanguage(Language);
     return parser.parse(source);
-  } catch {
+  } catch (err) {
+    console.error(`parseWithTreeSitter setLanguage/parse error for ${lang}:`, err);
     return null;
   }
 };
 
 /** Diagnostic helper — returns the load error (if any) for a language. */
-export const treeSitterLoadError = (lang: TreeSitterLanguageId): string | undefined =>
-  loadLanguage(lang).error;
+export const treeSitterLoadError = async (lang: TreeSitterLanguageId): Promise<string | undefined> =>
+  (await loadLanguage(lang)).error;
+
+/**
+ * Parses source code into a TreeSitter rootNode and hasError flag.
+ */
+export const parseSource = async (
+  lang: TreeSitterLanguageId,
+  source: string
+): Promise<{ rootNode: any; hasError: boolean }> => {
+  const tree = await parseWithTreeSitter(lang, source);
+  if (!tree) {
+    const err = (await treeSitterLoadError(lang)) || "unknown error";
+    throw new Error(`TreeSitter parser unavailable for language ${lang}: ${err}`);
+  }
+  const rootNode = tree.rootNode;
+  const hasError = typeof rootNode?.hasError === "function" ? rootNode.hasError() : !!rootNode?.hasError;
+  return { rootNode, hasError };
+};
+
+/**
+ * Returns 1-based line number for a TreeSitter syntax node.
+ */
+export const lineOf = (node: any): number => {
+  if (!node || !node.startPosition) return 1;
+  return node.startPosition.row + 1;
+};
+
+/**
+ * Returns named children matching any of the given type strings.
+ */
+export const namedChildrenOfType = (node: any, types: string[]): any[] => {
+  if (!node || !node.namedChildren) return [];
+  return node.namedChildren.filter((c: any) => types.includes(c.type));
+};
+
+/**
+ * Recursively collects descendant AST nodes matching `targetTypes`,
+ * stopping recursion at any node matching `stopTypes`.
+ */
+export const collectDescendants = (
+  node: any,
+  targetTypes: string[],
+  stopTypes: string[] = []
+): any[] => {
+  if (!node) return [];
+  const results: any[] = [];
+  const visit = (n: any) => {
+    if (!n) return;
+    const children = n.children || n.namedChildren || [];
+    for (const child of children) {
+      if (targetTypes.includes(child.type)) {
+        results.push(child);
+      }
+      if (!stopTypes.includes(child.type)) {
+        visit(child);
+      }
+    }
+  };
+  visit(node);
+  return results;
+};
+
+/**
+ * Cleans generic parameters or array brackets from a type name string.
+ * e.g. "List<String>" -> "List"
+ */
+export const cleanTypeName = (typeName: string): string => {
+  if (!typeName) return "";
+  return typeName.split("<")[0].split("[")[0].trim();
+};

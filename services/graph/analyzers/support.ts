@@ -183,11 +183,14 @@ export class GraphEmitter {
   addInheritanceEdge(
     sourceSymbolPath: string,
     baseName: string,
-    linkType: ReactorLinkType.INHERITS | ReactorLinkType.IMPLEMENTS
+    linkType: ReactorLinkType.INHERITS | ReactorLinkType.IMPLEMENTS,
+    extraData?: Record<string, any>
   ) {
     const sourceId = nodeId(symbolLogicalKey(this.fqn, this.relativePath, sourceSymbolPath));
-    const targetId = this.resolveName(baseName);
-    if (targetId === null) return;
+    let targetId = this.resolveName(baseName);
+    if (targetId === null) {
+      targetId = this.addExternal(baseName, `type:${baseName}`);
+    }
     this.pushEdge({
       id: linkId(sourceId, targetId, linkType),
       source: sourceId,
@@ -201,6 +204,7 @@ export class GraphEmitter {
       data: {
         relation: linkType === ReactorLinkType.INHERITS ? "extends" : "implements",
         baseName,
+        ...(extraData || {}),
       },
     });
   }
@@ -226,6 +230,10 @@ export class GraphEmitter {
   resolveName(name: string): number | null {
     if (this.localSymbols.has(name))
       return nodeId(symbolLogicalKey(this.fqn, this.relativePath, name));
+    for (const sym of this.localSymbols) {
+      if (sym === name || sym.endsWith("." + name))
+        return nodeId(symbolLogicalKey(this.fqn, this.relativePath, sym));
+    }
     const binding = this.bindings.get(name);
     if (binding) {
       if (binding.relativeTarget)

@@ -3,6 +3,7 @@ import Parser from "tree-sitter";
 import Reactory from "@reactorynet/reactory-core";
 import { ReactorNode, ReactorNodeType, ReactorLinkType } from "../../../types/model.types";
 import { FileAnalysis, GraphEmitter } from "./support";
+import { analyseCSharpFileLegacy } from "./legacyRegex";
 import {
   parseSource,
   lineOf,
@@ -72,7 +73,7 @@ const looksLikeInterfaceName = (name: string): boolean => /^I[A-Z]/.test(cleanTy
 const baseListNames = (typeNode: Parser.SyntaxNode): string[] => {
   const baseList = typeNode.namedChildren.find((c) => c.type === "base_list");
   if (!baseList) return [];
-  return baseList.namedChildren.map((c) => cleanTypeName(c.text));
+  return baseList.namedChildren.map((c) => cleanTypeName(c.text)).filter(Boolean);
 };
 
 /**
@@ -82,52 +83,48 @@ const baseListNames = (typeNode: Parser.SyntaxNode): string[] => {
  * here, matching the previous analyzer's flat symbol model).
  */
 const collectTypes = (root: Parser.SyntaxNode): CSharpTypeInfo[] => {
-  const results: CSharpTypeInfo[] = [];
-
-  const visitContainer = (container: Parser.SyntaxNode, qualifier?: string) => {
-    for (const child of container.namedChildren) {
-      if (child.type === "namespace_declaration" || child.type === "file_scoped_namespace_declaration") {
-        const body = child.childForFieldName("body") || child;
-        visitContainer(body, qualifier);
-      } else if (TYPE_DECL_TYPES.includes(child.type)) {
-        visitType(child, qualifier);
-      }
-    }
-  };
-
-  const visitType = (node: Parser.SyntaxNode, qualifier?: string) => {
-    const nameNode = node.childForFieldName("name");
+  const typeNodes = collectDescendants(root, TYPE_DECL_TYPES);
+  return typeNodes.map((node) => {
+    const nameNode =
+      node.childForFieldName("name") ||
+      (node.children || []).find((c: any) => c.type === "identifier");
     const name = nameNode ? nameNode.text : "<anonymous>";
     const kind = kindForNodeType(node.type);
     const bases = baseListNames(node);
 
-    results.push({ node, name, kind, qualifier, bases });
-
-    const body = node.childForFieldName("body");
-    if (body) {
-      for (const child of body.namedChildren) {
-        if (TYPE_DECL_TYPES.includes(child.type)) {
-          visitType(child, qualifier ? `${qualifier}.${name}` : name);
+    let parent = node.parent;
+    let qualifier: string | undefined;
+    while (parent && parent !== root) {
+      if (TYPE_DECL_TYPES.includes(parent.type)) {
+        const pNameNode = parent.childForFieldName("name");
+        if (pNameNode) {
+          qualifier = qualifier ? `${pNameNode.text}.${qualifier}` : pNameNode.text;
         }
       }
+      parent = parent.parent;
     }
-  };
 
-  visitContainer(root);
-  return results;
+    return { node, name, kind, qualifier, bases };
+  });
 };
 
 const directMembers = (
   bodyNode: Parser.SyntaxNode
 ): { kind: "method" | "constructor"; node: Parser.SyntaxNode; name: string }[] => {
   const out: { kind: "method" | "constructor"; node: Parser.SyntaxNode; name: string }[] = [];
-  for (const child of bodyNode.namedChildren) {
-    if (child.type === "method_declaration") {
-      const nameNode = child.childForFieldName("name");
-      if (nameNode) out.push({ kind: "method", node: child, name: nameNode.text });
-    } else if (child.type === "constructor_declaration") {
-      const nameNode = child.childForFieldName("name");
-      if (nameNode) out.push({ kind: "constructor", node: child, name: nameNode.text });
+  const children = bodyNode.children || bodyNode.namedChildren || [];
+  for (const child of children) {
+    if (child.type === "method_declaration" || child.type === "constructor_declaration") {
+      const nameNode =
+        child.childForFieldName("name") ||
+        (child.children || []).find((c: any) => c.type === "identifier");
+      if (nameNode) {
+        out.push({
+          kind: child.type === "constructor_declaration" ? "constructor" : "method",
+          node: child,
+          name: nameNode.text,
+        });
+      }
     }
   }
   return out;
@@ -153,17 +150,21 @@ const extractCalls = (node: Parser.SyntaxNode): CSharpCallRef[] => {
       if (fn.type === "identifier") {
         refs.push({ kind: "invocation", name: fn.text });
       } else if (fn.type === "member_access_expression") {
-        const nameNode = fn.childForFieldName("name");
-        const exprNode = fn.childForFieldName("expression");
+        const nameNode =
+          fn.childForFieldName("name") ||
+          (fn.namedChildren || [])[1] ||
+          (fn.children || []).find((c: any) => c.type === "identifier");
+        const exprNode = fn.childForFieldName("expression") || (fn.namedChildren || [])[0];
         if (!nameNode) continue;
-        if (!exprNode || exprNode.type === "this_expression") {
+        const exprText = exprNode ? exprNode.text : "";
+        const exprType = exprNode ? exprNode.type : "";
+        if (!exprNode || exprType === "this_expression" || exprText === "this") {
           refs.push({ kind: "invocation", receiver: "this", name: nameNode.text });
-        } else if (exprNode.type === "base_expression") {
+        } else if (exprType === "base_expression" || exprText === "base") {
           refs.push({ kind: "invocation", receiver: "base", name: nameNode.text });
-        } else if (exprNode.type === "identifier") {
-          refs.push({ kind: "invocation", receiver: exprNode.text, name: nameNode.text });
+        } else if (exprText) {
+          refs.push({ kind: "invocation", receiver: exprText, name: nameNode.text });
         }
-        // Other receiver shapes (chained/cast) intentionally produce no edge.
       }
     } else if (inv.type === "object_creation_expression") {
       const typeNode = inv.childForFieldName("type");
@@ -187,23 +188,19 @@ export const analyseCSharpFile = async (
     raw = fs.readFileSync(filePath, "utf-8");
   } catch (err) {
     context?.warn(`CSharpAnalyzer: cannot read ${filePath}: ${(err as Error).message}`);
-    return emitter.finish();
+    const result = emitter.finish();
+  if (filePath.includes("Dog.cs") || filePath.includes("Shape.cs") || filePath.includes("Widget.cs")) {
+    console.log(`[DEBUG ${filePath}] symbols:`, result.symbols.map(s => `${s.name} (${s.data?.symbolKind})`));
+    console.log(`[DEBUG ${filePath}] edges:`, result.edges.map(e => `${e.source} -> ${e.target} [${e.types}] resolved=${e.data?.resolved}`));
+  }
+  return result;
   }
 
-  let root: Parser.SyntaxNode;
-  try {
-    const parsed = await parseSource("csharp", raw);
-    root = parsed.rootNode;
-    if (parsed.hasError) {
-      context?.warn(`CSharpAnalyzer: parse errors in ${filePath}; results may be partial`);
-    }
-  } catch (err) {
-    context?.warn(`CSharpAnalyzer: tree-sitter parse failed for ${filePath}: ${(err as Error).message}`);
-    return emitter.finish();
-  }
+  const parsed = await parseSource("csharp", raw);
+  const root: Parser.SyntaxNode = parsed.rootNode;
 
   // ---- usings ----
-  for (const imp of root.namedChildren.filter((c) => c.type === "using_directive")) {
+  for (const imp of collectDescendants(root, ["using_directive"])) {
     const raw = imp.text.trim().replace(/;$/, "");
     const isStatic = /^using\s+static\s+/.test(raw);
     const rest = raw.replace(/^using\s+(static\s+)?/, "").trim();
@@ -240,7 +237,11 @@ export const analyseCSharpFile = async (
   // Pass 2: methods + constructors.
   const callSites: { symbolPath: string; typeName: string; bodyNode: Parser.SyntaxNode }[] = [];
   for (const t of types) {
-    const body = t.node.childForFieldName("body");
+    const body =
+      t.node.childForFieldName("body") ||
+      (t.node.children || []).find(
+        (c) => c.type.endsWith("body") || c.type.endsWith("list") || c.type.endsWith("block")
+      );
     if (!body) continue;
     const symbolPath = t.qualifier ? `${t.qualifier}.${t.name}` : t.name;
     const parentSymbol = typeNodeByQualifiedName.get(symbolPath);
@@ -250,7 +251,9 @@ export const analyseCSharpFile = async (
         qualifier: symbolPath,
         parent: parentSymbol,
       });
-      const memberBody = member.node.childForFieldName("body");
+      const memberBody =
+        member.node.childForFieldName("body") ||
+        (member.node.namedChildren || []).find((c: any) => c.type === "block");
       if (memberBody) callSites.push({ symbolPath: memberSymbolPath, typeName: t.name, bodyNode: memberBody });
     }
   }
@@ -287,10 +290,7 @@ export const analyseCSharpFile = async (
         resolved = false;
       }
 
-      emitter.addInheritanceEdge(symbolPath, base, linkType);
-      // Tag the edge's resolution provenance for downstream consumers.
-      const lastEdge = (emitter as any).edges?.[(emitter as any).edges.length - 1];
-      if (lastEdge?.data) lastEdge.data.resolved = resolved;
+      emitter.addInheritanceEdge(symbolPath, base, linkType, { resolved });
     }
   }
 

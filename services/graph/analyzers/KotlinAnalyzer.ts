@@ -199,18 +199,38 @@ export const analyseKotlinFile = async (
   }
 
   // ---- imports ----
-  for (const imp of root.namedChildren.filter((c) => c.type === "import_header")) {
-    const text = imp.text.trim().replace(/^import\s+/, "");
-    const wildcard = text.endsWith(".*");
-    const full = wildcard ? text.slice(0, -2) : text.split(" as ")[0].trim();
-    const aliasMatch = text.match(/\sas\s+(\w+)$/);
-    if (!full) continue;
-    const externalId = emitter.addExternal(full, `kotlin:${full}`);
-    emitter.addImportExternalEdge(externalId, full, full, [full]);
-    if (aliasMatch) {
-      emitter.bindExternal(aliasMatch[1], externalId);
-    } else if (!wildcard) {
-      emitter.bindExternal(full.split(".").pop()!, externalId);
+  const importNodes = collectDescendants(root, ["import_header", "import_directive", "import_declaration"]);
+  if (importNodes.length > 0) {
+    for (const imp of importNodes) {
+      const text = imp.text.trim().replace(/^import\s+/, "");
+      const wildcard = text.endsWith(".*");
+      const full = wildcard ? text.slice(0, -2) : text.split(" as ")[0].trim();
+      const aliasMatch = text.match(/\sas\s+(\w+)$/);
+      if (!full) continue;
+      const externalId = emitter.addExternal(full, `kotlin:${full}`);
+      emitter.addImportExternalEdge(externalId, full, full, [full]);
+      if (aliasMatch) {
+        emitter.bindExternal(aliasMatch[1], externalId);
+      } else if (!wildcard) {
+        emitter.bindExternal(full.split(".").pop()!, externalId);
+      }
+    }
+  } else {
+    const importRegex = /^import\s+([\w.]+)(?:\s+as\s+(\w+))?/gm;
+    let match: RegExpExecArray | null;
+    while ((match = importRegex.exec(raw)) !== null) {
+      const full = match[1];
+      const alias = match[2];
+      const wildcard = full.endsWith(".*");
+      const cleanFull = wildcard ? full.slice(0, -2) : full;
+      if (!cleanFull) continue;
+      const externalId = emitter.addExternal(cleanFull, `kotlin:${cleanFull}`);
+      emitter.addImportExternalEdge(externalId, cleanFull, cleanFull, [cleanFull]);
+      if (alias) {
+        emitter.bindExternal(alias, externalId);
+      } else if (!wildcard) {
+        emitter.bindExternal(cleanFull.split(".").pop()!, externalId);
+      }
     }
   }
 

@@ -163,6 +163,10 @@ abstract class AIProviderBase implements IAIProviderService {
       this.chatState = {
         id: chatSession._id.toString(),
         user: context.user,
+        // See the matching comment in the new-session branch above: this must
+        // always be populated so role-gated macros/tools work when invoked
+        // through a provider's internal tool-execution loop.
+        context,
         modelId: chatSession.modelId,
         started: chatSession.started,
         history: chatSession.history,        
@@ -265,6 +269,15 @@ abstract class AIProviderBase implements IAIProviderService {
         this.chatState = {
           id: chatSessionId,
           user: this.context.user,
+          // Bug fix: `context` is part of the ChatState contract (and the Macro
+          // signature accepts it as a 3rd param) specifically so role-gated
+          // macros/tools (e.g. the `shell` macro's `hasAnyRole` check) can
+          // authorize correctly when executed via a provider's internal
+          // agentic tool loop (see AnthropicService.executeToolCall). Without
+          // this, `state.context` is undefined and every role-gated tool call
+          // routed through such a loop fails closed with an Unauthorized error,
+          // regardless of the invoking user's actual roles.
+          context: this.context,
           modelId: persona.modelId,
           started: new Date(),
           history: [SYSTEM_INITIALIZER_MESSAGE],      
