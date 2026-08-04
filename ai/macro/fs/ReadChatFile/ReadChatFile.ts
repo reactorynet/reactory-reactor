@@ -93,7 +93,10 @@ export const ReadChatFile: Macro<ReadChatFileResult, ReadChatFileProps> = async 
     };
   }
 
-  if (mimetype === 'application/pdf' || filename.toLowerCase().endsWith('.pdf')) {
+  const isPdf = mimetype === 'application/pdf' || filename.toLowerCase().endsWith('.pdf');
+  const isDocx = mimetype === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' || mimetype === 'application/msword' || filename.toLowerCase().endsWith('.docx') || filename.toLowerCase().endsWith('.doc');
+
+  if (isPdf || isDocx) {
     try {
       if (!existsSync(filePath)) {
         return {
@@ -134,11 +137,11 @@ export const ReadChatFile: Macro<ReadChatFileResult, ReadChatFileProps> = async 
           params: props,
         };
       }
-    } catch (pdfErr: any) {
-      logger.error(`Error extracting PDF text in ReadChatFile: ${pdfErr.message}`, { error: pdfErr });
+    } catch (docErr: any) {
+      logger.error(`Error extracting document text in ReadChatFile: ${docErr.message}`, { error: docErr });
       return {
         success: false,
-        error: `Failed to extract PDF text: ${pdfErr.message}`,
+        error: `Failed to extract document text: ${docErr.message}`,
         tool: 'readChatFile',
         params: props,
       };

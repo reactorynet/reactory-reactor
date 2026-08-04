@@ -102,4 +102,33 @@ describe("GoogleAIService.createChatSession — providerConfig / structured outp
     expect(cfg.temperature).toBe(0.1); // overrides the hardcoded 0.7
     expect(cfg.maxOutputTokens).toBe(256);
   });
+
+  it("filters out empty assistant messages and avoids empty text parts", async () => {
+    const svc = createService({ supportsFunctionCalling: false });
+    const historyWithEmptyAssistant = [
+      { role: "system", content: "You are helpful." },
+      { role: "user", content: "Hello" },
+      { role: "assistant", content: "" }, // Empty / terminated assistant turn
+    ];
+    await svc.createChatSession(historyWithEmptyAssistant as any);
+    const historyArg = (createMock.mock.calls[createMock.mock.calls.length - 1][0] as any).history;
+    // Trailing user message is popped so history ends cleanly with no empty model parts
+    expect(historyArg.some((h: any) => h.parts.some((p: any) => p.text === ""))).toBe(false);
+  });
+
+  it("trims trailing user messages from history to maintain strict model->user role alternation", async () => {
+    const svc = createService({ supportsFunctionCalling: false });
+    const historyUnterminated = [
+      { role: "system", content: "You are helpful." },
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "First answer" },
+      { role: "user", content: "Interrupted question" }, // Unanswered user turn
+    ];
+    await svc.createChatSession(historyUnterminated as any);
+    const historyArg = (createMock.mock.calls[createMock.mock.calls.length - 1][0] as any).history;
+    // Trailing user message should be trimmed so the history ends with model role
+    if (historyArg.length > 0) {
+      expect(historyArg[historyArg.length - 1].role).toBe("model");
+    }
+  });
 });

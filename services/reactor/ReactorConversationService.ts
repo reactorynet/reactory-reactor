@@ -5392,32 +5392,72 @@ export default class ReactorConversationService
           uploadContext: "desktop_local_reference",
           status: "reference",
           tags: ["desktop_local_reference"],
-          owner: this.context.user._id,
-          uploadedBy: this.context.user._id,
+          owner: this.context.user?._id,
+          uploadedBy: this.context.user?._id,
           created: new Date(),
         });
       }
 
       if (!fileModel) {
         fileModel = await this.fileService.getUserFileByPath(path);
-        if (fileModel === null || fileModel === undefined) {
-          throw new Error(`File not found: ${userFileId} or ${path}`);
+        if (!fileModel && path && fs.existsSync(path)) {
+          const fileOid = ObjectId.isValid(userFileId)
+            ? ObjectId.createFromHexString(userFileId)
+            : new ObjectId();
+          const baseName = nodePath.basename(path);
+          let size = 0;
+          try {
+            size = fs.statSync(path).size;
+          } catch {
+            // path may be virtual or inaccessible from server
+          }
+          fileModel = await ReactoryFile.create({
+            _id: fileOid,
+            id: fileOid,
+            path,
+            alias: baseName,
+            filename: baseName,
+            mimetype: this.fileService?.getMimeType ? this.fileService.getMimeType(nodePath.extname(path)) : "application/octet-stream",
+            size,
+            uploadContext: "desktop_local_reference",
+            status: "reference",
+            tags: ["desktop_local_reference"],
+            owner: this.context.user?._id,
+            uploadedBy: this.context.user?._id,
+            created: new Date(),
+          });
         }
-        if (fileModel.isNew === true) {
-          fileModel._id = ObjectId.createFromHexString(userFileId);
-          fileModel.id = ObjectId.createFromHexString(userFileId);
-          await fileModel.save();
-        }
-        if (!referenceOnly) {
-          fileModel = await this.fileService.catalogFile(
-            fileModel.filename,
+      }
+
+      if (fileModel === null || fileModel === undefined) {
+        throw new Error(`File not found: ${userFileId} or ${path}`);
+      }
+
+      if (fileModel.isNew === true) {
+        fileModel._id = ObjectId.createFromHexString(userFileId);
+        fileModel.id = ObjectId.createFromHexString(userFileId);
+        await fileModel.save();
+      }
+
+      if (!referenceOnly && fileModel.status === "reference") {
+        const catalogPath = path || fileModel.path;
+        if (catalogPath && fs.existsSync(catalogPath)) {
+          const catalogged = await this.fileService.catalogFile(
+            catalogPath,
             fileModel.mimetype,
             fileModel.alias,
             `chat::${sessionId}`,
             this.context.partner,
             this.context.user
           );
+          if (catalogged) {
+            fileModel = catalogged;
+          }
         }
+      }
+
+      if (!fileModel || !fileModel._id) {
+        throw new Error("Unable to resolve file model for attachment");
       }
 
       const resolvedFileId = fileModel._id.toString();
@@ -5450,7 +5490,7 @@ export default class ReactorConversationService
       const updatedConversation = await ReactorConversationModel.findOneAndUpdate(
         {
           _id: sessionId,
-          user: this.context.user._id,
+          user: this.context.user?._id,
         },
         {
           $push: {
@@ -5473,7 +5513,7 @@ export default class ReactorConversationService
         sessionId,
         userFileId: resolvedFileId,
         path,
-        userId: this.context.user._id,
+        userId: this.context.user?._id,
         referenceOnly,
       });
 
