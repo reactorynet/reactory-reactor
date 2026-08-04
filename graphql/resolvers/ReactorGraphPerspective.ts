@@ -92,6 +92,23 @@ class ReactorGraphPerspectiveResolver {
     const { perspective } = args;
     const now = new Date();
 
+    let rootNodeId = perspective.rootNodeId;
+    if ((rootNodeId === undefined || rootNodeId === null) && perspective.projectId) {
+      try {
+        const projectSvc = context.getService<ReactorProjectService>("reactor.ReactorProjectService@1.0.0");
+        const graphSvc = context.getService<ISystemGraphManager>("reactor.SystemGraphManager@1.0.0");
+        const project = await projectSvc.getProjectById(perspective.projectId);
+        if (project) {
+          const pNode = await graphSvc.getProjectNode(project);
+          if (pNode && pNode.index !== undefined) {
+            rootNodeId = pNode.index;
+          }
+        }
+      } catch {
+        // ignore
+      }
+    }
+
     if (perspective.id) {
       const existing = await ReactorGraphPerspectiveModel.findById(perspective.id);
       if (!existing) throw new ApiError(`Perspective ${perspective.id} not found`, 404);
@@ -101,7 +118,7 @@ class ReactorGraphPerspectiveResolver {
       existing.set({
         name: perspective.name,
         projectId: perspective.projectId,
-        rootNodeId: perspective.rootNodeId,
+        rootNodeId: rootNodeId ?? existing.rootNodeId,
         nodePositions: perspective.nodePositions ?? existing.nodePositions,
         expandedKeys: perspective.expandedKeys ?? existing.expandedKeys,
         viewport: perspective.viewport ?? existing.viewport,
@@ -116,7 +133,7 @@ class ReactorGraphPerspectiveResolver {
       { owner, name: perspective.name, projectId: perspective.projectId ?? null },
       {
         $set: {
-          rootNodeId: perspective.rootNodeId,
+          rootNodeId: rootNodeId ?? null,
           nodePositions: perspective.nodePositions ?? [],
           expandedKeys: perspective.expandedKeys ?? [],
           viewport: perspective.viewport,
