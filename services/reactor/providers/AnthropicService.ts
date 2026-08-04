@@ -1,6 +1,8 @@
 import Reactory from "@reactorynet/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
 import Anthropic from "@anthropic-ai/sdk";
+import fs from "fs";
+import path from "path";
 import {
   AIChatParams,
   AIAudioChatParams,
@@ -250,15 +252,68 @@ class AnthropicService extends AIProviderBase {
     return content;
   }
 
-private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[]): Anthropic.Messages.MessageParam[] {
+  /**
+   * Reads files attached to the current chatState session and converts supported
+   * file types (PDFs, images) to Anthropic content blocks.
+   */
+  private getFileContentBlocksForSession(): any[] {
+    const blocks: any[] = [];
+    if (!this.chatState?.files || !Array.isArray(this.chatState.files)) {
+      return blocks;
+    }
+
+    for (const f of this.chatState.files) {
+      const filePath = (f as any).path || (f as any).location;
+      if (filePath && fs.existsSync(filePath)) {
+        try {
+          const stats = fs.statSync(filePath);
+          // 32MB limit for Anthropic inline document blocks
+          if (stats.size > 0 && stats.size <= 32 * 1024 * 1024) {
+            const buf = fs.readFileSync(filePath);
+            const base64Data = buf.toString("base64");
+            const mimeType = f.mimetype || (filePath.endsWith(".pdf") ? "application/pdf" : "application/octet-stream");
+
+            if (mimeType === "application/pdf") {
+              blocks.push({
+                type: "document",
+                source: {
+                  type: "base64",
+                  media_type: "application/pdf",
+                  data: base64Data,
+                },
+              });
+              this.context.log(`Attached PDF ${f.filename || f.alias} (${stats.size} bytes) as document block to Anthropic`, {}, "AnthropicService");
+            } else if (mimeType.startsWith("image/")) {
+              blocks.push({
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: mimeType,
+                  data: base64Data,
+                },
+              });
+              this.context.log(`Attached Image ${f.filename || f.alias} (${stats.size} bytes) as image block to Anthropic`, {}, "AnthropicService");
+            }
+          }
+        } catch (err: any) {
+          this.context.warn(`Failed to read file ${filePath} for Anthropic attachment: ${err.message}`, {}, "AnthropicService");
+        }
+      }
+    }
+    return blocks;
+  }
+
+  private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[]): Anthropic.Messages.MessageParam[] {
     const messages: Anthropic.Messages.MessageParam[] = [];
 
     // Track tool_use_ids that already have a tool_result so we never
     // send duplicates — Anthropic rejects requests with more than one
     // tool_result per tool_use_id.
     const seenToolResultIds = new Set<string>();
+    const lastUserMsgIdx = history.map(m => m?.role).lastIndexOf("user");
 
-    for (const msg of history) {
+    for (let idx = 0; idx < history.length; idx++) {
+      const msg = history[idx];
       // Skip system messages - handled via the system parameter
       if (msg.role === "system") continue;
 
@@ -336,7 +391,21 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
       }
 
       // Handle regular user messages
-      const translatedContent = this.translateContentBlocks(msg.content);
+      let translatedContent: any = this.translateContentBlocks(msg.content);
+      if (idx === lastUserMsgIdx) {
+        const fileBlocks = this.getFileContentBlocksForSession();
+        if (fileBlocks.length > 0) {
+          if (typeof translatedContent === "string") {
+            translatedContent = [{ type: "text", text: translatedContent }, ...fileBlocks];
+          } else if (Array.isArray(translatedContent)) {
+            translatedContent = [...translatedContent, ...fileBlocks];
+          } else if (translatedContent) {
+            translatedContent = [translatedContent, ...fileBlocks];
+          } else {
+            translatedContent = fileBlocks;
+          }
+        }
+      }
       if (translatedContent) {
         messages.push({ role: "user", content: translatedContent });
       }
