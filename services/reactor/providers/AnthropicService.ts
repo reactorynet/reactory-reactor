@@ -290,7 +290,17 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
         }
 
         if (contentBlocks.length > 0) {
-          messages.push({ role: "assistant", content: contentBlocks });
+          // Anthropic requires the assistant turn that carries a tool_use to
+          // start with the thinking block(s) that produced it, replayed verbatim,
+          // whenever thinking is enabled. Rebuilding the turn as [text, tool_use]
+          // fails the follow-up (tool_result) request with
+          // "Expected `thinking` or `redacted_thinking`, but found ...".
+          // buildRequestParams strips these again if thinking is off for the request.
+          const thinkingBlocks = this.extractThinkingBlocks(msg);
+          messages.push({
+            role: "assistant",
+            content: [...thinkingBlocks, ...contentBlocks],
+          });
         }
         continue;
       }
@@ -456,6 +466,65 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
   }
 
 
+
+  /**
+   * Recover the provider-native reasoning blocks stored on a history item.
+   *
+   * Only signed `thinking` blocks and `redacted_thinking` blocks can be replayed —
+   * anything else (notably the flattened `thinking` string, which carries no
+   * signature) is rejected by the API and is therefore dropped here rather than
+   * being reconstructed into an invalid block.
+   */
+  private extractThinkingBlocks(msg: ReactorConversationHistoryItem): Anthropic.Messages.ContentBlockParam[] {
+    const stored = (msg as any).thinking_blocks;
+    if (!Array.isArray(stored) || stored.length === 0) return [];
+
+    return stored
+      .filter((block: any) => {
+        if (!block) return false;
+        if (block.type === "thinking") return typeof block.signature === "string" && block.signature.length > 0;
+        if (block.type === "redacted_thinking") return typeof block.data === "string" && block.data.length > 0;
+        return false;
+      })
+      .map((block: any) =>
+        block.type === "thinking"
+          ? { type: "thinking", thinking: block.thinking ?? "", signature: block.signature }
+          : { type: "redacted_thinking", data: block.data }
+      ) as Anthropic.Messages.ContentBlockParam[];
+  }
+
+  /**
+   * Remove replayed reasoning blocks from the outbound messages.
+   *
+   * Thinking blocks are only valid when the request itself enables thinking; sending
+   * them with thinking disabled (structured output, or a model/persona with thinking
+   * off) is a 400. Assistant messages left with no content after stripping are
+   * dropped, since an empty content array is also rejected.
+   */
+  private stripThinkingBlocks(
+    messages: Anthropic.Messages.MessageParam[]
+  ): Anthropic.Messages.MessageParam[] {
+    const result: Anthropic.Messages.MessageParam[] = [];
+
+    for (const msg of messages) {
+      if (msg.role !== "assistant" || !Array.isArray(msg.content)) {
+        result.push(msg);
+        continue;
+      }
+
+      const filtered = (msg.content as any[]).filter(
+        (block: any) => block?.type !== "thinking" && block?.type !== "redacted_thinking"
+      );
+
+      if (filtered.length === (msg.content as any[]).length) {
+        result.push(msg);
+      } else if (filtered.length > 0) {
+        result.push({ ...msg, content: filtered as any });
+      }
+    }
+
+    return result;
+  }
 
   /**
    * Extract text content from various content formats
@@ -859,7 +928,9 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
     const params: Anthropic.Messages.MessageCreateParams = {
       model: this.modelId,
       max_tokens: persona.modelConfig?.maxTokens || 16000,
-      messages,
+      // Replayed reasoning blocks are only legal when this request enables
+      // thinking; with thinking off they are a 400, so drop them here.
+      messages: enableThinking ? messages : this.stripThinkingBlocks(messages),
       system: this.createSystemPrompt(persona).content,
     };
 
@@ -964,8 +1035,16 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
     const { sessionId, message, persona, history, messageId, providerConfig } = args;
     const structuredToolName = toAnthropicParams(providerConfig).structuredToolName;
 
+    // getAIResponse appends the incoming user message to chatState.history before
+    // calling us, so `history` already carries this turn — unconditionally pushing
+    // it again sent the user's message to the API twice (duplicated context, and
+    // billed twice). Only append it when the caller passed a history that does not
+    // already end in a user turn.
     const messages = this.convertHistoryToAnthropicFormat(history);
-    messages.push({ role: "user", content: this.translateContentBlocks(message) });
+    const lastMessage = messages[messages.length - 1];
+    if (!lastMessage || lastMessage.role !== "user") {
+      messages.push({ role: "user", content: this.translateContentBlocks(message) });
+    }
 
     let accumulatedText = "";
     let accumulatedReasoning = "";
@@ -974,9 +1053,21 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
     let completionTokens = 0;
     let finishReason = "stop";
     const collectedToolCalls: any[] = [];
+    // Reasoning blocks captured verbatim (text + signature). Anthropic rejects a
+    // tool-result turn whose assistant message dropped these, so they are
+    // persisted alongside the tool_calls and replayed on the next request.
+    const collectedThinkingBlocks: any[] = [];
 
     // Track current content blocks being streamed
-    const currentBlocks: Map<number, { type: string; id?: string; name?: string; inputJson: string }> = new Map();
+    const currentBlocks: Map<number, {
+      type: string;
+      id?: string;
+      name?: string;
+      inputJson: string;
+      thinkingText?: string;
+      signature?: string;
+      redactedData?: string;
+    }> = new Map();
 
     const params = this.buildRequestParams(messages, persona, { stream: true, providerConfig });
     const stream = await this.anthropic.messages.create(params as any);
@@ -1011,7 +1102,20 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
             toolEvent.messageId = messageId;
             await this.streamingTransportManager.sendEventToSession(sessionId, toolEvent);
           } else if (chunk.content_block?.type === "thinking") {
-            currentBlocks.set(index, { type: "thinking", inputJson: "" });
+            currentBlocks.set(index, {
+              type: "thinking",
+              inputJson: "",
+              // Adaptive thinking with display:"omitted" streams a thinking block
+              // whose text is empty but whose signature still must be replayed.
+              thinkingText: chunk.content_block.thinking || "",
+              signature: chunk.content_block.signature || undefined,
+            });
+          } else if (chunk.content_block?.type === "redacted_thinking") {
+            currentBlocks.set(index, {
+              type: "redacted_thinking",
+              inputJson: "",
+              redactedData: chunk.content_block.data,
+            });
           } else if (chunk.content_block?.type === "text") {
             currentBlocks.set(index, { type: "text", inputJson: "" });
           }
@@ -1022,8 +1126,16 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
           const block = currentBlocks.get(index);
           if (!block) break;
 
+          if (chunk.delta?.type === "signature_delta") {
+            // The signature arrives as its own delta on the thinking block and is
+            // mandatory when the block is replayed — without it Anthropic 400s.
+            block.signature = (block.signature || "") + (chunk.delta.signature || "");
+            break;
+          }
+
           if (chunk.delta?.type === "thinking_delta" && block.type === "thinking") {
             const delta = chunk.delta.thinking || "";
+            block.thinkingText = (block.thinkingText || "") + delta;
             accumulatedReasoning += delta;
             const event = this.createReasoningEvent(
               delta,
@@ -1054,6 +1166,27 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
         case "content_block_stop": {
           const index = chunk.index;
           const block = currentBlocks.get(index);
+          if (block?.type === "thinking") {
+            // Only a signed block can be replayed; an unsigned one would be
+            // rejected, so drop it rather than poison the next request.
+            if (block.signature) {
+              collectedThinkingBlocks.push({
+                type: "thinking",
+                thinking: block.thinkingText || "",
+                signature: block.signature,
+              });
+            }
+            currentBlocks.delete(index);
+            break;
+          }
+          if (block?.type === "redacted_thinking" && block.redactedData) {
+            collectedThinkingBlocks.push({
+              type: "redacted_thinking",
+              data: block.redactedData,
+            });
+            currentBlocks.delete(index);
+            break;
+          }
           if (block?.type === "tool_use" && block.id && block.name) {
             // Structured-output terminal bypass: the forced schema tool's accumulated
             // JSON is the response content, not an executable tool call.
@@ -1131,6 +1264,9 @@ private convertHistoryToAnthropicFormat(history: ReactorConversationHistoryItem[
               role: "assistant",
               content: accumulatedText,
               thinking: accumulatedReasoning || undefined,
+              // Verbatim reasoning blocks — required to build a valid tool-result
+              // turn on the follow-up request (see convertHistoryToAnthropicFormat).
+              thinking_blocks: collectedThinkingBlocks.length > 0 ? collectedThinkingBlocks : undefined,
               timestamp: new Date(),
               tool_calls: collectedToolCalls,
               tool_results: [],

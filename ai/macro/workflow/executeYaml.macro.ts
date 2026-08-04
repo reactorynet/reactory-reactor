@@ -63,6 +63,23 @@ export const executeYamlWorkflow: Macro<unknown, ExecuteYamlWorkflowProps> = asy
       return { success: false, error: `Failed to validate workflow definition: ${fqn}` };
     }
 
+    // Ensure the runner has registered the YAML workflow in its in-memory workflows list
+    workflowService.workflowRunner.registerWorkflow({
+      nameSpace: definition.nameSpace,
+      name: definition.name,
+      version: definition.version,
+      workflowType: 'YAML',
+      location: filePath,
+      props: definition,
+    });
+
+    // Reset circuit breaker for this workflow in case a previous run failed
+    if (typeof workflowService.workflowRunner.resetCircuitBreaker === 'function') {
+      workflowService.workflowRunner.resetCircuitBreaker(fqn);
+      workflowService.workflowRunner.resetCircuitBreaker(definition.name);
+      workflowService.workflowRunner.resetCircuitBreaker(`${fqn}@1`);
+    }
+
     // 6. Execute the workflow
     let parsedInputs = inputs;
     if (typeof inputs === 'string' && inputs.trim().length > 0) {

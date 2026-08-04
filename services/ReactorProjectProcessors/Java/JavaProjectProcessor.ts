@@ -8,6 +8,7 @@ import { ReactorNode } from "@reactory/server-modules/reactory-reactor/types/mod
 import { service } from "@reactory/server-core/application/decorators";
 import BaseProjectProcessor, { FileAnalysisResult } from "../BaseProjectProcessor";
 import { analyseJavaFile } from "../../graph/analyzers/JavaAnalyzer";
+import { analyseKotlinFile } from "../../graph/analyzers/KotlinAnalyzer";
 
 @service({
   name: "JavaProjectProcessor",
@@ -32,8 +33,12 @@ class JavaProjectProcessor extends BaseProjectProcessor {
   }
 
   protected async analyseFileFull(fileNode: ReactorNode): Promise<FileAnalysisResult> {
-    if (fileNode?.data?.language !== "java")
-      return { symbols: [], externals: [], edges: [] };
+    // JVM/Gradle projects frequently mix Java and Kotlin sources in the same
+    // module — this processor handles both rather than requiring a separate
+    // Kotlin-only project processor.
+    const language = fileNode?.data?.language;
+    if (language === "kotlin") return analyseKotlinFile(fileNode, this.context);
+    if (language !== "java") return { symbols: [], externals: [], edges: [] };
     return analyseJavaFile(fileNode, this.context);
   }
 
