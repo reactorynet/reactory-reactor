@@ -5,4 +5,5 @@ export { default as CSharpProjectProcessor } from '../ReactorProjectProcessors/C
 export { default as ReactNativeProjectProcessor } from '../ReactorProjectProcessors/ReactNative/ReactNativeProjectProcessor';
 export { default as PythonProjectProcessor } from '../ReactorProjectProcessors/Python/PythonProjectProcessor';
 export { default as BackStageProjectProcessor } from '../ReactorProjectProcessors/BackStage/BackStageProjectProcessor';
+export { default as MarkdownProjectProcessor } from '../ReactorProjectProcessors/Markdown/MarkdownProjectProcessor';
 export { default as FileProjectProcessor } from '../ReactorProjectProcessors/File/FileProjectProcessor';

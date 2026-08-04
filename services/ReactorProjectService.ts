@@ -28,6 +28,8 @@ import {
   ReactNativeProjectProcessor,
   PythonProjectProcessor,
   BackStageProjectProcessor,
+  MarkdownProjectProcessor,
+  FileProjectProcessor,
 } from "./SystemGraphProjectProviders";
 import logger from "@reactory/server-core/logging";
 
@@ -71,6 +73,8 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       props,
       context
     );
+    this.processors["markdown"] = new MarkdownProjectProcessor(props, context);
+    this.processors["file"] = new FileProjectProcessor(props, context);
   }
 
   setWorkflowService(
