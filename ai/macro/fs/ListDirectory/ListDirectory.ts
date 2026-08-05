@@ -8,26 +8,31 @@ import { summarizeItems, truncateOutput } from '../../summarize';
 
 const FQN_REGEX = /^\w+\.\w+(?:@.*)?$/;
 
-const DEFAULT_DIRECTORY_LIST_FORMATTER: DirectoryListFormatter = (pathInfos: PathInfo[]) => {
-  const lines = pathInfos.map(pathInfo => {
-    const isDir = pathInfo.isDirectory;
-    const name = pathInfo.name;
+const DEFAULT_DIRECTORY_LIST_FORMATTER: DirectoryListFormatter = (infos: any[]) => {
+  const lines = infos.map((info: any) => {
+    // support both legacy full PathInfo and new shorthand {n,e,s,d,f,p,m}
+    const name = info.n || info.name;
+    const isDir = info.d !== undefined ? info.d : info.isDirectory;
     if (isDir) {
-      return `${name} (${pathInfos.filter(i => i.name === name).length} items)`;
+      return `${name} (dir)`;
     }
-    const ext = pathInfo.extension ? `.${pathInfo.extension}` : '';
-    const size = pathInfo.size ? `${Math.round(pathInfo.size / 1024)}KB` : '';
+    const ext = (info.e || info.extension) ? `.${info.e || info.extension}` : '';
+    const sizeVal = info.s !== undefined ? info.s : info.size;
+    const size = sizeVal ? `${Math.round(sizeVal / 1024)}KB` : '';
     return `${name}${ext}${size ? ` (${size})` : ''}`;
   });
-  return lines.join('\n') + '\n\nLegend: n=Name, s=Size(bytes), d=IsDir(bool), p=RelPath, m=Modified';
+  return lines.join('\n') + '\n\nLegend: n=Name, e=Ext, s=Size(bytes), d=IsDir(bool), f=IsFile(bool), p=Path, m=Modified';
 };
 
-const DEFAULT_DIRECTORY_JSON_FORMATTER: DirectoryListFormatter = (pathInfos: PathInfo[]) => {
-  return JSON.stringify(pathInfos.map(pathInfo => ({
-    name: pathInfo.name,
-    extension: pathInfo?.extension,
-    size: pathInfo?.size,
-    path: pathInfo?.absolutePath
+const DEFAULT_DIRECTORY_JSON_FORMATTER: DirectoryListFormatter = (infos: any[]) => {
+  return JSON.stringify(infos.map((info: any) => ({
+    n: info.n || info.name,
+    e: info.e || info?.extension,
+    s: info.s !== undefined ? info.s : info?.size,
+    d: info.d !== undefined ? info.d : info?.isDirectory,
+    f: info.f !== undefined ? info.f : info?.isFile,
+    p: info.p || info?.relativePath || info?.absolutePath || info?.path,
+    m: info.m || info?.modified
   })));
 };
 
@@ -53,6 +58,18 @@ const getFilesInFolder = async (path: string, pattern: string, subFolders: boole
   }
   return fileInfos;
 };
+
+// Shorthand mapper: only key data needed to work with directories/files
+// n=name, e=ext, s=size(bytes), d=isDir, f=isFile, p=path, m=modified(iso)
+const toShorthand = (pi: PathInfo) => ({
+  n: pi.name,
+  e: pi.extension || undefined,
+  s: typeof pi.size === 'number' ? pi.size : undefined,
+  d: !!pi.isDirectory,
+  f: !!pi.isFile,
+  p: pi.relativePath || pi.path || pi.absolutePath || undefined,
+  m: pi.modified ? new Date(pi.modified).toISOString() : undefined
+});
 
 export const ListDirectory: Macro<ListDirectoryResult, ListDirectoryProps> = async (
   props: ListDirectoryProps,
@@ -100,16 +117,19 @@ export const ListDirectory: Macro<ListDirectoryResult, ListDirectoryProps> = asy
     }
 
     const fileInfos = await getFilesInFolder(targetPath, pattern.trim(), includeSubfolders);
-    
-    // Calculate summary statistics
+
+    // Convert to concise shorthand objects for output (key data only)
+    const shorthandItems = fileInfos.map(toShorthand);
+
+    // Calculate summary statistics (keep numeric for utility, but keep lean)
     const summary = {
-      totalItems: fileInfos.length,
-      files: fileInfos.filter(item => item.isFile).length,
-      directories: fileInfos.filter(item => item.isDirectory).length,
-      totalSize: fileInfos.reduce((sum, item) => sum + (item.size || 0), 0),
-      totalSizeFormatted: ''
+      t: fileInfos.length,
+      f: fileInfos.filter(item => item.isFile).length,
+      d: fileInfos.filter(item => item.isDirectory).length,
+      s: fileInfos.reduce((sum, item) => sum + (item.size || 0), 0),
+      sf: ''
     };
-    summary.totalSizeFormatted = `${(summary.totalSize / 1024).toFixed(2)}KB`;
+    summary.sf = `${(summary.s / 1024).toFixed(2)}KB`;
 
     let formatter: DirectoryListFormatter = DEFAULT_DIRECTORY_LIST_FORMATTER;
     let formatterMime: string = 'text';
@@ -129,27 +149,28 @@ export const ListDirectory: Macro<ListDirectoryResult, ListDirectoryProps> = asy
       }
     }
 
-    const formattedOutput = formatter(fileInfos);
+    // Formatters now receive shorthand items
+    const formattedOutput = formatter(shorthandItems);
     const finalOutput = escape ? `\`\`\`${formatterMime}\n${truncateOutput(formattedOutput)}\n\`\`\`` : truncateOutput(formattedOutput);
     const executionTime = Date.now() - startTime;
 
-    // Apply item-level truncation for very large directories
-    const summarized = summarizeItems(fileInfos);
+    // Apply item-level truncation for very large directories (on shorthand)
+    const summarized = summarizeItems(shorthandItems);
 
-    // Store in chat state for AI reference
+    // Store slim state for AI reference (shorthand only)
     if (!state.vars) {
       state.vars = {};
     }
     state.vars.lastListDirectory = {
-      path: targetPath,
+      p: targetPath,
       items: summarized.items,
-      summary,
-      pattern: pattern.trim(),
-      format,
-      includeSubfolders,
-      lastAccessed: new Date(),
-      truncated: summarized.truncated,
-      totalCount: summarized.totalCount,
+      sum: summary,
+      pat: pattern.trim(),
+      fmt: format,
+      sub: includeSubfolders,
+      at: new Date(),
+      tr: summarized.truncated,
+      tc: summarized.totalCount,
     };
 
     // Log access for security
@@ -158,63 +179,31 @@ export const ListDirectory: Macro<ListDirectoryResult, ListDirectoryProps> = asy
     return {
       success: true,
       data: {
-        path: targetPath,
+        p: targetPath,
         items: summarized.items,
-        summary,
-        formattedOutput: finalOutput,
-        format,
-        pattern: pattern.trim(),
-        includeSubfolders,
-        truncated: summarized.truncated,
-        totalCount: summarized.totalCount,
+        sum: summary,
+        out: finalOutput,
+        fmt: format,
+        pat: pattern.trim(),
+        sub: includeSubfolders,
+        tr: summarized.truncated,
+        tc: summarized.totalCount,
       },
       tool: 'listDirectory',
       params: props,
       metadata: {
-        executionTime,
-        timestamp: new Date(),
-        user: state.user?.id,
-        pattern: pattern.trim(),
-        format,
-        includeSubfolders
+        ms: executionTime,
+        ts: new Date(),
+        u: state.user?.id,
+        pat: pattern.trim(),
+        fmt: format,
+        sub: includeSubfolders
       },
-      instructions: `
-## Directory Listing Results
-
-Successfully listed directory: **${pathModule.basename(targetPath)}**
-
-### Directory Information:
-- **Path**: ${targetPath}
-- **Total Items**: ${summary.totalItems}
-- **Files**: ${summary.files}
-- **Directories**: ${summary.directories}
-- **Total Size**: ${summary.totalSizeFormatted}
-- **Pattern**: ${pattern.trim()}
-- **Include Subfolders**: ${includeSubfolders}
-- **Format**: ${format}
-- **Execution Time**: ${executionTime}ms
-
-### Available Data:
-- **items**: Array of PathInfo objects with detailed file/directory information
-- **summary**: Statistical summary of the directory contents
-- **formattedOutput**: Formatted output string (with or without code blocks)
-- **path**: Full directory path
-- **pattern**: File pattern filter used
-- **format**: Output format used
-
-### State Variables Available:
-- lastListDirectory: Complete directory information for future reference
-
-### Usage:
-- Use the \`items\` array for detailed file/directory analysis
-- Use \`summary\` for statistical information
-- Use \`formattedOutput\` for display in chat responses
-- Use \`data\` for comprehensive directory information
-      `
+      instructions: `Directory listed: ${pathModule.basename(targetPath)} | items:${summary.t} f:${summary.f} d:${summary.d} size:${summary.sf} | use items (shorthand n,e,s,d,f,p,m), sum(t,f,d,s,sf)`
     };
 
   } catch (err) {
-    const executionTime = Date.now() - startTime;
+    const ms = Date.now() - startTime;
     logger.error(`Error listing directory at ${path}:`, err);
     
     return {
@@ -222,14 +211,7 @@ Successfully listed directory: **${pathModule.basename(targetPath)}**
       error: `Error listing directory: ${err instanceof Error ? err.message : 'Unknown error'}`,
       tool: 'listDirectory',
       params: props,
-      metadata: {
-        executionTime,
-        timestamp: new Date(),
-        user: state.user?.id,
-        pattern: pattern.trim(),
-        format,
-        includeSubfolders: subfolders
-      }
+      metadata: { ms, ts: new Date(), u: state.user?.id, pat: pattern.trim(), fmt: format, sub: subfolders }
     };
   }
 };
@@ -240,7 +222,7 @@ export const ListDirectoryComponentRegister: MacroComponentDefinition<typeof Lis
   nameSpace: 'reactor-macros',
   alias: 'listDirectory',
   version: '1.0.0',
-  description: 'Lists files and directories in a specified path with detailed metadata and structured results',
+  description: 'Lists files and directories using concise shorthand (n,e,s,d,f,p,m) + slim summary',
   features: [],
   stem: 'file',
   roles: ['DEVELOPER', 'ADMIN'],

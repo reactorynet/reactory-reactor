@@ -259,7 +259,7 @@ providers:
     name: xAI
     endpointUrl: "${XAI_API_BASE_URL:-https://api.x.ai/v1}"
     apiVersion: v1
-    defaultModel: grok-4-1-fast-reasoning
+    defaultModel: grok-4.5
     capabilities:
       - text-generation
       - code-generation
@@ -273,8 +273,71 @@ providers:
     credentialEnvVars:
       apiKey: X_AI_API_KEY
     models:
-      # Language models
-      - id: grok-4.20-multi-agent-beta-0309
+      # Flagship Language models
+      - id: grok-4.5
+        name: Grok 4.5
+        version: "4.5"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+          - structured-output
+        contextLength: 500000
+        rpm: 7200
+        itpm: 50000000
+        otpm: 50000000
+        inputCostPerTokenUsdCents: 0.0002
+        outputCostPerTokenUsdCents: 0.0006
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: grok-build-0.1
+        name: Grok Build 0.1
+        version: "0.1"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+          - structured-output
+        contextLength: 256000
+        rpm: 1800
+        itpm: 10000000
+        otpm: 10000000
+        inputCostPerTokenUsdCents: 0.0001
+        outputCostPerTokenUsdCents: 0.0002
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: grok-4.3
+        name: Grok 4.3
+        version: "4.3"
+        capabilities:
+          - text-generation
+          - code-generation
+          - reasoning
+          - image-understanding
+          - structured-output
+        contextLength: 1000000
+        rpm: 1800
+        itpm: 10000000
+        otpm: 10000000
+        inputCostPerTokenUsdCents: 0.000125
+        outputCostPerTokenUsdCents: 0.00025
+        supportsStreaming: true
+        supportedTools:
+          - function-calling
+        supportedMediaTypes:
+          - text
+          - image
+      - id: grok-4.20-multi-agent-beta
         name: Grok 4.20 Multi-Agent Beta
         version: "4.20"
         capabilities:
@@ -282,51 +345,54 @@ providers:
           - code-generation
           - reasoning
           - image-understanding
-        contextLength: 2000000
-        rpm: 607
-        itpm: 4000000
-        otpm: 4000000
-        inputCostPerTokenUsdCents: 0.0002
-        outputCostPerTokenUsdCents: 0.0006
+          - structured-output
+        contextLength: 1000000
+        rpm: 450
+        itpm: 2500000
+        otpm: 2500000
+        inputCostPerTokenUsdCents: 0.000125
+        outputCostPerTokenUsdCents: 0.00025
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
-      - id: grok-4.20-beta-0309-reasoning
-        name: Grok 4.20 Beta (Reasoning)
+      - id: grok-4.20
+        name: Grok 4.20
         version: "4.20"
         capabilities:
           - text-generation
           - code-generation
           - reasoning
           - image-understanding
-        contextLength: 2000000
-        rpm: 607
-        itpm: 4000000
-        otpm: 4000000
-        inputCostPerTokenUsdCents: 0.0002
-        outputCostPerTokenUsdCents: 0.0006
+          - structured-output
+        contextLength: 1000000
+        rpm: 1800
+        itpm: 10000000
+        otpm: 10000000
+        inputCostPerTokenUsdCents: 0.000125
+        outputCostPerTokenUsdCents: 0.00025
         supportsStreaming: true
         supportedTools:
           - function-calling
         supportedMediaTypes:
           - text
           - image
-      - id: grok-4.20-beta-0309-non-reasoning
-        name: Grok 4.20 Beta (Non-Reasoning)
+      - id: grok-4.20-non-reasoning
+        name: Grok 4.20 (Non-Reasoning)
         version: "4.20"
         capabilities:
           - text-generation
           - code-generation
           - image-understanding
-        contextLength: 2000000
-        rpm: 607
-        itpm: 4000000
-        otpm: 4000000
-        inputCostPerTokenUsdCents: 0.0002
-        outputCostPerTokenUsdCents: 0.0006
+          - structured-output
+        contextLength: 1000000
+        rpm: 1800
+        itpm: 10000000
+        otpm: 10000000
+        inputCostPerTokenUsdCents: 0.000125
+        outputCostPerTokenUsdCents: 0.00025
         supportsStreaming: true
         supportedTools:
           - function-calling

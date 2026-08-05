@@ -16,8 +16,9 @@ const WIDGETS_DIR = path.resolve(__dirname, '../../../widgets');
  * every test suite pulling in the module registry, not just the ones using this
  * form.
  *
- * Returns null when nothing is found: an unreadable form module should degrade
- * to "that widget is unavailable", never to a failed process start.
+ * Returns null when nothing is found. The caller then omits the module entirely
+ * rather than registering one with an empty `src`, which would present the
+ * client with a widget that silently compiles to nothing.
  */
 const widgetSource = (baseName: string): string | null => {
   for (const extension of ['ts', 'tsx', 'js', 'jsx']) {
