@@ -80,7 +80,14 @@ describe("TreeSitterEngine", () => {
     const cache = binding.__reactoryTreeSitterShared;
     expect(cache).toBeDefined();
     expect(cache.parserCtor).toBeTruthy();
-    expect(cache.languages).toBeInstanceOf(Map);
+    // Duck-typed rather than `toBeInstanceOf(Map)`. The cache lives on the
+    // process-global native binding by design, so it may have been created in
+    // another Jest module registry — a different realm, with a different `Map`
+    // constructor. instanceof then fails with the memorable
+    // "Expected constructor: Map, Received constructor: Map".
+    expect(Object.prototype.toString.call(cache.languages)).toBe('[object Map]');
+    expect(typeof cache.languages.get).toBe('function');
+    expect(typeof cache.languages.set).toBe('function');
   });
 
   it("reports a clear diagnostic instead of a null rootNode", async () => {
