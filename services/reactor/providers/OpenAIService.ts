@@ -131,26 +131,86 @@ class OpenAIService extends AIProviderBase {
   }
 
   /**
+   * STRICT provider and model resolution following the exact contract:
+   * Provider: props.provider → persona.provider → env.REACTOR_DEFAULT_MODEL_PROVIDER
+   * Model:    props.model    → persona.model    → env.REACTOR_DEFAULT_MODEL
+   *
+   * Never falls back to a hardcoded "openai" default. Validates against the
+   * provider registry loaded by provider-loader.ts.
+   */
+  private async resolveProviderAndModelFromSession(
+    persona: IAIPersona,
+    props: IOpenAIServiceProps
+  ): Promise<{ providerId: string; modelId: string }> {
+    const providerId =
+      props.provider ||
+      persona?.providerId ||
+      process.env.REACTOR_DEFAULT_MODEL_PROVIDER ||
+      "xai"; // final safety net — should never reach here in normal operation
+
+    const modelId =
+      props.model ||
+      persona?.modelId ||
+      process.env.REACTOR_DEFAULT_MODEL ||
+      "grok-4.5";
+
+    // Validate that this provider + model combination exists in the registry
+    if (this.providerService) {
+      try {
+        const providers = await this.providerService.getProviders();
+        const providerRecord = providers.find((p: any) => p.id === providerId);
+        if (!providerRecord) {
+          this.context.warn(
+            `[OpenAIService] Provider "${providerId}" not found in registry. Using as-is but this may cause 401s.`,
+            { providerId, modelId, personaId: persona?.id },
+            "OpenAIService.resolveProviderAndModelFromSession"
+          );
+        } else if (!providerRecord.models?.some((m: any) => m.id === modelId)) {
+          this.context.warn(
+            `[OpenAIService] Model "${modelId}" not found for provider "${providerId}". Using as-is.`,
+            { providerId, modelId, personaId: persona?.id },
+            "OpenAIService.resolveProviderAndModelFromSession"
+          );
+        }
+      } catch (e) {
+        this.context.warn(
+          `[OpenAIService] Could not validate provider/model against registry: ${(e as Error).message}`,
+          { providerId, modelId },
+          "OpenAIService.resolveProviderAndModelFromSession"
+        );
+      }
+    }
+
+    return { providerId, modelId };
+  }
+
+  /**
    * Initialize the OpenAI-compatible client based on providerId.
-   * Supports OpenAI, xAI, and Ollama endpoints.
+   * Supports OpenAI, xAI, GitHub Copilot, Azure OpenAI, Ollama, llama.cpp, vLLM.
+   *
+   * Uses strict resolution (props → persona → env) and never silently falls back
+   * to OpenAI when the session was created for xAI or another provider.
    */
   protected async initializeClient(persona: IAIPersona): Promise<void> {
     // Reset cached model config for the new session/model
     this._resolvedModelConfig = null;
+
+    const { providerId, modelId } = await this.resolveProviderAndModelFromSession(
+      persona,
+      this.props
+    );
+
     const { apiKey, apiOrganizationId, apiBaseURL } = this.props;
-    const { providerId } = persona;
 
     const openAIArgs: ClientOptions = {
-      apiKey: apiKey || process.env.OPENAI_API_KEY,
+      apiKey: apiKey || undefined,
       organization: apiOrganizationId,
-      baseURL: apiBaseURL || process.env.OPENAI_API_BASE_URL,
+      baseURL: apiBaseURL || undefined,
     };
 
-    // Normalize so provider IDs are matched case-insensitively; a registry id
-    // like "Ollama"/"Vllm" must resolve to the same endpoint config as its
-    // lowercase provider type, otherwise it falls through to the OpenAI default.
-    switch (providerId?.toLowerCase()) {
+    switch (providerId.toLowerCase()) {
       case "xai":
+      case "x-ai":
         openAIArgs.baseURL = apiBaseURL || process.env.XAI_API_BASE_URL || "https://api.x.ai/v1";
         openAIArgs.apiKey = apiKey || process.env.X_AI_API_KEY;
         delete openAIArgs.organization;
@@ -184,22 +244,37 @@ class OpenAIService extends AIProviderBase {
         openAIArgs.apiKey = apiKey || process.env.VLLM_API_KEY || "vllm-no-key";
         delete openAIArgs.organization;
         break;
+      case "openai":
       default:
-        // Default to OpenAI-compatible endpoint
         openAIArgs.baseURL = apiBaseURL || process.env.OPENAI_API_BASE_URL || "https://api.openai.com/v1";
         openAIArgs.apiKey = apiKey || process.env.OPENAI_API_KEY;
         delete openAIArgs.organization;
         break;
     }
 
-    // Apply persona-specific configuration overrides
+    // Apply any persona-specific overrides (resolved credentials from ReactorConversationService)
     if (persona.config) {
       if (persona.config.apiKey) openAIArgs.apiKey = persona.config.apiKey;
       if (persona.config.apiOrg) openAIArgs.organization = persona.config.apiOrg;
       if (persona.config.apiBaseURL) openAIArgs.baseURL = persona.config.apiBaseURL;
     }
 
+    if (!openAIArgs.apiKey) {
+      this.context.error?.(
+        `[OpenAIService.initializeClient] No API key resolved for provider "${providerId}". ` +
+        `Check persona.config.apiKey, user/app provider auth, or the provider's credentialEnvVars.`,
+        { providerId, modelId, personaId: persona?.id },
+        "OpenAIService.initializeClient",
+      );
+    }
+
     this.ai = new OpenAI(openAIArgs);
+
+    this.context.info(
+      `[OpenAIService] Initialized client for provider=${providerId}, model=${modelId}`,
+      { providerId, modelId, personaId: persona?.id },
+      "OpenAIService.initializeClient"
+    );
   }
 
   // --- Tool definitions ---

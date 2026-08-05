@@ -3036,11 +3036,17 @@ export default class ReactorConversationService
       maxTokens = TOKEN_LIMITS.DEFAULT_MAX_TOKENS;
     }
 
+    // Resolve provider/model at genesis so the conversation document is always
+    // the source of truth for subsequent turns (including tool continuation).
+    const genesisResolved = await this.resolveProviderAndModel({
+      persona,
+    });
+
     const conversationData: any = {
       personaId: persona.id,
       user: this.context.user,
-      modelId: persona.modelId,
-      providerId: persona.providerId,
+      modelId: genesisResolved.modelId || persona.modelId,
+      providerId: genesisResolved.providerId,
       history: [],
       vars: {},
       meta: {
@@ -3062,8 +3068,8 @@ export default class ReactorConversationService
         _id: sessionId, // Set the _id explicitly to avoid multiple saves
         personaId: persona.id,
         user: this.context.user,
-        modelId: persona.modelId,
-        providerId: persona.providerId,
+        modelId: genesisResolved.modelId || persona.modelId,
+        providerId: genesisResolved.providerId,
         history: [],
         vars: {},
         meta: {
@@ -3171,6 +3177,235 @@ export default class ReactorConversationService
       adapted.structuredContent = parsed;
     }
     return adapted;
+  }
+
+  /**
+   * Strict provider + model resolution.
+   *
+   * Priority (provider):
+   *   1. explicit override (props / call args)
+   *   2. stored conversation.providerId (post-genesis source of truth)
+   *   3. persona.providerId
+   *   4. env.REACTOR_DEFAULT_MODEL_PROVIDER
+   *
+   * Priority (model):
+   *   1. explicit override
+   *   2. stored conversation.modelId
+   *   3. persona.modelId
+   *   4. env.REACTOR_DEFAULT_MODEL (or the provider registry defaultModel)
+   *
+   * Never silently falls back to "openai". Unknown providers are rejected when
+   * the registry is available. The returned persona always carries the resolved
+   * providerId/modelId so downstream adapters (OpenAIService.initializeClient)
+   * cannot drift from the routing decision.
+   */
+  private async resolveProviderAndModel(args: {
+    providerOverride?: string | null;
+    modelOverride?: string | null;
+    storedProviderId?: string | null;
+    storedModelId?: string | null;
+    persona?: Pick<IAIPersona, "providerId" | "modelId" | "id" | "name"> | null;
+    chatSessionId?: string;
+    /** When true, skip registry validation (e.g. unit-test / offline paths). */
+    skipValidation?: boolean;
+  }): Promise<{
+    providerId: string;
+    modelId: string;
+    source: {
+      provider: "override" | "stored" | "persona" | "env" | "registry-default";
+      model: "override" | "stored" | "persona" | "env" | "registry-default";
+    };
+  }> {
+    const {
+      providerOverride,
+      modelOverride,
+      storedProviderId,
+      storedModelId,
+      persona,
+      chatSessionId,
+      skipValidation = false,
+    } = args;
+
+    const envProvider = (process.env.REACTOR_DEFAULT_MODEL_PROVIDER || "").trim() || undefined;
+    const envModel = (process.env.REACTOR_DEFAULT_MODEL || "").trim() || undefined;
+
+    let providerSource: "override" | "stored" | "persona" | "env" | "registry-default" = "env";
+    let providerId =
+      (providerOverride && String(providerOverride).trim()) ||
+      (storedProviderId && String(storedProviderId).trim()) ||
+      (persona?.providerId && String(persona.providerId).trim()) ||
+      envProvider ||
+      "";
+
+    if (providerOverride && String(providerOverride).trim()) providerSource = "override";
+    else if (storedProviderId && String(storedProviderId).trim()) providerSource = "stored";
+    else if (persona?.providerId && String(persona.providerId).trim()) providerSource = "persona";
+    else if (envProvider) providerSource = "env";
+
+    let modelSource: "override" | "stored" | "persona" | "env" | "registry-default" = "env";
+    let modelId =
+      (modelOverride && String(modelOverride).trim()) ||
+      (storedModelId && String(storedModelId).trim()) ||
+      (persona?.modelId && String(persona.modelId).trim()) ||
+      envModel ||
+      "";
+
+    if (modelOverride && String(modelOverride).trim()) modelSource = "override";
+    else if (storedModelId && String(storedModelId).trim()) modelSource = "stored";
+    else if (persona?.modelId && String(persona.modelId).trim()) modelSource = "persona";
+    else if (envModel) modelSource = "env";
+
+    // Registry validation + defaultModel fill-in
+    if (!skipValidation && this.providerService) {
+      try {
+        const providers = await this.providerService.getProviders();
+        const normalize = (id: string) => id?.toLowerCase?.() || id;
+
+        if (providerId) {
+          const match = providers.find(
+            (p) => normalize(p.id) === normalize(providerId) || p.id === providerId,
+          );
+          if (!match) {
+            const available = providers.map((p) => p.id).join(", ");
+            throw new Error(
+              `Unknown AI provider "${providerId}". Available providers: ${available || "(none registered)"}. ` +
+              `Set REACTOR_DEFAULT_MODEL_PROVIDER or configure the persona/session provider explicitly.`,
+            );
+          }
+          // Canonicalize to the registry id (preserves declared casing)
+          providerId = match.id;
+
+          if (!modelId && match.defaultModel) {
+            modelId = match.defaultModel;
+            modelSource = "registry-default";
+          } else if (modelId && match.models?.length) {
+            const modelMatch = match.models.find((m) => m.id === modelId);
+            if (!modelMatch) {
+              // Soft-warn: some providers accept dynamic model ids not listed in yaml
+              this.sessionLog(
+                "warn",
+                `[resolveProviderAndModel] Model "${modelId}" is not listed on provider "${providerId}" registry entry — proceeding anyway`,
+                { providerId, modelId, knownModels: match.models.map((m) => m.id).slice(0, 20) },
+                chatSessionId,
+                persona?.id,
+              );
+            }
+          }
+        } else if (providers.length > 0) {
+          // Last-resort: prefer env, else first available provider with a default model
+          const preferred =
+            providers.find((p) => p.status?.available && p.defaultModel) ||
+            providers.find((p) => p.defaultModel) ||
+            providers[0];
+          if (preferred) {
+            providerId = preferred.id;
+            providerSource = "registry-default";
+            if (!modelId && preferred.defaultModel) {
+              modelId = preferred.defaultModel;
+              modelSource = "registry-default";
+            }
+          }
+        }
+      } catch (err: any) {
+        // Re-throw unknown-provider errors; swallow transient registry failures
+        if (err?.message?.startsWith?.("Unknown AI provider")) throw err;
+        this.sessionLog(
+          "warn",
+          `[resolveProviderAndModel] Provider registry lookup failed: ${err?.message}`,
+          { providerId, modelId },
+          chatSessionId,
+          persona?.id,
+        );
+      }
+    }
+
+    if (!providerId) {
+      throw new Error(
+        "Unable to resolve an AI provider. Configure persona.providerId, " +
+        "pass providerId on the request, or set REACTOR_DEFAULT_MODEL_PROVIDER.",
+      );
+    }
+
+    if (!modelId) {
+      // Model is strongly preferred but some local providers accept any tag.
+      // Log loudly and continue with an empty model rather than inventing "gpt-4".
+      this.sessionLog(
+        "warn",
+        `[resolveProviderAndModel] No model resolved for provider "${providerId}" — provider may reject the request`,
+        { providerId, providerSource, modelSource },
+        chatSessionId,
+        persona?.id,
+      );
+    }
+
+    if (providerSource !== "override" || modelSource !== "override") {
+      this.sessionLog(
+        "debug",
+        `[resolveProviderAndModel] resolved provider=${providerId} (${providerSource}), model=${modelId || "(none)"} (${modelSource})`,
+        {
+          providerOverride: providerOverride || null,
+          storedProviderId: storedProviderId || null,
+          personaProviderId: persona?.providerId || null,
+          modelOverride: modelOverride || null,
+          storedModelId: storedModelId || null,
+          personaModelId: persona?.modelId || null,
+        },
+        chatSessionId,
+        persona?.id,
+      );
+    }
+
+    return {
+      providerId,
+      modelId: modelId || "",
+      source: { provider: providerSource, model: modelSource },
+    };
+  }
+
+  /**
+   * Build an effective persona whose providerId/modelId match the routing decision,
+   * and inject resolved credentials into persona.config so initializeClient uses
+   * the correct key/baseURL for that provider.
+   */
+  private async buildEffectivePersona(args: {
+    persona: IAIPersona;
+    providerId: string;
+    modelId: string;
+    providerAuthOverride?: Record<string, any>;
+  }): Promise<IAIPersona> {
+    const { persona, providerId, modelId, providerAuthOverride } = args;
+    const providerChanged =
+      (persona.providerId || "").toLowerCase() !== (providerId || "").toLowerCase();
+    const modelChanged = (persona.modelId || "") !== (modelId || "");
+
+    // Drop provider-specific persona.config when the provider/model changes —
+    // it may contain apiBaseURL / apiKey that belong to the original provider.
+    const baseConfig = providerChanged || modelChanged ? undefined : persona.config;
+
+    const effectivePersona: IAIPersona = {
+      ...persona,
+      providerId,
+      modelId: modelId || persona.modelId,
+      ...(baseConfig !== undefined ? { config: baseConfig } : { config: undefined }),
+    };
+
+    // Always resolve credentials for the *effective* provider so tool-continuation
+    // and compaction paths don't silently reuse the wrong API key.
+    const resolvedCreds = await this.providerService.resolveProviderCredentials(
+      providerId,
+      effectivePersona.config,
+      providerAuthOverride,
+    );
+    if (resolvedCreds.source !== "none") {
+      effectivePersona.config = {
+        ...(effectivePersona.config || {}),
+        apiKey: resolvedCreds.apiKey || effectivePersona.config?.apiKey,
+        apiOrg: resolvedCreds.organization || effectivePersona.config?.apiOrg,
+        apiBaseURL: resolvedCreds.endpoint || effectivePersona.config?.apiBaseURL,
+      };
+    }
+
+    return effectivePersona;
   }
 
   private async executeProviderChat(
@@ -3503,6 +3738,7 @@ export default class ReactorConversationService
 
         // When resuming a conversation, the stored modelId/providerId take
         // precedence over persona defaults but are overridden by per-message values.
+        // Strict chain: override → stored session → persona → env. Never invent "openai".
         let storedModelId: string | undefined;
         let storedProviderId: string | undefined;
         if (chatSessionId) {
@@ -3514,19 +3750,26 @@ export default class ReactorConversationService
           storedProviderId = stored?.providerId || undefined;
         }
 
-        const effectiveModelId = modelIdOverride || storedModelId || persona.modelId;
-        const provider = providerIdOverride || storedProviderId || persona.providerId || "xai";
-        // Apply overrides: if caller specified a different model/provider, use it
-        const hasOverride = effectiveModelId !== persona.modelId || provider !== persona.providerId;
-        const effectivePersona = hasOverride
-          ? { ...persona, modelId: effectiveModelId, providerId: provider }
-          : persona;
+        const resolved = await this.resolveProviderAndModel({
+          providerOverride: providerIdOverride,
+          modelOverride: modelIdOverride,
+          storedProviderId,
+          storedModelId,
+          persona,
+          chatSessionId,
+        });
+        const provider = resolved.providerId;
+        const effectiveModelId = resolved.modelId;
 
-        // if we added a persona model / provider override we need to 
-        // remove the persona.config since it may contain provider/model specific settings that are no longer valid.
-        if (hasOverride) {
-          delete effectivePersona.config;
-        }
+        // Stamp providerId/modelId onto the persona AND inject credentials for
+        // the resolved provider. This is critical: OpenAIService.initializeClient
+        // keys off persona.providerId, so routing and client init must agree.
+        const effectivePersona = await this.buildEffectivePersona({
+          persona,
+          providerId: provider,
+          modelId: effectiveModelId,
+          providerAuthOverride,
+        });
 
         // Save message to conversation history
         let conversation;
@@ -3797,23 +4040,8 @@ export default class ReactorConversationService
           }
         }
 
-        // Execute chat with the specified provider
-        // Resolve user/app credentials and inject into persona config.
-        // Per-request sessionOverride (client-supplied, never persisted) takes priority.
-        const resolvedCreds = await this.providerService.resolveProviderCredentials(
-          provider,
-          effectivePersona.config,
-          providerAuthOverride
-        );
-        if (resolvedCreds.source !== "none" && resolvedCreds.source !== "persona") {
-          effectivePersona.config = {
-            ...effectivePersona.config,
-            apiKey: resolvedCreds.apiKey || effectivePersona.config?.apiKey,
-            apiOrg: resolvedCreds.organization || effectivePersona.config?.apiOrg,
-            apiBaseURL: resolvedCreds.endpoint || effectivePersona.config?.apiBaseURL,
-          };
-        }
-
+        // Credentials were already injected by buildEffectivePersona above.
+        // Execute chat with the resolved provider + stamped persona.
         let response = await this.executeProviderChat(
           provider,
           chatSessionId,
@@ -4614,7 +4842,14 @@ export default class ReactorConversationService
         throw new Error("Conversation not found");
       }
 
-      const provider = conversation.providerId || persona.providerId || "openai";
+      // Prefer the conversation's stored provider; never invent "openai".
+      const resolvedMacroProvider = await this.resolveProviderAndModel({
+        storedProviderId: conversation.providerId,
+        storedModelId: conversation.modelId,
+        persona,
+        chatSessionId,
+      });
+      const provider = resolvedMacroProvider.providerId;
       const adapter = await this.providerService.getAdapter(provider);
 
       // @ts-ignore
@@ -4847,7 +5082,7 @@ export default class ReactorConversationService
           _id: chatSessionId,
         }).exec();
         const providerAdapter = await this.providerService.getAdapter(
-          conv?.providerId || "openai"
+          conv?.providerId || persona.providerId || process.env.REACTOR_DEFAULT_MODEL_PROVIDER || "xai"
         );
         return providerAdapter.adaptResponse(toolErrorEntry);
       } catch {
@@ -5033,12 +5268,62 @@ export default class ReactorConversationService
 
     // Continue the AI processing loop: send the tool results to the provider
     // so the agent can see the real outputs and respond.
+    //
+    // CRITICAL: resolve provider/model from the STORED conversation first, then
+    // stamp them onto the persona before calling executeProviderChat. Previously
+    // we routed with `storedConv.providerId || persona.providerId || "xai"` but
+    // still initialized the OpenAI-compatible client from the unstamped persona.
+    // When persona.providerId was missing that fell through to OPENAI_API_KEY
+    // (often a Google key in mixed envs) → 401, while the SSE path still emitted
+    // a completion event → doubled final response in the UI.
     const persona = await this.context
       .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0")
       .getPersona(personaId);
-    const storedConv = await ReactorConversationModel.findById(chatSessionId).select('providerId').lean().exec();
-    const provider = storedConv?.providerId || persona.providerId || "xai";
+
+    const storedConv = await ReactorConversationModel.findById(chatSessionId)
+      .select("providerId modelId")
+      .lean()
+      .exec();
+
+    const resolved = await this.resolveProviderAndModel({
+      storedProviderId: storedConv?.providerId,
+      storedModelId: storedConv?.modelId,
+      persona,
+      chatSessionId,
+    });
+
+    const effectivePersona = await this.buildEffectivePersona({
+      persona,
+      providerId: resolved.providerId,
+      modelId: resolved.modelId,
+    });
+
+    const provider = resolved.providerId;
     const adapter = await this.providerService.getAdapter(provider);
+
+    // Backfill provider/model onto the conversation if they were missing
+    if (
+      storedConv &&
+      (storedConv.providerId !== provider || storedConv.modelId !== resolved.modelId)
+    ) {
+      try {
+        await ReactorConversationModel.findByIdAndUpdate(chatSessionId, {
+          $set: {
+            ...(storedConv.providerId ? {} : { providerId: provider }),
+            ...(storedConv.modelId ? {} : { modelId: resolved.modelId }),
+            updated: new Date(),
+          },
+        }).exec();
+      } catch (persistErr: any) {
+        this.sessionLog(
+          "warn",
+          `[completeClientToolCalls] Failed to backfill provider/model: ${persistErr?.message}`,
+          { conversationId: chatSessionId, provider, modelId: resolved.modelId },
+          chatSessionId,
+          personaId,
+        );
+      }
+    }
 
     if (streamingMode === StreamingMode.SSE) {
       // Initiate SSE and run the continuation in the background
@@ -5051,7 +5336,7 @@ export default class ReactorConversationService
           let response = await this.executeProviderChat(
             provider,
             chatSessionId,
-            persona,
+            effectivePersona,
             {
               personaId,
               chatSessionId,
@@ -5069,7 +5354,32 @@ export default class ReactorConversationService
         } catch (err: any) {
           this.sessionLog("error", `[completeClientToolCalls] SSE continuation failed: ${err.message}`, {
             conversationId: chatSessionId,
+            provider,
+            modelId: resolved.modelId,
+            errorCode: err?.status || err?.code,
           }, chatSessionId, personaId);
+
+          // Surface the failure so the client exits the "thinking" state.
+          try {
+            const errorEvent = StreamingEventFactory.createErrorEvent(
+              err?.status || err?.code || ReactorErrorCode.MESSAGE_ERROR,
+              err?.message || "Tool continuation failed",
+              { conversationId: chatSessionId, recoverable: true, provider },
+              { sessionId: chatSessionId, conversationId: chatSessionId },
+            );
+            await this.streamingTransportManager.sendEventToSession(
+              chatSessionId,
+              errorEvent,
+            );
+          } catch (sseErr: any) {
+            this.sessionLog(
+              "warn",
+              `[completeClientToolCalls] Failed to send SSE error event: ${sseErr?.message}`,
+              { conversationId: chatSessionId },
+              chatSessionId,
+              personaId,
+            );
+          }
         }
       })();
 
@@ -5083,7 +5393,7 @@ export default class ReactorConversationService
     let response = await this.executeProviderChat(
       provider,
       chatSessionId,
-      persona,
+      effectivePersona,
       {
         personaId,
         chatSessionId,
@@ -5121,7 +5431,11 @@ export default class ReactorConversationService
       const persona = await this.context
         .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0")
         .getPersona(personaId);
-      const provider = persona.providerId || "openai";
+      const resolvedImage = await this.resolveProviderAndModel({
+        persona,
+        chatSessionId,
+      });
+      const provider = resolvedImage.providerId;
       const adapter = await this.providerService.getAdapter(provider);
 
       // Validate conversation exists and user has access
@@ -6217,14 +6531,19 @@ export default class ReactorConversationService
         throw new Error("Failed to create new conversation");
       }
 
-      // Apply model/provider overrides if specified
-      if (args.modelId) {
-        conversation.modelId = args.modelId;
-      }
-      if (args.providerId) {
-        conversation.providerId = args.providerId;
-      }
-      if (args.modelId || args.providerId) {
+      // Apply model/provider overrides via the strict resolver so the stored
+      // conversation always carries a validated providerId/modelId pair.
+      if (args.modelId || args.providerId || !conversation.providerId || !conversation.modelId) {
+        const startResolved = await this.resolveProviderAndModel({
+          providerOverride: args.providerId,
+          modelOverride: args.modelId,
+          storedProviderId: conversation.providerId,
+          storedModelId: conversation.modelId,
+          persona,
+          chatSessionId: conversation._id?.toString(),
+        });
+        conversation.providerId = startResolved.providerId;
+        conversation.modelId = startResolved.modelId || conversation.modelId;
         await conversation.save();
       }
 
