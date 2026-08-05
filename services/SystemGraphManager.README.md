@@ -160,6 +160,12 @@ A reference originates from the **section containing it** where there is one, ot
 
 ## 8. Tests (no Mongo required)
 
+> Run with `NODE_OPTIONS=--max-old-space-size=6144 npx jest <path> --forceExit`.
+> `--forceExit` matters: suites that import `src/context` boot the module
+> registry, which starts an MCP `setInterval` that keeps Jest alive.
+>
+> The whole `reactory-reactor` module is green — **69 suites / 989 tests**.
+
 Shared fixtures via `services/graph/testUtils.ts` (`makeContext`, `writeProject`, `cleanup`, `fileNodeFor`, `symbolId`, `fileId`).
 
 - **`GraphBuilding.test.ts`** — end-to-end pipeline: detection, deterministic root, tree walk ignoring `node_modules`, folder/file expansion, symbol extraction, `process()` graph assembly (nodes+edges+searchables), import-edge resolution (relative + external).
