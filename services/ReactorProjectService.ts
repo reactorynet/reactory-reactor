@@ -888,6 +888,70 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
     return (await this.processProject(project)) as IReactorProject;
   }
 
+  async indexProjectSearch(params: { projectId?: string; repoPath?: string; id?: string }): Promise<any> {
+    const key = params?.id || params?.projectId || params?.repoPath;
+    if (!key) {
+      this.context.warn("indexProjectSearch called with no projectId or repoPath");
+      return { status: "SKIPPED", reason: "Missing projectId and repoPath" };
+    }
+
+    let project = await this.getProject(key);
+    if (!project && params?.repoPath) {
+      project = {
+        id: params.projectId || params.id,
+        repoPath: params.repoPath,
+      };
+    }
+
+    if (!project) {
+      this.context.warn(`indexProjectSearch: project not found for key "${key}"`);
+      return { status: "FAILED", reason: `Project not found for key ${key}` };
+    }
+
+    const processed = await this.processProject(project);
+    return {
+      status: "COMPLETED",
+      projectId: processed.id || params?.projectId || params?.id,
+      name: processed.name,
+      lastSync: new Date(),
+    };
+  }
+
+  async spawnCatalogWorkflow(params: {
+    folder?: string;
+    projectId?: string;
+    repoPath?: string;
+    repoUrl?: string;
+    name?: string;
+    nameSpace?: string;
+    version?: string;
+    chatSessionId?: string;
+  }): Promise<any> {
+    const workflowService = this.context.getService('core.ReactoryWorkflowService@1.0.0') as any;
+    if (!workflowService) {
+      throw new Error('core.ReactoryWorkflowService@1.0.0 is not available in the context');
+    }
+
+    if (!workflowService.workflowRunner || !workflowService.workflowRunner.isInitialized()) {
+      await workflowService.onStartup();
+    }
+
+    const fqn = 'reactor.CatalogProjectFolder@1.0.0';
+    const inputs = {
+      folder: params.folder || params.repoPath,
+      projectId: params.projectId,
+      repoPath: params.repoPath || params.folder,
+      repoUrl: params.repoUrl,
+      name: params.name,
+      nameSpace: params.nameSpace || 'reactory',
+      version: params.version || '1.0.0',
+      chatSessionId: params.chatSessionId,
+    };
+
+    const result = await workflowService.workflowRunner.startWorkflow(fqn, '1.0.0', inputs, this.context);
+    return result;
+  }
+
   async getAttributes(node: any): Promise<ReactorNodeAttributes[]> {
     // Project the node's data essentials as inspectable attributes.
     const attributes: ReactorNodeAttributes[] = [];

@@ -1179,6 +1179,27 @@ export interface ReactorProjectService extends Reactory.Service.IReactoryService
   catalogProject(projectSpec: Partial<IReactorProject>, options?: any): Promise<Partial<IReactorProject>>;
 
   /**
+   * Indexes a project for search
+   * @param params
+   */
+  indexProjectSearch(params: { projectId?: string; repoPath?: string; id?: string }): Promise<any>;
+
+  /**
+   * Spawns the CatalogProjectFolder workflow
+   * @param params
+   */
+  spawnCatalogWorkflow(params: {
+    folder?: string;
+    projectId?: string;
+    repoPath?: string;
+    repoUrl?: string;
+    name?: string;
+    nameSpace?: string;
+    version?: string;
+    chatSessionId?: string;
+  }): Promise<any>;
+
+  /**
    * Returns a project for the specified catalog node
    * @param node 
    */

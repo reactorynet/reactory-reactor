@@ -1,0 +1,112 @@
+nameSpace: reactor
+name: CatalogProjectFolder
+version: 1.0.0
+description: "Catalogs a project repository folder into the system graph, indexes file contents into search service, and sends completion feedback to an agent chat session if provided."
+author: "Reactor"
+tags: ["project", "catalog", "graph", "search", "indexing"]
+metadata:
+  timeout: 600000
+
+inputs:
+  folder:
+    type: string
+    required: false
+    description: "Repository local folder path (repoPath)"
+  projectId:
+    type: string
+    required: false
+    description: "Project ID or FQN"
+  repoPath:
+    type: string
+    required: false
+    description: "Repository local folder path"
+  repoUrl:
+    type: string
+    required: false
+    description: "Repository remote URL"
+  name:
+    type: string
+    required: false
+    description: "Project name"
+  nameSpace:
+    type: string
+    required: false
+    default: "reactory"
+    description: "Project namespace"
+  version:
+    type: string
+    required: false
+    default: "1.0.0"
+    description: "Project version"
+  chatSessionId:
+    type: string
+    required: false
+    description: "Optional chat session ID for AI agent feedback upon completion"
+
+outputs:
+  projectId:
+    type: string
+    source: "step.catalogProject.outputs.result.id"
+    description: "ID of the cataloged project"
+  status:
+    type: string
+    source: "step.indexProjectContent.outputs.result.status"
+    description: "Indexing completion status"
+
+steps:
+  - id: logStart
+    name: "Log Start"
+    type: log
+    config:
+      level: info
+      message: "Starting project cataloging & search indexing workflow..."
+
+  - id: catalogProject
+    name: "Catalog Project & Graph"
+    type: service_invoke
+    dependsOn: logStart
+    config:
+      service: "reactor.ReactorProjectService@1.0.0"
+      method: "catalogProject"
+      params:
+        id: "${input.projectId}"
+        name: "${input.name}"
+        nameSpace: "${input.nameSpace}"
+        version: "${input.version}"
+        repoPath: "${input.folder || input.repoPath}"
+        repoUrl: "${input.repoUrl}"
+
+  - id: indexProjectContent
+    name: "Index Project Content for Search"
+    type: service_invoke
+    dependsOn: catalogProject
+    config:
+      service: "reactor.ReactorProjectService@1.0.0"
+      method: "indexProjectSearch"
+      params:
+        projectId: "${steps.catalogProject.outputs.result.id || input.projectId}"
+        repoPath: "${steps.catalogProject.outputs.result.repoPath || input.folder || input.repoPath}"
+
+  - id: notifyAgentSession
+    name: "Notify Agent Chat Session"
+    type: condition
+    dependsOn: indexProjectContent
+    config:
+      condition: "input.chatSessionId && input.chatSessionId.length > 0"
+      thenSteps:
+        - id: sendFeedback
+          name: "Send Agent Feedback"
+          type: agent_conversation
+          dependsOn: indexProjectContent
+          config:
+            personaId: "reactor"
+            sessionId: "${input.chatSessionId}"
+            message: "Project cataloging and search indexing completed for project ${steps.catalogProject.outputs.result.name || input.name} (${steps.catalogProject.outputs.result.id || input.projectId}). Semantic search index is now available."
+
+  - id: logCompletion
+    name: "Log Completion"
+    type: log
+    dependsOn: indexProjectContent
+    config:
+      level: info
+      message: "CatalogProjectFolder workflow completed successfully."

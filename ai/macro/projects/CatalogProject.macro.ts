@@ -106,8 +106,26 @@ const CatalogProjectMacro = async (
       projectSpec.ownerTeam = ownerTeam;
     }
 
-    // Catalog the project
-    const catalogedProject = await reactorProjectService.catalogProject(projectSpec);
+    // Catalog the project via service & workflow
+    let catalogedProject: Partial<IReactorProject> = null;
+    let workflowResult: any = null;
+
+    try {
+      workflowResult = await reactorProjectService.spawnCatalogWorkflow({
+        folder: repoPath,
+        repoPath,
+        repoUrl,
+        name,
+        nameSpace,
+        version,
+        chatSessionId: chatState?.sessionId,
+      });
+    } catch (wfErr) {
+      context.warn(`Could not spawn CatalogProjectFolder workflow, falling back to direct cataloging: ${(wfErr as Error).message}`);
+    }
+
+    // Ensure project is fetched/cataloged
+    catalogedProject = await reactorProjectService.catalogProject(projectSpec);
 
     // Calculate file summary and strip the huge files array to prevent context / history bloat
     const files = catalogedProject.files || [];
