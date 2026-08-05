@@ -116,6 +116,29 @@ export interface WriteFileResult {
 }
 
 /**
+ * A single directory entry as returned by ListDirectory, in the shorthand form
+ * the macro emits so a listing costs as few tokens as possible when it is sent
+ * to a model. `ListDirectory`'s `instructions` field carries the same legend.
+ */
+export interface ListDirectoryItem {
+  /** Name. */
+  n: string;
+  /** Extension, without the leading dot. Absent for directories. */
+  e?: string;
+  /** Size in bytes. */
+  s?: number;
+  /** True when the entry is a directory. */
+  d: boolean;
+  /** True when the entry is a file. */
+  f: boolean;
+  /** Path — repo/listing-relative when known, else absolute. */
+  p?: string;
+  /** Last modified, ISO 8601. */
+  m?: string;
+  [key: string]: unknown;
+}
+
+/**
  * Return type for ListDirectory macro
  */
 export interface ListDirectoryResult {
@@ -125,52 +148,67 @@ export interface ListDirectoryResult {
   error?: string;
   /** Standardized error code for programmatic handling */
   errorCode?: MacroErrorCode;
-  /** Directory data if operation succeeded */
+  /**
+   * Directory data if operation succeeded.
+   *
+   * Keys are deliberately abbreviated: this payload goes to a model as a tool
+   * result, and directory listings are large enough that full key names cost
+   * real tokens on every row. The `instructions` field on the result documents
+   * the legend for the model.
+   */
   data?: {
-    /** Full directory path */
-    path: string;
-    /** Array of PathInfo objects */
-    items: any[];
-    /** Statistical summary of directory contents */
-    summary: {
-      /** Total number of items */
-      totalItems: number;
-      /** Number of files */
-      files: number;
-      /** Number of directories */
-      directories: number;
-      /** Total size in bytes */
-      totalSize: number;
-      /** Total size formatted as human readable string */
-      totalSizeFormatted: string;
+    /** Full directory path. */
+    p: string;
+    /**
+     * Directory entries in shorthand form:
+     * `n` name, `e` extension, `s` size in bytes, `d` isDirectory,
+     * `f` isFile, `p` path, `m` modified (ISO).
+     */
+    items: ListDirectoryItem[];
+    /** Statistical summary of directory contents. */
+    sum: {
+      /** Total number of items. */
+      t: number;
+      /** Number of files. */
+      f: number;
+      /** Number of directories. */
+      d: number;
+      /** Total size in bytes. */
+      s: number;
+      /** Total size formatted as a human readable string. */
+      sf: string;
     };
-    /** Formatted output string */
-    formattedOutput: string;
-    /** Output format used */
-    format: string;
-    /** File pattern filter used */
-    pattern: string;
-    /** Whether subfolders were included */
-    includeSubfolders: boolean;
+    /** Formatted output string. */
+    out: string;
+    /** Output format used. */
+    fmt: string;
+    /** File pattern filter used. */
+    pat: string;
+    /** Whether subfolders were included. */
+    sub: boolean;
+    /** Whether the listing was truncated. */
+    tr?: boolean;
+    /** Total entry count before truncation. */
+    tc?: number;
   };
   /** Tool name for context */
   tool: string;
   /** Original parameters passed to the macro */
   params: ListDirectoryProps;
-  /** Metadata about the operation */
+  /** Metadata about the operation. Abbreviated for the same reason as `data`. */
   metadata?: {
-    /** Execution time in milliseconds */
-    executionTime?: number;
-    /** Timestamp of operation */
-    timestamp: Date;
-    /** User who performed the operation */
-    user?: string;
-    /** File pattern filter used */
-    pattern: string;
-    /** Output format used */
-    format: string;
-    /** Whether subfolders were included */
-    includeSubfolders: boolean;
+    /** Execution time in milliseconds. */
+    ms?: number;
+    /** Timestamp of operation. */
+    ts: Date;
+    /** User who performed the operation. */
+    u?: string;
+    /** File pattern filter used. */
+    pat: string;
+    /** Output format used. */
+    fmt: string;
+    /** Whether subfolders were included. */
+    sub: boolean;
   };
   /** Instructions for AI on how to use the data */
   instructions?: string;

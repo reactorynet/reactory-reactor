@@ -473,12 +473,13 @@ export const CodeReview: Macro<string, CodeReviewProps> = async (
     return `Could not list the contents of ${$path}: ${listing.error}`;
   }
 
-  const dirContents: { name: string, extension?: string, size?: number, path: string }[] =
-    listing.data?.items ?? [];
+  // Entries come back in ListDirectory's shorthand form: n=name, s=size,
+  // d=isDirectory, p=path.
+  const dirContents = listing.data?.items ?? [];
 
   let question = `Write a review on file structure for the following directory: ${$path}
   \`\`\`txt
-  ${dirContents.map(f => `${f.name}`).join('\n')}\n\n
+  ${dirContents.map(f => `${f.n}`).join('\n')}\n\n
   \`\`\`
   `;
   const prompt = createPrompt(
@@ -504,22 +505,24 @@ export const CodeReview: Macro<string, CodeReviewProps> = async (
   const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
   for (const file of dirContents) {
-    const doReview = async () => {      
-      if (file.size > 0 && isDirectory(file.path) === false) {
-        if (file.size < 100000) {
-          const filePath = pathModule.join($path, file.name);
+    const doReview = async () => {
+      // Shorthand keys: n=name, s=size, d=isDirectory.
+      const size = file.s ?? 0;
+      if (size > 0 && file.d !== true) {
+        if (size < 100000) {
+          const filePath = pathModule.join($path, file.n);
           const fileResult = await CodeReviewFile({ path: filePath, specs }, state);
           // CodeReviewFile resolves a structured result; interpolating it
           // directly wrote "[object Object]" into the accumulated review for
           // every file in the directory.
           state.vars.review = fileResult.success
             ? `${state.vars.review}\n\n${fileResult.data?.review ?? ''}`
-            : `${state.vars.review}\n\nCould not review ${file.name}: ${fileResult.error}`;
+            : `${state.vars.review}\n\nCould not review ${file.n}: ${fileResult.error}`;
         } else {
-          state.vars.review = `${state.vars.review}\n\n${file.name} is too large to review - Skipping review`;
+          state.vars.review = `${state.vars.review}\n\n${file.n} is too large to review - Skipping review`;
         }
       } else {
-        state.vars.review =  `${state.vars.review}\n\n No content found for file ${file.name} - Skipping review`;
+        state.vars.review =  `${state.vars.review}\n\n No content found for file ${file.n} - Skipping review`;
       }
     }
 

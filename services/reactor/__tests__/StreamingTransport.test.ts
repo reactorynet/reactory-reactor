@@ -21,13 +21,25 @@ const setupSendError = (mockWs: MockWebSocket, error: Error) => {
   });
 };
 
-// Mock Express Response
+/**
+ * Mock Express Response, shaped like a real Node ServerResponse.
+ *
+ * `flushHeaders` is required — initialize() calls it to establish the SSE
+ * connection before any event is written. `cork`/`uncork` are required for
+ * sendEvent(): it flushes with `response.flush()` when compression middleware
+ * has added one, and falls back to cork/uncork otherwise. A plain
+ * ServerResponse has no `flush`, so this mock deliberately omits it and
+ * exercises the fallback path.
+ */
 const mockResponse = () => {
   const res = {
     writeHead: jest.fn().mockReturnThis(),
     write: jest.fn().mockReturnThis(),
     end: jest.fn().mockReturnThis(),
     setHeader: jest.fn().mockReturnThis(),
+    flushHeaders: jest.fn().mockReturnThis(),
+    cork: jest.fn().mockReturnThis(),
+    uncork: jest.fn().mockReturnThis(),
     on: jest.fn().mockReturnThis(),
     off: jest.fn().mockReturnThis(),
     once: jest.fn().mockReturnThis(),
@@ -93,9 +105,14 @@ describe('StreamingTransport', () => {
         await transport.initialize();
         
         expect(mockRes.setHeader).toHaveBeenCalledWith('Content-Type', 'text/event-stream');
-        expect(mockRes.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-cache');
+        // `no-transform` matters as much as `no-cache`: without it a proxy may
+        // buffer or rewrite the stream and events arrive in batches.
+        expect(mockRes.setHeader).toHaveBeenCalledWith('Cache-Control', 'no-cache, no-transform');
         expect(mockRes.setHeader).toHaveBeenCalledWith('Connection', 'keep-alive');
+        // Disables nginx response buffering for this stream.
+        expect(mockRes.setHeader).toHaveBeenCalledWith('X-Accel-Buffering', 'no');
         expect(mockRes.setHeader).toHaveBeenCalledWith('Access-Control-Allow-Origin', '*');
+        expect(mockRes.flushHeaders).toHaveBeenCalled();
         expect(transport.isConnected).toBe(true);
       });
       

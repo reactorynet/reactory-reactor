@@ -100,18 +100,18 @@ describe('ListDirectory', () => {
       expect(result.success).toBe(true);
       expect(result.data).toBeDefined();
       // 3 files + 1 subdirectory = 4
-      expect(result.data!.summary.totalItems).toBe(4);
-      expect(result.data!.summary.files).toBe(3);
-      expect(result.data!.summary.directories).toBe(1);
+      expect(result.data!.sum.t).toBe(4);
+      expect(result.data!.sum.f).toBe(3);
+      expect(result.data!.sum.d).toBe(1);
     });
 
     it('should return items with path and summary info', async () => {
       const state = createMockState();
       const result = await ListDirectory({ path: tmpDir }, state);
 
-      expect(result.data!.path).toBe(tmpDir);
-      expect(result.data!.pattern).toBe('*');
-      expect(result.data!.includeSubfolders).toBe(false);
+      expect(result.data!.p).toBe(tmpDir);
+      expect(result.data!.pat).toBe('*');
+      expect(result.data!.sub).toBe(false);
     });
 
     it('should populate tool and params on the result', async () => {
@@ -131,9 +131,9 @@ describe('ListDirectory', () => {
 
       expect(result.success).toBe(true);
       // Only alpha.txt should match the .txt pattern
-      const fileItems = (result.data!.items as any[]).filter((i: any) => i.isFile);
+      const fileItems = (result.data!.items as any[]).filter((i: any) => i.f);
       expect(fileItems.length).toBe(1);
-      expect(fileItems[0].name).toContain('alpha');
+      expect(fileItems[0].n).toContain('alpha');
     });
 
     it('should return no items when pattern matches nothing', async () => {
@@ -141,7 +141,7 @@ describe('ListDirectory', () => {
       const result = await ListDirectory({ path: tmpDir, pattern: '*.xyz' }, state);
 
       expect(result.success).toBe(true);
-      expect(result.data!.summary.totalItems).toBe(0);
+      expect(result.data!.sum.t).toBe(0);
     });
   });
 
@@ -153,7 +153,7 @@ describe('ListDirectory', () => {
 
       expect(result.success).toBe(true);
       // 3 root files + 1 sub dir + 1 sub file = 5
-      expect(result.data!.summary.totalItems).toBe(5);
+      expect(result.data!.sum.t).toBe(5);
     });
   });
 
@@ -164,9 +164,9 @@ describe('ListDirectory', () => {
       const result = await ListDirectory({ path: tmpDir, format: 'text' }, state);
 
       expect(result.success).toBe(true);
-      expect(result.data!.format).toBe('text');
+      expect(result.data!.fmt).toBe('text');
       // The text formatter includes filename and byte size
-      expect(result.data!.formattedOutput).toContain('alpha');
+      expect(result.data!.out).toContain('alpha');
     });
 
     it('should produce JSON-formatted output when format=json', async () => {
@@ -174,9 +174,9 @@ describe('ListDirectory', () => {
       const result = await ListDirectory({ path: tmpDir, format: 'json' }, state);
 
       expect(result.success).toBe(true);
-      expect(result.data!.format).toBe('json');
+      expect(result.data!.fmt).toBe('json');
       // JSON output should be parseable (strip the code block wrapper first)
-      const raw = result.data!.formattedOutput
+      const raw = result.data!.out
         .replace(/^```[^\n]*\n/, '')
         .replace(/\n```$/, '');
       const parsed = JSON.parse(raw);
@@ -187,14 +187,14 @@ describe('ListDirectory', () => {
       const state = createMockState();
       const result = await ListDirectory({ path: tmpDir }, state);
 
-      expect(result.data!.formattedOutput).toMatch(/^```/);
+      expect(result.data!.out).toMatch(/^```/);
     });
 
     it('should omit code blocks when escape=false', async () => {
       const state = createMockState();
       const result = await ListDirectory({ path: tmpDir, escape: false }, state);
 
-      expect(result.data!.formattedOutput).not.toMatch(/^```/);
+      expect(result.data!.out).not.toMatch(/^```/);
     });
   });
 
@@ -206,8 +206,8 @@ describe('ListDirectory', () => {
 
       expect(state.vars.lastListDirectory).toBeDefined();
       const stored = state.vars.lastListDirectory as any;
-      expect(stored.path).toBe(tmpDir);
-      expect(stored.summary.totalItems).toBe(4);
+      expect(stored.p).toBe(tmpDir);
+      expect(stored.sum.t).toBe(4);
     });
 
     it('should initialise vars if it was undefined', async () => {
@@ -227,16 +227,20 @@ describe('ListDirectory', () => {
       const result = await ListDirectory({ path: tmpDir }, state);
 
       expect(result.metadata).toBeDefined();
-      expect(typeof result.metadata!.executionTime).toBe('number');
-      expect(result.metadata!.user).toBe('user-test');
+      expect(typeof result.metadata!.ms).toBe('number');
+      expect(result.metadata!.u).toBe('user-test');
     });
 
-    it('should include instructions markdown', async () => {
+    it('should include instructions naming the shorthand legend', async () => {
       const state = createMockState();
       const result = await ListDirectory({ path: tmpDir }, state);
 
+      // The instructions are the model's only guide to the abbreviated keys, so
+      // they must spell out the legend.
       expect(result.instructions).toBeDefined();
-      expect(result.instructions).toContain('Directory Listing Results');
+      expect(result.instructions).toContain('Directory listed');
+      expect(result.instructions).toContain('shorthand n,e,s,d,f,p,m');
+      expect(result.instructions).toContain('sum(t,f,d,s,sf)');
     });
   });
 });

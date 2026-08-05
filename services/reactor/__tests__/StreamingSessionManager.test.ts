@@ -8,6 +8,16 @@ import {
 // Mock RedisService
 jest.mock('@reactory/server-modules/reactory-core/services/RedisService');
 
+/** Minimal Reactory context — the manager only logs through it. */
+const mockContext = {
+  log: jest.fn(),
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+  debug: jest.fn(),
+  getService: jest.fn(),
+} as any;
+
 describe('StreamingSessionManager', () => {
   let sessionManager: StreamingSessionManager;
   let mockRedisService: jest.Mocked<RedisService>;
@@ -37,7 +47,18 @@ describe('StreamingSessionManager', () => {
       getClient: jest.fn(() => mockRedisClient)
     } as any;
 
-    sessionManager = new StreamingSessionManager(mockRedisService);
+    // StreamingSessionManager is a DI service: its constructor takes
+    // (props, context) and ServiceManager injects redisService afterwards by
+    // calling set${alias}. Passing the mock as the first constructor argument —
+    // as this suite used to — left redisService undefined, so every method
+    // threw "Redis service not available".
+    //
+    // It is also a singleton whose constructor returns the existing instance,
+    // so the instance has to be discarded between tests or this beforeEach is a
+    // no-op after the first one and state leaks across cases.
+    StreamingSessionManager.resetInstanceForTesting();
+    sessionManager = new StreamingSessionManager({}, mockContext);
+    sessionManager.setRedisService(mockRedisService);
   });
 
   describe('constructor', () => {

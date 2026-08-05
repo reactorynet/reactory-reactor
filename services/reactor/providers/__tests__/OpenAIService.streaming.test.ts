@@ -9,6 +9,7 @@ import {
   ToolCallStreamingEvent,
 } from "../../types/streaming.types";
 import { ToolApprovalMode } from "../../../../ai/openai/types/chat";
+import { StreamingEventFactory } from "../../streaming/StreamingEventFactory";
 
 // ---------------------------------------------------------------------------
 // Helpers – we test OpenAIService methods by instantiating the class with
@@ -138,74 +139,78 @@ describe("OpenAIService – streaming event shapes", () => {
   // Unit tests for event factory methods
   // -----------------------------------------------------------------------
 
-  describe("createCompletionEvent", () => {
+  // Event construction moved out of the provider into StreamingEventFactory —
+  // OpenAIService now calls the factory's statics, so these shapes are asserted
+  // against their actual owner. Calling them as `svc.createXEvent(...)` failed
+  // with "svc.createCompletionEvent is not a function".
+
+  describe("StreamingEventFactory.createCompletionEvent", () => {
     it("should produce data with top-level finishReason (not nested in metadata)", () => {
-      const event: CompletionStreamingEvent = svc.createCompletionEvent(
+      const event: CompletionStreamingEvent = StreamingEventFactory.createCompletionEvent(
         "Hello world",
-        {
-          totalTokens: 10,
-          promptTokens: 5,
-          completionTokens: 5,
-          finishReason: "stop",
-          model: "gpt-4",
-        },
-        "session-1",
+        "stop",
+        undefined,
+        { sessionId: "session-1" },
       );
 
       expect(event.type).toBe(StreamingEventType.COMPLETE);
       // Client expects data.finishReason at the top level
       expect(event.data.content).toBe("Hello world");
       expect(event.data.finishReason).toBe("stop");
-      // finishReason should NOT be buried in metadata
+      // Token counts and model name are deliberately not carried on the event.
       expect((event.data as any).metadata).toBeUndefined();
     });
 
-    it("should include thinking when set after creation", () => {
-      const event: CompletionStreamingEvent = svc.createCompletionEvent(
+    it("should carry thinking when supplied", () => {
+      const event: CompletionStreamingEvent = StreamingEventFactory.createCompletionEvent(
         "response",
-        {
-          totalTokens: 10,
-          promptTokens: 5,
-          completionTokens: 5,
-          finishReason: "stop",
-          model: "gpt-4",
-        },
-        "session-1",
+        "stop",
+        "chain of thought",
+        { sessionId: "session-1" },
       );
 
-      // The streaming handler adds thinking after creation
-      (event.data as any).thinking = "chain of thought";
       expect(event.data.thinking).toBe("chain of thought");
+      expect(event.data.finishReason).toBe("stop");
+    });
+
+    it("should omit thinking entirely when not supplied", () => {
+      const event = StreamingEventFactory.createCompletionEvent("response", "stop");
+      expect("thinking" in (event.data as any)).toBe(false);
+    });
+
+    it("should default finishReason to stop", () => {
+      const event = StreamingEventFactory.createCompletionEvent("response");
       expect(event.data.finishReason).toBe("stop");
     });
   });
 
-  describe("createErrorEvent", () => {
+  describe("StreamingEventFactory.createErrorEvent", () => {
     it("should produce data with code and message fields", () => {
-      const event: ErrorStreamingEvent = svc.createErrorEvent(
+      const event: ErrorStreamingEvent = StreamingEventFactory.createErrorEvent(
         "STREAM_ERROR",
         "Connection lost",
         { detail: "timeout" },
-        "session-1",
+        { sessionId: "session-1" },
       );
 
       expect(event.type).toBe(StreamingEventType.ERROR);
       expect(event.data.code).toBe("STREAM_ERROR");
       expect(event.data.message).toBe("Connection lost");
+      expect(event.data.details).toEqual({ detail: "timeout" });
     });
   });
 
-  describe("createTokenEvent", () => {
+  describe("StreamingEventFactory.createTokenEvent", () => {
     it("should produce correct token data shape", () => {
-      const event: TokenStreamingEvent = svc.createTokenEvent(
-        "Hello",
+      const event: TokenStreamingEvent = StreamingEventFactory.createTokenEvent(
         "Hello",
         0,
-        false,
-        "session-1",
+        { sessionId: "session-1" },
       );
 
       expect(event.type).toBe(StreamingEventType.TOKEN);
+      // `content` mirrors `delta` for a token event: each event carries only the
+      // newly produced text, and the client accumulates.
       expect(event.data).toEqual({
         content: "Hello",
         delta: "Hello",
@@ -215,15 +220,15 @@ describe("OpenAIService – streaming event shapes", () => {
     });
   });
 
-  describe("createToolCallEvent", () => {
+  describe("StreamingEventFactory.createToolCallEvent", () => {
     it("should produce correct tool call data shape", () => {
-      const event: ToolCallStreamingEvent = svc.createToolCallEvent(
+      const event: ToolCallStreamingEvent = StreamingEventFactory.createToolCallEvent(
         "call_123",
         "searchWeb",
         '{"query":"test"}',
         true,
         undefined,
-        "session-1",
+        { sessionId: "session-1" },
       );
 
       expect(event.type).toBe(StreamingEventType.TOOL_CALL);
@@ -234,17 +239,17 @@ describe("OpenAIService – streaming event shapes", () => {
     });
 
     it("should generate an ObjectId when id is empty", () => {
-      const event: ToolCallStreamingEvent = svc.createToolCallEvent(
+      const event: ToolCallStreamingEvent = StreamingEventFactory.createToolCallEvent(
         "",
         "readFile",
         "{}",
         false,
         undefined,
-        "session-1",
+        { sessionId: "session-1" },
       );
 
       expect(event.data.id).toBeTruthy();
-      expect(event.data.id.length).toBeGreaterThan(0);
+      expect(ObjectId.isValid(event.data.id)).toBe(true);
     });
   });
 

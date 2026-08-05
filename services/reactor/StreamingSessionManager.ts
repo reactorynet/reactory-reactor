@@ -46,7 +46,7 @@ export class StreamingSessionManager implements Reactory.Service.IReactoryServic
   /**
    * The singleton instance of the StreamingSessionManager
    */
-  private static instance: StreamingSessionManager;
+  private static instance: StreamingSessionManager | undefined;
 
   constructor(props: any, context: Reactory.Server.IReactoryContext) {
     if (!StreamingSessionManager.instance) {
@@ -255,8 +255,25 @@ export class StreamingSessionManager implements Reactory.Service.IReactoryServic
     return cleanedCount;
   }
 
-  private setRedisService(redisService: RedisService) {
+  /**
+   * Dependency setter called by ServiceManager, which resolves `set${alias}`
+   * from the `dependencies` declaration above. Public because it is part of the
+   * service's wiring contract, like every other setter in the codebase — it was
+   * private, which happened to work (the injector reaches it through an `any`
+   * cast) but made the dependency impossible to supply in a test without
+   * defeating the type system.
+   */
+  public setRedisService(redisService: RedisService) {
     this.redisService = redisService;
+  }
+
+  /**
+   * Discards the singleton. Tests only: the constructor returns the existing
+   * instance for any subsequent `new`, so without this a suite's second
+   * construction silently reuses the first instance and its state.
+   */
+  public static resetInstanceForTesting(): void {
+    StreamingSessionManager.instance = undefined;
   }
 
   description?: string = "Manages streaming sessions with Redis backend";
