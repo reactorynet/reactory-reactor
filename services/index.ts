@@ -18,7 +18,8 @@ import {
   ReactNativeProjectProcessor,
   PythonProjectProcessor,
   BackStageProjectProcessor,
-  FileProjectProcessor
+  FileProjectProcessor,
+  MarkdownProjectProcessor
 } from './SystemGraphProjectProviders';
 import DocumentChunkingService from "./reactor/DocumentChunkingService";
 import { StreamingSessionManager } from "./reactor/StreamingSessionManager";
@@ -56,4 +57,5 @@ export default [
   StreamingTransportManager,
   ShellSessionManager,
   ReactorPlaywrightService,
+  MarkdownProjectProcessor
 ];
