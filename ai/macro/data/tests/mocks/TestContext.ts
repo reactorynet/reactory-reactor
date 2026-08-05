@@ -21,15 +21,24 @@ export default async (roles: string[] = DEFAULT_ROLES): Promise<Reactory.Server.
     lastName: 'User',
     email: 'test@mail.com',
     username: 'test-user',
-    roles: ['USER'],
+    // Honour the roles the caller asked for; the parameter used to be ignored,
+    // leaving every mock user with a bare ['USER'].
+    roles,
     avatar: 'https://www.gravatar.com/a'
   }
 
-  const testPartner: Partial<Reactory.Models.IReactoryClientDocument> = { 
+  const testPartner: Partial<Reactory.Models.IReactoryClientDocument> = {
     __v: 0,
     _id: partnerId,
     key: 'test-partner-key',
     name: 'Test Partner',
+    // ReactoryContextProvider.extend() reads the "context-provider" client
+    // setting, so a partner mock must answer getSetting or context creation
+    // throws "this.partner.getSetting is not a function" — which took out every
+    // macro suite that builds a test context. Returning { data: undefined }
+    // means "no setting", so extend() leaves the context as-is.
+    getSetting: <T>(_name: string, defaultValue?: T) => ({ data: defaultValue as T }),
+    settings: [],
   }
 
   const testContext: Partial<Reactory.Server.IReactoryContext> = { 

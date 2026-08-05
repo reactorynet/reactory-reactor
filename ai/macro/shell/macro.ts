@@ -170,7 +170,13 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
     };
   }
 
-  const shFilePath = path.join(os.tmpdir(), `${templateId}.sh`);
+  // The script path must be unique per invocation. It used to be
+  // `<tmpdir>/<templateId>.sh`, a fixed name shared by every concurrent call —
+  // so two shell macros running at once (two users, or two Jest workers) would
+  // overwrite each other's script, and whichever finished first deleted the
+  // file the other was about to execute. shellSessionId is already unique for
+  // this invocation, so reuse it.
+  const shFilePath = path.join(os.tmpdir(), `${templateId}-${shellSessionId}.sh`);
   let shellCommandText = null;
 
   try {

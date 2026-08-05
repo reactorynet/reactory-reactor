@@ -2,7 +2,6 @@ import { describe, it, expect, jest, beforeEach } from '@jest/globals';
 
 // Mock external dependencies
 jest.mock('@reactorynet/reactory-core', () => ({}), { virtual: true });
-jest.mock('@reactory/reactory-core', () => ({}), { virtual: true });
 jest.mock('openai', () => ({
   OpenAI: jest.fn().mockImplementation(() => ({
     chat: { completions: { create: jest.fn() } }

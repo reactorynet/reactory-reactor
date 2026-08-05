@@ -1,132 +1,132 @@
-import fs, { readFile, readFileSync } from 'fs';
-import { 
-  ReadFile, 
-  WriteFile,
-  ListDirectory,
-  PathInfoMacro,
-  ExtractTextFromFile,
-  InsertSnippet
-} from './macro';
+import fs from 'fs';
+import os from 'os';
+import path from 'path';
+import { ReadFile, PathInfoMacro, ExtractTextFromFile } from './macro';
 import TestChatState from '../data/tests/mocks/ChatState';
 import { ChatState } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 
-describe('file utilities', () => {
-  let chatState: ChatState = null;
+/**
+ * Covers the fs macros that have no suite of their own.
+ *
+ * ListDirectory, WriteFile and InsertSnippet are covered in depth by
+ * `./__tests__/*.test.ts`. This file used to duplicate them against the
+ * deprecated positional-array API (`ReadFile([filePath])` resolving to a bare
+ * string), which no longer exists — every macro now takes a props object and
+ * resolves a structured `{ success, data | error, tool, params }` result. It
+ * also wrote into the checked-in `./samples` fixtures, so a failing run left
+ * them modified; each test now works in its own temp directory.
+ */
+
+describe('fs macros', () => {
+  let chatState: ChatState;
+  let workDir: string;
 
   beforeEach(async () => {
-    jest.resetAllMocks();
-    chatState = await TestChatState({ macros: [] });    
+    chatState = await TestChatState({ macros: [] });
+    // Under the home directory, not os.tmpdir(): ReadFile sandboxes reads to
+    // `os.homedir()` and rejects anything outside it, and on macOS tmpdir is
+    // /var/folders/... which is not under home.
+    workDir = fs.mkdtempSync(path.join(os.homedir(), '.reactor-fs-macro-test-'));
   });
 
-  describe("Directory Read/Write", () => { 
-    test('Reads the contents of a directory and returns it as a text list', async () => {    
-      const filePath = __dirname;
-      const result = await ListDirectory([filePath, 'true', '*', 'text'], chatState);
-      expect(result.trim()).toBeTruthy();
+  afterEach(() => {
+    fs.rmSync(workDir, { recursive: true, force: true });
+  });
+
+  const writeFixture = (name: string, content: string): string => {
+    const target = path.join(workDir, name);
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.writeFileSync(target, content, 'utf8');
+    return target;
+  };
+
+  describe('ReadFile', () => {
+    it('returns the content plus a fenced code block and metadata', async () => {
+      const target = writeFixture('notes.md', '# Title\n\nBody line.\n');
+      const result = await ReadFile({ path: target }, chatState);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.content).toContain('# Title');
+      expect(result.data?.codeBlock).toContain('```');
+      // The macro resolves symlinks, so compare against the canonical path.
+      expect(result.data?.metadata.path).toBe(fs.realpathSync(target));
+      expect(result.data?.metadata.size).toBeGreaterThan(0);
     });
 
-    test('Reads the contents of a directory and returns it as a JSON list', async () => { 
-      const filePath = __dirname;
-      const result = await ListDirectory([filePath, 'true', '*', 'json'], chatState);    
-      expect(result.trim()).toBeTruthy();
+    it('reports a missing path as a validation error rather than throwing', async () => {
+      const result = await ReadFile({ path: '' }, chatState);
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('No path provided');
+      expect(result.tool).toBe('readFile');
+    });
+
+    it('reports a non-existent file as an error', async () => {
+      const result = await ReadFile({ path: path.join(workDir, 'absent.txt') }, chatState);
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/File not found/);
+    });
+
+    it('refuses to read outside the home directory', async () => {
+      const result = await ReadFile({ path: '/etc/hosts' }, chatState);
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/only read files in your home directory/);
     });
   });
 
-  describe("File Read/Write & Info", () => {
+  describe('PathInfoMacro', () => {
+    it('describes a file and records it on the chat state', async () => {
+      const target = writeFixture('thing.txt', 'hello');
+      const result = await PathInfoMacro({ path: target }, chatState);
 
-    const path = require.resolve('./samples/03.txt');
-    const data = `Line 1\nLine 2\nLine 3`;
-
-    beforeEach(() => {
-      if (fs.existsSync(path)) fs.unlinkSync(path);
-      fs.writeFileSync(path, data, 'utf-8');
+      expect(result.success).toBe(true);
+      expect(result.data?.pathInfo).toMatchObject({ isFile: true, isDirectory: false });
+      expect(result.data?.summary).toMatchObject({ type: 'File' });
+      // Recorded so later macros in the same conversation can refer back to it.
+      expect(chatState.vars.lastPathInfo).toMatchObject({ path: target });
     });
 
-    afterEach(() => {
-      //reset the file
-      if (fs.existsSync(path)) fs.unlinkSync(path);
-      fs.writeFileSync(path, data, 'utf-8');
+    it('describes a directory', async () => {
+      const result = await PathInfoMacro({ path: workDir }, chatState);
+      expect(result.success).toBe(true);
+      expect(result.data?.pathInfo).toMatchObject({ isDirectory: true, isFile: false });
+      expect(result.data?.summary.type).toBe('Directory');
     });
 
-    test('returns the path info of a file', async () => { 
-      const filePath = require.resolve('./samples/01.txt');
-      const result = await PathInfoMacro([filePath], chatState);
-      expect(result).toBeTruthy();
+    it('reports a missing path as a validation error', async () => {
+      const result = await PathInfoMacro({ path: '' }, chatState);
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('No path provided');
+      expect(result.tool).toBe('pathInfo');
+    });
+  });
+
+  describe('ExtractTextFromFile', () => {
+    const lines = ['one', 'two', 'three', 'four', 'five'];
+    const fixture = () => writeFixture('lines.txt', `${lines.join('\n')}\n`);
+
+    it('extracts an inclusive line range', async () => {
+      const result = await ExtractTextFromFile({ path: fixture(), start: 2, end: 4 }, chatState);
+
+      expect(result.success).toBe(true);
+      expect(result.data?.extractedText).toContain('two');
+      expect(result.data?.extractedText).toContain('four');
+      expect(result.data?.extractedText).not.toContain('one');
+      expect(result.data?.extractedText).not.toContain('five');
+      expect(result.data?.lineRange).toMatchObject({ start: 2, end: 4 });
     });
 
-    test('returns the contents of a file as a string, formatted with backticks', async () => {
-      const expectedString = `\`\`\`txt\ncontents of file\n\`\`\``.trim();
-      const filePath = require.resolve('./samples/01.txt');
-      const result = await ReadFile([filePath], chatState);
-      expect(result.trim()).toEqual(expectedString);
+    it('extracts a single line when start equals end', async () => {
+      const result = await ExtractTextFromFile({ path: fixture(), start: 2, end: 2 }, chatState);
+      expect(result.success).toBe(true);
+      expect(result.data?.extractedText).toContain('two');
+      expect(result.data?.extractedText).not.toContain('three');
     });
 
-    test('Writes a string to a file, formatted without backticks', async () => {
-      const dataRoot = (process.env as Reactory.Server.ReactoryEnvironment).APP_DATA_ROOT;
-      const filePath = `${dataRoot}/tmp/macro-output-test-file.txt`;
-      if (!fs.existsSync(`${dataRoot}/tmp`)) fs.mkdirSync(`${dataRoot}/tmp/`)
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-
-      const mockString = `\`\`\`txt\nstring to write to file\n\`\`\``.trim();
-      const response = await WriteFile([filePath, mockString], chatState);
-      expect(response).toEqual(`File was written successfully to ${filePath}`);
-      const result = fs.readFileSync(filePath, 'utf-8').toString();    
-      expect(result).toEqual('string to write to file');
+    it('reports a missing path as a validation error', async () => {
+      const result = await ExtractTextFromFile({ path: '', start: 1, end: 2 }, chatState);
+      expect(result.success).toBe(false);
+      expect(result.error).toBe('No path provided');
+      expect(result.tool).toBe('extractTextFromFile');
     });
-
-    test('Writes a string to a file, formatted without backticks', async () => {
-      const dataRoot = (process.env as Reactory.Server.ReactoryEnvironment).APP_DATA_ROOT;
-      const filePath = `${dataRoot}/tmp/macro-output-test-large-block.txt`;
-      if (!fs.existsSync(`${dataRoot}/tmp`)) fs.mkdirSync(`${dataRoot}/tmp/`)
-      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-
-      const mockString = readFileSync(require.resolve('./samples/04.txt'), 'utf-8').toString();
-      const compareString = readFileSync(require.resolve('./samples/05.txt'), 'utf-8').toString();
-      const response = await WriteFile([filePath, mockString], chatState);
-      expect(response).toEqual(`File was written successfully to ${filePath}`);
-      const result = fs.readFileSync(filePath, 'utf-8').toString();
-      expect(result).toEqual(compareString);
-    });
-    
-
-    test('Reads a portion of a file using ExtractFile', async () => {
-      const filePath = require.resolve('./samples/03.txt');      
-      const result = await ExtractTextFromFile([filePath, '2', '2'], chatState);
-      expect(result.trim()).toEqual(`\`\`\`txt\nLine 2\n\`\`\``);
-    });
-
-    test('should insert a snippet into a file at the specified line', async () => {
-      const path = require.resolve('./samples/03.txt');          
-      const expectedContent = 'Line 1\nSnippet\nLine 3';
-      const snippet = 'Snippet';
-      const result = await InsertSnippet([path, '2', '', snippet], chatState);
-      // Re-read the file to check its contents
-      const modifiedContent = fs.readFileSync(path, 'utf-8');
-
-      expect(result).toBe(`Snippet inserted into ${path} successfully.`);
-      expect(modifiedContent).toBe(expectedContent);
-    });
-
-    test('should replace lines in a file with the snippet', async () => {
-      const path = require.resolve('./samples/03.txt');
-      const expectedContent = 'Line 1\nSnippet';
-      const snippet = 'Snippet';
-      const result = await InsertSnippet([path, '2', '3', snippet], chatState);
-
-      // Re-read the file to check its contents
-      const modifiedContent = await fs.readFileSync(path, 'utf-8');
-
-      expect(result).toBe(`Snippet inserted into ${path} successfully.`);
-      expect(modifiedContent).toBe(expectedContent);
-    });
-
-    test('should handle file read/write errors', async () => {
-      const path = './nonexistent.txt';
-      const snippet = 'Snippet';
-
-      const result = await InsertSnippet([path, '2', '', snippet], chatState);
-
-      expect(result).toMatch(`Error writing file at ${path}`);
-    });
-  })
+  });
 });

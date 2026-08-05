@@ -12,6 +12,7 @@ import {
 import { getAIResponse, createPrompt, extractResponse } from '@reactory/server-modules/reactory-reactor/ai/openai/chat/questions/factory';
 import { template } from 'lodash';
 import { CodeReviewFileProps, CodeReviewProps, CodeReviewFileMacroResult, CodeReviewMacroResult } from './types';
+import { Default as DefaultReviewSpecification } from './specifications';
 import { strongRandom } from 'utils';
 import logger from '@reactory/server-core/logging';
 
@@ -68,7 +69,12 @@ export const CodeReviewFile: Macro<CodeReviewFileMacroResult, CodeReviewFileProp
 
   let $path = path.trim();
 
-  rl.write(`Reviewing ${$path} - please wait...\n`);
+  // `rl` is the CLI readline interface and is only present on a ChatState built
+  // by the interactive CLI. This macro is also reached as a tool call from the
+  // conversation service, where there is no readline — an unguarded write threw
+  // "Cannot read properties of undefined (reading 'write')" and failed the
+  // review before it started.
+  rl?.write(`Reviewing ${$path} - please wait...\n`);
 
   if ($path.indexOf('${') > -1) $path = template($path)({ os, pathModule, process, state });
   
@@ -94,7 +100,10 @@ export const CodeReviewFile: Macro<CodeReviewFileMacroResult, CodeReviewFileProp
     specificationContent = readFileSync(specs).toString();
   }
   
-  const fileIn = FileMacros.find(macro => macro.name === 'ReadFile');
+  // Registry names are camelCase ('readFile', not 'ReadFile'). This looked up
+  // 'ReadFile', never matched, and returned "No file input macro found" for
+  // every call — CodeReviewFile could not review anything.
+  const fileIn = FileMacros.find(macro => macro.name === 'readFile');
 
   if (!fileIn) {
     return {
@@ -123,10 +132,15 @@ export const CodeReviewFile: Macro<CodeReviewFileMacroResult, CodeReviewFileProp
       'system'
     );
 
-    const result = await getAIResponse(ai, prompt, state);  
+    const result = await getAIResponse(ai, prompt, state);
     const updatedResponse = JSON.parse(JSON.stringify(result));
-    // Access message object
-    let review = extractResponse(updatedResponse, prompt.messages[0].content);
+    // extractResponse returns the *message object*, so take its content. This
+    // used to keep the whole message, which put `{ role, content }` into
+    // `data.review` and left `reviewLength` undefined (message objects have no
+    // `.length`). CodeReview below already did this correctly.
+    const reviewMessage = extractResponse(updatedResponse, prompt.messages[0].content);
+    const review: string =
+      typeof reviewMessage === 'string' ? reviewMessage : reviewMessage?.content ?? '';
     const executionTime = Date.now() - startTime;
     const reviewLength = review.length;
     let writtenToFile = false;
@@ -223,7 +237,11 @@ Successfully completed code review for: **${pathModule.basename($path)}**
         };
       }
 
-      const fileOut = macros.find(macro => macro.name === 'WriteFile');
+      // Same casing fix as the readFile lookup above, and resolved from the
+      // imported FileMacros registry rather than state.macros: writing the
+      // review out is this macro's own dependency, not something the caller
+      // needs to have registered on the chat state.
+      const fileOut = FileMacros.find(macro => macro.name === 'writeFile');
       if (!fileOut) {
         return {
           success: false,
@@ -433,14 +451,30 @@ export const CodeReview: Macro<string, CodeReviewProps> = async (
   if(!$path) return 'A request for a review requires a valid path to a folder';
   if(!existsSync($path)) return `The path ${$path} does not exist`;
 
-  let specificationContent: string = readFileSync(require.resolve('./review.specifications.default.md')).toString();
+  // The default specification is the `Default` preset in ./specifications, not
+  // a markdown file. This used to `require.resolve('./review.specifications.
+  // default.md')` — a file that does not exist in the package, so every call to
+  // CodeReview threw MODULE_NOT_FOUND before it could review anything. A caller
+  // -supplied `specs` file still wins.
+  let specificationContent: string = JSON.stringify(DefaultReviewSpecification, null, 2);
   if (specs && existsSync(specs)) specificationContent = readFileSync(specs).toString();
 
   
-  // we get the directory contents using the dirIn macro
-  const dirContents: { name: string, extension?: string, size?: number, path: string}[] = JSON.parse(
-    await dirIn({ path: $path, recursive: true, pattern: '*', format: 'json' }, state)
+  // we get the directory contents using the dirIn macro. It resolves a
+  // structured result now; this used to JSON.parse() its return value, which
+  // threw `"[object Object]" is not valid JSON` on every call since the macro
+  // stopped returning a JSON string.
+  const listing = await dirIn(
+    { path: $path, recursive: true, pattern: '*', format: 'json' },
+    state
   );
+
+  if (!listing.success) {
+    return `Could not list the contents of ${$path}: ${listing.error}`;
+  }
+
+  const dirContents: { name: string, extension?: string, size?: number, path: string }[] =
+    listing.data?.items ?? [];
 
   let question = `Write a review on file structure for the following directory: ${$path}
   \`\`\`txt
@@ -475,7 +509,12 @@ export const CodeReview: Macro<string, CodeReviewProps> = async (
         if (file.size < 100000) {
           const filePath = pathModule.join($path, file.name);
           const fileResult = await CodeReviewFile({ path: filePath, specs }, state);
-          state.vars.review = `${state.vars.review}\n\n${fileResult}`;
+          // CodeReviewFile resolves a structured result; interpolating it
+          // directly wrote "[object Object]" into the accumulated review for
+          // every file in the directory.
+          state.vars.review = fileResult.success
+            ? `${state.vars.review}\n\n${fileResult.data?.review ?? ''}`
+            : `${state.vars.review}\n\nCould not review ${file.name}: ${fileResult.error}`;
         } else {
           state.vars.review = `${state.vars.review}\n\n${file.name} is too large to review - Skipping review`;
         }
