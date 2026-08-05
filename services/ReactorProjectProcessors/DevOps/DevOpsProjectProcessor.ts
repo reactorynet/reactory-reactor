@@ -62,6 +62,11 @@ export class DevOpsProjectProcessor extends BaseProjectProcessor {
       return { symbols: [], externals: [], edges: [] };
     }
 
+    // Documents (runbooks, ADRs, chart READMEs) are outlined by the base.
+    if (this.isDocument(filePath, fileNode.data?.language)) {
+      return super.analyseFileFull(fileNode);
+    }
+
     const fileName = path.basename(filePath);
     const symbols: ReactorNode[] = [];
     const edges: ReactorNodeLink[] = [];

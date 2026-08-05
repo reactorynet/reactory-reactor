@@ -1,25 +1,70 @@
 import fs from "fs";
 import path from "path";
 import { service } from "application/decorators";
-import BaseProjectProcessor, { FileAnalysisResult } from "../BaseProjectProcessor";
+import BaseProjectProcessor from "../BaseProjectProcessor";
 import {
   IReactorProject,
-  IReactorProjectFileSpec,
-  IProjectProcessor,
+  KnownReactorProjectTypes,
 } from "@reactory/server-modules/reactory-reactor/types/service.types";
-import {
-  ReactorNode,
-  ReactorNodeType,
-  ReactorNodeLink,
-  ReactorLinkType,
-} from "@reactory/server-modules/reactory-reactor/types/model.types";
-import Hash from "@reactory/server-core/utils/hash";
+import { ReactorNode } from "@reactory/server-modules/reactory-reactor/types/model.types";
+import { documentFormatFor } from "../../graph/documents";
 
+/**
+ * Directories that conventionally hold a project's documentation. Scanned (one
+ * level deep) so a project whose root holds only `docs/` is still detected as a
+ * documentation project.
+ */
+const DOC_DIRECTORIES = [
+  "docs",
+  "doc",
+  "documentation",
+  "wiki",
+  "adr",
+  "rfcs",
+  "rfc",
+  "guides",
+  "handbook",
+  "content",
+  "pages",
+  "_posts",
+];
+
+/** Files whose presence marks a documentation *site* rather than loose notes. */
+const DOC_SITE_MARKERS = [
+  "mkdocs.yml",
+  "mkdocs.yaml",
+  "docusaurus.config.js",
+  "docusaurus.config.ts",
+  "book.toml",
+  "_config.yml",
+  "antora.yml",
+  ".vitepress",
+  "docsify.js",
+];
+
+/** Cap on entries read per directory during detection. */
+const DETECT_SCAN_LIMIT = 400;
+
+/**
+ * Processor for documentation: prose-first repositories (handbooks, ADR
+ * archives, docs sites) and the documentation inside code projects.
+ *
+ * The document *graphing* itself lives in `services/graph/documents` and is
+ * wired into BaseProjectProcessor, so every processor outlines the documents it
+ * walks. What this processor adds is:
+ *
+ *  - detection, so a docs-only repository is recognised as a project at all,
+ *  - project typing (`documentation` + the dialects present),
+ *  - a document-only file claim, so when it runs alongside a language processor
+ *    on a hybrid project it contributes documents without taking ownership of
+ *    that project's source nodes.
+ */
 @service({
   name: "MarkdownProjectProcessor",
   nameSpace: "reactor",
   version: "1.0.0",
-  description: "Service for cataloging and graphing Markdown documentation and standard text-based projects",
+  description:
+    "Processor for documentation projects (markdown, reStructuredText, AsciiDoc, plain text) and the documentation inside code projects",
   id: "reactor.MarkdownProjectProcessor@1.0.0",
   serviceType: "data",
   dependencies: [
@@ -33,95 +78,97 @@ export class MarkdownProjectProcessor extends BaseProjectProcessor {
   name: string = "MarkdownProjectProcessor";
   version: string = "1.0.0";
 
-  supportsProject(project: Partial<IReactorProject>): boolean {
-    if (!project?.repoPath) return false;
-    const root = project.repoPath;
-    try {
-      // Matches if there are .md or .markdown files in the project
-      const files = fs.readdirSync(root);
-      const hasMarkdown = files.some(file => file.endsWith(".md") || file.endsWith(".markdown") || file === "docs");
-      return hasMarkdown;
-    } catch {
-      return false;
-    }
-  }
-
-  getProjectTypes(project: Partial<IReactorProject>): any[] {
-    return this.supportsProject(project) ? ["documentation", "markdown"] : [];
-  }
-
   protected iconKey(): string | null {
     return "markdown";
   }
 
-  protected async analyseFileFull(fileNode: ReactorNode): Promise<FileAnalysisResult> {
-    const filePath = fileNode.data?.path;
-    if (!filePath || !fs.existsSync(filePath)) {
-      return { symbols: [], externals: [], edges: [] };
-    }
+  /**
+   * On a hybrid project only documents are claimed: this processor runs beside
+   * a language processor, and restating every source file node under its own
+   * providerId would stop the tree expanding symbols for those files.
+   *
+   * On a documentation-only project nothing else walks the tree, so everything
+   * is claimed - otherwise an image a document embeds, or a config file it
+   * links to, would have no node for those edges to land on.
+   */
+  protected claimsFile(
+    fileNode: ReactorNode,
+    project: Partial<IReactorProject>
+  ): boolean {
+    if (this.isDocument(fileNode?.data?.path, fileNode?.data?.language)) return true;
+    return !this.hasPeerProcessor(project);
+  }
 
-    const fileName = path.basename(filePath);
-    const symbols: ReactorNode[] = [];
-    const edges: ReactorNodeLink[] = [];
+  /**
+   * True when the project contains documents. Looks at the repository root and
+   * one level into the conventional documentation directories - a docs project
+   * frequently has nothing but a `docs/` folder at its root.
+   */
+  supportsProject(project: Partial<IReactorProject>): boolean {
+    return this.documentFormats(project).length > 0;
+  }
 
-    // We only process Markdown files
-    if (!fileName.endsWith(".md") && !fileName.endsWith(".markdown")) {
-      return { symbols: [], externals: [], edges: [] };
-    }
+  getProjectTypes(project: Partial<IReactorProject>): KnownReactorProjectTypes[] {
+    const formats = this.documentFormats(project);
+    if (formats.length === 0) return [];
 
-    try {
-      const content = fs.readFileSync(filePath, "utf8");
-      const lines = content.split("\n");
+    const types: KnownReactorProjectTypes[] = ["documentation"];
+    const byFormat: Record<string, KnownReactorProjectTypes> = {
+      markdown: "markdown",
+      mdx: "mdx",
+      asciidoc: "asciidoc",
+      restructuredtext: "restructuredtext",
+      text: "plaintext",
+    };
+    formats.forEach((format) => {
+      const type = byFormat[format];
+      if (type && !types.includes(type)) types.push(type);
+    });
+    return types;
+  }
 
-      // 1. Extract Headings as Symbol Nodes
-      lines.forEach((line, index) => {
-        const headingMatch = line.match(/^(#+)\s+(.+)$/);
-        if (headingMatch) {
-          const [_, hashes, title] = headingMatch;
-          const level = hashes.length;
-          const headingNodeId = Hash(`heading:${level}:${title}:${filePath}`);
-          
-          const headingNode: ReactorNode = {
-            id: headingNodeId,
-            key: `${headingNodeId}`,
-            name: title.trim(),
-            type: ReactorNodeType.CHILD,
-            description: `Markdown Heading Level ${level}`,
-            data: { title, level, line: index + 1, path: filePath, kind: "heading" },
-          };
-          symbols.push(headingNode);
+  /**
+   * The document dialects found in the project, in discovery order. Empty when
+   * the project holds no documents.
+   */
+  private documentFormats(project: Partial<IReactorProject>): string[] {
+    const root = project?.repoPath;
+    if (!root) return [];
+
+    const formats = new Set<string>();
+
+    const scan = (dir: string, descend: boolean): void => {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      const subdirectories: string[] = [];
+      for (const entry of entries.slice(0, DETECT_SCAN_LIMIT)) {
+        if (entry.isDirectory()) {
+          if (this.ignoredDirectories.has(entry.name)) continue;
+          subdirectories.push(path.join(dir, entry.name));
+          continue;
         }
-      });
-
-      // 2. Extract relative Markdown Links and create REFERENCE edges
-      const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
-      let match;
-      while ((match = linkRegex.exec(content)) !== null) {
-        const [_, label, dest] = match;
-        // Check if destination is a relative file path (not an absolute URL or anchor)
-        if (!dest.startsWith("http://") && !dest.startsWith("https://") && !dest.startsWith("#")) {
-          const cleanDest = dest.split("#")[0]; // strip anchors
-          if (cleanDest) {
-            const absoluteDestPath = path.resolve(path.dirname(filePath), cleanDest);
-            if (fs.existsSync(absoluteDestPath)) {
-              const targetNodeId = Hash(`file:${absoluteDestPath}`);
-              const fileNodeId = Hash(`file:${filePath}`);
-              edges.push({
-                id: Hash(`link:${fileNodeId}:${targetNodeId}`),
-                source: fileNodeId,
-                target: targetNodeId,
-                types: [ReactorLinkType.REFERENCE],
-                title: `references ${label}`,
-              });
-            }
-          }
+        // A docs-site config marks the project as documentation even before any
+        // document is seen (the content may live deeper than we scan).
+        if (DOC_SITE_MARKERS.includes(entry.name)) formats.add("markdown");
+        const format = documentFormatFor(entry.name);
+        if (format) formats.add(format);
+      }
+      if (!descend) return;
+      for (const subdirectory of subdirectories) {
+        // Only conventional documentation directories are descended into, so
+        // detection stays cheap on large repositories.
+        if (DOC_DIRECTORIES.includes(path.basename(subdirectory).toLowerCase())) {
+          scan(subdirectory, false);
         }
       }
-    } catch (err) {
-      this.context.error(`MarkdownProjectProcessor error parsing ${fileName}: ${(err as Error).message}`);
-    }
+    };
 
-    return { symbols, externals: [], edges };
+    scan(root, true);
+    return Array.from(formats);
   }
 }
 

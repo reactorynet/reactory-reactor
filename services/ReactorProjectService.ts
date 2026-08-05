@@ -264,23 +264,39 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
     return projectTypes;
   }
 
+  /** Processor key of the generic file walker, used only as a fallback. */
+  private static readonly FALLBACK_PROCESSOR = "file";
+
   async detectProjectProcessors(
     project: Partial<IReactorProject>
   ): Promise<IProjectProcessorConfig[]> {
-    // Check if the project has a processor that supports it
-    let processors: IProjectProcessorConfig[] = [];
+    const processors: IProjectProcessorConfig[] = [];
 
-    // If not, iterate through processors to find a match
     for (const processorKey of Object.keys(this.processors)) {
+      // The generic file walker supports every folder, so it would always match.
+      // It is only useful when nothing else claimed the project - including it
+      // alongside a real processor makes it re-walk the whole tree and take
+      // ownership of nodes that processor's analyzers should expand.
+      if (processorKey === ReactorProjectServiceImpl.FALLBACK_PROCESSOR) continue;
       const processor = this.processors[processorKey];
       if (processor.supportsProject(project)) {
-        const fqn = `${processor.nameSpace}.${processor.name}@${processor.version}`;
         processors.push({
           id: processorKey,
-          processor: fqn,
+          processor: `${processor.nameSpace}.${processor.name}@${processor.version}`,
         });
       }
     }
+
+    if (processors.length === 0) {
+      const fallback = this.processors[ReactorProjectServiceImpl.FALLBACK_PROCESSOR];
+      if (fallback?.supportsProject(project)) {
+        processors.push({
+          id: ReactorProjectServiceImpl.FALLBACK_PROCESSOR,
+          processor: `${fallback.nameSpace}.${fallback.name}@${fallback.version}`,
+        });
+      }
+    }
+
     return processors;
   }
 

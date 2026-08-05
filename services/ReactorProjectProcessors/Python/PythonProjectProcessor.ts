@@ -32,8 +32,9 @@ class PythonProjectProcessor extends BaseProjectProcessor {
   }
 
   protected async analyseFileFull(fileNode: ReactorNode): Promise<FileAnalysisResult> {
+    // Non-Python files fall through to the base, which outlines documentation.
     if (fileNode?.data?.language !== "python")
-      return { symbols: [], externals: [], edges: [] };
+      return super.analyseFileFull(fileNode);
     return analysePythonFile(fileNode, this.context);
   }
 

@@ -16,6 +16,10 @@ enum ReactorNodeType {
   FILE
   FUNCTION
   ENDPOINT
+  DOCUMENT
+  SECTION
+  TOPIC
+  RESOURCE
 }
 
 enum ReactorLinkType {
@@ -31,6 +35,9 @@ enum ReactorLinkType {
   REFERENCE
   SYMLINK
   CONTAINS
+  DOCUMENTS
+  MENTIONS
+  EMBEDS
 }
 
 type ReactorNodeCategory {

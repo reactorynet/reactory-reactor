@@ -37,8 +37,9 @@ class ReactNativeProjectProcessor extends BaseProjectProcessor {
     fileNode: ReactorNode
   ): Promise<FileAnalysisResult> {
     const language = fileNode?.data?.language;
+    // Anything else falls through to the base, which outlines documentation.
     if (language !== "typescript" && language !== "javascript")
-      return { symbols: [], externals: [], edges: [] };
+      return super.analyseFileFull(fileNode);
     return analyseTypeScriptFile(fileNode, this.context);
   }
 

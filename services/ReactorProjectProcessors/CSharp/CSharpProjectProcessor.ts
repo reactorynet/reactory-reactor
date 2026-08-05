@@ -31,8 +31,9 @@ class CSharpProjectProcessor extends BaseProjectProcessor {
   }
 
   protected async analyseFileFull(fileNode: ReactorNode): Promise<FileAnalysisResult> {
+    // Non-C# files fall through to the base, which outlines documentation.
     if (fileNode?.data?.language !== "csharp")
-      return { symbols: [], externals: [], edges: [] };
+      return super.analyseFileFull(fileNode);
     return analyseCSharpFile(fileNode, this.context);
   }
 

@@ -30,6 +30,11 @@ import {
 } from "../graph/GraphIdentity";
 import { ReactorNodeModel } from "@reactory/server-modules/reactory-reactor/models/ReactorGraphNode";
 import { ReactorNodeLinkModel } from "@reactory/server-modules/reactory-reactor/models/ReactorNodeLink";
+import {
+  DOCUMENT_LANGUAGES,
+  analyseDocumentFile,
+  documentFormatFor,
+} from "../graph/documents";
 
 /**
  * The result of a deep analysis of a single source file: the symbol nodes it
@@ -40,6 +45,15 @@ export interface FileAnalysisResult {
   symbols: ReactorNode[];
   externals: ReactorNode[];
   edges: ReactorNodeLink[];
+  /**
+   * Optional enrichment for the analysed file's own node, merged by process().
+   * Document analysis uses it to lift a document's title, frontmatter, tags and
+   * outline onto the file node so the node is meaningful without expanding it.
+   */
+  filePatch?: {
+    description?: string;
+    data?: Record<string, any>;
+  };
 }
 
 /** Maximum characters of file content stored on a searchable. */
@@ -53,9 +67,11 @@ const ANALYSABLE_LANGUAGES = new Set([
   "java",
   "csharp",
   "kotlin",
-  "markdown",
   "yaml",
   "terraform",
+  // Document dialects - handled by the base document analyzer for every
+  // processor, so documentation in a code project is graphed too.
+  ...DOCUMENT_LANGUAGES,
 ]);
 
 /**
@@ -69,7 +85,20 @@ export interface TreeNodeData {
   repoPath: string; // project root, propagated to every descendant
   projectFqn: string;
   projectId?: string | number;
-  kind: "folder" | "file" | "symbol" | "submodule" | "symlink";
+  kind:
+    | "folder"
+    | "file"
+    | "symbol"
+    | "submodule"
+    | "symlink"
+    /** A prose document the document analyzers can outline. */
+    | "document"
+    /** A heading-delimited section of a document. */
+    | "section"
+    /** A subject a document is about (frontmatter tag, keyword). */
+    | "topic"
+    /** An out-of-repo resource a document points at. */
+    | "resource";
   language?: string;
   /** Symlink metadata — present when kind is 'symlink'. */
   symlink?: {
@@ -237,14 +266,63 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
 
   /**
    * Deep-analyse a FILE node into symbol nodes, external dependency nodes and
-   * edges. Default: files are opaque leaves. Language processors override this
-   * (e.g. NodeJS wires in the TypeScript AST analyzer). Both interactive tree
-   * expansion (analyseFile) and batch processing (process) build on this.
+   * edges. Both interactive tree expansion (analyseFile) and batch processing
+   * (process) build on this.
+   *
+   * The default handles *documents* (markdown, reStructuredText, AsciiDoc,
+   * plain text): sections, cross-document links, doc-to-code references,
+   * embedded assets and frontmatter topics. Language processors override this
+   * for their own sources (e.g. NodeJS wires in the TypeScript AST analyzer)
+   * and should delegate here for anything they do not handle, so that a code
+   * project's documentation is graphed as well as its code.
    */
   protected async analyseFileFull(
-    _fileNode: ReactorNode
+    fileNode: ReactorNode
   ): Promise<FileAnalysisResult> {
+    const { language, path: filePath } = fileNode?.data || {};
+    if (this.isDocument(filePath, language)) {
+      return analyseDocumentFile(fileNode, this.context);
+    }
     return { symbols: [], externals: [], edges: [] };
+  }
+
+  /** True when a file is a document the base analyzer can outline. */
+  protected isDocument(filePath?: string, language?: string): boolean {
+    if (language && DOCUMENT_LANGUAGES.has(language)) return true;
+    return !!filePath && documentFormatFor(filePath) !== null;
+  }
+
+  /**
+   * Whether process() should emit a node for this file.
+   *
+   * Default: everything the walker found, which is what a project's primary
+   * processor wants. A *supplementary* processor - one that runs alongside
+   * others on a hybrid project - narrows this to the files it actually
+   * understands, so it does not restate (and take ownership of) nodes another
+   * processor owns. Node ids are deterministic, so the only thing at stake is
+   * which processor's `providerId` lands on the node, and therefore which
+   * analyzer expands it in the tree.
+   */
+  protected claimsFile(
+    _fileNode: ReactorNode,
+    _project: Partial<IReactorProject>
+  ): boolean {
+    return true;
+  }
+
+  /**
+   * True when another processor is configured for this project, i.e. this one
+   * is running as a supplement rather than as the project's primary processor.
+   * The generic file fallback does not count as a peer.
+   */
+  protected hasPeerProcessor(project: Partial<IReactorProject>): boolean {
+    const self = this.fqn();
+    return (project?.processors || []).some(
+      (config) =>
+        !!config?.processor &&
+        config.processor !== self &&
+        config.processor !== "reactor.FileProjectProcessor@1.0.0"
+    );
   }
 
   /**
@@ -259,8 +337,14 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     return symbols;
   }
 
-  /** Coarse language classification from a file extension. */
+  /**
+   * Coarse language classification from a file extension. Document dialects
+   * resolve through documentFormatFor(), which also recognises extension-less
+   * conventions (README, CHANGELOG, LICENSE).
+   */
   protected languageForFile(fileName: string): string | undefined {
+    const documentFormat = documentFormatFor(fileName);
+    if (documentFormat) return documentFormat;
     const ext = path.extname(fileName).toLowerCase();
     const map: Record<string, string> = {
       ".ts": "typescript",
@@ -281,8 +365,6 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       ".json": "json",
       ".yaml": "yaml",
       ".yml": "yaml",
-      ".md": "markdown",
-      ".markdown": "markdown",
       ".tf": "terraform",
       ".tfvars": "terraform",
     };
@@ -394,6 +476,9 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     const { isDir: isDirectory, isSymlink } = classification;
     const isSubmodule =
       isDirectory && !isSymlink && fs.existsSync(path.join(fullPath, ".git"));
+    const language =
+      isDirectory || isSymlink ? undefined : this.languageForFile(entryName);
+    const isDocument = !isDirectory && !isSymlink && this.isDocument(entryName, language);
     const data: TreeNodeData = {
       path: fullPath,
       relativePath,
@@ -406,8 +491,10 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
         ? "submodule"
         : isDirectory
         ? "folder"
+        : isDocument
+        ? "document"
         : "file",
-      language: isDirectory || isSymlink ? undefined : this.languageForFile(entryName),
+      language,
     };
 
     if (isSymlink) {
@@ -427,14 +514,18 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
 
     const describe = isSymlink
       ? `Symlink ${relativePath}${classification.relativeTarget ? ` -> ${classification.relativeTarget}` : classification.broken ? " (broken)" : ""}`
-      : `${isSubmodule ? "Submodule" : isDirectory ? "Folder" : "File"} ${relativePath}`;
+      : `${isSubmodule ? "Submodule" : isDirectory ? "Folder" : isDocument ? "Document" : "File"} ${relativePath}`;
 
     return {
       id,
       index: id,
       name: entryName,
       key: appendAncestry(parent.key, id),
-      type: isDirectory ? ReactorNodeType.FOLDER : ReactorNodeType.FILE,
+      type: isDirectory
+        ? ReactorNodeType.FOLDER
+        : isDocument
+        ? ReactorNodeType.DOCUMENT
+        : ReactorNodeType.FILE,
       description: describe,
       parentId: parent.id,
       providerId: parent.providerId,
@@ -466,8 +557,8 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     // real target node expands normally. Cycle guard for the lazy tree.
     if (node?.data?.noExpand === true) return [];
 
-    // FILE nodes expand into symbols (if a language analyzer is provided).
-    if (node.type === ReactorNodeType.FILE) {
+    // FILE nodes expand into symbols, DOCUMENT nodes into their sections.
+    if (node.type === ReactorNodeType.FILE || node.type === ReactorNodeType.DOCUMENT) {
       try {
         return await this.analyseFile(node as ReactorNode);
       } catch (err) {
@@ -726,7 +817,11 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
 
   // ---- Processing / indexing ----------------------------------------------
 
-  /** Builds a FILE node parented to the project root (used by batch process). */
+  /**
+   * Builds a FILE (or DOCUMENT) node parented to the project root, used by
+   * batch process(). Must agree with makeTreeNode on id, type and kind so the
+   * batch and interactive paths produce one node, not two.
+   */
   private fileNodeForProcess(
     root: Partial<ReactorNode>,
     project: Partial<IReactorProject>,
@@ -737,13 +832,15 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       path.relative(project.repoPath || "", absPath)
     );
     const id = nodeId(pathLogicalKey(fqn, relativePath));
+    const language = this.languageForFile(absPath);
+    const isDocument = this.isDocument(absPath, language);
     return {
       id,
       index: id,
       name: path.basename(absPath),
       key: appendAncestry(root.key, id),
-      type: ReactorNodeType.FILE,
-      description: `File ${relativePath}`,
+      type: isDocument ? ReactorNodeType.DOCUMENT : ReactorNodeType.FILE,
+      description: `${isDocument ? "Document" : "File"} ${relativePath}`,
       parentId: root.id,
       providerId: this.fqn(),
       nameSpace: project.nameSpace,
@@ -762,8 +859,8 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
         repoPath: project.repoPath,
         projectFqn: fqn,
         projectId: project.id,
-        kind: "file",
-        language: this.languageForFile(absPath),
+        kind: isDocument ? "document" : "file",
+        language,
       },
     };
   }
@@ -959,6 +1056,7 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
 
     for (const spec of fileSpecs) {
       const fileNode = this.fileNodeForProcess(root, next, spec.path);
+      if (!this.claimsFile(fileNode, next)) continue;
       nodes.push(fileNode);
 
       const searchable = this.buildSearchable(next, spec);
@@ -970,6 +1068,17 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
           nodes.push(...analysis.symbols);
           analysis.externals.forEach((e) => externals.set(e.id, e));
           edges.push(...analysis.edges);
+          // Analysis may enrich the file's own node (a document's title,
+          // frontmatter and outline). Applied in place: fileNode is already in
+          // `nodes`, so the enriched version is what gets persisted.
+          if (analysis.filePatch) {
+            if (analysis.filePatch.description) {
+              fileNode.description = analysis.filePatch.description;
+            }
+            if (analysis.filePatch.data) {
+              fileNode.data = { ...fileNode.data, ...analysis.filePatch.data };
+            }
+          }
         } catch (err) {
           this.context.warn(
             `analyseFileFull failed for ${spec.path}: ${(err as Error).message}`
@@ -1045,6 +1154,55 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
         value: { type: "svg", svg: (SVGS as Record<string, string>)[key] },
       });
     }
+    attributes.push(...this.documentAttributes(node));
+    return attributes;
+  }
+
+  /**
+   * Inspectable attributes for document and section nodes, so the explorer can
+   * show what a document is about without opening it.
+   */
+  private documentAttributes(node: ReactorNode): ReactorNodeAttributes[] {
+    const data = node?.data;
+    if (!data || typeof data !== "object") return [];
+
+    const attributes: ReactorNodeAttributes[] = [];
+    const push = (attributeKey: string, value: unknown) => {
+      if (value === undefined || value === null || value === "") return;
+      if (Array.isArray(value) && value.length === 0) return;
+      attributes.push({
+        id: Hash(`${node.id}_${attributeKey}`),
+        key: attributeKey,
+        value: Array.isArray(value) ? value.join(", ") : value,
+      });
+    };
+
+    if (data.kind === "document") {
+      push("title", data.documentTitle);
+      push("format", data.documentFormat);
+      push("tags", data.tags);
+      push("sections", data.documentMetrics?.sections);
+      push("reading-minutes", data.documentMetrics?.readingMinutes);
+      push("code-languages", data.codeLanguages);
+      // Frontmatter ownership fields are the ones people actually look for.
+      ["owner", "team", "status", "reviewed", "updated"].forEach((field) =>
+        push(field, data.frontmatter?.[field])
+      );
+    }
+
+    if (data.kind === "section") {
+      push("anchor", data.slug ? `#${data.slug}` : undefined);
+      push("heading-level", data.level);
+      push("lines", data.lines);
+      push("starts-at-line", data.line);
+    }
+
+    if (data.kind === "topic") push("topic", data.label);
+    if (data.kind === "resource") {
+      push("url", data.url);
+      push("host", data.host);
+    }
+
     return attributes;
   }
 

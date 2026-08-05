@@ -36,14 +36,15 @@ class NodeJSProjectProcessor extends BaseProjectProcessor {
   /**
    * TypeScript / JavaScript files are analysed with the TypeScript compiler API
    * into symbol nodes (classes, functions, interfaces, exports), external
-   * dependency nodes, and import/dependency edges.
+   * dependency nodes, and import/dependency edges. Anything else falls through
+   * to the base, which outlines the project's documentation.
    */
   protected async analyseFileFull(
     fileNode: ReactorNode
   ): Promise<FileAnalysisResult> {
     const language = fileNode?.data?.language;
     if (language !== "typescript" && language !== "javascript")
-      return { symbols: [], externals: [], edges: [] };
+      return super.analyseFileFull(fileNode);
     return analyseTypeScriptFile(fileNode, this.context);
   }
 

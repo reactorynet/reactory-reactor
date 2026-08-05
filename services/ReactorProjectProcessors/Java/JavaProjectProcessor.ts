@@ -38,7 +38,8 @@ class JavaProjectProcessor extends BaseProjectProcessor {
     // Kotlin-only project processor.
     const language = fileNode?.data?.language;
     if (language === "kotlin") return analyseKotlinFile(fileNode, this.context);
-    if (language !== "java") return { symbols: [], externals: [], edges: [] };
+    // Anything else falls through to the base, which outlines documentation.
+    if (language !== "java") return super.analyseFileFull(fileNode);
     return analyseJavaFile(fileNode, this.context);
   }
 

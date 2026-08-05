@@ -883,6 +883,14 @@ export type KnownWebAPIs = "rest" | "graphql" | "soap" | "websocket" | "grpc" | 
 
 export type KnownVisualizationLibs = "d3" | "three";
 
+/**
+ * Prose/document project types. "documentation" marks a project whose primary
+ * artifacts are documents (a docs site, a handbook, an RFC archive); the others
+ * name the document dialect(s) found in it.
+ */
+export type KnownDocumentTypes =
+  | "documentation" | "markdown" | "mdx" | "asciidoc" | "restructuredtext" | "plaintext";
+
 export type KnownReactorProjectTypes =
   | KnownLanguages
   | KnownBuildSystems
@@ -895,6 +903,7 @@ export type KnownReactorProjectTypes =
   | KnownWebAPIs
   | KnownConfigTypes
   | KnownDataSystems
+  | KnownDocumentTypes
 
 export interface IReactorProjectPathSpec {
   id: number;

@@ -1,10 +1,10 @@
-# SystemGraphManager — Code Graph Engine
+# SystemGraphManager — Code & Documentation Graph Engine
 
 > State of `services/SystemGraphManager.ts` and its supporting providers, processors, analyzers, models and GraphQL surface.
 >
-> **Intent:** inspect any code base, index its files, and build a detailed graph of nodes (projects → folders → files → symbols) with edges linking related elements.
+> **Intent:** inspect any code base *or documentation set*, index its files, and build a detailed graph of nodes (projects → folders → files/documents → symbols/sections) with edges linking related elements.
 >
-> **Current state:** delivers that pipeline for **TypeScript/JavaScript (NodeJS/React Native)** with full AST analysis, and generic file-tree browsing for **all** languages. Node identity is deterministic; nodes and edges persist to MongoDB; file contents index to search. Edge CRUD and the graph query surface are wired through GraphQL.
+> **Current state:** delivers that pipeline for **TypeScript/JavaScript (NodeJS/React Native)** with full AST analysis, heuristic analyzers for Python/Java/Kotlin/C#, a **document analyzer** for markdown/reStructuredText/AsciiDoc/plain text (§4), and generic file-tree browsing for **all** languages. Documentation-only and hybrid (code + docs) projects are both graphed. Node identity is deterministic; nodes and edges persist to MongoDB; file contents index to search. Edge CRUD and the graph query surface are wired through GraphQL.
 
 ---
 
@@ -23,19 +23,23 @@ SystemGraphManager (facade + edge store)
         │
         └── IProjectProcessor (per language) ──► BaseProjectProcessor
                                                     │
-                    ┌───────────────────────────────┼───────────────────────────────┐
-                    ▼                                ▼                                ▼
-            generic tree walk               TypeScriptAnalyzer               persistence + search
-        (folders/files, lazy+cached)   (ts compiler API: symbols,        (reactor_nodes, reactor_node_links,
-                                        imports → edges, externals)        reactor_graph_<ns>_<name> index)
+            ┌───────────────────┬───────────────────┼───────────────────┬───────────────────┐
+            ▼                   ▼                   ▼                   ▼                   ▼
+    generic tree walk    TypeScriptAnalyzer   other language      document analyzer   persistence + search
+ (folders/files, docs,  (ts compiler API:      analyzers        (services/graph/    (reactor_nodes,
+   lazy + cached)         symbols, imports    (heuristic:        documents/:         reactor_node_links,
+                          → edges, externals)  py/java/kt/cs)     sections, links,    reactor_graph_<ns>_<name>)
+                                                                  topics, resources)
 ```
 
 ### Deterministic identity (`services/graph/GraphIdentity.ts`)
 Every node id is `Hash(logicalKey)`:
 - project root → `nameSpace.name@version`
-- file/folder → `<fqn>::<relativePath>`
+- file/folder/document → `<fqn>::<relativePath>`
 - symbol → `<fqn>::<relativePath>#<symbolPath>`
+- **document section** → `<fqn>::<relativePath>#<anchor-slug>`
 - external dep → `npm:<package>`
+- **topic** → `topic:<fqn>#<slug>` · **external resource** → `resource:<fqn>#<url>`
 
 Edge id = `Hash(source->target:type)`. Because ids are a pure function of position, re-processing is idempotent, edges never dangle, and an import edge can point at a file/symbol whose node has not been materialised yet. There is **one** numeric id space (the Mongo/static-catalog split is gone).
 
@@ -47,7 +51,8 @@ All processors now extend **`BaseProjectProcessor`**, which provides:
 - deterministic project root node,
 - generic recursive folder/file tree expansion (`getChildrenForNode`) with an ignore list (`node_modules`, `.git`, `dist`, `target`, …), folder-first ordering, and paging,
 - `process()` — discovers files, builds root/file/symbol/external nodes, resolves edges, **persists** them, and **indexes** file contents to search,
-- `analyseFileFull()` hook for language-specific symbol/edge extraction (default: files are leaves),
+- `analyseFileFull()` hook for language-specific symbol/edge extraction. **The default handles documents** (§4), so every processor graphs the documentation it walks; language processors delegate to `super.analyseFileFull()` for files they do not handle,
+- `claimsFile()` hook deciding which files a processor emits nodes for — the escape hatch that lets a supplementary processor contribute to a hybrid project without taking ownership of another processor's nodes,
 - default icon attribute + service plumbing.
 
 | Processor | Detection | Tree walk | Symbols + edges (AST) | Icon |
@@ -55,11 +60,14 @@ All processors now extend **`BaseProjectProcessor`**, which provides:
 | **NodeJS** | `package.json` (detects `typescript`/`react`) | ✅ (base) | ✅ TypeScript AST analyzer | nodejs |
 | **ReactNative** | `react-native` dep | ✅ (base) | ✅ TypeScript AST analyzer | react-native |
 | **Python** | requirements/setup/pyproject | ✅ (base) | ✅ Python analyzer | python |
-| **Java** | pom/gradle/ant | ✅ (base) | ✅ Java analyzer | java |
+| **Java** | pom/gradle/ant | ✅ (base) | ✅ Java + Kotlin analyzers | java |
 | **CSharp** | `.csproj`/`.sln` | ✅ (base) | ✅ C# analyzer | csharp |
 | **TSql** | `.sqlproj`/`.dacpac` | ✅ (base) + Connections node, DATASTORE root, rich menus | — | tsql |
-| **File** | any repoPath (fallback) | ✅ (base) | — | — |
+| **Markdown** | documents in root or a docs dir (`docs`, `adr`, `rfcs`, …), or a docs-site config (`mkdocs.yml`, `docusaurus.config.*`, …) | ✅ (base) | ✅ document analyzer (§4); claims documents only on hybrid projects | markdown |
+| **File** | any repoPath (**fallback only** — used when nothing else claims the project) | ✅ (base) | documents only (base default) | — |
 | **BackStage** | `catalog-info.yaml` | own impl | parses catalog metadata | — |
+
+**Processor selection.** `ReactorProjectService.detectProjectProcessors` returns every processor that claims the project, and `processProject` runs them all — so a NodeJS repo with a `docs/` folder is processed by both NodeJS and Markdown. `File` is deliberately excluded unless nothing else matched: it supports *every* folder, so including it alongside a real processor made it re-walk the whole tree and overwrite each node's `providerId`, which stopped the tree expanding symbols for those files.
 
 ## 3. TypeScript analyzer (`services/graph/analyzers/TypeScriptAnalyzer.ts`)
 
@@ -81,13 +89,57 @@ No AST parser is available in-runtime for Python/Java/C#, so these are careful *
 
 All emit the same `{ symbols, externals, edges }` shape and id-space as the TS analyzer, so persistence, edges and GraphQL resolution work identically. Unresolved references (builtins, cross-namespace bases without an import binding) produce **no** edge, which keeps the graph clean rather than guessing.
 
-## 4. Persistence & search
+## 4. Document analyzer (`services/graph/documents/`)
+
+Documents are graphed in two stages, so a new dialect means a new parser and nothing else:
+
+```
+content ──(parser)──► DocumentOutline ──(DocumentGraphEmitter)──► { symbols, externals, edges, filePatch }
+```
+
+| File | Role |
+|------|------|
+| `DocumentTypes.ts` | the dialect-agnostic `DocumentOutline` model, `slugify`/`uniqueSlug` (GitHub-compatible anchors), metrics helpers |
+| `MarkdownParser.ts` | markdown/MDX block scanner |
+| `PlainTextParser.ts` | `.txt` / extension-less documents; infers structure from underlines, numbered sections and standalone title-case lines |
+| `DocumentGraphEmitter.ts` | outline → deterministic nodes/edges; link resolution against the repo |
+| `index.ts` | dialect dispatch (`documentFormatFor`, `parseDocument`, `analyseDocumentFile`) |
+
+**Recognised as documents:** `.md`, `.markdown`, `.mdx`, `.rst`, `.adoc`, `.txt`, plus extension-less conventions (`README`, `CHANGELOG`, `LICENSE`, `CONTRIBUTING`, `CODEOWNERS`, …). These get `ReactorNodeType.DOCUMENT` instead of `FILE`, and `data.kind = "document"`.
+
+**What the parser gets right** (and a line-regex pass does not): `#` inside a fenced code block is code, not a heading; `[a](b)` inside a code span or fence is not a link; `---` is frontmatter only at the top of the file, a setext underline only directly under a paragraph, and a thematic break otherwise. It also handles YAML frontmatter (without shifting line numbers), setext headings, explicit `{#custom-id}` anchors and `<a name>` aliases, reference-style links defined anywhere in the file, nested `[![img](a)](b)`, tables, task lists and HTML comments.
+
+**New node types:** `DOCUMENT`, `SECTION`, `TOPIC`, `RESOURCE`. **New link types:** `DOCUMENTS`, `MENTIONS`, `EMBEDS` (mirrored in the GraphQL enums and the client's `GraphExplorer` styling maps).
+
+**The graph produced from a document:**
+
+| Element | Node/edge |
+|---------|-----------|
+| Heading | `SECTION` node, nested under its parent heading via `parentId` (so `CONTAINS` edges are synthesized as usual) |
+| `[x](./other.md#anchor)` | `REFERENCE` → the **section node inside the target document**, plus one to the document itself |
+| `[x](#local)` | `REFERENCE` → the local section |
+| `[x](./src/index.ts)`, `` `src/config.json` `` | `DOCUMENTS` + `REFERENCE` → the code node — the edge that ties a README to what it describes |
+| `![x](./img/a.png)` | `EMBEDS` → the asset node |
+| `https://…`, `mailto:…` | `RESOURCE` node (project-scoped, URL-normalised) + `REFERENCE` (or `EMBEDS` for images) |
+| frontmatter `tags`/`keywords`/`topics` | `TOPIC` node **shared across the project** + `MENTIONS` — two documents tagged `auth` attach to one node |
+| frontmatter `related`/`see_also`/`links` | treated as document-level links |
+
+Two decisions carry the design:
+
+1. **Sections are keyed by their anchor slug, not by heading hierarchy.** `nodeId(<fqn>::docs/guide.md#installing)` is computable from the link `docs/guide.md#installing` alone, so a cross-document anchor resolves to the right node *without parsing the target document first*. Hierarchy lives in `parentId`. Duplicate headings de-duplicate to `overview`, `overview-1`, … exactly as GitHub does.
+2. **An edge is only emitted when its target node will exist.** Link destinations are resolved against the repository (extension-less links, directory `index.md`/`README.md`, root-relative `/docs/x`, percent-encoding, query strings), rejecting URLs, missing files and anything escaping the repo root. Resolution happens in canonical `realpath` space on both sides — mixing canonical and non-canonical paths makes `path.relative` degrade to a `../..` walk and silently drops every in-repo edge (this is the macOS `/var` → `/private/var` trap).
+
+A reference originates from the **section containing it** where there is one, otherwise from the document node — so "the Overview section links to X" and "this document relates to X" stay distinct statements.
+
+`analyseFileFull` also returns a `filePatch`, which `process()` merges onto the document's own node: title, frontmatter, tags, heading outline, fenced-code languages and metrics (words, reading minutes, sections, links, tables, tasks). `getAttributes` surfaces these in the explorer's inspector, so a document node is meaningful without expanding it.
+
+## 5. Persistence & search
 
 - **`reactor_nodes`** (numeric `id`, `key`, `parentId`, `providerId`, `source`, `data`, relationship id arrays) — persisted for analysed artifacts (roots, files, symbols, externals). Raw folder browsing stays lazy/cached.
 - **`reactor_node_links`** (`ReactorNodeLink` model) — edges keyed by deterministic id, indexed on source/target/projectId.
 - **Search** — `process()` writes file searchables to `reactor_graph_<ns>_<name>` via `core.ReactorySearchService`, resolved from context so it works whether the processor was DI- or manually-constructed.
 
-## 5. SystemGraphManager methods
+## 6. SystemGraphManager methods
 
 | Method | Status |
 |--------|--------|
@@ -100,25 +152,27 @@ All emit the same `{ symbols, externals, edges }` shape and id-space as the TS a
 | `getLinks / createLink / updateLink / deleteLink` | ✅ backed by `reactor_node_links` (idempotent upserts) |
 | `getCategoryNodes` | ✅ static taxonomy |
 
-## 6. GraphQL surface
+## 7. GraphQL surface
 
 - **Node relationships:** `ReactorNode.dependencies / dependents / inputs / outputs / parent` resolve via the edge store; `ReactorNodeLink.source / target` resolve node objects from ids.
 - **Search queries** `ReactorNodesForType` / `ReactorNodesByTerm` query the **persisted graph** (with catalog fallback) instead of filtering the full list in memory.
 - **Mutations** match the schema: `ReactorCreateNodeLink`, `ReactorUpdateNodeLink`, `ReactorDeleteNodeLink`, `ReactorSyncCatalogNodes`, `ReactorIndexNodes`, `ReactorSaveSystemGraph` — all implemented (the previous throwing/misnamed stubs are gone).
 
-## 7. Tests (41 tests / 12 suites, no Mongo required)
+## 8. Tests (no Mongo required)
 
 Shared fixtures via `services/graph/testUtils.ts` (`makeContext`, `writeProject`, `cleanup`, `fileNodeFor`, `symbolId`, `fileId`).
 
 - **`GraphBuilding.test.ts`** — end-to-end pipeline: detection, deterministic root, tree walk ignoring `node_modules`, folder/file expansion, symbol extraction, `process()` graph assembly (nodes+edges+searchables), import-edge resolution (relative + external).
-- **Analyzer suites** (`analyzers/*.test.ts`) — TypeScript, Python, Java, C#: symbol extraction, import dependency edges, `INHERITS`/`IMPLEMENTS` edges (cross-file where import bindings allow), `CALL` edges (`this`/`self`/local/construction), edge de-duplication.
-- **Per-processor tests** (Java, C#, Python, ReactNative, NodeJS, TSql, File) — real temp-fixture detection (`supportsProject`/`getProjectTypes`, incl. foreign-project rejection), generic tree-walk for Python/File, the DATASTORE + Connections behaviour for TSql, and a Python `process()` integration proving symbols/edges flow through the full pipeline.
+- **Analyzer suites** (`analyzers/*.test.ts`) — TypeScript, Python, Java, Kotlin, C#: symbol extraction, import dependency edges, `INHERITS`/`IMPLEMENTS` edges (cross-file where import bindings allow), `CALL` edges (`this`/`self`/local/construction), edge de-duplication.
+- **`documents/MarkdownParser.test.ts`** (37) — slugging, ATX/setext headings, nesting and line ranges, headings-vs-fences, duplicate slugs, explicit ids and `<a name>` aliases, frontmatter (valid, malformed, unterminated, mid-document `---`), links (inline, reference, shortcut, autolink, bare, nested, code-span paths), tables/tasks/metrics, HTML comments.
+- **`documents/DocumentGraph.test.ts`** (29) — document detection, URL normalisation, link resolution (relative/parent/root-relative, extension-less, directory index, anchors, repo escapes), anchor-keyed section ids and hierarchy, `DOCUMENTS`/`EMBEDS`/`MENTIONS`/`REFERENCE` edges, project-scoped topics and resources, idempotence, and an assertion that **no edge points at a node the analyzer did not create**.
+- **Per-processor tests** (Java, C#, Python, ReactNative, NodeJS, TSql, File, Markdown) — real temp-fixture detection (`supportsProject`/`getProjectTypes`, incl. foreign-project rejection), generic tree-walk, the DATASTORE + Connections behaviour for TSql, a Python `process()` integration, and for Markdown: a documentation-only project end to end, document→section tree expansion, and **hybrid-project ownership** (the markdown processor claims only documents when a language processor is present, everything when it is not).
 
-All green; full project typechecks clean (no new errors).
+> **Note:** the tree-sitter-backed analyzer suites (Java/Kotlin/C#) interfere with each other when run in the same batch — a pre-existing isolation issue, unrelated to this work. Run them individually to see them green.
 
 ---
 
-## 8. Remaining / future work
+## 9. Remaining / future work
 
 1. **Deeper edges** — resolve `Obj.method()` calls where `Obj` is a locally instantiated variable (needs light type inference), `new X()` construction edges, endpoint↔handler, DB FK/view/proc references (TSql), DI wiring.
 2. **Higher-fidelity non-TS analyzers** — the Python/Java/C# scanners are heuristic (constructors skipped for Java/C#; cross-file same-package/namespace bases only resolve through explicit import bindings). A real parser (tree-sitter / language server) would raise precision if needed.
@@ -126,5 +180,8 @@ All green; full project typechecks clean (no new errors).
 4. **Incremental re-index** — only reprocess changed files (mtime/hash) rather than the whole repo.
 5. **Category assignment** — attach nodes to the `DefaultReactorNodeCategories` taxonomy during analysis.
 6. **Persist folder nodes on demand** if full-tree queries (not just analysed artifacts) become necessary.
+7. **Native rst/adoc parsers** — both currently route through the plain-text parser, which picks up their underline/prefix headings but not directives, includes or attribute references. `parseDocument` in `services/graph/documents/index.ts` is the single seam to slot them into.
+8. **Docs↔code inference beyond explicit links** — a document that *names* a symbol (rather than linking a path) produces no `DOCUMENTS` edge today. Matching prose mentions against the project's symbol index would connect far more of the documentation, at some precision cost.
+9. **Cross-project topics/resources** — `TOPIC` and `RESOURCE` nodes are project-scoped so their `parentId` stays stable. Answering "which projects reference this runbook?" means grouping on `data.url` / `data.slug` across projects, or introducing a global tier.
 
-_Reflects the code on this branch. Key files: `services/graph/GraphIdentity.ts`, `services/graph/analyzers/TypeScriptAnalyzer.ts`, `services/ReactorProjectProcessors/BaseProjectProcessor.ts`, `services/SystemGraphManager.ts`, `models/ReactorNodeLink.ts`, `models/ReactorGraphNode.ts`, `graphql/resolvers/ReactorSystemGraph.ts`._
+_Reflects the code on this branch. Key files: `services/graph/GraphIdentity.ts`, `services/graph/analyzers/TypeScriptAnalyzer.ts`, `services/graph/documents/` (`MarkdownParser.ts`, `DocumentGraphEmitter.ts`), `services/ReactorProjectProcessors/BaseProjectProcessor.ts`, `services/SystemGraphManager.ts`, `models/ReactorNodeLink.ts`, `models/ReactorGraphNode.ts`, `graphql/resolvers/ReactorSystemGraph.ts`._

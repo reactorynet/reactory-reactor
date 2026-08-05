@@ -17,6 +17,25 @@ export enum ReactorNodeType {
   FILE = 'FILE',
   FUNCTION = 'FUNCTION',
   ENDPOINT = 'ENDPOINT',
+  /**
+   * A prose document (markdown, reStructuredText, AsciiDoc, plain text). Used
+   * instead of FILE for files the document analyzers can outline, so the
+   * explorer can present documentation differently from source.
+   */
+  DOCUMENT = 'DOCUMENT',
+  /** A heading-delimited section inside a DOCUMENT. Nests by heading level. */
+  SECTION = 'SECTION',
+  /**
+   * A subject a document is about - a frontmatter tag, keyword or glossary
+   * term. Project-scoped and shared, so documents that discuss the same topic
+   * become connected.
+   */
+  TOPIC = 'TOPIC',
+  /**
+   * An out-of-repo resource a document points at: an external URL, an image
+   * host, a ticket, a mailto address.
+   */
+  RESOURCE = 'RESOURCE',
 }
 
 
@@ -63,6 +82,15 @@ export enum ReactorLinkType {
   REFERENCE = 'REFERENCE',
   /** A is a symlink resolving to B (filesystem symbolic link). */
   SYMLINK = 'SYMLINK',
+  /**
+   * A documents B - a document (or one of its sections) describes a code file,
+   * folder or symbol. The inverse of "is documented by".
+   */
+  DOCUMENTS = 'DOCUMENTS',
+  /** A mentions B - a document references a topic, term or entity. */
+  MENTIONS = 'MENTIONS',
+  /** A embeds B - an image, diagram or transcluded document inside A. */
+  EMBEDS = 'EMBEDS',
   /**
    * A contains B (parent → child containment). Synthesized in subgraph
    * responses from `parentId` — never persisted to reactor_node_links.
