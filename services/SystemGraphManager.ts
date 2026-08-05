@@ -566,26 +566,56 @@ class SystemGraphManager implements ISystemGraphManager {
   }
 
   async catalogProject(projectSpec: Partial<IReactorProject>): Promise<Reactory.Models.ISearchable[]> {
-    const that = this    
-    const { context, props } = this;
+    const { context } = this;
+    const providerId = projectSpec.providerId;
 
-    const { 
-      name, 
-      nameSpace, 
-      version,
-      providerId, 
-    } = projectSpec;
-
-    if(!providerId) {
-      throw new ApiError('A providerId is required to process a project', 400);
+    if (providerId) {
+      const processorService = context.getService(providerId) as IProjectProcessor;
+      if (!processorService) {
+        throw new ApiError(`Processor ${providerId} not found`, 400);
+      }
+      return await processorService.process(projectSpec as IReactorProject);
     }
 
-    const processorService = context.getService(providerId) as IProjectProcessor;
-    if (!processorService) {
-      throw new ApiError(`Processor ${providerId} not found`, 400);
+    // Auto-resolve processor(s) from project.processors or projectService
+    const processorFqns: string[] = [];
+    if (projectSpec.processors && projectSpec.processors.length > 0) {
+      for (const p of projectSpec.processors) {
+        if (p.processor) processorFqns.push(p.processor);
+      }
     }
 
-    return await processorService.process(projectSpec as IReactorProject);
+    if (processorFqns.length === 0) {
+      try {
+        const detected = await this.projectService.getProcessors(projectSpec as IReactorProject);
+        for (const proc of detected || []) {
+          if ((proc as any).processor) processorFqns.push((proc as any).processor);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    if (processorFqns.length === 0) {
+      // Nothing claimed the project: fall back to the generic file walker,
+      // which still produces the folder/file tree and outlines any documents
+      // it finds (document analysis lives in BaseProjectProcessor).
+      processorFqns.push("reactor.FileProjectProcessor@1.0.0");
+    }
+
+    let results: Reactory.Models.ISearchable[] = [];
+    for (const fqn of processorFqns) {
+      try {
+        const procService = context.getService(fqn) as IProjectProcessor;
+        if (procService) {
+          const res = await procService.process(projectSpec as IReactorProject);
+          if (res) results = results.concat(res);
+        }
+      } catch (err) {
+        this.context.error(`catalogProject: error processing with ${fqn}: ${(err as Error).message}`);
+      }
+    }
+    return results;
   }
 
   async catalogProjects(projects: Partial<IReactorProject>[]): Promise<Partial<IReactorProject>[]> {
@@ -615,7 +645,11 @@ class SystemGraphManager implements ISystemGraphManager {
       }
     }
     if(provider && provider.getProjectNode) {
-      return await provider.getProjectNode(project);
+      try {
+        return await provider.getProjectNode(project);
+      } catch (err) {
+        this.context.warn(`getProjectNode: provider.getProjectNode error for ${project?.name}: ${(err as Error).message}`);
+      }
     } else {
       const id = nodeId(projectLogicalKey(project));
       return {
@@ -654,11 +688,16 @@ class SystemGraphManager implements ISystemGraphManager {
     });
     const nodes: ReactorNode[] = [];
 
-    const promises: Promise<ReactorNode>[] = pagedProjects.projects.map(async (project) => { 
-      const node = await that.getProjectNode(project);
-      nodes.push(node);
-      return node;
-    })
+    const promises: Promise<ReactorNode | null>[] = pagedProjects.projects.map(async (project) => { 
+      try {
+        const node = await that.getProjectNode(project);
+        if (node) nodes.push(node);
+        return node;
+      } catch (err) {
+        this.context.warn(`getCatalogNodes error for project ${project?.name}: ${(err as Error).message}`);
+        return null;
+      }
+    });
 
     await Promise.all(promises);
     

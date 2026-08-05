@@ -157,7 +157,7 @@ export const SafeEditFile: Macro<SafeEditFileResult, SafeEditFileProps> = async 
       metadata: {
         executionTime,
         timestamp: new Date(),
-        user: state.user?.id
+        user: state.user?._id.toString() || 'unknown'
       }
     };
 

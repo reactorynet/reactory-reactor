@@ -24,6 +24,7 @@ import { PagingRequest } from "@reactory/server-core/database/types";
 import { service } from "application/decorators";
 import yaml from "js-yaml";
 import { ObjectId } from "mongodb";
+import BaseProjectProcessor from "../BaseProjectProcessor";
 
 // TODO: Import IProjectProcessor and any required types from the shared types location
 // import { IProjectProcessor } from '../../types';
@@ -43,7 +44,8 @@ import { ObjectId } from "mongodb";
   ],
 })
 class BackStageProjectProcessor
-  implements IProjectProcessor, AttributeProvider
+  extends BaseProjectProcessor
+  implements AttributeProvider
 {
   context: Reactory.Server.IReactoryContext;
   description?: string;
@@ -58,8 +60,7 @@ class BackStageProjectProcessor
   fetchService: Reactory.Service.IFetchService;
 
   constructor(props: any, context: Reactory.Server.IReactoryContext) {
-    this.props = props;
-    this.context = context;
+    super(props, context);
   }
   getFileSpecs(
     project: Partial<IReactorProject>
@@ -190,32 +191,15 @@ class BackStageProjectProcessor
   getProjectSubTypes(
     project: Partial<IReactorProject>
   ): KnownReactorProjectTypes[] {
-    throw new Error("Method not implemented.");
-  }
-  sync(project: IReactorProject): Promise<IReactorProject> {
-    throw new Error("Method not implemented.");
-  }
-  index(project: IReactorProject): Promise<IReactorProject> {
-    throw new Error("Method not implemented.");
-  }
-  toString?(includeVersion?: boolean): string {
-    throw new Error("Method not implemented.");
+    return [];
   }
   getAttributes(node: ReactorNode): Promise<ReactorNodeAttributes[]> {
-    throw new Error("Method not implemented.");
+    return Promise.resolve([]);
   }
-  getProjectNode(
+  async getProjectNode(
     project: Partial<IReactorProject>
   ): Promise<Partial<ReactorDataNode<Partial<IReactorProject>>>> {
-    throw new Error("Method not implemented.");
-  }
-  getChildrenForNode(
-    node: Partial<ReactorNode>,
-    treeKey: string,
-    filter: string,
-    paging: PagingRequest
-  ): Promise<ReactorDataNode<any>[]> {
-    throw new Error("Method not implemented.");
+    return super.getProjectNode(project);
   }
 
   supportsProject(project: Partial<IReactorProject>): boolean {

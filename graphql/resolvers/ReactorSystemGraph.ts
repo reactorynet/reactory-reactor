@@ -270,12 +270,30 @@ class ReactorSystemGraph {
 
   @property("ReactorNodeLink", "sourceId")
   getLinkSourceId(link: ReactorNodeLink): number {
-    return link.source;
+    return link.sourceId ?? (link as any).source;
   }
 
   @property("ReactorNodeLink", "targetId")
   getLinkTargetId(link: ReactorNodeLink): number {
-    return link.target;
+    return link.targetId ?? (link as any).target;
+  }
+
+  @property("ReactorNode", "nodeId")
+  getNodeId(node: Partial<ReactorNode>): number {
+    if (node.nodeId !== undefined && node.nodeId !== null) return node.nodeId;
+    if (node.index !== undefined && node.index !== null) return node.index;
+    if (typeof node.id === 'number') return node.id;
+    const parsed = parseInt(String(node.id), 10);
+    return isNaN(parsed) ? 0 : parsed;
+  }
+
+  @property("ReactorNode", "index")
+  getNodeIndex(node: Partial<ReactorNode>): number {
+    if (node.index !== undefined && node.index !== null) return node.index;
+    if (node.nodeId !== undefined && node.nodeId !== null) return node.nodeId;
+    if (typeof node.id === 'number') return node.id;
+    const parsed = parseInt(String(node.id), 10);
+    return isNaN(parsed) ? 0 : parsed;
   }
 
   @property("ReactorNode", "links")
