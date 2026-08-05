@@ -14,6 +14,7 @@
  * regex/brace engine in `./legacyRegex`).
  */
 
+import fs from "fs";
 import path from "path";
 
 export type TreeSitterLanguageId = "java" | "csharp" | "kotlin";
@@ -24,19 +25,82 @@ interface LoadResult {
   error?: string;
 }
 
-const languageCache = new Map<TreeSitterLanguageId, LoadResult>();
-let parserCtorCache: any | null | undefined;
+/**
+ * The `tree-sitter` JS wrapper may only be **evaluated once per process**, and
+ * its own source says so:
+ *
+ *     const {rootNode, rootNodeWithOffset, edit} = Tree.prototype;
+ *     Object.defineProperty(Tree.prototype, 'rootNode', { get() { ... } });
+ *
+ * `Tree` comes from the native addon, which Node caches per *process*, so
+ * `Tree.prototype` is shared by every module registry. The first evaluation
+ * replaces the native `rootNode` method with an accessor. A second evaluation
+ * destructures `Tree.prototype.rootNode` again — now invoking that accessor
+ * with `this === Tree.prototype`, which fails its `this instanceof Tree` guard
+ * and yields `undefined`. The re-installed getter closes over that `undefined`,
+ * so from then on **`tree.rootNode` is `undefined` for the rest of the
+ * process** (and `rootNodeWithOffset`/`walk()` degrade the same way, one
+ * generation behind).
+ *
+ * Under Jest that is exactly what happens: every test file gets a fresh module
+ * registry — and a fresh `globalThis` and `process`, so no JS-level cache can
+ * span them — while the native addon stays shared. The first suite to load a
+ * grammar worked and every later one saw `rootNode === undefined`, which
+ * surfaced as `Cannot read properties of undefined (reading 'namedChildren')`.
+ *
+ * The fix is to evaluate the wrapper once and share the result through the one
+ * object that *is* process-global: the native binding itself. Registries after
+ * the first find the cached constructor and never re-require the wrapper, so
+ * the prototypes it set up stay intact.
+ */
+const SHARED_CACHE_KEY = "__reactoryTreeSitterShared";
 
-/** Lazily requires the core `tree-sitter` Parser constructor. Cached. */
+interface SharedCache {
+  /** `undefined` = not attempted, `null` = unavailable. */
+  parserCtor?: any | null;
+  languages: Map<TreeSitterLanguageId, LoadResult>;
+}
+
+/**
+ * The core addon's exports object. Node caches native modules per process, so
+ * this is the same object in every module registry — unlike `globalThis`.
+ * Requiring it does not evaluate the `tree-sitter` JS wrapper, so it is safe to
+ * call before deciding whether the wrapper still needs loading.
+ */
+const nativeBinding = (): any | null => {
+  try {
+    const coreDir = path.dirname(require.resolve("tree-sitter/package.json"));
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return require("node-gyp-build")(coreDir);
+  } catch {
+    return null;
+  }
+};
+
+const sharedCache = (): SharedCache => {
+  // Falls back to module scope when the addon cannot be loaded at all; there is
+  // nothing to protect in that case.
+  const host = nativeBinding() || (globalThis as Record<string, any>);
+  if (!host[SHARED_CACHE_KEY]) {
+    host[SHARED_CACHE_KEY] = { languages: new Map() } as SharedCache;
+  }
+  return host[SHARED_CACHE_KEY] as SharedCache;
+};
+
+/**
+ * Requires the core `tree-sitter` Parser constructor, at most once per process.
+ * See SHARED_CACHE_KEY above for why re-requiring it must be avoided.
+ */
 const getParserCtor = (): any | null => {
-  if (parserCtorCache !== undefined) return parserCtorCache;
+  const cache = sharedCache();
+  if (cache.parserCtor !== undefined) return cache.parserCtor;
   try {
     // eslint-disable-next-line @typescript-eslint/no-var-requires
-    parserCtorCache = require("tree-sitter");
+    cache.parserCtor = require("tree-sitter");
   } catch {
-    parserCtorCache = null;
+    cache.parserCtor = null;
   }
-  return parserCtorCache;
+  return cache.parserCtor;
 };
 
 const GRAMMAR_MODULE: Record<TreeSitterLanguageId, string> = {
@@ -45,8 +109,14 @@ const GRAMMAR_MODULE: Record<TreeSitterLanguageId, string> = {
   kotlin: "@tree-sitter-grammars/tree-sitter-kotlin",
 };
 
-/** Lazily requires and caches a grammar's Language object. Never throws. */
+/**
+ * Lazily requires and caches a grammar's Language object. Never throws.
+ * Cached on the shared (process-global) cache alongside the Parser ctor, so a
+ * grammar's native addon is resolved once no matter how many module registries
+ * ask for it.
+ */
 const loadLanguage = async (lang: TreeSitterLanguageId): Promise<LoadResult> => {
+  const languageCache = sharedCache().languages;
   const cached = languageCache.get(lang);
   if (cached && cached.Language) return cached;
 
@@ -165,6 +235,12 @@ export const treeSitterLoadError = async (lang: TreeSitterLanguageId): Promise<s
 
 /**
  * Parses source code into a TreeSitter rootNode and hasError flag.
+ *
+ * A parsed tree with no `rootNode` means the core wrapper's prototype patching
+ * has been clobbered by a second evaluation (see SHARED_CACHE_KEY). That is a
+ * process-wide fault, not a problem with this file, so it is reported as such —
+ * otherwise it surfaces far away as "Cannot read properties of undefined
+ * (reading 'namedChildren')" inside whichever analyzer asked first.
  */
 export const parseSource = async (
   lang: TreeSitterLanguageId,
@@ -176,7 +252,15 @@ export const parseSource = async (
     throw new Error(`TreeSitter parser unavailable for language ${lang}: ${err}`);
   }
   const rootNode = tree.rootNode;
-  const hasError = typeof rootNode?.hasError === "function" ? rootNode.hasError() : !!rootNode?.hasError;
+  if (!rootNode) {
+    throw new Error(
+      `TreeSitter returned a tree with no rootNode for language ${lang}. The ` +
+        `core 'tree-sitter' JS wrapper has been evaluated more than once in this ` +
+        `process, which permanently breaks Tree.prototype.rootNode. Load it only ` +
+        `through TreeSitterEngine, which caches it on the shared native binding.`
+    );
+  }
+  const hasError = typeof rootNode.hasError === "function" ? rootNode.hasError() : !!rootNode.hasError;
   return { rootNode, hasError };
 };
 
