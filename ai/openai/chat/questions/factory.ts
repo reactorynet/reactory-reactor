@@ -18,6 +18,7 @@ import {
 } from "@reactory/server-modules/reactory-reactor/ai/macro";
 import { colors } from "../../../../helpers";
 import ReactorConversationModel from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
+import ToolResultProcessor from "../../../macro/runtime/ToolResultProcessor";
 import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
 import { get, template } from "lodash";
 import { RecordNotFoundError } from "@reactory/server-core/exceptions";
@@ -329,7 +330,15 @@ async function executeToolCall(
       }
     } 
 
-    return response as string;
+    const processed = ToolResultProcessor.process(
+      toolName,
+      args,
+      response,
+      state,
+      state?.context
+    );
+
+    return (typeof processed.result === 'string' ? processed.result : JSON.stringify(processed.result)) as string;
   } catch (error) {
     return `Error in tool call ${toolName}: ${error.message}`;
   }

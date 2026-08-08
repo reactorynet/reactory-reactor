@@ -128,8 +128,13 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
     timeoutInSeconds = 60,
     sudo = 'false',
     format = 'string',
-    shell = '/bin/bash'
+    shell = '/bin/bash',
+    maxOutputSize: propsMaxOutputSize
   } = props;
+
+  const maxOutputSize = typeof propsMaxOutputSize === 'number' && propsMaxOutputSize > 0
+    ? propsMaxOutputSize
+    : (process.env.SHELL_MAX_OUTPUT_SIZE ? parseInt(process.env.SHELL_MAX_OUTPUT_SIZE, 10) : 20000);
 
   // Unique terminal id for this one-shot invocation. Streamed to the client so
   // the shell widget can render this command's output as its own terminal pane
@@ -273,6 +278,26 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
     const totalExecutionTime = Date.now() - startTime;
     const commandSuccess = result.exitCode === 0 && !result.timedOut;
 
+    let finalStdout = result.stdout;
+    let outputFile: string | undefined = undefined;
+    let outputSize: number | undefined = undefined;
+    let outputTruncated: boolean | undefined = undefined;
+    let instructions: string | undefined = undefined;
+
+    if (result.stdout && result.stdout.length > maxOutputSize) {
+      outputFile = path.join(os.tmpdir(), `shell-output-${shellSessionId}.log`);
+      outputSize = Buffer.byteLength(result.stdout, 'utf8');
+      outputTruncated = true;
+      try {
+        fs.writeFileSync(outputFile, result.stdout, { encoding: 'utf8' });
+      } catch (writeErr: any) {
+        logger.error(`Error writing shell stdout to tmp file ${outputFile}: ${writeErr.message}`);
+      }
+
+      finalStdout = `Output size (${outputSize} bytes / ${result.stdout.length} characters) exceeds the maximum allowed output threshold (${maxOutputSize} characters). The complete output has been piped to a temporary file: ${outputFile}. Please use targeted search (such as snip, grep, or searchContent) to inspect relevant sections of the output file, or issue a new shell command with filters to reduce the output volume.`;
+      instructions = `Output was piped to temporary file: ${outputFile} (size: ${outputSize} bytes). Use targeted search tools (such as snip, grep, or searchContent) to read specific sections, or issue a new shell command to reduce output.`;
+    }
+
     if (!state.vars) state.vars = {};
     state.vars.lastShellCommand = {
       command: shellCommand, workingDir, shell, templateId,
@@ -285,15 +310,17 @@ export const ShellCommand: Macro<ShellCommandResult, ShellCommandProps> = async 
     return {
       success: true,
       data: {
-        stdout: result.stdout,
+        stdout: finalStdout,
         stderr: result.stderr,
         exitCode: result.exitCode, success: commandSuccess,
         command: shellCommand, workingDir, shell, templateId,
         sudo: sudo === 'true', executionTime: result.executionTime, timedOut: result.timedOut, pid: result.pid,
-        shellSessionId
+        shellSessionId,
+        ...(outputFile ? { outputFile, outputSize, outputTruncated } : {})
       },
       tool: 'shell', params: props,
-      metadata: { executionTime: totalExecutionTime, timestamp: new Date() }
+      metadata: { executionTime: totalExecutionTime, timestamp: new Date() },
+      ...(instructions ? { instructions } : {})
     };
   } catch (error: any) {
     logger.error(`Command execution failed: ${error.message}`);
@@ -326,7 +353,8 @@ const ShellCommandComponentRegister: MacroComponentDefinition<typeof ShellComman
           timeoutInSeconds: { type: "number", description: "The timeout in seconds for the shell command (default: 60)" },
           sudo: { type: "string", enum: ["true", "false"], description: "Use sudo to execute the shell command" },
           format: { type: "string", enum: ["string", "object"], description: "The format of the output (string or object)" },
-          shell: { type: "string", enum: ["/bin/bash", "/bin/zsh"], description: "The shell to use for the command" }
+          shell: { type: "string", enum: ["/bin/bash", "/bin/zsh"], description: "The shell to use for the command" },
+          maxOutputSize: { type: "number", description: "Maximum output character threshold before piping stdout to a tmp file (default: 20000)" }
         }, required: ["command"]
       }
     }

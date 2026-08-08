@@ -155,5 +155,62 @@ describe('ShellCommand macro', () => {
       expect(result.success).toBe(true);
       expect(result.data?.timedOut).toBe(true);
     }, 20000);
+
+    it('pipes massive stdout to a tmp file when exceeding threshold and updates response', async () => {
+      stubTemplateService(chatState);
+      const result = await ShellCommand(
+        { command: 'seq 1 6000' },
+        chatState
+      );
+      expect(result.success).toBe(true);
+      expect(result.data?.outputTruncated).toBe(true);
+      expect(result.data?.outputFile).toBeDefined();
+      expect(typeof result.data?.outputFile).toBe('string');
+      expect(require('fs').existsSync(result.data?.outputFile!)).toBe(true);
+
+      const fileContent = require('fs').readFileSync(result.data?.outputFile!, 'utf8');
+      expect(fileContent).toContain('6000');
+
+      expect(result.data?.outputSize).toBeGreaterThan(20000);
+      expect(result.data?.stdout).toContain('Output size');
+      expect(result.data?.stdout).toContain('exceeds the maximum allowed output threshold');
+      expect(result.data?.stdout).toContain(result.data?.outputFile);
+      expect(result.data?.stdout).toContain('targeted search');
+
+      expect(result.instructions).toContain('Output was piped to temporary file');
+      expect(result.instructions).toContain(result.data?.outputFile);
+
+      if (result.data?.outputFile && require('fs').existsSync(result.data.outputFile)) {
+        require('fs').unlinkSync(result.data.outputFile);
+      }
+    });
+
+    it('honours maxOutputSize parameter from props', async () => {
+      stubTemplateService(chatState);
+      const result = await ShellCommand(
+        { command: 'seq 1 100', maxOutputSize: 100 },
+        chatState
+      );
+      expect(result.success).toBe(true);
+      expect(result.data?.outputTruncated).toBe(true);
+      expect(result.data?.outputFile).toBeDefined();
+      expect(result.data?.stdout).toContain('100');
+
+      if (result.data?.outputFile && require('fs').existsSync(result.data.outputFile)) {
+        require('fs').unlinkSync(result.data.outputFile);
+      }
+    });
+
+    it('returns output inline when under maxOutputSize threshold', async () => {
+      stubTemplateService(chatState);
+      const result = await ShellCommand(
+        { command: 'echo "small output"', maxOutputSize: 20000 },
+        chatState
+      );
+      expect(result.success).toBe(true);
+      expect(result.data?.outputTruncated).toBeUndefined();
+      expect(result.data?.outputFile).toBeUndefined();
+      expect(result.data?.stdout).toBe('small output');
+    });
   });
 });

@@ -6,6 +6,7 @@ import DeleteProjectMacroDefinition from "./DeleteProject.macro";
 import CatalogProjectMacroDefinition from "./CatalogProject.macro";
 import GetProjectDocumentationMacroDefinition from "./GetProjectDocumentation.macro";
 import GetProjectMetricsMacroDefinition from "./GetProjectMetrics.macro";
+import SearchProjectMacroDefinition from "./SearchProject.macro";
 
 export default [
   ListProjectsMacroDefinition,
@@ -15,5 +16,6 @@ export default [
   DeleteProjectMacroDefinition,
   CatalogProjectMacroDefinition,
   GetProjectDocumentationMacroDefinition,
-  GetProjectMetricsMacroDefinition
+  GetProjectMetricsMacroDefinition,
+  SearchProjectMacroDefinition,
 ]; 

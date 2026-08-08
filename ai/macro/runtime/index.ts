@@ -7,6 +7,9 @@ import { DateTimeMacroRegistry } from './datetimeMacro.macro';
 import { TodoMacroRegistry } from './todoMacro.macro';
 import { AddToolsToSessionMacroRegistry, RemoveToolsFromSessionMacroRegistry } from './sessionTools.macro';
 import { ReloadPersonasMacroRegistry } from './reloadPersonas.macro';
+import ToolResultProcessor from './ToolResultProcessor';
+
+export { ToolResultProcessor };
 
 export default [
   VariableMacroRegistry,

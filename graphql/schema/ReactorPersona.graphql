@@ -71,6 +71,17 @@ type ReactorPersonaBackground {
 }
 
 """
+A 3D representation artefact supplied by the persona for realtime avatar rendering.
+"""
+type ReactorPersonaAppearanceArtefact {
+  type: String
+  name: String
+  format: String
+  data: Any
+  url: String
+}
+
+"""
 Defines the complete visual and auditory representation of a persona.
 """
 type ReactorPersonaAppearance {
@@ -82,6 +93,7 @@ type ReactorPersonaAppearance {
   accessories: [String]
   metrics: [ReactorPersonaMetrics]
   skin: [ReactorPersonaSkin]
+  artefacts: [ReactorPersonaAppearanceArtefact]
   background: [ReactorPersonaBackground]
 }
 

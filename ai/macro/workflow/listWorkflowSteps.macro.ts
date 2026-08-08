@@ -23,11 +23,17 @@ export const listWorkflowSteps: Macro<unknown, ListWorkflowStepsProps> = async (
     }
 
     const runner = (workflowService as any).workflowRunner;
-    if (!runner) {
-      return { success: false, error: "WorkflowRunner is not initialized." };
+    let stepRegistry = runner?.getStepRegistry();
+
+    if (!stepRegistry) {
+      try {
+        const { YamlStepRegistry } = require('../../../../reactory-core/workflow/YamlFlow/steps/registry/YamlStepRegistry');
+        stepRegistry = new YamlStepRegistry();
+      } catch (err: any) {
+        ctx?.log(`listWorkflowSteps: Could not instantiate fallback YamlStepRegistry: ${err.message}`, 'warn');
+      }
     }
 
-    const stepRegistry = runner.getStepRegistry();
     if (!stepRegistry) {
       return { success: false, error: "YamlStepRegistry is not available." };
     }

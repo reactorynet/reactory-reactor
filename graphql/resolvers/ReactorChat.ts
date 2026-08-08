@@ -273,11 +273,17 @@ class ReactorChatResolver {
         "reactor.ReactorConversationService@1.0.0"
       );
     try {
-      return await conversationService.setChatModelProvider(
+      const chatState = await conversationService.setChatModelProvider(
         args.chatSessionId,
         args.modelId,
         args.providerId
       );
+
+      return {
+        __typename: "ReactorChatState",
+        ...chatState,
+      };
+
     } catch (error) {
       return {
         __typename: "ReactorErrorResponse",

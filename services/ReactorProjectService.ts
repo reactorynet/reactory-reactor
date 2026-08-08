@@ -19,6 +19,7 @@ import {
   PagingResult,
 } from "@reactory/server-core/database/types";
 import { ReactorProjectModel } from "../models/ReactorProject";
+import { ReactorGraphPerspectiveModel } from "../models/ReactorGraphPerspective";
 import { service } from "@reactory/server-core/application/decorators";
 import {
   JavaProjectProcessor,
@@ -599,7 +600,36 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
         $or: [{ fqn: idOrPath }, { name: idOrPath }, { repoPath: idOrPath }],
       };
     }
+    const project = await ReactorProjectModel.findOne(query).lean();
     const result = await ReactorProjectModel.deleteOne(query);
+
+    if (project) {
+      // Clean up associated graph perspectives
+      try {
+        await ReactorGraphPerspectiveModel.deleteMany({
+          $or: [
+            { projectId: project._id?.toString() },
+            { projectId: (project as any).id },
+            { name: project.name },
+            { name: project.fqn },
+          ],
+        });
+      } catch (err) {
+        logger.warn(`Error deleting perspectives for project ${project.name}: ${(err as Error).message}`);
+      }
+
+      // Clean up search index for this project
+      try {
+        const searchService = this.context.getService<Reactory.Service.ISearchService>("core.ReactorySearchService@1.0.0");
+        if (searchService) {
+          const indexName = `reactor_graph_${project.nameSpace}_${project.name}`;
+          await searchService.deleteIndex(indexName);
+        }
+      } catch {
+        // ignore if index does not exist
+      }
+    }
+
     return result.deletedCount > 0;
   }
 

@@ -43,6 +43,12 @@ export interface ShellCommandProps {
    * the shell to use
    */
   shell?: "/bin/bash" | "/bin/zsh";
+  /**
+   * Maximum character threshold before stdout is piped to a tmp file
+   * @default 20000
+   * @example 50000
+   */
+  maxOutputSize?: number;
 }
 
 /**
@@ -124,6 +130,12 @@ export interface ShellCommandResult {
     pid?: number;
     /** Streaming terminal id — correlates the buffered result with the live SHELL stream events */
     shellSessionId?: string;
+    /** Path to temporary file containing complete output if redirected */
+    outputFile?: string;
+    /** Output size in bytes if redirected to file */
+    outputSize?: number;
+    /** Whether stdout was truncated and redirected to a file */
+    outputTruncated?: boolean;
   };
   /** Tool name for context */
   tool: string;

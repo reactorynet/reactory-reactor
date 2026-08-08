@@ -245,7 +245,7 @@ export const WorkflowWillPersona: IAIPersona = {
   persona: WORKFLOW_PERSONA_TEXT,
   features: WORKFLOW_FEATURES_TEXT,
   appearance,
-  modelId: process.env.GOOGLE_AI_STUDIO_MODEL_ID || "gemini-2.5-pro",
+  modelId: process.env.GOOGLE_AI_STUDIO_MODEL_ID || "gemini-3.6-flash",
   providerId: "google",
   defaultGreeting: "Hello, I am WorkflowWill, your dedicated workflow architect for the Reactory platform. I specialize exclusively in designing and building YAML and Code-based workflows for the Reactory Workflow Engine. Whether you need to create a new workflow, debug an existing one, build custom steps, or optimize execution patterns, I am here to help. What workflow challenge can I assist you with today?",
   prompts: {

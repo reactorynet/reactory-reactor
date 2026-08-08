@@ -274,6 +274,14 @@ export interface IOpenAIService extends Reactory.Service.IReactoryService {
 /**
  * Defines the object shape of the AI Appearance
  */
+export interface IAIAppearanceArtefact {
+    type: 'wiremesh' | 'mesh' | 'material' | 'texture' | 'shader' | 'geometry' | 'scene';
+    name?: string;
+    format?: string;
+    data?: string | Record<string, unknown>;
+    url?: string;
+}
+
 export interface IAIAppearance {
     voice?: string[];    
     face?: string[];
@@ -290,6 +298,7 @@ export interface IAIAppearance {
       color: string;
       tone: string;
     };
+    artefacts?: IAIAppearanceArtefact[];
     background?: [{
       src: string;
       type: "image" | "video" | "audio";

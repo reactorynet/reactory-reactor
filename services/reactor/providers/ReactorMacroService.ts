@@ -8,6 +8,7 @@ import {
 } from "@reactory/server-modules/reactory-reactor/ai/macro/index";
 import Reactory from "@reactorynet/reactory-core";
 import AIPersonaProvider from "../AIPersonaProvider";
+import ToolResultProcessor from "../../../ai/macro/runtime/ToolResultProcessor";
 
 @service({
   id: "reactor.ReactorMacroService@1.0.0",
@@ -162,7 +163,15 @@ class ReactorMacroService implements Reactory.Service.IReactoryService {
       // still fail closed with a false 'Unauthorized' even though this
       // service already holds a perfectly valid context via DI.
       const stateWithContext: ChatState = state?.context ? state : { ...state, context: this.context };
-      return await macro(params, stateWithContext, this.context) as T;
+      const rawResult = await macro(params, stateWithContext, this.context) as T;
+      const processed = ToolResultProcessor.process(
+        toolName,
+        params,
+        rawResult,
+        stateWithContext,
+        this.context
+      );
+      return processed.result;
     } else {
       throw new Error(`Tool ${toolName} not found`);
     }

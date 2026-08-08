@@ -2420,6 +2420,68 @@ export default class ReactorConversationService
   }
 
   /**
+   * Helper to get the provider service instance
+   */
+  private getProviderService(): IReactorProviderService | null {
+    if (this.providerService) return this.providerService;
+    if (this.context?.getService) {
+      try {
+        return this.context.getService<IReactorProviderService>('reactor.ReactorProviderService@1.0.0');
+      } catch (_) {
+        return null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Resolves the maximum context token limit for a model.
+   * `providers.yaml` via ReactorProviderService is the primary source of truth.
+   * If a model's contextLength is declared in providers.yaml, it takes absolute precedence over defaults.
+   */
+  public async resolveModelContextLength(
+    modelId?: string,
+    providerId?: string,
+    fallbackMaxTokens?: number
+  ): Promise<number> {
+    if (modelId) {
+      try {
+        const providerSvc = this.getProviderService();
+        if (providerSvc) {
+          const provider = providerId
+            ? await providerSvc.getProvider(providerId)
+            : null;
+          const model = provider?.models?.find((m: any) => m.id === modelId);
+          if (model?.contextLength) {
+            return model.contextLength;
+          }
+
+          // Search across all providers if not found under specified provider
+          const allProviders = await providerSvc.getProviders();
+          for (const p of allProviders) {
+            const found = p.models?.find((m: any) => m.id === modelId);
+            if (found?.contextLength) {
+              return found.contextLength;
+            }
+          }
+        }
+      } catch (err) {
+        this.context.warn?.(
+          `[resolveModelContextLength] Failed to resolve contextLength for model ${modelId}: ${(err as Error)?.message}`,
+          {},
+          "ReactorConversationService.resolveModelContextLength"
+        );
+      }
+    }
+
+    if (fallbackMaxTokens && fallbackMaxTokens > 0) {
+      return fallbackMaxTokens;
+    }
+
+    return TOKEN_LIMITS.DEFAULT_MAX_TOKENS;
+  }
+
+  /**
    * Set the model and/or provider for an existing conversation.
    * Persists the override so it is used for subsequent messages and tool executions.
    */
@@ -2451,24 +2513,7 @@ export default class ReactorConversationService
       try {
         const effectiveProviderId = providerId
           || (await ReactorConversationModel.findOne({ _id: chatSessionId, user: this.context.user }).select('providerId').lean().exec())?.providerId;
-        const provider = effectiveProviderId
-          ? await this.providerService.getProvider(effectiveProviderId)
-          : null;
-        const model = provider?.models?.find((m: any) => m.id === modelId);
-
-        if (model?.contextLength) {
-          update.maxTokens = model.contextLength;
-        } else {
-          // Model not found on specified provider — search across all providers
-          const allProviders = await this.providerService.getProviders();
-          for (const p of allProviders) {
-            const found = p.models?.find((m: any) => m.id === modelId);
-            if (found?.contextLength) {
-              update.maxTokens = found.contextLength;
-              break;
-            }
-          }
-        }
+        update.maxTokens = await this.resolveModelContextLength(modelId, effectiveProviderId);
       } catch (err) {
         this.context.warn?.(
           `[setChatModelProvider] Failed to resolve contextLength for model ${modelId}: ${(err as Error)?.message}`,
@@ -2990,8 +3035,28 @@ export default class ReactorConversationService
       // Ensure SSE session ID is properly set
       if (!lastConversation.sseSessionId) {
         lastConversation.sseSessionId = lastConversation._id.toString();
-        await lastConversation.save();
       }
+
+      // Re-sync maxTokens against providers.yaml to ensure stale database values don't override providers.yaml
+      const currentModelId = lastConversation.modelId || persona.modelId;
+      const currentProviderId = lastConversation.providerId || persona.providerId;
+      const resolvedMaxTokens = await this.resolveModelContextLength(
+        currentModelId,
+        currentProviderId,
+        persona.maxTokens
+      );
+
+      if (lastConversation.maxTokens !== resolvedMaxTokens) {
+        this.sessionLog("info", "Updating reused conversation maxTokens to match provider config", {
+          conversationId: lastConversation._id?.toString(),
+          oldMaxTokens: lastConversation.maxTokens,
+          newMaxTokens: resolvedMaxTokens,
+          modelId: currentModelId,
+        }, lastConversation._id?.toString(), persona.id);
+        lastConversation.maxTokens = resolvedMaxTokens;
+      }
+
+      await lastConversation.save();
 
       this.sessionLog("info", "Reusing existing empty conversation", {
         conversationId: lastConversation._id?.toString(),
@@ -3003,38 +3068,11 @@ export default class ReactorConversationService
       return lastConversation;
     }
 
-    let maxTokens = persona.maxTokens;
-    if (!maxTokens && persona.modelId) {
-      try {
-        const provider = persona.providerId
-          ? await this.providerService.getProvider(persona.providerId)
-          : null;
-        const model = provider?.models?.find((m: any) => m.id === persona.modelId);
-        if (model?.contextLength) {
-          maxTokens = model.contextLength;
-        } else {
-          // Model not found on specified provider — search across all providers
-          const allProviders = await this.providerService.getProviders();
-          for (const p of allProviders) {
-            const found = p.models?.find((m: any) => m.id === persona.modelId);
-            if (found?.contextLength) {
-              maxTokens = found.contextLength;
-              break;
-            }
-          }
-        }
-      } catch (err) {
-        this.context.warn?.(
-          `[getNewConversation] Failed to resolve contextLength for model ${persona.modelId}: ${(err as Error)?.message}`,
-          {},
-          "ReactorConversationService.getNewConversation"
-        );
-      }
-    }
-
-    if (!maxTokens) {
-      maxTokens = TOKEN_LIMITS.DEFAULT_MAX_TOKENS;
-    }
+    const maxTokens = await this.resolveModelContextLength(
+      persona.modelId,
+      persona.providerId,
+      persona.maxTokens
+    );
 
     const conversationData: any = {
       personaId: persona.id,
@@ -6218,13 +6256,24 @@ export default class ReactorConversationService
       }
 
       // Apply model/provider overrides if specified
-      if (args.modelId) {
+      let modelOrProviderChanged = false;
+      if (args.modelId && conversation.modelId !== args.modelId) {
         conversation.modelId = args.modelId;
+        modelOrProviderChanged = true;
       }
-      if (args.providerId) {
+      if (args.providerId && conversation.providerId !== args.providerId) {
         conversation.providerId = args.providerId;
+        modelOrProviderChanged = true;
       }
-      if (args.modelId || args.providerId) {
+
+      // Re-resolve maxTokens whenever starting a session or when model/provider changed
+      const resolvedMaxTokens = await this.resolveModelContextLength(
+        conversation.modelId,
+        conversation.providerId,
+        persona.maxTokens
+      );
+      if (conversation.maxTokens !== resolvedMaxTokens || modelOrProviderChanged) {
+        conversation.maxTokens = resolvedMaxTokens;
         await conversation.save();
       }
 

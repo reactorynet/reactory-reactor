@@ -4,6 +4,7 @@ import GetNodeChildrenMacroDefinition from "./GetNodeChildren.macro";
 import ExploreGraphMacroDefinition from "./ExploreGraph.macro";
 import GetNodeLinksMacroDefinition from "./GetNodeLinks.macro";
 import CreateNodeEdgeMacroDefinition from "./CreateNodeEdge.macro";
+import DeletePerspectiveMacroDefinition from "./DeletePerspective.macro";
 
 export default [
   SearchGraphMacroDefinition,
@@ -12,4 +13,5 @@ export default [
   ExploreGraphMacroDefinition,
   GetNodeLinksMacroDefinition,
   CreateNodeEdgeMacroDefinition,
+  DeletePerspectiveMacroDefinition,
 ];
