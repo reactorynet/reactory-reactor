@@ -43,6 +43,11 @@ const REACTOR_TOOL_INCLUDES = [
   'readSkill',
   'searchSkills',
   // System graph traversal tools
+  'catalogProject',
+  'deleteProject',
+  'searchProject',
+
+  'deletePerspective',
   'searchGraph',
   'getGraphNode',
   'graphChildren',
