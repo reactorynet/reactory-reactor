@@ -333,4 +333,15 @@ input ReactorInitSession {
   Never persisted on the chat session.
   """
   providerAuthOverride: ReactorProviderAuthOverrideInput
+  """
+  What the conversation is for: "standalone", "workflow", "content", "form", or
+  any application defined string. Scopes the session so it is only ever resumed
+  or listed alongside conversations of the same kind. Defaults to "standalone".
+  """
+  use_case: String
+  """
+  Links from this conversation to the thing that opened it — a workflow id, a
+  content slug, a related conversation.
+  """
+  edges: [ReactorConversationEdgeInput]
 }

@@ -336,12 +336,52 @@ type ReactorChatContextResource {
 }
 
 """
+A link from a conversation to something outside it — the workflow it belongs
+to, the content item it is editing, a related conversation.
+
+Deliberately generic: a new kind of association is a new `edge_type`, not a
+schema change.
+"""
+type ReactorConversationEdge {
+  """
+  Human readable label for the link, e.g. "slug" or "workflowId".
+  """
+  name: String!
+  """
+  The identifier being pointed at.
+  """
+  value: String!
+  """
+  What kind of thing is being pointed at, e.g. "content", "workflow", "chat".
+  """
+  edge_type: String!
+}
+
+input ReactorConversationEdgeInput {
+  name: String!
+  value: String!
+  edge_type: String!
+}
+
+"""
 Represents the overall state of a chat conversation, including
 its history and metadata.
 """
 type ReactorChatState {
   id: String
   personaId: String
+  """
+  What this conversation is being used for: "standalone", "workflow",
+  "content", "form", or any application defined string. Conversations are
+  scoped by this, so a chat opened beside a content editor never resumes or
+  lists a chat from elsewhere in the product. Defaults to "standalone".
+  """
+  use_case: String
+  """
+  Links from this conversation to workflows, content items or other
+  conversations.
+  """
+  edges: [ReactorConversationEdge]
   """
   A short title for the conversation, auto-generated from the user's first message.
   """
@@ -478,6 +518,17 @@ input ReactorConversationFilter {
   search: String
   limit: Int
   offset: Int
+  """
+  Restrict to conversations of this use case. Omit to list every use case,
+  which is what the standalone chat history panel wants.
+  """
+  use_case: String
+  """
+  Restrict to conversations carrying all of these edges. Matching is on
+  edge_type and value, so a caller can ask for "the conversations attached to
+  this workflow" without knowing the label used.
+  """
+  edges: [ReactorConversationEdgeInput]
 }
 
 """

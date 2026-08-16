@@ -31,7 +31,17 @@ class ReactorChatResolver {
   async ReactorConversations(
     _: any,
     args: {
-      filter?: { personaId?: string;modelId?: string };
+      filter?: {
+        personaId?: string;
+        modelId?: string;
+        search?: string;
+        limit?: number;
+        offset?: number;
+        /** Scopes the listing to conversations of a single use case. */
+        use_case?: string;
+        /** Scopes the listing to conversations carrying all of these edges. */
+        edges?: { name: string; value: string; edge_type: string }[];
+      };
     },
     context: Reactory.Server.IReactoryContext
   ) {
@@ -149,6 +159,10 @@ class ReactorChatResolver {
         macros: Partial<MacroComponentDefinition<unknown>>;
         tools: Partial<MacroToolDefinition>[];
         contextFromSessionId?: string;
+        /** What the conversation is for; scopes resuming and listing. */
+        use_case?: string;
+        /** Links from this conversation to a workflow, content item or chat. */
+        edges?: { name: string; value: string; edge_type: string }[];
       };
     },
     context: Reactory.Server.IReactoryContext

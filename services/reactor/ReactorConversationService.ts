@@ -2789,7 +2789,15 @@ export default class ReactorConversationService
       userId: this.context.user?._id,
     });
 
-    const { personaId, modelId, search, limit = 50, offset = 0 } = filter || {};
+    const {
+      personaId,
+      modelId,
+      search,
+      limit = 50,
+      offset = 0,
+      use_case,
+      edges,
+    } = filter || {};
     const query: any = {};
 
     // check if the user is logged in or an anoymous user.
@@ -2802,6 +2810,27 @@ export default class ReactorConversationService
 
     if (personaId) query.personaId = personaId;
     if (modelId) query.modelId = modelId;
+
+    if (use_case) {
+      // Conversations created before use_case existed are standalone by
+      // definition, so a standalone listing has to include the unset ones or
+      // every pre-existing chat would disappear from the history panel.
+      query.use_case = use_case === 'standalone'
+        ? { $in: ['standalone', null, undefined] }
+        : use_case;
+    }
+
+    if (Array.isArray(edges) && edges.length > 0) {
+      // $all with $elemMatch so a conversation must carry every requested
+      // edge, not merely one of them.
+      query.edges = {
+        $all: edges
+          .filter((edge: any) => edge && edge.edge_type && edge.value)
+          .map((edge: any) => ({
+            $elemMatch: { edge_type: edge.edge_type, value: edge.value },
+          })),
+      };
+    }
 
     if (search && typeof search === 'string' && search.trim() !== '') {
       query.$or = [
@@ -2973,8 +3002,16 @@ export default class ReactorConversationService
 
   // Create a new conversation
   private async getNewConversation(
-    persona: IAIPersona
+    persona: IAIPersona,
+    options?: {
+      use_case?: string;
+      edges?: { name: string; value: string; edge_type: string }[];
+    }
   ): Promise<TReactorConversationDocument> {
+    // Conversations are scoped by use case, so a chat opened beside a content
+    // editor never adopts an empty standalone session and vice versa.
+    const useCase = options?.use_case || 'standalone';
+    const edges = options?.edges || [];
     this.context.debug("Creating new conversation", {
       personaId: persona?.id,
       userId: this.context.user?._id,
@@ -3006,6 +3043,12 @@ export default class ReactorConversationService
         _id: { $ne: null },
         personaId: persona.id,
         user: this.context.user._id,
+        // Only reuse a blank conversation of the same kind. Without this a
+        // content session could silently continue in an empty standalone one,
+        // inheriting the wrong scope and edges.
+        use_case: useCase === 'standalone'
+          ? { $in: ['standalone', null, undefined] }
+          : useCase,
         $or: [
           { history: { $size: 0 } }, // Empty history
           {
@@ -3018,6 +3061,10 @@ export default class ReactorConversationService
         $set: {
           started: new Date(),
           updated: new Date(),
+          // A reused blank conversation takes on the caller's scope, so its
+          // edges reflect what it is about to be used for.
+          use_case: useCase,
+          edges,
         },
         $setOnInsert: {
           // These fields will only be set if no document is found and a new one is created
@@ -3091,6 +3138,8 @@ export default class ReactorConversationService
       toolApprovalMode: ToolApprovalMode.PROMPT,
       tokenCount: 0,
       maxTokens,
+      use_case: useCase,
+      edges,
     };
 
     try {
@@ -3116,6 +3165,8 @@ export default class ReactorConversationService
         maxTokens,
         sseSessionId: sessionId.toString(),
         updated: new Date(),
+        use_case: useCase,
+        edges,
       };
 
       this.sessionLog("debug", "Creating new conversation with pre-set IDs", {
@@ -6243,7 +6294,10 @@ export default class ReactorConversationService
         throw new Error(`Persona with id ${args.personaId} not found`);
       }
 
-      const conversation = await this.getNewConversation(persona);
+      const conversation = await this.getNewConversation(persona, {
+        use_case: (args as any).use_case,
+        edges: (args as any).edges,
+      });
       if (!conversation || !conversation._id) {
         this.sessionLog("error",
           "Failed to create new conversation in startChatSession",

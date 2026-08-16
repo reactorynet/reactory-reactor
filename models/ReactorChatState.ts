@@ -152,6 +152,27 @@ export interface ReactorConversationDocument {
   } | null;
   // Optional reference to a parent session that provided context for this session
   parentSessionId?: string
+  /**
+   * What the conversation is being used for: "standalone", "workflow",
+   * "content", "form", or any application defined string.
+   *
+   * Conversations are scoped by this, so a chat opened alongside a content
+   * editor never resumes or lists a chat from somewhere else in the product.
+   * Defaults to "standalone", which is the plain chat experience.
+   */
+  use_case?: string
+  /**
+   * Arbitrary links from this conversation to things outside it — the workflow
+   * it belongs to, the content slug it is editing, a related conversation.
+   *
+   * Kept as a generic name/value/type triple rather than dedicated columns so
+   * a new kind of association does not need a schema change.
+   */
+  edges?: {
+    name: string;
+    value: string;
+    edge_type: string;
+  }[]
   // Virtual: resolved session folder path (not persisted to DB)
   readonly sessionFolder?: string
   // Virtual: child conversations spawned from this session (sub-agent delegations)
@@ -307,7 +328,30 @@ const ReactorConversationSchema = new Schema({
     default: null,
     index: true,
   },
+  // What the conversation is being used for. Indexed because every list and
+  // resume query filters on it.
+  use_case: {
+    type: String,
+    default: 'standalone',
+    index: true,
+  },
+  // Links from this conversation to workflows, content, other conversations.
+  edges: {
+    type: [{
+      _id: false,
+      name: { type: String, required: true },
+      value: { type: String, required: true },
+      edge_type: { type: String, required: true },
+    }],
+    default: [],
+  },
 });
+
+// Resuming a conversation looks it up by user, persona and use case together,
+// so the three are indexed as one.
+ReactorConversationSchema.index({ user: 1, personaId: 1, use_case: 1, updated: -1 });
+// Finding the conversation attached to a given workflow or content item.
+ReactorConversationSchema.index({ 'edges.edge_type': 1, 'edges.value': 1 });
 
 ReactorConversationSchema.virtual('sessionFolder').get(function () {
   const dataRoot = process.env.REACTORY_DATA || process.env.APP_DATA_ROOT;
