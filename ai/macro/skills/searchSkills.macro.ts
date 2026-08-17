@@ -6,8 +6,6 @@ import {
   Macro,
   MacroComponentDefinition,
 } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
-import ReactoryModules from "@reactory/server-core/modules";
-
 export interface SearchSkillsProps {
   /** Free-text query matched against skill name, description, and tags */
   query?: string;
@@ -32,6 +30,7 @@ export interface SearchSkillsResult {
  * Deduplication is by skill `id`; last writer wins for duplicate IDs.
  */
 function buildCatalog(): Map<string, ISkillDefinition> {
+  const ReactoryModules = require("@reactory/server-core/modules").default || require("@reactory/server-core/modules");
   const catalog = new Map<string, ISkillDefinition>();
   const modules = ReactoryModules.enabled as Reactory.Server.IReactoryModule[];
 

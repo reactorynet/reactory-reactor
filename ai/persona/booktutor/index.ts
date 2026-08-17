@@ -80,7 +80,7 @@ const BOOKTUTOR_RESOURCES: IAIPersonaResource[] = [
 ];
 
 // Process macros from the registry and add book-specific ones
-MacroRegistry.forEach(m => {
+(MacroRegistry || []).forEach(m => {
   if (m.tools) {
     m.tools.forEach(t => {
       if (t.type === "function" && BOOKTUTOR_TOOL_INCLUDES.includes(t.function?.name)) {
@@ -92,7 +92,7 @@ MacroRegistry.forEach(m => {
 
 // Add the macro tools to the tools array
 const ALL_BOOKTUTOR_MACROS = [...IMPORTED_BOOKTUTOR_MACROS];
-MacroRegistry.forEach(m => {
+(MacroRegistry || []).forEach(m => {
   if (m.tools?.some(t => t.type === "function" && BOOKTUTOR_TOOL_INCLUDES.includes(t.function?.name))) {
     const macro = {
       ...m,

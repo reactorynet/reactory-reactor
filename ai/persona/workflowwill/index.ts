@@ -156,7 +156,7 @@ const WORKFLOW_RESOURCES: IAIPersonaResource[] = [
 const WORKFLOW_MACROS: MacroComponentDefinition<any>[] = [];
 
 // Process macros from the registry
-MacroRegistry.forEach(m => {
+(MacroRegistry || []).forEach(m => {
   if (m.tools) {
     m.tools.forEach(t => {
       if (t.type === "function" && WORKFLOW_TOOL_INCLUDES.includes(t.function?.name)) {
@@ -167,7 +167,7 @@ MacroRegistry.forEach(m => {
 });
 
 // Add the macro tools to the tools array
-MacroRegistry.forEach(m => {
+(MacroRegistry || []).forEach(m => {
   const macro = {
     ...m,
     runat: m.runat ?? "server",
