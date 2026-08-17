@@ -92,10 +92,10 @@ const DATAANALYTICS_RESOURCES: IAIPersonaResource[] = [
   }
 ]
 
-const DATAANALYTICS_TOOLS = DATAANALYTICS_MACROS.map(m => m.tools).flat().filter(t => t.type === "function")
+const DATAANALYTICS_TOOLS = (DATAANALYTICS_MACROS || []).flatMap(m => m?.tools || []).filter(t => t?.type === "function");
 
 // Process additional macros from the registry
-MacroRegistry.forEach(m => {
+(MacroRegistry || []).forEach(m => {
   if (m.tools) {
     m.tools.forEach(t => {
       if (t.type === "function" && DATAANALYTICS_TOOL_INCLUDES.includes(t.function?.name)) {
@@ -107,7 +107,7 @@ MacroRegistry.forEach(m => {
 });
 
 // Add the macro tools to the tools array
-MacroRegistry.forEach(m => {
+(MacroRegistry || []).forEach(m => {
   const macro = {
     ...m,
     runat: m.runat ?? "server",

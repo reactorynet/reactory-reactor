@@ -4885,7 +4885,7 @@ export default class ReactorConversationService
           _id: chatSessionId,
         }).exec();
         const providerAdapter = await this.providerService.getAdapter(
-          conv?.providerId || "openai"
+          conv?.providerId || persona?.providerId || "openai"
         );
         return providerAdapter.adaptResponse(toolErrorEntry);
       } catch {
@@ -5156,12 +5156,6 @@ export default class ReactorConversationService
     this.validateChatSessionId(chatSessionId, "attachImage");
 
     try {
-      const persona = await this.context
-        .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0")
-        .getPersona(personaId);
-      const provider = persona.providerId || "openai";
-      const adapter = await this.providerService.getAdapter(provider);
-
       // Validate conversation exists and user has access
       const conversation = await ReactorConversationModel.findOne({
         _id: chatSessionId,
@@ -5173,6 +5167,12 @@ export default class ReactorConversationService
           "Conversation not found or you do not have permission to access it"
         );
       }
+
+      const persona = await this.context
+        .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0")
+        .getPersona(personaId);
+      const provider = conversation.providerId || persona.providerId || "openai";
+      const adapter = await this.providerService.getAdapter(provider);
 
       // Use atomic update to add image message to history
       await ReactorConversationModel.findOneAndUpdate(

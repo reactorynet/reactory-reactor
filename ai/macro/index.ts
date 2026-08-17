@@ -15,6 +15,7 @@ import DataMacros from './data';
 import ModuleMacros from './develop/module';
 import PlaywrightMacros from './playwright';
 import SkillsMacros from './skills';
+import ImageMacros from './image';
 
 export { MacroErrorCode, MacroError, createMacroError } from './errors';
 export { summarizeItems, truncateOutput } from './summarize';
@@ -108,6 +109,7 @@ export const MacroRegistry: MacroComponentDefinition<unknown>[] = [
   ...ModuleMacros,
   ...PlaywrightMacros,
   ...SkillsMacros,
+  ...ImageMacros,
 ];
 
 export const getMacrosMD = (): string => {

@@ -7,8 +7,6 @@ import {
   Macro,
   MacroComponentDefinition,
 } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
-import ReactoryModules from "@reactory/server-core/modules";
-
 export interface ReadSkillProps {
   /** Skill FQN, e.g. "reactory-kb.createArticle@1.0.0" */
   id?: string;
@@ -76,6 +74,7 @@ function canAccessSkill(
 }
 
 function findSkill(props: ReadSkillProps): ISkillDefinition | undefined {
+  const ReactoryModules = require("@reactory/server-core/modules").default || require("@reactory/server-core/modules");
   const modules = ReactoryModules.enabled as Reactory.Server.IReactoryModule[];
 
   for (const mod of modules) {

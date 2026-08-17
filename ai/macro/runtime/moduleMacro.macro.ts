@@ -1,6 +1,5 @@
 import Reactory from "@reactorynet/reactory-core";
 import { ChatState, Macro, MacroComponentDefinition } from "../../../types/chat";
-import modules from '@reactory/server-core/modules';
 import { ModuleMacroProps } from './types';
 
 // a macro that describes modules installed in reactory
@@ -8,6 +7,7 @@ export const ModuleMacro: Macro<unknown, ModuleMacroProps> = async (
   props: ModuleMacroProps,
   state: ChatState): Promise<unknown> => {    
     const { details = false } = props;
+    const modules = require('@reactory/server-core/modules').default || require('@reactory/server-core/modules');
     
     try {
       const describeModule = (module: Reactory.Server.IReactoryModule) => { 

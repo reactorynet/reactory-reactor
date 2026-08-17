@@ -31,7 +31,7 @@ const REACTOR_TOOLS: MacroToolDefinition[] = PROJECT_MACROS
   .filter(t => t && t.type === "function");
 
 // Add additional tools from the registry that match our includes list
-MacroRegistry.forEach(m => {
+(MacroRegistry || []).forEach(m => {
   if (m.tools) {
     m.tools.forEach(t => {
       if (t.type === "function" && 
@@ -59,7 +59,7 @@ const buildToolDescriptions = (tools: any[]): string => {
 const REACTOR_MACROS: MacroComponentDefinition<any>[] = [...PROJECT_MACROS];
 
 // Add additional macros from the registry
-MacroRegistry.forEach(m => {
+(MacroRegistry || []).forEach(m => {
   if (!REACTOR_MACROS.some(rm => rm.name === m.name)) {
     const macro = {
       ...m,
