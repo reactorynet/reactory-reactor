@@ -20,79 +20,127 @@ class ReactorCapabilityService implements IReactorCapabilityService {
   private capabilities: Map<string, any> = new Map();
   private providerService: IReactorProviderService;
 
+  private capabilityDescriptions: Record<string, { name: string; description: string; parameters?: any[] }> = {
+    "text-generation": {
+      name: "Text Generation",
+      description: "Generate natural language text and responses",
+      parameters: [
+        { name: "temperature", type: "float", required: false, defaultValue: 0.7, description: "Controls randomness of output" },
+        { name: "max_tokens", type: "integer", required: false, defaultValue: 1000, description: "Maximum tokens to generate" }
+      ]
+    },
+    "code-generation": {
+      name: "Code Generation",
+      description: "Generate, review, and refactor programming code",
+      parameters: [
+        { name: "language", type: "string", required: false, defaultValue: "typescript", description: "Programming language to generate" }
+      ]
+    },
+    "image-generation": {
+      name: "Image Generation",
+      description: "Generate images based on prompts",
+      parameters: [
+        { name: "size", type: "string", required: false, defaultValue: "1024x1024", description: "Size of generated image" }
+      ]
+    },
+    "image-understanding": {
+      name: "Image Understanding",
+      description: "Analyze and describe input images and visual content"
+    },
+    "speech-to-text": {
+      name: "Speech to Text",
+      description: "Transcribe audio streams and files into text"
+    },
+    "reasoning": {
+      name: "Reasoning & Extended Thinking",
+      description: "Perform multi-step analytical reasoning and thinking"
+    },
+    "structured-output": {
+      name: "Structured Output",
+      description: "Constrain model responses to strict JSON Schema definitions"
+    }
+  };
+
   constructor(props: Reactory.Service.IReactoryServiceProps, 
     context: Reactory.Server.IReactoryContext) {
     this.context = context;
-    this.initialize();
-  }
-
-  private async initialize() {
-    // Register capabilities
-    this.capabilities.set("text-generation", {
-      id: "text-generation",
-      name: "Text Generation",
-      description: "Generate text based on prompts",
-      providers: ["openai", "xai", "anthropic", "google", "cohere"],
-      models: ["gpt-4", "gpt-3.5-turbo", "claude-2", "bard", "cohere"],
-      parameters: [
-        {
-          name: "temperature",
-          type: "float",
-          required: false,
-          defaultValue: 0.7,
-          description: "Controls randomness of output"
-        },
-        {
-          name: "max_tokens",
-          type: "integer",
-          required: false,
-          defaultValue: 1000,
-          description: "Maximum tokens to generate"
-        }
-      ]
-    });
-
-    this.capabilities.set("code-generation", {
-      id: "code-generation",
-      name: "Code Generation",
-      description: "Generate code based on specifications",
-      providers: ["openai", "xai"],
-      models: ["gpt-4", "gpt-3.5-turbo"],
-      parameters: [
-        {
-          name: "language",
-          type: "string",
-          required: false,
-          defaultValue: "javascript",
-          description: "Programming language to generate"
-        }
-      ]
-    });
-
-    this.capabilities.set("image-generation", {
-      id: "image-generation",
-      name: "Image Generation",
-      description: "Generate images based on prompts",
-      providers: ["openai"],
-      models: ["dall-e-3"],
-      parameters: [
-        {
-          name: "size",
-          type: "string",
-          required: false,
-          defaultValue: "1024x1024",
-          description: "Size of generated image"
-        }
-      ]
-    });
   }
 
   setProviderService(service: IReactorProviderService) {
     this.providerService = service;
   }
 
+  private getProviderService(): IReactorProviderService | undefined {
+    if (this.providerService) return this.providerService;
+    if (this.context?.getService) {
+      try {
+        this.providerService = this.context.getService<IReactorProviderService>("reactor.ReactorProviderService@1.0.0");
+      } catch {
+        // Fall back
+      }
+    }
+    return this.providerService;
+  }
+
   async getCapabilities(): Promise<any[]> {
-    return Array.from(this.capabilities.values());
+    const providerSvc = this.getProviderService();
+    if (!providerSvc) {
+      return Array.from(this.capabilities.values());
+    }
+
+    const providers = await providerSvc.getProviders();
+    const capMap = new Map<string, { id: string; name: string; description: string; providers: Set<string>; models: Set<string>; parameters: any[] }>();
+
+    for (const provider of providers) {
+      const pCaps = provider.capabilities || [];
+      for (const capId of pCaps) {
+        if (!capMap.has(capId)) {
+          const meta = this.capabilityDescriptions[capId] || {
+            name: capId.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' '),
+            description: `Capability: ${capId}`
+          };
+          capMap.set(capId, {
+            id: capId,
+            name: meta.name,
+            description: meta.description,
+            providers: new Set(),
+            models: new Set(),
+            parameters: meta.parameters || []
+          });
+        }
+        const capObj = capMap.get(capId)!;
+        capObj.providers.add(provider.id);
+      }
+
+      for (const model of provider.models || []) {
+        const mCaps = model.capabilities || [];
+        for (const capId of mCaps) {
+          if (!capMap.has(capId)) {
+            const meta = this.capabilityDescriptions[capId] || {
+              name: capId.split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' '),
+              description: `Capability: ${capId}`
+            };
+            capMap.set(capId, {
+              id: capId,
+              name: meta.name,
+              description: meta.description,
+              providers: new Set(),
+              models: new Set(),
+              parameters: meta.parameters || []
+            });
+          }
+          const capObj = capMap.get(capId)!;
+          capObj.providers.add(provider.id);
+          capObj.models.add(model.id);
+        }
+      }
+    }
+
+    return Array.from(capMap.values()).map(c => ({
+      ...c,
+      providers: Array.from(c.providers),
+      models: Array.from(c.models)
+    }));
   }
 
   async getProvidersForCapability(capabilityId: string): Promise<any[]> {

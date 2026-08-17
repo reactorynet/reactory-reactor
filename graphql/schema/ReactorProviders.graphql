@@ -1,5 +1,23 @@
 
 """
+Declares sampling parameter support for a model.
+"""
+type ReactorModelSamplingSupport {
+  temperature: Boolean
+  topP: Boolean
+  topK: Boolean
+}
+
+"""
+Declares thinking capability for a model.
+"""
+type ReactorModelThinkingSupport {
+  mode: String
+  effort: String
+  display: String
+}
+
+"""
 Defines capabilities and limitations of a specific AI model from any provider.
 """
 type ReactorModelDefinition {
@@ -12,10 +30,17 @@ type ReactorModelDefinition {
   costPerToken: Float
   inputCostPerToken: Float
   outputCostPerToken: Float
+  inputCostPerTokenUsdCents: Float
+  outputCostPerTokenUsdCents: Float
+  rpm: Int
+  itpm: Int
+  otpm: Int
   maxParallelRequests: Int
   supportsStreaming: Boolean
   supportedTools: [String]
   supportedMediaTypes: [String]
+  sampling: ReactorModelSamplingSupport
+  thinking: ReactorModelThinkingSupport
 }
 
 """
