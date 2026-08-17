@@ -109,7 +109,6 @@ export const MacroRegistry: MacroComponentDefinition<unknown>[] = [
   ...ModuleMacros,
   ...PlaywrightMacros,
   ...SkillsMacros,
-  ...ImageMacros,
 ];
 
 export const getMacrosMD = (): string => {
