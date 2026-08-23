@@ -6082,6 +6082,78 @@ export default class ReactorConversationService
     }
   }
 
+  async deleteToolCall(chatSessionId: string, toolCallId: string, messageId?: string): Promise<boolean> {
+    this.sessionLog("info", `Deleting tool call ${toolCallId}`, {
+      chatSessionId,
+      toolCallId,
+      messageId,
+      userId: this.context.user?._id,
+    }, chatSessionId);
+
+    try {
+      const conversation = await ReactorConversationModel.findOne({
+        _id: chatSessionId,
+        user: this.context.user,
+      }).exec();
+
+      if (!conversation) {
+        throw new Error(`Conversation ${chatSessionId} not found`);
+      }
+
+      let modified = false;
+
+      if (conversation.history && Array.isArray(conversation.history)) {
+        for (let i = conversation.history.length - 1; i >= 0; i--) {
+          const msg: any = conversation.history[i];
+          const isTargetMsg = messageId ? (msg.id?.toString() === messageId || msg.id === messageId) : true;
+
+          if (isTargetMsg && Array.isArray(msg.tool_calls) && msg.tool_calls.some((tc: any) => tc.id === toolCallId)) {
+            msg.tool_calls = msg.tool_calls.filter((tc: any) => tc.id !== toolCallId);
+            if (Array.isArray(msg.tool_results)) {
+              msg.tool_results = msg.tool_results.filter((r: any) => r.id !== toolCallId && r.toolCallId !== toolCallId);
+            }
+            if (Array.isArray(msg.tool_errors)) {
+              msg.tool_errors = msg.tool_errors.filter((e: any) => e.id !== toolCallId);
+            }
+            modified = true;
+
+            // If the message has no tool calls left and no meaningful text or content, remove it
+            const hasContent = typeof msg.content === 'string'
+              ? msg.content.trim().length > 0 && !msg.content.startsWith('Calling tool:') && msg.content !== 'Processing...'
+              : !!msg.content;
+            const hasOtherCalls = Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0;
+            const hasThinking = typeof msg.thinking === 'string' && msg.thinking.trim().length > 0;
+            const hasImages = Array.isArray(msg.images) && msg.images.length > 0;
+
+            if (!hasContent && !hasOtherCalls && !hasThinking && !hasImages) {
+              conversation.history.splice(i, 1);
+            }
+          } else if (msg.role === 'tool' && (msg.tool_call_id === toolCallId || msg.id === toolCallId)) {
+            // Remove standalone tool message for this tool call
+            conversation.history.splice(i, 1);
+            modified = true;
+          }
+        }
+      }
+
+      if (modified) {
+        conversation.markModified('history');
+        await conversation.save();
+        this.sessionLog("info", `Tool call ${toolCallId} deleted successfully`, { chatSessionId, toolCallId }, chatSessionId);
+        return true;
+      }
+
+      return false;
+    } catch (error) {
+      this.sessionLog("error", `Error deleting tool call ${toolCallId}: ${(error as Error).message}`, {
+        error: (error as Error).message,
+        chatSessionId,
+        toolCallId,
+      }, chatSessionId);
+      throw error;
+    }
+  }
+
   async loadChatSession(
     chatSessionId: string
   ): Promise<TReactorConversationDocument | null> {

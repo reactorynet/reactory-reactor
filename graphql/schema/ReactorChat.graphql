@@ -1058,6 +1058,16 @@ extend type Mutation {
   ReactorDeleteChatSession(id: String!): Boolean
 
   """
+  Deletes a specific tool call (and its corresponding tool result / error) from
+  a message or conversation history.
+  """
+  ReactorDeleteToolCall(
+    chatSessionId: String!
+    toolCallId: String!
+    messageId: String
+  ): Boolean
+
+  """
   Triggers manual compaction on a conversation. The LLM summarizes older messages
   which are then archived to truncatedHistory and replaced with a summary.
   Returns compaction stats.

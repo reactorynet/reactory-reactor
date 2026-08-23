@@ -773,6 +773,7 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
     chatSessionId: string 
   }): Promise<any>;
   deleteChatSession(args: { id: string }): Promise<any>;
+  deleteToolCall(chatSessionId: string, toolCallId: string, messageId?: string): Promise<boolean>;
   
   /**
    * Attaches files to the chat session. This can be used to attach files to the chat session

@@ -994,6 +994,23 @@ class ReactorChatResolver {
     return await conversationService.deleteChatSession(args);
   }
 
+  @mutation("ReactorDeleteToolCall")
+  async ReactorDeleteToolCall(
+    _: any,
+    args: { chatSessionId: string; toolCallId: string; messageId?: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<boolean> {
+    const conversationService =
+      context.getService<IReactorConversationsService>(
+        "reactor.ReactorConversationService@1.0.0"
+      );
+    return await conversationService.deleteToolCall(
+      args.chatSessionId,
+      args.toolCallId,
+      args.messageId
+    );
+  }
+
   @mutation("ReactorAskQuestionAudio")
   async ReactorAskQuestionAudio(
     _: any,
