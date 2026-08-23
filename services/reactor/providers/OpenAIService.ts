@@ -568,8 +568,15 @@ class OpenAIService extends AIProviderBase {
         finish_reason: finishReason || "stop",
       }],
       usage: streamUsage
-        ? { prompt_tokens: streamUsage.prompt_tokens, completion_tokens: streamUsage.completion_tokens, total_tokens: streamUsage.total_tokens }
-        : { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+        ? {
+            promptTokens: streamUsage.prompt_tokens,
+            completionTokens: streamUsage.completion_tokens,
+            totalTokens: streamUsage.total_tokens,
+            prompt_tokens: streamUsage.prompt_tokens,
+            completion_tokens: streamUsage.completion_tokens,
+            total_tokens: streamUsage.total_tokens,
+          }
+        : undefined,
       // Carry reasoning through for persistence by the conversation service
       reasoning: accumulatedReasoning || undefined,
     } as any;

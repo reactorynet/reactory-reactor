@@ -126,6 +126,7 @@ export const MacroRegistry: MacroComponentDefinition<unknown>[] = [
   ...ModuleMacros,
   ...PlaywrightMacros,
   ...SkillsMacros,
+  ...ImageMacros,
   ...SupportMacros,
 ];
 

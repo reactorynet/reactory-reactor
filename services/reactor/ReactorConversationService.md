@@ -325,9 +325,12 @@ After tool execution, `sendToolResultsToAI` sends results via GraphQL (`streamin
 
 ## Token Management
 
-- **Atomic counting**: MongoDB aggregation pipelines calculate total tokens
-- **Truncation**: When tokens exceed max by 20%, older messages move to `truncatedHistory` (preserving system messages)
-- **Configurable**: `setChatMaxTokens(chatSessionId, maxTokens)` per conversation
+- **Authoritative Provider Usage**: Provider-reported `usage.totalTokens` (from OpenAI, Google Gemini, Anthropic, Ollama, and AWS Bedrock) is captured across streaming and non-streaming modes and preserved on the conversation document.
+- **Atomic Counting & Fallback Estimation**: MongoDB aggregation pipelines calculate token counts (`tokenCountAggregationExpression`) without regressing prior authoritative provider token counts.
+- **Auto-Compaction (Threshold: 95%)**: When a conversation reaches 95% of `maxTokens` (`COMPACTION_THRESHOLD`, evaluated both post-response and proactively prior to provider dispatch), the service invokes LLM summarization. Older non-system messages are archived to `truncatedHistory` and replaced with a structured summary, reducing context window utilization down to ~65% (`COMPACTION_TARGET_MULTIPLIER`).
+- **Truncation Fallback (Threshold: 120%)**: If compaction fails or tokens exceed 120% of limit, older messages are truncated down to 80% (`TRUNCATION_TARGET_MULTIPLIER`) while strictly preserving system messages and ensuring chronological message alternation.
+- **Streaming Lifecycle Events**: Emits `compaction_start`, `compaction_progress`, `compaction_complete`, and `compaction_error` events via SSE to inform client UIs of active background context optimization.
+- **Configurable Limits**: `setChatMaxTokens(chatSessionId, maxTokens)` per conversation, with default fallback to model context lengths from `providers.yaml` or persona definitions.
 
 ## Data Model
 

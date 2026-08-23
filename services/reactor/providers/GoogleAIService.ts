@@ -1049,6 +1049,7 @@ class GoogleAIService extends AIProviderBase {
     const pacerCfg = persona?.config?.streamingPace ?? {};
 
     let result: GoogleGenAI.GenerateContentResponse = null;
+    let latestUsageMetadata: any = null;
     let accumulatedText = "";
     let accumulatedReasoning = "";
     let accumulatedFunctionCalls: any[] = [];
@@ -1103,6 +1104,9 @@ class GoogleAIService extends AIProviderBase {
         // Initialize result with the first chunk
         if (result === null) {
           result = chunk;
+        }
+        if (chunk.usageMetadata) {
+          latestUsageMetadata = chunk.usageMetadata;
         }
         this.slog("debug", `Received chunk from Google AI stream`, {
           chunkPreview: JSON.stringify(chunk).substring(0, 200),
@@ -1351,8 +1355,9 @@ class GoogleAIService extends AIProviderBase {
     }
 
     // Attach usage metadata for the caller to pass through buildCompletion
-    if (result?.usageMetadata) {
-      (result as any).__usageMetadata = result.usageMetadata;
+    const finalUsageMetadata = latestUsageMetadata || result?.usageMetadata;
+    if (finalUsageMetadata) {
+      (result as any).__usageMetadata = finalUsageMetadata;
     }
 
     this.slog("info", `Streaming request completed`, {

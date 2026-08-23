@@ -243,10 +243,18 @@ class OllamaAIService extends AIProviderBase {
     const toolCallsMap: Map<string, { name: string; arguments: string }> = new Map();
     const toolCallOrder: string[] = [];
     let finishReason = "stop";
+    let streamUsage: any = undefined;
 
     try {
       for await (const chunk of stream) {
         const msg = chunk.message;
+        if (chunk.prompt_eval_count !== undefined || chunk.eval_count !== undefined) {
+          streamUsage = {
+            promptTokens: chunk.prompt_eval_count || 0,
+            completionTokens: chunk.eval_count || 0,
+            totalTokens: (chunk.prompt_eval_count || 0) + (chunk.eval_count || 0),
+          };
+        }
         if (!msg) continue;
 
         if (msg.content) {
@@ -350,6 +358,7 @@ class OllamaAIService extends AIProviderBase {
           finish_reason: finishReason,
         },
       ],
+      usage: streamUsage,
     };
   }
 
@@ -384,6 +393,16 @@ class OllamaAIService extends AIProviderBase {
         },
       })) ?? [];
 
+    const nonStreamUsage =
+      response.prompt_eval_count !== undefined || response.eval_count !== undefined
+        ? {
+            promptTokens: response.prompt_eval_count || 0,
+            completionTokens: response.eval_count || 0,
+            totalTokens:
+              (response.prompt_eval_count || 0) + (response.eval_count || 0),
+          }
+        : undefined;
+
     return {
       id: new ObjectId(),
       object: "chat.completion",
@@ -399,6 +418,7 @@ class OllamaAIService extends AIProviderBase {
           finish_reason: response.done_reason || (toolCalls.length > 0 ? "tool_calls" : "stop"),
         },
       ],
+      usage: nonStreamUsage,
     };
   }
 

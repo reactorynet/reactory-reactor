@@ -398,6 +398,15 @@ class AWSBedrockService extends AIProviderBase {
 
         const responseBody = JSON.parse(new TextDecoder().decode(result.body));
         const responseText = responseBody.content?.[0]?.text || "";
+        const bedrockUsage = responseBody.usage
+          ? {
+              promptTokens: responseBody.usage.input_tokens || 0,
+              completionTokens: responseBody.usage.output_tokens || 0,
+              totalTokens:
+                (responseBody.usage.input_tokens || 0) +
+                (responseBody.usage.output_tokens || 0),
+            }
+          : undefined;
 
         const completion: AIChatCompletion = {
           id: new ObjectId(),
@@ -413,6 +422,7 @@ class AWSBedrockService extends AIProviderBase {
               finish_reason: "stop",
             },
           ],
+          usage: bedrockUsage,
           created: new Date(),
         };
 
@@ -459,9 +469,19 @@ class AWSBedrockService extends AIProviderBase {
           }
 
           const responseBody = JSON.parse(new TextDecoder().decode(response.body));
+          const bedrockUsage = responseBody.usage
+            ? {
+                promptTokens: responseBody.usage.input_tokens || 0,
+                completionTokens: responseBody.usage.output_tokens || 0,
+                totalTokens:
+                  (responseBody.usage.input_tokens || 0) +
+                  (responseBody.usage.output_tokens || 0),
+              }
+            : undefined;
           result = {
             content: responseBody.content?.[0]?.text || "",
             finishReason: "stop",
+            usage: bedrockUsage,
           };
         }
 
@@ -490,6 +510,7 @@ class AWSBedrockService extends AIProviderBase {
               finish_reason: result.finishReason || "stop",
             },
           ],
+          usage: result.usage,
           created: new Date(),
         };
 

@@ -1067,10 +1067,12 @@ export default class ReactorConversationService
   private async updateConversationTokenCount(
     conversationId: string,
     providerReportedTokens?: number,
+    forceReset: boolean = false,
   ): Promise<number> {
     this.sessionLog("debug", "Updating conversation token count", {
       conversationId,
       providerReportedTokens,
+      forceReset,
       userId: this.context.user?._id,
       timestamp: new Date().toISOString(),
     }, conversationId);
@@ -1161,7 +1163,11 @@ export default class ReactorConversationService
         throw new Error("Conversation not found");
       }
 
-      const calculatedTokens = Math.ceil(result[0].calculatedTokenCount || 0);
+      const existingTokenCount = result[0].tokenCount || 0;
+      const heuristicTokens = Math.ceil(result[0].calculatedTokenCount || 0);
+      const calculatedTokens = forceReset
+        ? heuristicTokens
+        : Math.max(existingTokenCount, heuristicTokens);
 
       // Atomically update the conversation with the new token count
       const updatedConversation =
@@ -1204,9 +1210,9 @@ export default class ReactorConversationService
 
       this.sessionLog("debug", "Token count updated from heuristic estimation", {
         conversationId,
-        oldTokenCount: result[0].tokenCount,
+        oldTokenCount: existingTokenCount,
         newTokenCount: calculatedTokens,
-        source: "heuristic",
+        source: forceReset ? "heuristic_reset" : "heuristic",
         userId: this.context.user?._id,
       }, conversationId);
 
@@ -1326,17 +1332,20 @@ export default class ReactorConversationService
       }
 
       const conversationData = result[0];
-      const calculatedTokens = Math.ceil(
+      const existingTokenCount = conversationData.tokenCount || 0;
+      const heuristicTokens = Math.ceil(
         conversationData.calculatedTokenCount || 0
       );
+      // Preserve existing higher token count (e.g. from provider) so heuristic does not underestimate
+      const calculatedTokens = Math.max(existingTokenCount, heuristicTokens);
       const maxTokens = conversationData.maxTokens;
       const percentageUsed = maxTokens
         ? (calculatedTokens / maxTokens) * 100
         : 0;
 
-      const exceedsLimit = maxTokens ? calculatedTokens > maxTokens : false;
+      const exceedsLimit = maxTokens ? calculatedTokens >= maxTokens : false;
       const shouldTruncate = maxTokens
-        ? calculatedTokens >
+        ? calculatedTokens >=
           maxTokens * TOKEN_LIMITS.TRUNCATION_THRESHOLD_MULTIPLIER
         : false;
 
@@ -1820,8 +1829,8 @@ export default class ReactorConversationService
       { new: true },
     ).exec();
 
-    // Recalculate token count
-    const tokensAfter = await this.updateConversationTokenCount(conversationId);
+    // Recalculate token count with forceReset=true so the reduced history is reflected
+    const tokensAfter = await this.updateConversationTokenCount(conversationId, undefined, true);
 
     this.sessionLog("info", "Compaction complete", {
       conversationId,
@@ -3783,24 +3792,54 @@ export default class ReactorConversationService
             conversation._id.toString()
           );
 
-          // Check if truncation is needed based on updated token count
-          if (tokenStatus.shouldTruncate) {
+          // Check if truncation or compaction is needed based on updated token count
+          if (
+            tokenStatus.shouldTruncate ||
+            tokenStatus.exceedsLimit ||
+            tokenStatus.percentageUsed >= TOKEN_LIMITS.COMPACTION_THRESHOLD * 100
+          ) {
             this.sessionLog("warn",
-              "Token limit exceeded, truncating conversation history",
+              `Token threshold reached (${Math.round(tokenStatus.percentageUsed)}%), initiating history reduction before dispatch`,
               {
                 conversationId: conversation._id.toString(),
                 currentTokens: tokenStatus.currentTokens,
                 maxTokens: tokenStatus.maxTokens,
-                exceedsBy:
-                  tokenStatus.currentTokens - (tokenStatus.maxTokens || 0),
+                percentageUsed: tokenStatus.percentageUsed,
+                shouldTruncate: tokenStatus.shouldTruncate,
+                exceedsLimit: tokenStatus.exceedsLimit,
               }, conversation._id.toString(), personaId
             );
 
-            await this.truncateConversationHistory(
-              conversation._id.toString(),
-              (tokenStatus.maxTokens || TOKEN_LIMITS.DEFAULT_MAX_TOKENS) *
-                TOKEN_LIMITS.TRUNCATION_TARGET_MULTIPLIER
-            );
+            if (tokenStatus.shouldTruncate) {
+              await this.truncateConversationHistory(
+                conversation._id.toString(),
+                (tokenStatus.maxTokens || TOKEN_LIMITS.DEFAULT_MAX_TOKENS) *
+                  TOKEN_LIMITS.TRUNCATION_TARGET_MULTIPLIER
+              );
+            } else {
+              try {
+                await this.compactConversationHistory(
+                  conversation._id.toString(),
+                  tokenStatus.currentTokens,
+                  tokenStatus.maxTokens || TOKEN_LIMITS.DEFAULT_MAX_TOKENS,
+                  streamingMode,
+                );
+              } catch (compactionErr: any) {
+                this.sessionLog("warn", `Auto-compaction failed, falling back to truncation: ${compactionErr.message}`, {
+                  conversationId: conversation._id.toString(),
+                }, conversation._id.toString(), personaId);
+                await this.truncateConversationHistory(
+                  conversation._id.toString(),
+                  (tokenStatus.maxTokens || TOKEN_LIMITS.DEFAULT_MAX_TOKENS) *
+                    TOKEN_LIMITS.TRUNCATION_TARGET_MULTIPLIER
+                );
+              }
+            }
+
+            const freshConv = await ReactorConversationModel.findById(conversation._id).exec();
+            if (freshConv) {
+              conversation = freshConv;
+            }
           }
         } else {
           // Create new conversation only when no chatSessionId is provided
@@ -4518,7 +4557,7 @@ export default class ReactorConversationService
       }
 
       // Update token count after adding AI response — prefer provider-reported usage
-      const providerTotalTokens = response?.usage?.totalTokens;
+      const providerTotalTokens = response?.usage?.totalTokens || (response?.usage as any)?.total_tokens;
       await this.updateConversationTokenCount(conversation._id.toString(), providerTotalTokens);
 
       // Check if auto-compaction is needed
