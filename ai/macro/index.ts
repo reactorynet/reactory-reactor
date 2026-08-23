@@ -38,7 +38,7 @@ import  {
 import { FetchMacro } from './web/macro';
 import { QueryGQL, MutationGQL } from './graphql/macro';
 import { ServiceRegister } from './workflow/macro';
-import { CreateUser, GetUser } from './user/macro';
+import { CreateUser, GetUser, SearchUser } from './user/macro';
 
 import { 
   CodeReview,
@@ -76,6 +76,8 @@ const inputMacros: MacroFunctions = {
   user: GetUser,
   getUser: GetUser,
   GetUser,
+  searchUser: SearchUser,
+  SearchUser,
   review: CodeReview,
   reviewFile: CodeReviewFile,
   getSupportTicket: GetSupportTicket,
@@ -126,7 +128,6 @@ export const MacroRegistry: MacroComponentDefinition<unknown>[] = [
   ...ModuleMacros,
   ...PlaywrightMacros,
   ...SkillsMacros,
-  ...ImageMacros,
   ...SupportMacros,
 ];
 

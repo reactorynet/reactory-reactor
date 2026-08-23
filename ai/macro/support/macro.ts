@@ -573,16 +573,16 @@ export const UpdateSupportTicketRegistry: MacroComponentDefinition<typeof Update
   name: "updateSupportTicket",
   version: "1.0.0",
   component: UpdateSupportTicket,
-  description: "Update a support ticket's status, assignment, priority, tags, or add an update comment",
+  description: "Update a support ticket's status, assignee (user account ID), priority, tags, or add an update comment",
   roles: ["ADMIN", "USER", "SUPPORT_ADMIN", "SUPPORT"],
   stem: "support",
-  tags: ["support", "ticket", "update", "assign", "delegate", "status"],
+  tags: ["support", "ticket", "update", "assign", "status"],
   tools: [
     {
       type: "function",
       function: {
         name: "updateSupportTicket",
-        description: "Update an existing support ticket's status, assignee, priority, or details",
+        description: "Update an existing support ticket's status, assignee (must be a valid user account ID), priority, or details",
         parameters: {
           type: "object",
           properties: {
@@ -596,7 +596,7 @@ export const UpdateSupportTicketRegistry: MacroComponentDefinition<typeof Update
             },
             assignTo: {
               type: "string",
-              description: "User ID or Agent ID of the assigned handler",
+              description: "User ID of the assigned user account (ownership must always sit with a user account, not an agent ID). Use searchUser or getUser to look up user IDs.",
             },
             priority: {
               type: "string",

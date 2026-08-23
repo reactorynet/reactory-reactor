@@ -28,6 +28,7 @@ export interface CreateSupportTicketProps {
 export interface UpdateSupportTicketProps {
   ticketId: string;
   status?: string;
+  /** User ID of the assigned user account (ownership must always sit with a user account, not an agent ID) */
   assignTo?: string;
   priority?: string;
   comment?: string;

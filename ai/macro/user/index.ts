@@ -1,8 +1,19 @@
-import { 
-  GetUserRegistry as GetUser,
-  CreateUserRegistry as CreateUser
-} from './macro';
-export default [
+import {
   GetUser,
-  CreateUser
+  GetUserRegistry,
+  SearchUser,
+  SearchUserRegistry,
+  CreateUser,
+  CreateUserRegistry,
+} from "./macro";
+
+export * from "./types";
+export * from "./macro";
+
+export const UserMacros = [
+  GetUserRegistry,
+  SearchUserRegistry,
+  CreateUserRegistry,
 ];
+
+export default UserMacros;
