@@ -1,6 +1,15 @@
 import { ModuleMacro } from '../moduleMacro.macro';
 import { createMockState } from './support/mockState';
 
+// Mock class with prototype.reactory (as attached by @service decorator)
+class MockDecoratedService {}
+(MockDecoratedService as any).prototype.reactory = {
+  id: 'core.DecoratedService@1.0.0',
+  nameSpace: 'core',
+  name: 'DecoratedService',
+  version: '1.0.0',
+};
+
 // Mock the modules import
 jest.mock('@reactory/server-core/modules', () => ({
   __esModule: true,
@@ -11,7 +20,7 @@ jest.mock('@reactory/server-core/modules', () => ({
         name: 'auth',
         version: '1.0.0',
         dependencies: ['core.users@1.0.0'],
-        services: [{ id: 'core.AuthService@1.0.0' }],
+        services: [{ id: 'core.AuthService@1.0.0' }, MockDecoratedService],
       },
       {
         nameSpace: 'core',
@@ -54,7 +63,7 @@ describe('ModuleMacro', () => {
   });
 
   describe('detailed (details=true)', () => {
-    it('should include dependencies and service ids', async () => {
+    it('should include dependencies and service ids for both object definitions and decorated service classes', async () => {
       const state = createMockState();
       const result: any = await ModuleMacro({ details: true }, state);
 
@@ -62,7 +71,11 @@ describe('ModuleMacro', () => {
       expect(result.details).toBe(true);
       const authModule = result.modules[0];
       expect(authModule.dependencies).toEqual(['core.users@1.0.0']);
-      expect(authModule.services).toEqual(['core.AuthService@1.0.0']);
+      expect(authModule.services).toEqual([
+        'core.AuthService@1.0.0',
+        'core.DecoratedService@1.0.0',
+      ]);
+      expect(authModule.services).not.toContain(null);
     });
   });
 });

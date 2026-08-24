@@ -2,6 +2,27 @@ import Reactory from "@reactorynet/reactory-core";
 import { ChatState, Macro, MacroComponentDefinition } from "../../../types/chat";
 import { ModuleMacroProps } from './types';
 
+function resolveServiceId(service: any): string | null {
+  if (!service) return null;
+  if (typeof service === 'string') return service;
+  if (service.id) return service.id;
+  if (typeof service === 'function') {
+    if (service.prototype?.reactory?.id) return service.prototype.reactory.id;
+    if (service.prototype?.COMPONENT_DEFINITION?.id) return service.prototype.COMPONENT_DEFINITION.id;
+    if (service.reactory?.id) return service.reactory.id;
+    if (service.COMPONENT_DEFINITION?.id) return service.COMPONENT_DEFINITION.id;
+    if (service.prototype?.nameSpace && service.prototype?.name && service.prototype?.version) {
+      return `${service.prototype.nameSpace}.${service.prototype.name}@${service.prototype.version}`;
+    }
+  }
+  if (service.reactory?.id) return service.reactory.id;
+  if (service.COMPONENT_DEFINITION?.id) return service.COMPONENT_DEFINITION.id;
+  if (service.nameSpace && service.name && service.version) {
+    return `${service.nameSpace}.${service.name}@${service.version}`;
+  }
+  return service.name || null;
+}
+
 // a macro that describes modules installed in reactory
 export const ModuleMacro: Macro<unknown, ModuleMacroProps> = async (
   props: ModuleMacroProps,
@@ -12,13 +33,16 @@ export const ModuleMacro: Macro<unknown, ModuleMacroProps> = async (
     try {
       const describeModule = (module: Reactory.Server.IReactoryModule) => { 
         if (details) {
+          const rawServices = Array.isArray(module.services) ? module.services : [];
           return {
             id: `${module.nameSpace}.${module.name}@${module.version}`,
             nameSpace: module.nameSpace,
             name: module.name,
             version: module.version,
-            dependencies: module.dependencies,
-            services: module.services.map((service) => service.id)
+            dependencies: module.dependencies || [],
+            services: rawServices
+              .map(resolveServiceId)
+              .filter((id): id is string => Boolean(id))
           };
         } else {
           return {
@@ -30,7 +54,7 @@ export const ModuleMacro: Macro<unknown, ModuleMacroProps> = async (
         }
       };
       
-      const modulesList = modules.enabled?.map((mod) => describeModule(mod)) || [];
+      const modulesList = modules.enabled?.map((mod: any) => describeModule(mod)) || [];
       
       const namespaces = [...new Set(modulesList.map((m: any) => m.nameSpace))];
 
@@ -95,4 +119,4 @@ export const ModuleMacroRegistry: MacroComponentDefinition<typeof ModuleMacro> =
       }
     }
   }]
-} 
+};
