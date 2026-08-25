@@ -4332,25 +4332,20 @@ export default class ReactorConversationService
               || '';
             let finalThinking = response?.thinking || response?.__reasoning || undefined;
 
-            // DB fallback: if the in-memory response has empty content,
-            // read the last assistant message from MongoDB. This handles
-            // edge cases where the content was persisted by processAIResponse
-            // but the response object lost it during normalization.
-            if (!finalContent) {
-              this.sessionLog("warn", `[sendMessage] AUTO final response content is empty — falling back to DB`, {
+            // DB fallback: if the in-memory response has empty content and no client tools are pending,
+            // check if the last assistant message in MongoDB has content.
+            // Note: We only check the very last message in history, NOT older turns,
+            // to avoid echoing previous conversation turns when a response only contained tool calls.
+            if (!finalContent && !hasClientToolsPending) {
+              this.sessionLog("warn", `[sendMessage] AUTO final response content is empty — checking last DB message`, {
                 conversationId: effectiveConversationId,
               }, effectiveConversationId, personaId);
               try {
                 const conv = await ReactorConversationModel.findById(effectiveConversationId).lean();
-                if (conv?.history?.length) {
-                  for (let hi = conv.history.length - 1; hi >= 0; hi--) {
-                    const entry = conv.history[hi] as any;
-                    if (entry.role === 'assistant' && entry.content) {
-                      finalContent = entry.content;
-                      if (!finalThinking && entry.thinking) finalThinking = entry.thinking;
-                      break;
-                    }
-                  }
+                const lastEntry = conv?.history?.[conv.history.length - 1] as any;
+                if (lastEntry && lastEntry.role === 'assistant' && lastEntry.content) {
+                  finalContent = lastEntry.content;
+                  if (!finalThinking && lastEntry.thinking) finalThinking = lastEntry.thinking;
                 }
               } catch (dbErr: any) {
                 this.sessionLog("error", `[sendMessage] DB fallback failed: ${dbErr.message}`, {
