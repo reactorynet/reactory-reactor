@@ -122,6 +122,7 @@ const ReactorProjectSchema: Schema = new Schema({
   repoUrl: String,
   projectTypes: [String], 
   lastSync: Date,
+  indexingJobId: String,
   description: String,
   tasksUrl: String,
   primaryDocumentation: ProjectDocumentationSchema,

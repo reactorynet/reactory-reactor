@@ -59,9 +59,9 @@ All processors now extend **`BaseProjectProcessor`**, which provides:
 |-----------|-----------|-----------|------------------------|------|
 | **NodeJS** | `package.json` (detects `typescript`/`react`) | ✅ (base) | ✅ TypeScript AST analyzer | nodejs |
 | **ReactNative** | `react-native` dep | ✅ (base) | ✅ TypeScript AST analyzer | react-native |
-| **Python** | requirements/setup/pyproject | ✅ (base) | ✅ Python analyzer | python |
-| **Java** | pom/gradle/ant | ✅ (base) | ✅ Java + Kotlin analyzers | java |
-| **CSharp** | `.csproj`/`.sln` | ✅ (base) | ✅ C# analyzer | csharp |
+| **Python** | requirements/setup/pyproject | ✅ (base) | ✅ Python Tree-sitter AST analyzer (with heuristic fallback) | python |
+| **Java** | pom/gradle/ant | ✅ (base) | ✅ Java + Kotlin Tree-sitter AST analyzers | java |
+| **CSharp** | `.csproj`/`.sln` | ✅ (base) | ✅ C# Tree-sitter AST analyzer | csharp |
 | **TSql** | `.sqlproj`/`.dacpac` | ✅ (base) + Connections node, DATASTORE root, rich menus | — | tsql |
 | **Markdown** | documents in root or a docs dir (`docs`, `adr`, `rfcs`, …), or a docs-site config (`mkdocs.yml`, `docusaurus.config.*`, …) | ✅ (base) | ✅ document analyzer (§4); claims documents only on hybrid projects | markdown |
 | **File** | any repoPath (**fallback only** — used when nothing else claims the project) | ✅ (base) | documents only (base default) | — |
@@ -72,7 +72,7 @@ All processors now extend **`BaseProjectProcessor`**, which provides:
 ## 3. TypeScript analyzer (`services/graph/analyzers/TypeScriptAnalyzer.ts`)
 
 Parses `.ts/.tsx/.js/.jsx` with the TypeScript compiler API in four passes and returns `{ symbols, externals, edges }`:
-- **Pass 1 — imports:** builds an import-binding map (local name → resolved file / npm package) and emits `DEPENDENCY` edges (relative imports resolved via extension/`index` lookup; bare imports → external dependency node; `export … from` re-exports).
+- **Pass 1 — imports:** builds an import-binding map (local name → resolved file / npm package) and emits `DEPENDENCY` edges (relative imports resolved via extension/`index` lookup; non-relative imports resolved via `tsconfig.json` `compilerOptions.paths` and `baseUrl` against in-repo files via `tsconfigPaths.ts`, cached per repo; bare package imports → external dependency node; `export … from` re-exports).
 - **Pass 2 — symbols:** classes (+ one level of methods), functions, interfaces, type aliases, enums, exported const/arrow functions — each a deterministic child node with line number, `symbolKind`, and `exported` flag.
 - **Pass 3 — inheritance:** `extends` → `INHERITS` edge, `implements` → `IMPLEMENTS` edge, resolved to the base type's node (same file or via import bindings).
 - **Pass 4 — calls:** walks each callable body for call expressions and emits `CALL` edges — `this.method()` → the sibling method, local calls → the local symbol, and cross-file calls resolved through import bindings.
@@ -81,11 +81,12 @@ Edges are de-duplicated by deterministic id. `ReactorLinkType` was extended with
 
 ### Other language analyzers (`services/graph/analyzers/`)
 
-No AST parser is available in-runtime for Python/Java/C#, so these are careful **heuristic scanners** sharing a `GraphEmitter` (deterministic node/edge construction + local-symbol/import-binding resolution) and, for C-family languages, `sanitizeCLike` (blanks comments/strings), `matchBrace`, `topLevelMembers` and `emitBraceTypes` in `support.ts`.
+AST parsers via `TreeSitterEngine` (with resilient heuristic fallback for Python/C-family) share a `GraphEmitter` (deterministic node/edge construction + local-symbol/import-binding resolution):
 
-- **PythonAnalyzer** — indentation-aware: classes, functions, methods; `import`/`from … import` (relative imports resolved to in-repo files, absolute → external); base-class `INHERITS`; `self.method()`, local and construction `CALL` edges.
-- **JavaAnalyzer** — brace-based: classes/interfaces/enums, methods; `import` deps; `extends`→`INHERITS`, `implements`→`IMPLEMENTS`; `this.method()`/sibling `CALL` edges. Constructors (no return type) are intentionally not surfaced.
-- **CSharpAnalyzer** — brace-based: classes/structs/interfaces/enums, methods; `using` deps; base list `: Base, IFoo` split into `INHERITS`/`IMPLEMENTS` via the `IXxx` naming convention; `this.method()`/sibling `CALL` edges.
+- **PythonAnalyzer** — Tree-sitter AST analyzer with indentation heuristic fallback: classes, functions, methods; `import`/`from … import` (relative imports resolved to in-repo files, absolute → external); base-class `INHERITS`; `self.method()`, local and construction `CALL` edges.
+- **JavaAnalyzer** — Tree-sitter AST analyzer: classes/interfaces/enums/records, methods and constructors; `import` deps; `extends`→`INHERITS`, `implements`→`IMPLEMENTS`; `this.method()`/sibling and `new X()` `CALL` edges.
+- **CSharpAnalyzer** — Tree-sitter AST analyzer: classes/structs/interfaces/enums, methods and constructors; `using` deps; base list `: Base, IFoo` resolved locally or via `IXxx` fallback; `this.method()`/sibling and `new X()` `CALL` edges.
+- **KotlinAnalyzer** — Tree-sitter AST analyzer: classes/interfaces/objects, functions and constructors; `import` deps; `constructor_invocation`→`INHERITS` vs `user_type`→`IMPLEMENTS`; `this.method()` and constructor `CALL` edges.
 
 All emit the same `{ symbols, externals, edges }` shape and id-space as the TS analyzer, so persistence, edges and GraphQL resolution work identically. Unresolved references (builtins, cross-namespace bases without an import binding) produce **no** edge, which keeps the graph clean rather than guessing.
 
@@ -155,6 +156,8 @@ A reference originates from the **section containing it** where there is one, ot
 
 **Incremental re-index by content hash (Session 08):** `BaseProjectProcessor.process` computes a SHA-256 `contentHash` for each file. Unchanged files bypass `analyseFileFull` and search index rebuilding. Descendant symbols/sections and edges for skipped files are touched with the current `runId` so they are preserved during project-scoped GC. `forceFull: true` option forces complete re-analysis.
 
+**Async catalog & index jobs (Session 09):** `ReactorSyncCatalogNodes` and `ReactorIndexNodes` default to asynchronous execution (`async: true`), enqueuing catalog jobs via `enqueueCatalog` and returning `ReactorCatalogJobAccepted` with a `jobId` in < 1s. The jobs execute through the `reactor.CatalogProjectGraph@1.0.0` YAML workflow on the Reactory durable workflow engine. `async: false` is supported for synchronous/script execution. `ReactorCatalogJobStatus` query maps workflow instance status to `PENDING | RUNNING | COMPLETE | FAILED`. Re-enqueuing an active project without `forceFull` returns the existing `jobId` (idempotent).
+
 ## 6. SystemGraphManager methods
 
 | Method | Status |
@@ -166,13 +169,14 @@ A reference originates from the **section containing it** where there is one, ot
 | `getProjectForCatalogNode` | ✅ Mongo-backed, matched by deterministic id |
 | `catalogProject` / `catalogProjects` | ✅ `catalogProjects` now awaits + isolates errors |
 | `getLinks / createLink / updateLink / deleteLink` | ✅ backed by `reactor_node_links` (idempotent upserts) |
+| `enqueueCatalog / getCatalogJobStatus` | ✅ async workflow job submission & status polling |
 | `getCategoryNodes` | ✅ static taxonomy |
 
 ## 7. GraphQL surface
 
 - **Node relationships:** `ReactorNode.dependencies / dependents / inputs / outputs / parent` resolve via the edge store; `ReactorNodeLink.source / target` resolve node objects from ids.
-- **Search queries** `ReactorNodesForType` / `ReactorNodesByTerm` query the **persisted graph** (with catalog fallback) instead of filtering the full list in memory.
-- **Mutations** match the schema: `ReactorCreateNodeLink`, `ReactorUpdateNodeLink`, `ReactorDeleteNodeLink`, `ReactorSyncCatalogNodes`, `ReactorIndexNodes`, `ReactorSaveSystemGraph` — all implemented (the previous throwing/misnamed stubs are gone).
+- **Search queries** `ReactorNodesForType` / `ReactorNodesByTerm` query the **persisted graph** (with catalog fallback) instead of filtering the full list in memory. `ReactorCatalogJobStatus` exposes async job execution status (`PENDING`, `RUNNING`, `COMPLETE`, `FAILED`).
+- **Mutations** match the schema: `ReactorCreateNodeLink`, `ReactorUpdateNodeLink`, `ReactorDeleteNodeLink`, `ReactorSyncCatalogNodes` (default async, returning `ReactorCatalogJobAccepted`), `ReactorIndexNodes` (default async), `ReactorSaveSystemGraph` — all implemented (the previous throwing/misnamed stubs are gone).
 
 ## 8. Tests (no Mongo required)
 

@@ -108,15 +108,18 @@ Same roles as existing mutations; do not open ANON.
 
 ## 6. Acceptance criteria
 
-- [ ] Default sync catalog mutation returns in < 1s with job id (mocked engine)
-- [ ] `async: false` still blocks and catalogs (for scripts)
-- [ ] Status query reflects workflow terminal states
-- [ ] No double concurrent full process for same project without force
-- [ ] Schema additive / backward compatible as much as possible
+- [x] Default sync catalog mutation returns in < 1s with job id (mocked engine)
+- [x] `async: false` still blocks and catalogs (for scripts)
+- [x] Status query reflects workflow terminal states
+- [x] No double concurrent full process for same project without force
+- [x] Schema additive / backward compatible as much as possible
 
 ---
 
 ## 7. Agent Notes
 
-- Workflow file path:
-- Registration mechanism used:
+- Workflow file path: `src/modules/reactory-reactor/workflow/CatalogProjectGraph.yaml`
+- Registration mechanism used: Registered via `YAML_WORKFLOWS` in `src/modules/reactory-reactor/workflow/index.ts` using `loadYamlWorkflow` under `reactor.CatalogProjectGraph@1.0.0`
+- Service implementation: `enqueueCatalog(projectId, opts)` added to `ReactorProjectService` and `SystemGraphManager`, persisting `project.indexingJobId` for idempotency unless `forceFull: true`. `getCatalogJobStatus(jobId)` maps workflow instance status codes (0/4 -> PENDING, 1 -> RUNNING, 2 -> COMPLETE, 3 -> FAILED).
+- GraphQL surface: Added `ReactorCatalogJobAccepted` type to `CatalogNodeSyncResult` union in `mutations.graphql`. Added `async: Boolean = true` parameter to `ReactorSyncCatalogNodes` and `ReactorIndexNodes`. Added `ReactorCatalogJobStatus` query in `queries.graphql`.
+- Test coverage: `src/modules/reactory-reactor/services/graph/AsyncCatalogJobs.test.ts` (15 passing tests).

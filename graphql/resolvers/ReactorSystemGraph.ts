@@ -55,16 +55,25 @@ interface ReactorProjectFilterArgs {
 }
 
 interface CatalogNodeSyncSuccess {
+  __typename?: "CatalogNodeSyncSuccess";
   node: Partial<ReactorNode>;
   message: string;
 }
 
 interface CatalogNodeSyncFailure {
+  __typename?: "CatalogNodeSyncFailure";
   node: Partial<ReactorNode>;
   errors: string[];
 }
 
-type CatalogNodeSyncResult = CatalogNodeSyncSuccess | CatalogNodeSyncFailure;
+interface ReactorCatalogJobAccepted {
+  __typename?: "ReactorCatalogJobAccepted";
+  jobId: string;
+  message?: string;
+  node?: Partial<ReactorNode>;
+}
+
+type CatalogNodeSyncResult = CatalogNodeSyncSuccess | CatalogNodeSyncFailure | ReactorCatalogJobAccepted;
 
 
 interface ReactorNodeCatalogIndexSuccess {
@@ -559,20 +568,53 @@ class ReactorSystemGraph {
   @mutation("ReactorSyncCatalogNodes")
   async syncCatalogNodes(
     _: any,
-    args: { request: { ids: number[] } },
+    args: { request: { ids: number[] }; async?: boolean },
     context: Reactory.Server.IReactoryContext
   ): Promise<CatalogNodeSyncResult[]> {
+    const isAsync = args?.async !== false;
     const graphSvc = graphService(context);
     const ids = args?.request?.ids || [];
     const results: CatalogNodeSyncResult[] = [];
     for (const id of ids) {
       try {
         const project = await graphSvc.getProjectForCatalogNode({ id });
-        if (project) await graphSvc.catalogProject(project);
-        results.push({
-          node: await graphSvc.getCatalogNode(id),
-          message: "Catalog node sync complete",
-        });
+        if (!project) {
+          let node: Partial<ReactorNode> = { id } as Partial<ReactorNode>;
+          try {
+            node = await graphSvc.getCatalogNode(id);
+          } catch {
+            /* node may not resolve if project missing */
+          }
+          results.push({
+            __typename: "CatalogNodeSyncFailure",
+            node,
+            errors: [`Project for catalog node ${id} not found`],
+          });
+          continue;
+        }
+
+        if (isAsync) {
+          const job = await graphSvc.enqueueCatalog(project._id?.toString() || project.id);
+          let node: Partial<ReactorNode> = { id } as Partial<ReactorNode>;
+          try {
+            node = await graphSvc.getCatalogNode(id);
+          } catch {
+            /* fallback */
+          }
+          results.push({
+            __typename: "ReactorCatalogJobAccepted",
+            jobId: job.jobId,
+            message: job.message || "Catalog job enqueued",
+            node,
+          });
+        } else {
+          await graphSvc.catalogProject(project);
+          results.push({
+            __typename: "CatalogNodeSyncSuccess",
+            node: await graphSvc.getCatalogNode(id),
+            message: "Catalog node sync complete",
+          });
+        }
       } catch (e) {
         let node: Partial<ReactorNode> = { id } as Partial<ReactorNode>;
         try {
@@ -580,7 +622,11 @@ class ReactorSystemGraph {
         } catch {
           /* node may not resolve if project missing */
         }
-        results.push({ node, errors: [(e as Error).message] });
+        results.push({
+          __typename: "CatalogNodeSyncFailure",
+          node,
+          errors: [(e as Error).message],
+        });
       }
     }
     return results;
@@ -589,9 +635,10 @@ class ReactorSystemGraph {
   @mutation("ReactorIndexNodes")
   async indexNodes(
     _: any,
-    args: { filter: ReactorProjectFilterArgs },
+    args: { filter: ReactorProjectFilterArgs; async?: boolean },
     context: Reactory.Server.IReactoryContext
   ): Promise<PagedNodes> {
+    const isAsync = args?.async !== false;
     const graphSvc = graphService(context);
     const projectSvc = context.getService<ReactorProjectService>(
       "reactor.ReactorProjectService@1.0.0"
@@ -600,7 +647,11 @@ class ReactorSystemGraph {
     const { projects } = await projectSvc.getProjects(args.filter);
     for (const project of projects) {
       try {
-        await projectSvc.index(project as IReactorProject);
+        if (isAsync) {
+          await graphSvc.enqueueCatalog(project.id || (project as any)._id?.toString());
+        } else {
+          await projectSvc.index(project as IReactorProject);
+        }
       } catch (e) {
         context.error(
           `Failed to index project ${project.name}: ${(e as Error).message}`
@@ -628,6 +679,15 @@ class ReactorSystemGraph {
   ): Promise<Partial<ReactorNodeCategory> | undefined> {
     const categories = await graphService(context).getCategoryNodes();
     return categories.find((cat) => cat.id === args.id);
+  }
+
+  @query("ReactorCatalogJobStatus")
+  async ReactorCatalogJobStatus(
+    _: any,
+    args: { jobId: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<any> {
+    return graphService(context).getCatalogJobStatus(args.jobId);
   }
 
   @query("ReactorNodeByCategory")

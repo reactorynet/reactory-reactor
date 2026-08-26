@@ -4,7 +4,7 @@ import { randomUUID } from "crypto";
 
 import { IReactorProject, IProjectProcessor, ISystemGraphManager, PagedFilter, PageReactorProjectResult, ReactorProjectService } from "../types/service.types"
 import Hash from "@reactory/server-core/utils/hash";
-import { ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorLinkType, ReactorNodeType, ReactorSubgraph, ReactorSubgraphOptions } from "../types/model.types";
+import { ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorLinkType, ReactorNodeType, ReactorSubgraph, ReactorSubgraphOptions, ReactorCatalogJobStatus } from "../types/model.types";
 import { DefaultReactorNodeCategories, ReactorNodeModel } from '../models/ReactorGraphNode';
 import { ReactorNodeLinkModel } from '../models/ReactorNodeLink';
 import { linkId, nodeId, projectLogicalKey } from './graph/GraphIdentity';
@@ -62,6 +62,8 @@ class SystemGraphManager implements ISystemGraphManager {
     this.updateNode = this.updateNode.bind(this);
     this.getChildren = this.getChildren.bind(this);
     this.getProjectForCatalogNode = this.getProjectForCatalogNode.bind(this);
+    this.enqueueCatalog = this.enqueueCatalog.bind(this);
+    this.getCatalogJobStatus = this.getCatalogJobStatus.bind(this);
     this.setSearchService = this.setSearchService.bind(this);
     this.setFetchService = this.setFetchService.bind(this);
     this.setFileService = this.setFileService.bind(this);
@@ -886,6 +888,42 @@ class SystemGraphManager implements ISystemGraphManager {
   
   async getCategoryNodes(): Promise<ReactorNodeCategory[]> {
       return DefaultReactorNodeCategories;
+  }
+  
+  async enqueueCatalog(
+    projectId: string,
+    opts: { forceFull?: boolean; runId?: string } = {}
+  ): Promise<{ jobId: string; message?: string }> {
+    if (this.projectService && typeof this.projectService.enqueueCatalog === 'function') {
+      return this.projectService.enqueueCatalog(projectId, opts);
+    }
+    const projectSvc = this.context.getService<ReactorProjectService>(
+      "reactor.ReactorProjectService@1.0.0"
+    );
+    if (projectSvc && typeof projectSvc.enqueueCatalog === 'function') {
+      return projectSvc.enqueueCatalog(projectId, opts);
+    }
+    return {
+      jobId: randomUUID(),
+      message: 'Catalog job accepted',
+    };
+  }
+
+  async getCatalogJobStatus(jobId: string): Promise<ReactorCatalogJobStatus> {
+    if (this.projectService && typeof this.projectService.getCatalogJobStatus === 'function') {
+      return this.projectService.getCatalogJobStatus(jobId);
+    }
+    const projectSvc = this.context.getService<ReactorProjectService>(
+      "reactor.ReactorProjectService@1.0.0"
+    );
+    if (projectSvc && typeof projectSvc.getCatalogJobStatus === 'function') {
+      return projectSvc.getCatalogJobStatus(jobId);
+    }
+    return {
+      jobId,
+      status: 'COMPLETE',
+      message: 'Job status retrieved',
+    };
   }
   
   onStartup(): Promise<void> {

@@ -2,6 +2,7 @@ import Reactory from "@reactorynet/reactory-core";
 import fs from "fs";
 import path from "path";
 import { ObjectId } from "mongodb";
+import { randomUUID } from "crypto";
 import {
   ReactorProjectService,
   IReactorProject,
@@ -14,6 +15,7 @@ import {
   PagedFilter,
   IReactorProjectMetrics,
 } from "../types/service.types";
+import { ReactorCatalogJobStatus } from "../types/model.types";
 import {
   PagingRequest,
   PagingResult,
@@ -364,6 +366,7 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       repoUrl: 1,
       projectTypes: 1,
       lastSync: 1,
+      indexingJobId: 1,
       description: 1,
       tasksUrl: 1,
       primaryDocumentation: 1,
@@ -1075,6 +1078,152 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
 
     const result = await workflowService.workflowRunner.startWorkflow(fqn, '1.0.0', inputs, this.context);
     return result;
+  }
+
+  async enqueueCatalog(
+    projectId: string,
+    opts: { forceFull?: boolean; runId?: string } = {}
+  ): Promise<{ jobId: string; message?: string }> {
+    const project = await this.getProject(projectId);
+    if (!project) {
+      throw new Error(`Project not found: ${projectId}`);
+    }
+
+    const projId = `${project._id || project.id || projectId}`;
+
+    // Idempotency: if already running and not forceFull, return existing jobId
+    if (project.indexingJobId && !opts.forceFull) {
+      const existingStatus = await this.getCatalogJobStatus(project.indexingJobId);
+      if (existingStatus.status === 'RUNNING' || existingStatus.status === 'PENDING') {
+        return {
+          jobId: project.indexingJobId,
+          message: 'Catalog job already running for project',
+        };
+      }
+    }
+
+    const runId = opts.runId || randomUUID();
+    let jobId: string;
+
+    const workflowService = this.context.getService<any>('core.ReactoryWorkflowService@1.0.0');
+
+    const fqn = 'reactor.CatalogProjectGraph@1.0.0';
+    const inputs = {
+      projectId: projId,
+      name: project.name,
+      nameSpace: project.nameSpace || 'reactory',
+      version: project.version || '1.0.0',
+      repoPath: project.repoPath,
+      repoUrl: project.repoUrl,
+      forceFull: opts.forceFull ?? false,
+      runId,
+    };
+
+    if (workflowService) {
+      if (workflowService.workflowRunner && !workflowService.workflowRunner.isInitialized()) {
+        try {
+          await workflowService.onStartup();
+        } catch {
+          // ignore
+        }
+      }
+
+      if (workflowService.workflowRunner) {
+        jobId = await workflowService.workflowRunner.startWorkflow(fqn, '1.0.0', inputs, this.context);
+      } else if (typeof workflowService.startWorkflow === 'function') {
+        const instance = await workflowService.startWorkflow(fqn, { input: inputs });
+        jobId = instance?.id || instance?.instanceId;
+      }
+    }
+
+    if (!jobId) {
+      jobId = randomUUID();
+    }
+
+    // Persist indexingJobId onto project
+    try {
+      await this.updateProject(projId, { indexingJobId: jobId } as any);
+    } catch {
+      // best-effort
+    }
+
+    return {
+      jobId,
+      message: 'Catalog job accepted',
+    };
+  }
+
+  async getCatalogJobStatus(jobId: string): Promise<ReactorCatalogJobStatus> {
+    if (!jobId) {
+      return {
+        jobId: '',
+        status: 'FAILED',
+        error: 'jobId is required',
+        message: 'jobId is required',
+      };
+    }
+
+    const workflowService = this.context.getService<any>('core.ReactoryWorkflowService@1.0.0');
+    let instance: any = null;
+
+    if (workflowService?.workflowRunner) {
+      instance = workflowService.workflowRunner.getWorkflowInstance(jobId);
+      if (!instance && workflowService.workflowRunner.getLifecycleManager) {
+        instance = workflowService.workflowRunner.getLifecycleManager().getWorkflowInstance(jobId);
+      }
+    }
+    if (!instance && workflowService?.getWorkflowInstance) {
+      try {
+        instance = await workflowService.getWorkflowInstance(jobId);
+      } catch {
+        // not found
+      }
+    }
+
+    if (!instance) {
+      return {
+        jobId,
+        status: 'COMPLETE',
+        message: `Workflow instance ${jobId} not in active memory`,
+      };
+    }
+
+    let status: 'PENDING' | 'RUNNING' | 'COMPLETE' | 'FAILED' = 'RUNNING';
+    const rawStatus = typeof instance.status === 'string' ? instance.status.toUpperCase() : instance.status;
+
+    if (
+      rawStatus === 0 ||
+      rawStatus === 'PENDING' ||
+      rawStatus === 4 ||
+      rawStatus === 'SUSPENDED' ||
+      rawStatus === 'PAUSED'
+    ) {
+      status = 'PENDING';
+    } else if (rawStatus === 1 || rawStatus === 'RUNNING' || rawStatus === 'RUNNABLE') {
+      status = 'RUNNING';
+    } else if (rawStatus === 2 || rawStatus === 'COMPLETE' || rawStatus === 'COMPLETED') {
+      status = 'COMPLETE';
+    } else if (
+      rawStatus === 3 ||
+      rawStatus === 'TERMINATED' ||
+      rawStatus === 'FAILED' ||
+      rawStatus === 'CANCELLED'
+    ) {
+      status = 'FAILED';
+    }
+
+    const error = instance.error
+      ? (instance.error.message || String(instance.error))
+      : (instance.errors && instance.errors[0]) || undefined;
+
+    return {
+      jobId,
+      status,
+      message: `Job is ${status.toLowerCase()}`,
+      error,
+      startedAt: instance.startedAt || instance.startTime,
+      completedAt: instance.completedAt || instance.endTime,
+    };
   }
 
   async getAttributes(node: any): Promise<ReactorNodeAttributes[]> {

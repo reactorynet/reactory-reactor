@@ -128,9 +128,9 @@ types/
 | 06 | `06-graphql-facade-and-paging.md` | P1 | M | done | |
 | 07 | `07-mongo-indexes-and-project-fields.md` | P1 | S | done | |
 | 08 | `08-incremental-reindex.md` | P1 | L | done | |
-| 09 | `09-async-catalog-jobs.md` | P1 | M | pending | |
-| 10 | `10-typescript-path-aliases.md` | P2 | M | pending | |
-| 11 | `11-treesitter-python-and-engine-guard.md` | P2 | M | pending | |
+| 09 | `09-async-catalog-jobs.md` | P1 | M | done | |
+| 10 | `10-typescript-path-aliases.md` | P2 | M | done | |
+| 11 | `11-treesitter-python-and-engine-guard.md` | P2 | M | done | |
 | 12 | `12-cross-project-externals.md` | P3 | M | pending | |
 | 13 | `13-docs-symbol-mentions.md` | P3 | M | pending | |
 | 14 | `14-observability-tenancy-cache.md` | P4 | M | pending | |
@@ -194,7 +194,7 @@ Program is **done** when:
 - [x] GraphQL graph queries go through manager (no ad-hoc model filters for core paths).
 - [x] Mongo indexes match hot queries; `projectId` is first-class.
 - [x] Incremental re-index skips unchanged files by hash.
-- [ ] Heavy catalog/index mutations are async jobs.
+- [x] Heavy catalog/index mutations are async jobs.
 - [ ] All listed tests green; README future-work items updated.
 
 ---

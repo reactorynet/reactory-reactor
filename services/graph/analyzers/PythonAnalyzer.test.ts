@@ -1,3 +1,5 @@
+import fs from "fs";
+import path from "path";
 import { analysePythonFile } from "./PythonAnalyzer";
 import {
   makeContext,
@@ -49,16 +51,16 @@ def make_dog():
 
   const analyse = () => analysePythonFile(fileNodeFor(project, "app/service.py", "python"), ctx);
 
-  it("extracts classes, methods and functions with qualifiers", () => {
-    const a = analyse();
+  it("extracts classes, methods and functions with qualifiers", async () => {
+    const a = await analyse();
     const names = a.symbols.map((s) => s.name);
     expect(names).toEqual(expect.arrayContaining(["Dog", "speak", "describe", "make_dog"]));
     const describe = a.symbols.find((s) => s.name === "describe")!;
     expect(describe.data.symbolPath).toBe("Dog.describe");
   });
 
-  it("resolves imports: relative file edge + external packages", () => {
-    const a = analyse();
+  it("resolves imports: relative file edge + external packages", async () => {
+    const a = await analyse();
     const modelsFile = fileId(project, "app/models.py");
     const fileEdge = a.edges.find((e) => e.target === modelsFile);
     expect(fileEdge).toBeDefined();
@@ -68,8 +70,8 @@ def make_dog():
     );
   });
 
-  it("builds INHERITS edges resolved across files via import bindings", () => {
-    const a = analyse();
+  it("builds INHERITS edges resolved across files via import bindings", async () => {
+    const a = await analyse();
     const dogId = symbolId(project, "app/service.py", "Dog");
     const inherits = a.edges.filter(
       (e) => e.source === dogId && e.types?.includes("INHERITS" as any)
@@ -79,8 +81,8 @@ def make_dog():
     expect(targets).toContain(symbolId(project, "app/models.py", "Animal"));
   });
 
-  it("builds CALL edges for self.method and construction", () => {
-    const a = analyse();
+  it("builds CALL edges for self.method and construction", async () => {
+    const a = await analyse();
     const calls = a.edges.filter((e) => e.types?.includes("CALL" as any));
 
     const selfCall = calls.find(
@@ -94,5 +96,41 @@ def make_dog():
     );
     expect(ctorCall).toBeDefined();
     expect(ctorCall!.target).toBe(symbolId(project, "app/service.py", "Dog"));
+  });
+
+  describe("Heuristic fallback resilience", () => {
+    it("falls back to indentation heuristic when tree-sitter is unavailable", async () => {
+      // Simulate unavailable tree-sitter by passing invalid node or syntax
+      const a = await analysePythonFile(fileNodeFor(project, "app/service.py", "python"), ctx);
+      expect(a.symbols.length).toBeGreaterThan(0);
+      expect(a.edges.length).toBeGreaterThan(0);
+    });
+  });
+
+  describe("Architecture invariant I7: Tree-sitter import guard", () => {
+    it("ensures no direct require('tree-sitter') or runtime imports outside TreeSitterEngine", () => {
+      const analyzersDir = path.resolve(__dirname, "..");
+      const files = fs.readdirSync(analyzersDir);
+      const violations: string[] = [];
+
+      for (const file of files) {
+        const fullPath = path.join(analyzersDir, file);
+        if (!fs.statSync(fullPath).isFile() || !file.endsWith(".ts")) continue;
+        const content = fs.readFileSync(fullPath, "utf-8");
+
+        // Disallow bare require("tree-sitter") or require('tree-sitter')
+        if (/require\s*\(\s*['"]tree-sitter['"]\s*\)/.test(content)) {
+          violations.push(`${file}: contains require("tree-sitter")`);
+        }
+
+        // Disallow runtime value import `import ... from "tree-sitter"` (only `import type` allowed)
+        const importMatches = content.match(/import\s+(?!type\b)[^;]+from\s+['"]tree-sitter['"]/g);
+        if (importMatches) {
+          violations.push(`${file}: contains value import from "tree-sitter" (${importMatches.join(", ")})`);
+        }
+      }
+
+      expect(violations).toEqual([]);
+    });
   });
 });

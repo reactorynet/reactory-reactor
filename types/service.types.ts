@@ -2,7 +2,7 @@ import Reactory from '@reactorynet/reactory-core';
 import OpenAI from "openai"
 import GoogleGenAI from "google-genai";
 import { TReactorConversationDocument, TReactorConversationModel, ReactorConversationHistoryItem } from "../models/ReactorChatState"
-import { AIAudioChatParams, AIChatCompletion, AIChatParams, AIFile, AIFineTuningEvent, AIFineTuningJob, AIImage, AIImageGenerationParams, AIListResponse, AIModel, CreateAIFineTuningJobParams, ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorNodeType, ReactorProviderConfig, ReactorSubgraph, ReactorSubgraphOptions } from "./model.types"
+import { AIAudioChatParams, AIChatCompletion, AIChatParams, AIFile, AIFineTuningEvent, AIFineTuningJob, AIImage, AIImageGenerationParams, AIListResponse, AIModel, CreateAIFineTuningJobParams, ReactorCatalogJobStatus, ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorNodeType, ReactorProviderConfig, ReactorSubgraph, ReactorSubgraphOptions } from "./model.types"
 import { PagingRequest, PagingResult } from "@reactory/server-core/database/types"
 import { ObjectId } from "mongodb"
 import { ChatState, MacroComponentDefinition, MacroToolDefinition, Schema, ToolApprovalMode } from '../ai/openai/types/chat';
@@ -1077,6 +1077,7 @@ export interface IReactorProject extends Reactory.IComponentFqnDefinition {
   repoUrl?: string;
   projectTypes: KnownReactorProjectTypes[];  
   lastSync?: Date;
+  indexingJobId?: string;
   description?: string;
   tasksUrl?: string;
   primaryDocumentation: ReactorProjectDocumentation;
@@ -1261,6 +1262,19 @@ export interface ReactorProjectService extends Reactory.Service.IReactoryService
    */
   getProjectMetrics(project: Partial<IReactorProject>, startDate?: Date, endDate?: Date): Promise<IReactorProjectMetrics[]>;
 
+  /**
+   * Enqueues an asynchronous catalog job for a project.
+   */
+  enqueueCatalog(
+    projectId: string,
+    opts?: { forceFull?: boolean; runId?: string }
+  ): Promise<{ jobId: string; message?: string }>;
+
+  /**
+   * Returns the status of an asynchronous catalog job.
+   */
+  getCatalogJobStatus(jobId: string): Promise<ReactorCatalogJobStatus>;
+
 }
 
 export interface ISystemGraphManager extends Reactory.Service.IReactoryDefaultService {
@@ -1410,6 +1424,19 @@ export interface ISystemGraphManager extends Reactory.Service.IReactoryDefaultSe
    * Updates node fields, persists changes, and invalidates ephemeral cache.
    */
   updateNode(id: number, patch: Partial<ReactorNode>): Promise<Partial<ReactorNode>>;
+
+  /**
+   * Enqueues an asynchronous catalog job for a project.
+   */
+  enqueueCatalog(
+    projectId: string,
+    opts?: { forceFull?: boolean; runId?: string }
+  ): Promise<{ jobId: string; message?: string }>;
+
+  /**
+   * Returns the status of an asynchronous catalog job.
+   */
+  getCatalogJobStatus(jobId: string): Promise<ReactorCatalogJobStatus>;
 
 }
 

@@ -260,6 +260,25 @@ export interface ReactorNodeUI {
   options: ReactorNodeOption[]
 }
 
+export type ReactorCatalogJobState = 'PENDING' | 'RUNNING' | 'COMPLETE' | 'FAILED';
+
+export interface ReactorCatalogJobStats {
+  filesProcessed?: number;
+  nodesCreated?: number;
+  linksCreated?: number;
+  durationMs?: number;
+}
+
+export interface ReactorCatalogJobStatus {
+  jobId: string;
+  status: ReactorCatalogJobState;
+  message?: string;
+  error?: string;
+  stats?: ReactorCatalogJobStats;
+  startedAt?: Date;
+  completedAt?: Date;
+}
+
 /**
  * Generic AI Model definition for provider abstraction.
  */

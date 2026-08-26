@@ -10,7 +10,13 @@ type CatalogNodeSyncFailure {
   errors: [String!]
 }
 
-union CatalogNodeSyncResult = CatalogNodeSyncSuccess | CatalogNodeSyncFailure
+type ReactorCatalogJobAccepted {
+  jobId: String!
+  message: String
+  node: ReactorNode
+}
+
+union CatalogNodeSyncResult = CatalogNodeSyncSuccess | CatalogNodeSyncFailure | ReactorCatalogJobAccepted
 
 type ReactorNodeCatalogIndexSuccess {
   nodes: [ReactorNode!]
@@ -100,8 +106,8 @@ type Mutation {
   ReactorCreateNodeLink(input: ReactoryNodeLinkInput!): ReactorNodeLinkCreateResult!
   ReactorUpdateNodeLink(input: ReactoryNodeLinkInput!): ReactorNodeLinkUpdateResult!
   ReactorDeleteNodeLink(id: Int!): ReactorNodeLinkDeleteResult!
-  ReactorSyncCatalogNodes(request: CatalogCrawlRequest!): [CatalogNodeSyncResult!]!
-  ReactorIndexNodes(filter: ReactorProjectFilter!): ReactorPagedNodes!
+  ReactorSyncCatalogNodes(request: CatalogCrawlRequest!, async: Boolean = true): [CatalogNodeSyncResult!]!
+  ReactorIndexNodes(filter: ReactorProjectFilter!, async: Boolean = true): ReactorPagedNodes!
   """
   Deprecated — only applies link updates; node positions/title/share were
   never persisted. Use ReactorSaveGraphPerspective instead.

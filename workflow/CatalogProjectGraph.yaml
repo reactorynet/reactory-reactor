@@ -1,0 +1,84 @@
+nameSpace: reactor
+name: CatalogProjectGraph
+version: 1.0.0
+description: "Asynchronously catalogs a project repository folder and builds its system graph."
+author: "Reactor"
+tags: ["project", "catalog", "graph", "indexing", "async"]
+metadata:
+  timeout: 600000
+
+inputs:
+  projectId:
+    type: string
+    required: false
+    description: "Project ID, FQN, or name"
+  forceFull:
+    type: boolean
+    required: false
+    default: false
+    description: "Whether to force full re-indexing without hash skip"
+  runId:
+    type: string
+    required: false
+    description: "Run identifier for GC scoping"
+  repoPath:
+    type: string
+    required: false
+    description: "Repository local folder path"
+  repoUrl:
+    type: string
+    required: false
+    description: "Repository remote URL"
+  name:
+    type: string
+    required: false
+    description: "Project name"
+  nameSpace:
+    type: string
+    required: false
+    default: "reactory"
+    description: "Project namespace"
+  version:
+    type: string
+    required: false
+    default: "1.0.0"
+    description: "Project version"
+
+outputs:
+  projectId:
+    type: string
+    source: "step.catalogProject.outputs.result.id"
+    description: "ID of the cataloged project"
+
+steps:
+  - id: logStart
+    name: "Log Start"
+    type: log
+    config:
+      level: info
+      message: "Starting async project graph cataloging for project: ${input.projectId || input.name}"
+
+  - id: catalogProject
+    name: "Catalog Project & Build System Graph"
+    type: service_invoke
+    dependsOn: logStart
+    config:
+      service: "reactor.ReactorProjectService@1.0.0"
+      method: "catalogProject"
+      params:
+        id: "${input.projectId}"
+        name: "${input.name}"
+        nameSpace: "${input.nameSpace}"
+        version: "${input.version}"
+        repoPath: "${input.repoPath}"
+        repoUrl: "${input.repoUrl}"
+        forceFull: "${input.forceFull}"
+        runId: "${input.runId}"
+
+  - id: logCompletion
+    name: "Log Completion"
+    type: log
+    dependsOn: catalogProject
+    config:
+      level: info
+      message: "CatalogProjectGraph workflow completed successfully."
