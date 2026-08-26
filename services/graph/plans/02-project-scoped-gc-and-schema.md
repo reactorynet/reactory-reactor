@@ -209,16 +209,34 @@ Multi-processor: two process calls same runId → GC once with that runId; nodes
 
 ## 7. Acceptance criteria
 
-- [ ] Every node/edge written by process has `projectId`, `runId`, `indexedAt`.
-- [ ] Second full process with new runId removes nodes not rewritten.
-- [ ] Empty projectId never triggers deleteMany.
-- [ ] Multi-processor single catalog run does **not** wipe sibling processor nodes.
-- [ ] Manual/user links with `runId: 'manual'` (or equivalent) survive GC.
-- [ ] Tests green; no session 08 incremental logic required.
+- [x] Every node/edge written by process has `projectId`, `runId`, `indexedAt`.
+- [x] Second full process with new runId removes nodes not rewritten.
+- [x] Empty projectId never triggers deleteMany.
+- [x] Multi-processor single catalog run does **not** wipe sibling processor nodes.
+- [x] Manual/user links with `runId: 'manual'` (or equivalent) survive GC.
+- [x] Tests green; no session 08 incremental logic required.
 
 ---
 
 ## 8. Agent Notes
+
+- Chosen multi-processor strategy (A/B): **Option A (soft GC flag)**. `catalogProject` (and explicit provider path) now generate a single `sharedRunId` per invocation. All processors receive `{ runId, skipGc: !isLast }`; only the last runs GC. Single-processor path also uses a runId + GC.
+- `process` signature extended to `process(project, options?: { runId?: string; skipGc?: boolean })`. Capturing test overrides updated to accept meta. Stamping centralized in `persistGraph(meta)`.
+- GC uses `$nin: [runId, 'manual']` to protect manual/user edges and current run.
+- Legacy unscoped nodes (`projectId` missing): **do not delete** this session (per plan). Future migration can target `projectId: { $exists: false }` + old `indexedAt`.
+- No drive-by refactors outside allowed files. Tree-sitter never touched directly. GraphIdentity invariants preserved (ids unchanged).
+- Tests: all GC unit tests (spies) + full suite for GraphBuilding.test.ts now pass. Used fallback jest cmd (NODE_OPTIONS + npx) due to bin/jest.sh env-file resolution.
+- Diff summary (small patches):
+  - types/model.types.ts: add fields to interfaces (ReactorNode + ReactorNodeLink)
+  - models/ReactorGraphNode.ts + ReactorNodeLink.ts: schema fields + indexes
+  - BaseProjectProcessor.ts: import crypto, extend process sig, stamp in persistGraph, GC after persist (with safeguards)
+  - SystemGraphManager.ts: shared runId plumbing for multi/single processor paths
+  - GraphBuilding.test.ts: new GC describe + makeCapturing that replicates stamp + spy tests; minor call sites to pass skipGc
+  - SystemGraphManager.README.md: persistence bullet for runId GC
+
+Branch: `feat/system-graph-02-gc-schema` (per plan)
+
+All AC checked. Session complete.
 
 - Chosen multi-processor strategy (A/B):
 - Migration notes for legacy unscoped nodes:

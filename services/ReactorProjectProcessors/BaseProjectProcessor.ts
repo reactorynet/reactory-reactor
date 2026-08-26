@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import ignore from "ignore";
+import { randomUUID } from "crypto";
 import Reactory from "@reactorynet/reactory-core";
 import {
   IReactorProject,
@@ -1041,14 +1042,27 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
   /** Upserts nodes and edges by their deterministic ids (idempotent). */
   protected async persistGraph(
     nodes: Partial<ReactorNode>[],
-    edges: ReactorNodeLink[]
+    edges: ReactorNodeLink[],
+    meta?: { projectId?: any; projectFqn?: string; runId?: string; indexedAt?: Date }
   ): Promise<void> {
+    // Stamp project/run metadata (single choke point) before building ops.
+    // This ensures every node/edge written by process() carries projectId/runId/indexedAt.
+    const stamp = (entity: any) => {
+      if (meta) {
+        if (meta.projectId !== undefined) entity.projectId = String(meta.projectId);
+        if (meta.projectFqn) entity.projectFqn = meta.projectFqn;
+        if (meta.runId) entity.runId = meta.runId;
+        if (meta.indexedAt) entity.indexedAt = meta.indexedAt;
+      }
+    };
+
     // Build upsert operations, skipping any entry without a stable id (an
     // id-less filter would match/replace an arbitrary document). `created` and
     // `updated` are removed from the $set payload so they never collide with
     // the $setOnInsert timestamps (MongoDB rejects a field that appears in both
     // $set and $setOnInsert with "would create a conflict").
     const toOp = <T extends { id?: number | string }>(entity: T) => {
+      stamp(entity);
       const { created, updated, ...rest } = entity as T & {
         created?: Date;
         updated?: Date;
@@ -1109,9 +1123,15 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
    * + symbol + external nodes, resolve edges, persist the graph, and index file
    * contents for search. Raw folder browsing remains lazy; only analysed
    * artifacts are persisted.
+   *
+   * options.runId — shared across processors for a single catalog run so GC does not
+   *   wipe sibling processor output. If omitted a fresh UUID is generated.
+   * options.skipGc — when true, do not run project-scoped GC after persist (orchestrator
+   *   will call GC once after all processors for a shared runId).
    */
   async process(
-    project: Partial<IReactorProject>
+    project: Partial<IReactorProject>,
+    options?: { runId?: string; skipGc?: boolean }
   ): Promise<Partial<IReactorProject>> {
     const next = { ...project };
     // Canonicalize the repo path so it agrees with the realpath'd file paths
@@ -1222,11 +1242,38 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     }
 
     nodes.push(...externals.values());
-    await this.persistGraph(nodes, edges);
+
+    const runId = options?.runId || randomUUID();
+    const indexedAt = new Date();
+    const meta = {
+      projectId: next.id,
+      projectFqn: projectFqn(next),
+      runId,
+      indexedAt,
+    };
+
+    // Ensure any edges that arrived without projectId get stamped here too (defense in depth).
+    for (const e of edges) {
+      if (!e.projectId && meta.projectId) e.projectId = meta.projectId as any;
+    }
+
+    await this.persistGraph(nodes, edges, meta);
     await this.indexSearchables(next, searchables);
 
+    // Project-scoped GC: remove nodes/edges for this project with a different runId.
+    // Safeguards: only when projectId present; only if not skipGc; never delete 'manual' runId.
+    if (!options?.skipGc && meta.projectId) {
+      try {
+        const pid = String(meta.projectId);
+        await ReactorNodeModel.deleteMany({ projectId: pid, runId: { $nin: [runId, 'manual'] } });
+        await ReactorNodeLinkModel.deleteMany({ projectId: pid, runId: { $nin: [runId, 'manual'] } });
+      } catch (gcErr) {
+        this.context.warn(`gcStaleGraph failed: ${(gcErr as Error).message}`);
+      }
+    }
+
     this.context.info(
-      `Processed ${next.name}: ${nodes.length} nodes, ${edges.length} edges, ${searchables.length} searchables`
+      `Processed ${next.name}: ${nodes.length} nodes, ${edges.length} edges, ${searchables.length} searchables (runId=${runId})`
     );
     return next;
   }

@@ -1,5 +1,6 @@
 import Reactory from "@reactorynet/reactory-core";
 import ApiError from "@reactory/server-core/exceptions";
+import { randomUUID } from "crypto";
 
 import { IReactorProject, IProjectProcessor, ISystemGraphManager, PagedFilter, PageReactorProjectResult, ReactorProjectService } from "../types/service.types"
 import Hash from "@reactory/server-core/utils/hash";
@@ -574,7 +575,9 @@ class SystemGraphManager implements ISystemGraphManager {
       if (!processorService) {
         throw new ApiError(`Processor ${providerId} not found`, 400);
       }
-      return await processorService.process(projectSpec as IReactorProject);
+      // Single explicit processor path: still use a runId so GC works when this is the only processor.
+      const runId = randomUUID();
+      return await processorService.process(projectSpec as IReactorProject, { runId, skipGc: false });
     }
 
     // Auto-resolve processor(s) from project.processors or projectService
@@ -603,12 +606,22 @@ class SystemGraphManager implements ISystemGraphManager {
       processorFqns.push("reactor.FileProjectProcessor@1.0.0");
     }
 
+    // Generate ONE shared runId for this catalog invocation so multi-processor
+    // runs (e.g. NodeJS + Markdown) stamp the same runId and only the final
+    // processor performs GC (Option A from session 02 plan).
+    const sharedRunId = randomUUID();
+    const n = processorFqns.length;
     let results: Reactory.Models.ISearchable[] = [];
-    for (const fqn of processorFqns) {
+    for (let i = 0; i < n; i++) {
+      const fqn = processorFqns[i];
+      const isLast = i === n - 1;
       try {
         const procService = context.getService(fqn) as IProjectProcessor;
         if (procService) {
-          const res = await procService.process(projectSpec as IReactorProject);
+          const res = await procService.process(projectSpec as IReactorProject, {
+            runId: sharedRunId,
+            skipGc: !isLast, // only last processor runs GC
+          });
           if (res) results = results.concat(res);
         }
       } catch (err) {

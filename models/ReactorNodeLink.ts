@@ -23,6 +23,8 @@ const ReactorNodeLinkSchema: Schema<ReactorNodeLink> = new Schema<ReactorNodeLin
   // Stored as a string so both numeric (catalog hash) and Mongo ObjectId
   // project ids can be scoped without a type clash.
   projectId: { type: String, index: true },
+  runId: { type: String, index: true },
+  indexedAt: { type: Date, index: true },
   data: Schema.Types.Mixed,
   created: { type: Date, default: () => new Date() },
   updated: { type: Date, default: () => new Date() },

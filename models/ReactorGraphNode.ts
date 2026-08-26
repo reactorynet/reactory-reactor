@@ -239,6 +239,13 @@ const ReactorNodeSchema: Schema<ReactorNode> = new Schema<ReactorNode>({
   dependencies: [{ type: Number }],
   // Free-form node payload (relativePath, language, symbol kind, etc.).
   data: Schema.Types.Mixed,
+  // Project scoping + GC fields (session 02)
+  projectId: { type: String, index: true },
+  projectFqn: { type: String, index: true },
+  runId: { type: String, index: true },
+  indexedAt: { type: Date, index: true },
+  // Reserved for session 08 incremental (nullable)
+  contentHash: String,
   created: {
     type: Date,
     default: () => { return new Date() }

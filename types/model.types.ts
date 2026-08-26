@@ -117,6 +117,10 @@ export interface ReactorNodeLink {
   description?: string
   /** The project this edge belongs to, used for scoping queries. */
   projectId?: string | number
+  /** Run id for the process() invocation that wrote this edge (for project-scoped GC). */
+  runId?: string
+  /** When this edge was (re)indexed. */
+  indexedAt?: Date
   /** Arbitrary edge metadata (line numbers, resolved module, etc.). */
   data?: any
   created?: Date
@@ -153,6 +157,16 @@ export interface ReactorNode extends Reactory.IComponentFqnDefinition {
   links?: Partial<ReactorNodeLink>[]
   created?: Date
   updated?: Date
+  /** Project id (stringified) owning this node. */
+  projectId?: string | number
+  /** Project FQN (nameSpace.name@version) for scoping. */
+  projectFqn?: string
+  /** Run id for the process() invocation that wrote this node (for project-scoped GC). */
+  runId?: string
+  /** When this node was (re)indexed. */
+  indexedAt?: Date
+  /** Optional content hash for future incremental indexing (session 08). Nullable. */
+  contentHash?: string
   data: any
 }
 
