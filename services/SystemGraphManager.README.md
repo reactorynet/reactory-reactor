@@ -149,6 +149,10 @@ A reference originates from the **section containing it** where there is one, ot
 
 **SystemGraphManager cleanup & getProject delegation (Session 05):** `SystemGraphManager.getProject` delegates directly to `ReactorProjectService.getProject(pathSpec)` and handles 400/404 errors. Dead static mapping (`kvp`) and commented historical code were removed. `getSubgraph` lazy materialization maintains a `childCountByParent` map for O(1) checks on existing persisted children rather than an O(N) array scan. Manual edge creation via `createLink` stamps `runId: 'manual'` in `$setOnInsert` for GC exclusion.
 
+**GraphQL Façade consistency & paging fixes (Session 06):** GraphQL graph operations in `ReactorSystemGraph.ts` are thin wrappers over `SystemGraphManager` (direct model imports `ReactorNodeModel` and `ReactorNodeLinkModel` removed). Added `normalizePaging` helper ensuring 1-based page indexing (`skip = (page - 1) * pageSize`), added manager query helpers `findNodesByType`, `findNodesByCategory`, `findLinks`, and `updateNode` (with ephemeral cache invalidation), and capped unbounded type/term queries to max 500 items.
+
+**MongoDB Indexes for Graph & Link Models (Session 07):** Declared compound indexes on `reactor_nodes` (`{ projectId: 1, runId: 1 }`, `{ projectId: 1, parentId: 1 }`, `{ projectId: 1, type: 1 }`, `{ type: 1, name: 1 }`, `{ projectFqn: 1, type: 1 }`) and `reactor_node_links` (`{ projectId: 1, runId: 1 }`, `{ source: 1, types: 1 }`, `{ target: 1, types: 1 }`, `{ projectId: 1, source: 1 }`, `{ projectId: 1, target: 1 }`), plus unique sparse index on `reactor_projects.graphRootId`. Production index builds can be executed via Mongoose `syncIndexes()` during scheduled maintenance or directly in MongoDB shell (`db.reactor_nodes.createIndex(...)`, `db.reactor_node_links.createIndex(...)`).
+
 ## 6. SystemGraphManager methods
 
 | Method | Status |

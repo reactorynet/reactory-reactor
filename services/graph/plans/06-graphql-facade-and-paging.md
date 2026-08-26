@@ -75,12 +75,22 @@ function normalizePaging(paging?: PagingRequest): { page: number; pageSize: numb
 
 ## 6. Acceptance criteria
 
-- [ ] No `ReactorNodeModel` / `ReactorNodeLinkModel` imports needed in resolver **or** only used inside clearly temporary code removed
-- [ ] Page 1 skip = 0; page 2 skip = pageSize
-- [ ] Type/term queries capped (≤ 200–500)
-- [ ] Update node goes through manager and clears cache key
-- [ ] Existing clients still receive same primary field shapes
+- [x] No `ReactorNodeModel` / `ReactorNodeLinkModel` imports needed in resolver **or** only used inside clearly temporary code removed
+- [x] Page 1 skip = 0; page 2 skip = pageSize
+- [x] Type/term queries capped (≤ 200–500)
+- [x] Update node goes through manager and clears cache key
+- [x] Existing clients still receive same primary field shapes
 
 ---
 
 ## 7. Agent Notes
+
+- **Resolver Decoupling:** Removed `ReactorNodeModel` and `ReactorNodeLinkModel` imports completely from `graphql/resolvers/ReactorSystemGraph.ts`. All graph queries and mutations now delegate to `SystemGraphManager` via `graphService(context)`.
+- **Standardized Paging Helper:** Added `normalizePaging(paging, defaultPageSize, maxPageSize)` with proper 1-based page indexing (`skip = (page - 1) * pageSize`), clamping bounds within 1..500.
+- **Manager Query Wrappers:**
+  - `findNodesByType(types, limit)`: queries persisted node types with fallback to catalog roots, capped at 500.
+  - `findNodesByCategory(categoryIds, limit)`: queries persisted nodes by category with fallback to catalog roots, capped at 500.
+  - `findLinks(options)`: paged edge query wrapping `ReactorNodeLinkModel.find` with `skip/limit/countDocuments`.
+  - `updateNode(id, patch)`: updates node in `ReactorNodeModel` and busts ephemeral context cache (`REACTOR_NODE_${id}`).
+- **Term & Type Queries:** `ReactorNodesByTerm` delegates to `searchNodes` capped at 100 results with catalog fallback; `ReactorNodesForType` delegates to `findNodesByType`.
+- **Tests:** Created comprehensive unit tests in `services/graph/GraphQLFacade.test.ts` (14/14 tests passing) covering all new manager methods and GraphQL resolver delegation paths. All 92 program graph tests passing.

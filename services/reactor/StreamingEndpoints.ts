@@ -7,6 +7,7 @@ import { ChatSessionResourceManager } from './ChatSessionResourceManager';
 import { ShellSessionManager } from './ShellSessionManager';
 import passport from 'passport';
 import safeUrl from '@reactory/server-core/utils/url/safeUrl';
+import { sseUriRoot } from './streaming/sseOrigin';
 import Helpers from 'authentication/strategies/helpers';
 
 /**
@@ -338,7 +339,7 @@ export class StreamingEndpoints {
       // ReactorConversationService.createInitiateSSEResponse. Auth travels as
       // query params because EventSource cannot set headers, and x-client-pwd
       // is a server-only secret the browser cannot supply itself.
-      const sseUrl = new URL(safeUrl([process.env.API_URI_ROOT || 'http://localhost:4000', `reactor-chat/streaming/sse/${session.sessionId}`]));
+      const sseUrl = new URL(safeUrl([sseUriRoot(), `reactor-chat/streaming/sse/${session.sessionId}`]));
       const partnerKey = context.partner?.key?.toUpperCase().replace(/-/g, '_') || '';
       sseUrl.searchParams.set('transport', 'sse');
       sseUrl.searchParams.set('no-upgrade', 'true');

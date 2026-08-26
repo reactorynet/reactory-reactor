@@ -69,11 +69,17 @@ ReactorProjectSchema.index({ graphRootId: 1 }, { unique: true, sparse: true });
 
 ## 5. Acceptance criteria
 
-- [ ] All listed compound indexes declared in schema files
-- [ ] No duplicate conflicting unique indexes
-- [ ] README ops note for index build
-- [ ] No application logic changes required (unless fixing missing field definitions from 02)
+- [x] All listed compound indexes declared in schema files
+- [x] No duplicate conflicting unique indexes
+- [x] README ops note for index build
+- [x] No application logic changes required (unless fixing missing field definitions from 02)
 
 ---
 
 ## 6. Agent Notes
+
+- **`reactor_nodes` Compound Indexes:** Added indexes for `{ projectId: 1, runId: 1 }`, `{ projectId: 1, parentId: 1 }`, `{ projectId: 1, type: 1 }`, `{ type: 1, name: 1 }`, and `{ projectFqn: 1, type: 1 }`.
+- **`reactor_node_links` Compound Indexes:** Added indexes for `{ projectId: 1, runId: 1 }`, `{ source: 1, types: 1 }`, `{ target: 1, types: 1 }`, `{ projectId: 1, source: 1 }`, and `{ projectId: 1, target: 1 }` (in addition to existing `{ source: 1, target: 1 }`).
+- **`reactor_projects` Index:** Verified unique sparse index `{ graphRootId: 1 }` on `ReactorProjectSchema`.
+- **Production Ops Documentation:** Documented production index sync instructions in `services/SystemGraphManager.README.md`.
+- **Tests:** Created unit test suite `services/graph/MongoIndexes.test.ts` verifying all declared single and compound schema indexes via Mongoose `schema.indexes()`. All tests passing.

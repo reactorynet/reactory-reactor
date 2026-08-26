@@ -94,6 +94,16 @@ type ReactorNodeCatalogIndexResult = ReactorNodeCatalogIndexSuccess |
 const graphService = (context: Reactory.Server.IReactoryContext): ISystemGraphManager =>
   context.getService<ISystemGraphManager>("reactor.SystemGraphManager@1.0.0");
 
+function normalizePaging(
+  paging?: PagingRequest,
+  defaultPageSize: number = 25,
+  maxPageSize: number = 500
+): { page: number; pageSize: number; skip: number } {
+  const page = Math.max(paging?.page || 1, 1);
+  const pageSize = Math.min(Math.max(paging?.pageSize || defaultPageSize, 1), maxPageSize);
+  return { page, pageSize, skip: (page - 1) * pageSize };
+}
+
 /**
  * Resolve a node by its deterministic id. Delegates to the graph façade,
  * which checks the persisted graph, then the lazy tree cache, and returns a
@@ -144,9 +154,7 @@ class ReactorSystemGraph {
     context: Reactory.Server.IReactoryContext
   ): Promise<PagedNodes> {
     const { name, nameSpace, term } = args;
-    const paging = args.paging || { page: 1, pageSize: 10 };
-    const page = Math.max(paging.page || 1, 1);
-    const pageSize = Math.min(Math.max(paging.pageSize || 10, 1), 1000);
+    const { page, pageSize } = normalizePaging(args.paging, 10, 500);
     const graphSvc = graphService(context);
     const nodes = await graphSvc.searchNodes(term || "", {
       nameSpace,
@@ -171,10 +179,7 @@ class ReactorSystemGraph {
     args: { id: number; key?: string; ancestry?: string },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>> {
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
-    );
-    return graphSvc.getNode(args.id, args.key || args.ancestry);
+    return graphService(context).getNode(args.id, args.key || args.ancestry);
   }
 
   @property("ReactorNode", "dependencies")
@@ -309,36 +314,7 @@ class ReactorSystemGraph {
     },
     context: Reactory.Server.IReactoryContext
   ): Promise<{ links: ReactorNodeLink[]; paging: PagingResult }> {
-    const paging = args.paging || { page: 1, pageSize: 100 };
-    const page = Math.max(paging.page || 1, 1);
-    const pageSize = Math.min(Math.max(paging.pageSize || 100, 1), 1000);
-
-    const or: any[] = [];
-    if (args.sources && args.sources.length) or.push({ source: { $in: args.sources } });
-    if (args.targets && args.targets.length) or.push({ target: { $in: args.targets } });
-
-    const query: any = {};
-    if (or.length) query.$or = or;
-    if (args.types && args.types.length) query.types = { $in: args.types };
-    if (args.projectId) query.projectId = args.projectId;
-
-    const [links, total] = await Promise.all([
-      ReactorNodeLinkModel.find(query)
-        .skip((page - 1) * pageSize)
-        .limit(pageSize)
-        .lean() as unknown as Promise<ReactorNodeLink[]>,
-      ReactorNodeLinkModel.countDocuments(query),
-    ]);
-
-    return {
-      links,
-      paging: {
-        total,
-        page,
-        pageSize,
-        hasNext: page * pageSize < total,
-      },
-    };
+    return graphService(context).findLinks(args);
   }
 
   @query("ReactorSubgraph")
@@ -394,14 +370,10 @@ class ReactorSystemGraph {
     args: any,
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
-    );
-
-    if(node && node.id) { 
-      return graphSvc.getChildren([node] as ReactorNode[]);
+    if (node && node.id) { 
+      return graphService(context).getChildren([node] as ReactorNode[]);
     } else {
-      context.warn("No node id provided for getChildrenForNode")
+      context.warn("No node id provided for getChildrenForNode");
     }
     
     return [];
@@ -413,10 +385,7 @@ class ReactorSystemGraph {
     args: any,
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNodeCategory>[]> {
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
-    );
-    return graphSvc.getCategoryNodes();
+    return graphService(context).getCategoryNodes();
   }
 
   @property("ReactorProject", "id")
@@ -502,19 +471,18 @@ class ReactorSystemGraph {
   @query("ReactorCatalogNodes")
   async ReactorCatalogNodes(
     _: any,
-    args: any,
+    args: { paging?: PagingRequest },
     context: Reactory.Server.IReactoryContext
   ): Promise<PagedNodes> {
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
-    );
-    const nodes = await graphSvc.getCatalogNodes();
+    const { page, pageSize } = normalizePaging(args?.paging, 100, 500);
+    const graphSvc = graphService(context);
+    const nodes = await graphSvc.getCatalogNodes({ page, pageSize });
     return {
       paging: {
         total: nodes.length,
         hasNext: false,
-        page: 0,
-        pageSize: nodes.length,
+        page,
+        pageSize,
       },
       nodes,
     };
@@ -597,9 +565,7 @@ class ReactorSystemGraph {
     args: { request: { ids: number[] } },
     context: Reactory.Server.IReactoryContext
   ): Promise<CatalogNodeSyncResult[]> {
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
-    );
+    const graphSvc = graphService(context);
     const ids = args?.request?.ids || [];
     const results: CatalogNodeSyncResult[] = [];
     for (const id of ids) {
@@ -629,9 +595,7 @@ class ReactorSystemGraph {
     args: { filter: ReactorProjectFilterArgs },
     context: Reactory.Server.IReactoryContext
   ): Promise<PagedNodes> {
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
-    );
+    const graphSvc = graphService(context);
     const projectSvc = context.getService<ReactorProjectService>(
       "reactor.ReactorProjectService@1.0.0"
     );
@@ -665,11 +629,7 @@ class ReactorSystemGraph {
     args: { id: number },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNodeCategory> | undefined> {
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
-    );
-    // Filter from getCategoryNodes
-    const categories = await graphSvc.getCategoryNodes();
+    const categories = await graphService(context).getCategoryNodes();
     return categories.find((cat) => cat.id === args.id);
   }
 
@@ -679,14 +639,7 @@ class ReactorSystemGraph {
     args: { ids: number[] },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    // Not directly supported, so filter nodes by category ids
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
-    );
-    const allNodes = await graphSvc.getCatalogNodes();
-    return allNodes.filter((node) =>
-      node.categories && node.categories.some((cat) => args.ids.includes(cat.id))
-    );
+    return graphService(context).findNodesByCategory(args.ids);
   }
 
   @query("ReactorNodesForType")
@@ -709,6 +662,28 @@ class ReactorSystemGraph {
     );
     const allNodes = await graphSvc.getCatalogNodes();
     return allNodes.filter((node) => args.type.includes(node.type));
+  }
+
+  /**
+   * Resolve the graph node for a conversation by its deterministic id.
+   *
+   * `ProcessConversationStep` upserts the node as
+   * `nodeId("conversation::<conversationId>")`, and `id` is indexed and unique,
+   * so this is one index hit. The conversation id appears nowhere in the node's
+   * `name` or `description` (they hold "Conversation: <title>"), which is why
+   * searching for it via `ReactorNodesByTerm` can never match — and why doing
+   * so costs a full collection scan plus a catalog load every time.
+   */
+  @query("ReactorConversationNode")
+  async ReactorConversationNode(
+    _: any,
+    args: { conversationId: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode> | null> {
+    if (!args.conversationId) return null;
+    const id = nodeId(`conversation::${args.conversationId}`);
+    const node = (await ReactorNodeModel.findOne({ id }).lean()) as any;
+    return node || null;
   }
 
   /**
@@ -794,9 +769,7 @@ class ReactorSystemGraph {
     args: { input: { from: number; to: number; types?: string[]; title?: string; description?: string } },
     context: Reactory.Server.IReactoryContext
   ): Promise<any> {
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
-    );
+    const graphSvc = graphService(context);
     try {
       const { from, to, types, title, description } = args.input;
       const primaryType = (types && types[0]) || ReactorLinkType.DIRECT;
@@ -832,9 +805,7 @@ class ReactorSystemGraph {
     args: { input: { from: number; to: number; types?: string[]; title?: string; description?: string } },
     context: Reactory.Server.IReactoryContext
   ): Promise<any> {
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
-    );
+    const graphSvc = graphService(context);
     try {
       const { from, to, types, title, description } = args.input;
       const primaryType = (types && types[0]) || ReactorLinkType.DIRECT;
@@ -870,9 +841,7 @@ class ReactorSystemGraph {
     args: { id: number },
     context: Reactory.Server.IReactoryContext
   ): Promise<any> {
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
-    );
+    const graphSvc = graphService(context);
     try {
       await graphSvc.deleteLink({ id: args.id } as ReactorNodeLink);
       return { __typename: "ReactorDeleteNodeLinkSuccess", id: args.id, message: "Link deleted" };
@@ -887,9 +856,7 @@ class ReactorSystemGraph {
     args: { graph: { title?: string; share?: boolean; nodes?: number[]; links?: { id: number; types?: string[]; title?: string; description?: string }[] } },
     context: Reactory.Server.IReactoryContext
   ): Promise<any> {
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
-    );
+    const graphSvc = graphService(context);
     try {
       const links = args.graph?.links || [];
       for (const l of links) {
@@ -1022,22 +989,7 @@ class ReactorSystemGraph {
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>> {
     const { id, data } = args;
-    const node = await ReactorNodeModel.findOneAndUpdate(
-      { id },
-      { 
-        $set: { 
-          data,
-          updated: new Date()
-        } 
-      },
-      { new: true }
-    ).lean();
-
-    if (!node) {
-      throw new Error(`Node not found with ID ${id}`);
-    }
-
-    return node as unknown as Partial<ReactorNode>;
+    return graphService(context).updateNode(id, { data });
   }
 }
 

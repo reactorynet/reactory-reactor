@@ -348,4 +348,5 @@ describe('SystemGraphManager traversal façade', () => {
       expect(getChildrenSpy).toHaveBeenCalled();
       expect(res.nodes.map((n: any) => n.id).sort()).toEqual([1, 100]);
     });
+  });
 });

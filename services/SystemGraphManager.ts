@@ -56,6 +56,10 @@ class SystemGraphManager implements ISystemGraphManager {
     this.createLink = this.createLink.bind(this);
     this.updateLink = this.updateLink.bind(this);
     this.deleteLink = this.deleteLink.bind(this);
+    this.findNodesByType = this.findNodesByType.bind(this);
+    this.findNodesByCategory = this.findNodesByCategory.bind(this);
+    this.findLinks = this.findLinks.bind(this);
+    this.updateNode = this.updateNode.bind(this);
     this.getChildren = this.getChildren.bind(this);
     this.getProjectForCatalogNode = this.getProjectForCatalogNode.bind(this);
     this.setSearchService = this.setSearchService.bind(this);
@@ -416,13 +420,22 @@ class SystemGraphManager implements ISystemGraphManager {
       });
     }
 
-    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const rx = new RegExp(escaped, 'i');
-    return ReactorNodeModel.find({
+    const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, (ch) => "\\" + ch);
+    const rx = new RegExp(escaped, "i");
+    const persisted = (await ReactorNodeModel.find({
       $or: [{ name: rx }, { description: rx }],
     })
       .limit(limit)
-      .lean() as unknown as Partial<ReactorNode>[];
+      .lean()) as unknown as Partial<ReactorNode>[];
+    if (persisted && persisted.length) return persisted;
+
+    const allNodes = await this.getCatalogNodes();
+    const lower = term.toLowerCase();
+    return allNodes.filter(
+      (node) =>
+        (node.name && node.name.toLowerCase().includes(lower)) ||
+        (node.description && node.description.toLowerCase().includes(lower))
+    ).slice(0, limit);
   }
 
   /**
@@ -521,6 +534,101 @@ class SystemGraphManager implements ISystemGraphManager {
     const existing = (await ReactorNodeLinkModel.findOne({ id: link.id }).lean()) as unknown as ReactorNodeLink;
     await ReactorNodeLinkModel.deleteOne({ id: link.id });
     return existing;
+  }
+
+  async findNodesByType(types: string[], limit: number = 100): Promise<Partial<ReactorNode>[]> {
+    if (!types || types.length === 0) return [];
+    const cappedLimit = Math.min(Math.max(limit, 1), 500);
+    const persisted = (await ReactorNodeModel.find({
+      type: { $in: types },
+    })
+      .limit(cappedLimit)
+      .lean()) as unknown as Partial<ReactorNode>[];
+    if (persisted && persisted.length) return persisted;
+
+    const allNodes = await this.getCatalogNodes();
+    return allNodes.filter((node) => types.includes(node.type)).slice(0, cappedLimit);
+  }
+
+  async findNodesByCategory(categoryIds: number[], limit: number = 100): Promise<Partial<ReactorNode>[]> {
+    if (!categoryIds || categoryIds.length === 0) return [];
+    const cappedLimit = Math.min(Math.max(limit, 1), 500);
+    const persisted = (await ReactorNodeModel.find({
+      'categories.id': { $in: categoryIds },
+    })
+      .limit(cappedLimit)
+      .lean()) as unknown as Partial<ReactorNode>[];
+    if (persisted && persisted.length) return persisted;
+
+    const allNodes = await this.getCatalogNodes();
+    return allNodes
+      .filter((node) => node.categories && node.categories.some((cat) => categoryIds.includes(cat.id)))
+      .slice(0, cappedLimit);
+  }
+
+  async findLinks(options: {
+    sources?: number[];
+    targets?: number[];
+    types?: string[];
+    projectId?: string;
+    paging?: PagingRequest;
+  } = {}): Promise<{ links: ReactorNodeLink[]; paging: PagingResult }> {
+    const page = Math.max(options.paging?.page || 1, 1);
+    const pageSize = Math.min(Math.max(options.paging?.pageSize || 100, 1), 500);
+    const skip = (page - 1) * pageSize;
+
+    const or: any[] = [];
+    if (options.sources && options.sources.length) or.push({ source: { $in: options.sources } });
+    if (options.targets && options.targets.length) or.push({ target: { $in: options.targets } });
+
+    const query: any = {};
+    if (or.length) query.$or = or;
+    if (options.types && options.types.length) query.types = { $in: options.types };
+    if (options.projectId) query.projectId = options.projectId;
+
+    const [links, total] = await Promise.all([
+      ReactorNodeLinkModel.find(query)
+        .skip(skip)
+        .limit(pageSize)
+        .lean() as unknown as Promise<ReactorNodeLink[]>,
+      ReactorNodeLinkModel.countDocuments(query),
+    ]);
+
+    return {
+      links,
+      paging: {
+        total,
+        page,
+        pageSize,
+        hasNext: skip + links.length < total,
+      },
+    };
+  }
+
+  async updateNode(id: number, patch: Partial<ReactorNode>): Promise<Partial<ReactorNode>> {
+    const updatePayload: any = {
+      ...patch,
+      updated: new Date(),
+    };
+    delete updatePayload.id;
+
+    const updated = (await ReactorNodeModel.findOneAndUpdate(
+      { id },
+      { $set: updatePayload },
+      { new: true }
+    ).lean()) as unknown as Partial<ReactorNode>;
+
+    if (!updated) {
+      throw new ApiError(`Node not found with ID ${id}`, 404);
+    }
+
+    try {
+      await this.context.setValue(`REACTOR_NODE_${id}`, null);
+    } catch {
+      // cache clear best-effort
+    }
+
+    return updated;
   }
 
   async getProjects(filter?: Partial<PagedFilter>): Promise<PageReactorProjectResult> {
