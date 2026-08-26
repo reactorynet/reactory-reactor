@@ -1,7 +1,8 @@
+import mongoose, { Schema } from "mongoose";
 import fs from "fs";
 import path from "path";
 import ignore from "ignore";
-import { randomUUID } from "crypto";
+import { createHash, randomUUID } from "crypto";
 import Reactory from "@reactorynet/reactory-core";
 import {
   IReactorProject,
@@ -57,8 +58,20 @@ export interface FileAnalysisResult {
   };
 }
 
+/** Checks if MongoDB connection is active or if the model method is mocked in tests. */
+function isMongoAvailable(modelFn?: any): boolean {
+  if (mongoose.connection?.readyState === 1) return true;
+  if (modelFn && (modelFn.mock || modelFn._isMockFunction)) return true;
+  return false;
+}
+
 /** Maximum characters of file content stored on a searchable. */
 const MAX_SEARCHABLE_CONTENT = 100_000;
+
+/** Computes SHA-256 hex hash of file content. */
+export function fileContentHash(buf: Buffer | string): string {
+  return createHash("sha256").update(buf).digest("hex");
+}
 
 /** Languages a processor may deep-analyse during process(). */
 const ANALYSABLE_LANGUAGES = new Set([
@@ -907,7 +920,8 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
   private fileNodeForProcess(
     parent: Partial<ReactorNode>,
     project: Partial<IReactorProject>,
-    absPath: string
+    absPath: string,
+    contentHash?: string
   ): ReactorNode {
     const fqn = projectFqn(project);
     const relativePath = normalizeRelative(
@@ -933,6 +947,7 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       inputs: [],
       outputs: [],
       metrics: [],
+      contentHash,
       created: new Date(),
       updated: new Date(),
       data: {
@@ -1010,10 +1025,14 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
 
   private buildSearchable(
     project: Partial<IReactorProject>,
-    fileSpec: Partial<IReactorProjectFileSpec>
+    fileSpec: Partial<IReactorProjectFileSpec>,
+    existingContent?: string | null
   ): Reactory.Models.ISearchable | null {
     try {
-      const content = fs.readFileSync(fileSpec.path, "utf-8");
+      const content =
+        existingContent !== undefined && existingContent !== null
+          ? existingContent
+          : fs.readFileSync(fileSpec.path, "utf-8");
       const lines = content.split("\n");
       const fqn = projectFqn(project);
       const relativePath = normalizeRelative(
@@ -1080,10 +1099,10 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     const edgeOps = edges.filter((e) => e && e.id !== undefined && e.id !== null).map(toOp);
 
     try {
-      if (nodeOps.length) {
+      if (nodeOps.length && isMongoAvailable(ReactorNodeModel.bulkWrite)) {
         await ReactorNodeModel.bulkWrite(nodeOps, { ordered: false });
       }
-      if (edgeOps.length) {
+      if (edgeOps.length && isMongoAvailable(ReactorNodeLinkModel.bulkWrite)) {
         await ReactorNodeLinkModel.bulkWrite(edgeOps, { ordered: false });
       }
     } catch (err) {
@@ -1118,6 +1137,117 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
   }
 
   /**
+   * Loads previously persisted FILE/DOCUMENT nodes for incremental comparison.
+   */
+  protected async loadPreviousNodes(
+    project: Partial<IReactorProject>
+  ): Promise<Map<number, Partial<ReactorNode>>> {
+    if (!project.id || !isMongoAvailable(ReactorNodeModel.find)) return new Map();
+    try {
+      const previous = (await ReactorNodeModel.find({
+        projectId: String(project.id),
+        type: { $in: [ReactorNodeType.FILE, ReactorNodeType.DOCUMENT] },
+      })
+        .select({ id: 1, contentHash: 1, parentId: 1, data: 1, type: 1 })
+        .lean()) as unknown as Partial<ReactorNode>[];
+      return new Map((previous || []).map((n) => [n.id, n]));
+    } catch (err) {
+      this.context.warn(`loadPreviousNodes failed: ${(err as Error).message}`);
+      return new Map();
+    }
+  }
+
+  /**
+   * Loads descendant symbol / section node ids for an unchanged file.
+   */
+  protected async loadDescendantNodeIds(
+    parentId: number,
+    projectId: string
+  ): Promise<number[]> {
+    if (!isMongoAvailable(ReactorNodeModel.find)) return [];
+    try {
+      const children = (await ReactorNodeModel.find({
+        parentId,
+        projectId: String(projectId),
+      })
+        .select({ id: 1 })
+        .lean()) as unknown as { id: number }[];
+      const ids = children.map((c) => c.id);
+      if (ids.length > 0) {
+        const subChildren = (await ReactorNodeModel.find({
+          parentId: { $in: ids },
+          projectId: String(projectId),
+        })
+          .select({ id: 1 })
+          .lean()) as unknown as { id: number }[];
+        subChildren.forEach((sc) => ids.push(sc.id));
+      }
+      return ids;
+    } catch (err) {
+      this.context.warn(`loadDescendantNodeIds failed: ${(err as Error).message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Loads edge ids touching any of the specified node ids for an unchanged file.
+   */
+  protected async loadEdgeIdsTouching(
+    nodeIds: number[],
+    projectId: string
+  ): Promise<number[]> {
+    if (!nodeIds.length || !isMongoAvailable(ReactorNodeLinkModel.find)) return [];
+    try {
+      const links = (await ReactorNodeLinkModel.find({
+        projectId: String(projectId),
+        $or: [{ source: { $in: nodeIds } }, { target: { $in: nodeIds } }],
+      })
+        .select({ id: 1 })
+        .lean()) as unknown as { id: number }[];
+      return links.map((l) => l.id);
+    } catch (err) {
+      this.context.warn(`loadEdgeIdsTouching failed: ${(err as Error).message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Bulk-updates runId and indexedAt for skipped unchanged nodes so GC does not delete them.
+   */
+  protected async touchNodes(
+    ids: number[],
+    meta: { runId: string; indexedAt: Date }
+  ): Promise<void> {
+    if (!ids.length || !isMongoAvailable(ReactorNodeModel.updateMany)) return;
+    try {
+      await ReactorNodeModel.updateMany(
+        { id: { $in: ids } },
+        { $set: { runId: meta.runId, indexedAt: meta.indexedAt, updated: new Date() } }
+      );
+    } catch (err) {
+      this.context.warn(`touchNodes failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * Bulk-updates runId and indexedAt for skipped unchanged edges so GC does not delete them.
+   */
+  protected async touchEdges(
+    ids: number[],
+    meta: { runId: string; indexedAt: Date }
+  ): Promise<void> {
+    if (!ids.length || !isMongoAvailable(ReactorNodeLinkModel.updateMany)) return;
+    try {
+      await ReactorNodeLinkModel.updateMany(
+        { id: { $in: ids } },
+        { $set: { runId: meta.runId, indexedAt: meta.indexedAt, updated: new Date() } }
+      );
+    } catch (err) {
+      this.context.warn(`touchEdges failed: ${(err as Error).message}`);
+    }
+  }
+
+  /**
    * Full pipeline for a project: discover files, build the project root + file
    * + symbol + external nodes, resolve edges, persist the graph, and index file
    * contents for search. Raw folder browsing remains lazy; only analysed
@@ -1127,10 +1257,11 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
    *   wipe sibling processor output. If omitted a fresh UUID is generated.
    * options.skipGc — when true, do not run project-scoped GC after persist (orchestrator
    *   will call GC once after all processors for a shared runId).
+   * options.forceFull — when true, bypasses content hash check and re-analyses all files.
    */
   async process(
     project: Partial<IReactorProject>,
-    options?: { runId?: string; skipGc?: boolean }
+    options?: { runId?: string; skipGc?: boolean; forceFull?: boolean }
   ): Promise<Partial<IReactorProject>> {
     const next = { ...project };
     // Canonicalize the repo path so it agrees with the realpath'd file paths
@@ -1157,6 +1288,12 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     // Folder nodes for batch process() — ensures parity with makeTreeNode ancestry
     const folderByRel = new Map<string, ReactorNode>();
 
+    const prevById = await this.loadPreviousNodes(next);
+    let analysedCount = 0;
+    let skippedCount = 0;
+    const seenNodeIds = new Set<number>();
+    const seenEdgeIds = new Set<number>();
+
     for (const spec of fileSpecs) {
       const relativeForChain = normalizeRelative(
         path.relative(next.repoPath || "", spec.path)
@@ -1168,34 +1305,66 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
         folderByRel,
         nodes
       );
-      const fileNode = this.fileNodeForProcess(parentForFile, next, spec.path);
+
+      let content: string | null = null;
+      let hash: string | undefined = undefined;
+      try {
+        content = fs.readFileSync(spec.path, "utf-8");
+        hash = fileContentHash(content);
+      } catch {
+        // if file read fails, let analysis handle or skip
+      }
+
+      const fileNode = this.fileNodeForProcess(parentForFile, next, spec.path, hash);
       if (!this.claimsFile(fileNode, next)) continue;
-      nodes.push(fileNode);
 
-      const searchable = this.buildSearchable(next, spec);
-      if (searchable) searchables.push(searchable);
+      const prev = prevById.get(fileNode.id);
+      const isUnchanged =
+        !options?.forceFull &&
+        !!prev &&
+        !!prev.contentHash &&
+        !!hash &&
+        prev.contentHash === hash;
 
-      if (fileNode.data?.language && ANALYSABLE_LANGUAGES.has(fileNode.data.language)) {
-        try {
-          const analysis = await this.analyseFileFull(fileNode);
-          nodes.push(...analysis.symbols);
-          analysis.externals.forEach((e) => externals.set(e.id, e));
-          edges.push(...analysis.edges);
-          // Analysis may enrich the file's own node (a document's title,
-          // frontmatter and outline). Applied in place: fileNode is already in
-          // `nodes`, so the enriched version is what gets persisted.
-          if (analysis.filePatch) {
-            if (analysis.filePatch.description) {
-              fileNode.description = analysis.filePatch.description;
+      if (isUnchanged) {
+        skippedCount++;
+        nodes.push(fileNode);
+        seenNodeIds.add(fileNode.id);
+        if (next.id) {
+          const childIds = await this.loadDescendantNodeIds(fileNode.id, String(next.id));
+          childIds.forEach((id) => seenNodeIds.add(id));
+          const edgeIds = await this.loadEdgeIdsTouching([fileNode.id, ...childIds], String(next.id));
+          edgeIds.forEach((id) => seenEdgeIds.add(id));
+        }
+      } else {
+        analysedCount++;
+        nodes.push(fileNode);
+
+        const searchable = this.buildSearchable(next, spec, content);
+        if (searchable) searchables.push(searchable);
+
+        if (fileNode.data?.language && ANALYSABLE_LANGUAGES.has(fileNode.data.language)) {
+          try {
+            const analysis = await this.analyseFileFull(fileNode);
+            nodes.push(...analysis.symbols);
+            analysis.externals.forEach((e) => externals.set(e.id, e));
+            edges.push(...analysis.edges);
+            // Analysis may enrich the file's own node (a document's title,
+            // frontmatter and outline). Applied in place: fileNode is already in
+            // `nodes`, so the enriched version is what gets persisted.
+            if (analysis.filePatch) {
+              if (analysis.filePatch.description) {
+                fileNode.description = analysis.filePatch.description;
+              }
+              if (analysis.filePatch.data) {
+                fileNode.data = { ...fileNode.data, ...analysis.filePatch.data };
+              }
             }
-            if (analysis.filePatch.data) {
-              fileNode.data = { ...fileNode.data, ...analysis.filePatch.data };
-            }
+          } catch (err) {
+            this.context.warn(
+              `analyseFileFull failed for ${spec.path}: ${(err as Error).message}`
+            );
           }
-        } catch (err) {
-          this.context.warn(
-            `analyseFileFull failed for ${spec.path}: ${(err as Error).message}`
-          );
         }
       }
     }
@@ -1264,9 +1433,17 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     await this.persistGraph(nodes, edges, meta);
     await this.indexSearchables(next, searchables);
 
+    // Re-stamp skipped unchanged nodes & edges with the new runId & indexedAt so GC preserves them
+    if (seenNodeIds.size > 0) {
+      await this.touchNodes(Array.from(seenNodeIds), { runId, indexedAt });
+    }
+    if (seenEdgeIds.size > 0) {
+      await this.touchEdges(Array.from(seenEdgeIds), { runId, indexedAt });
+    }
+
     // Project-scoped GC: remove nodes/edges for this project with a different runId.
     // Safeguards: only when projectId present; only if not skipGc; never delete 'manual' runId.
-    if (!options?.skipGc && meta.projectId) {
+    if (!options?.skipGc && meta.projectId && isMongoAvailable(ReactorNodeModel.deleteMany)) {
       try {
         const pid = String(meta.projectId);
         await ReactorNodeModel.deleteMany({ projectId: pid, runId: { $nin: [runId, 'manual'] } });
@@ -1277,7 +1454,7 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     }
 
     this.context.info(
-      `Processed ${next.name}: ${nodes.length} nodes, ${edges.length} edges, ${searchables.length} searchables (runId=${runId})`
+      `process ${next.name}: analysed=${analysedCount} skipped=${skippedCount} folders=${folderByRel.size} edges=${edges.length} (runId=${runId})`
     );
     return next;
   }

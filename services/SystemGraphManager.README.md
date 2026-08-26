@@ -153,6 +153,8 @@ A reference originates from the **section containing it** where there is one, ot
 
 **MongoDB Indexes for Graph & Link Models (Session 07):** Declared compound indexes on `reactor_nodes` (`{ projectId: 1, runId: 1 }`, `{ projectId: 1, parentId: 1 }`, `{ projectId: 1, type: 1 }`, `{ type: 1, name: 1 }`, `{ projectFqn: 1, type: 1 }`) and `reactor_node_links` (`{ projectId: 1, runId: 1 }`, `{ source: 1, types: 1 }`, `{ target: 1, types: 1 }`, `{ projectId: 1, source: 1 }`, `{ projectId: 1, target: 1 }`), plus unique sparse index on `reactor_projects.graphRootId`. Production index builds can be executed via Mongoose `syncIndexes()` during scheduled maintenance or directly in MongoDB shell (`db.reactor_nodes.createIndex(...)`, `db.reactor_node_links.createIndex(...)`).
 
+**Incremental re-index by content hash (Session 08):** `BaseProjectProcessor.process` computes a SHA-256 `contentHash` for each file. Unchanged files bypass `analyseFileFull` and search index rebuilding. Descendant symbols/sections and edges for skipped files are touched with the current `runId` so they are preserved during project-scoped GC. `forceFull: true` option forces complete re-analysis.
+
 ## 6. SystemGraphManager methods
 
 | Method | Status |
@@ -204,11 +206,10 @@ Under Jest every test file gets a fresh module registry — and a fresh `globalT
 1. **Deeper edges** — resolve `Obj.method()` calls where `Obj` is a locally instantiated variable (needs light type inference), `new X()` construction edges, endpoint↔handler, DB FK/view/proc references (TSql), DI wiring.
 2. **Higher-fidelity non-TS analyzers** — the Python/Java/C# scanners are heuristic (constructors skipped for Java/C#; cross-file same-package/namespace bases only resolve through explicit import bindings). A real parser (tree-sitter / language server) would raise precision if needed.
 3. **Cross-project edges** — link external `npm:`/`java:`/`cs:` dependency nodes to the actual project node that publishes them.
-4. **Incremental re-index** — only reprocess changed files (mtime/hash) rather than the whole repo.
-5. **Category assignment** — attach nodes to the `DefaultReactorNodeCategories` taxonomy during analysis.
-6. **Persist folder nodes on demand** if full-tree queries (not just analysed artifacts) become necessary.
-7. **Native rst/adoc parsers** — both currently route through the plain-text parser, which picks up their underline/prefix headings but not directives, includes or attribute references. `parseDocument` in `services/graph/documents/index.ts` is the single seam to slot them into.
-8. **Docs↔code inference beyond explicit links** — a document that *names* a symbol (rather than linking a path) produces no `DOCUMENTS` edge today. Matching prose mentions against the project's symbol index would connect far more of the documentation, at some precision cost.
-9. **Cross-project topics/resources** — `TOPIC` and `RESOURCE` nodes are project-scoped so their `parentId` stays stable. Answering "which projects reference this runbook?" means grouping on `data.url` / `data.slug` across projects, or introducing a global tier.
+4. **Category assignment** — attach nodes to the `DefaultReactorNodeCategories` taxonomy during analysis.
+5. **Persist folder nodes on demand** if full-tree queries (not just analysed artifacts) become necessary.
+6. **Native rst/adoc parsers** — both currently route through the plain-text parser, which picks up their underline/prefix headings but not directives, includes or attribute references. `parseDocument` in `services/graph/documents/index.ts` is the single seam to slot them into.
+7. **Docs↔code inference beyond explicit links** — a document that *names* a symbol (rather than linking a path) produces no `DOCUMENTS` edge today. Matching prose mentions against the project's symbol index would connect far more of the documentation, at some precision cost.
+8. **Cross-project topics/resources** — `TOPIC` and `RESOURCE` nodes are project-scoped so their `parentId` stays stable. Answering "which projects reference this runbook?" means grouping on `data.url` / `data.slug` across projects, or introducing a global tier.
 
 _Reflects the code on this branch. Key files: `services/graph/GraphIdentity.ts`, `services/graph/analyzers/TypeScriptAnalyzer.ts`, `services/graph/documents/` (`MarkdownParser.ts`, `DocumentGraphEmitter.ts`), `services/ReactorProjectProcessors/BaseProjectProcessor.ts`, `services/SystemGraphManager.ts`, `models/ReactorNodeLink.ts`, `models/ReactorGraphNode.ts`, `graphql/resolvers/ReactorSystemGraph.ts`._

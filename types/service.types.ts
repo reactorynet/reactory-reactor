@@ -1424,6 +1424,12 @@ export interface IProjectNodeProvider {
 }
 
 
+export interface ProcessOptions {
+  runId?: string;
+  skipGc?: boolean;
+  forceFull?: boolean;
+}
+
 export interface IProjectProcessor extends ProjectSynchronizer, AttributeProvider, IProjectNodeProvider { 
   getFileSpecs(project: Partial<IReactorProject>): Partial<IReactorProjectFileSpec>[];
   setFileSpecs(project: Partial<IReactorProject>, specs: Partial<IReactorProjectFileSpec>[]): Promise<Partial<IReactorProject>>;
@@ -1432,8 +1438,9 @@ export interface IProjectProcessor extends ProjectSynchronizer, AttributeProvide
    * searchables to the search index. Returns the (possibly enriched) project.
    * May run asynchronously.
    * @param project
+   * @param options
    */
-  process(project: Partial<IReactorProject>): Partial<IReactorProject> | Promise<Partial<IReactorProject>>;
+  process(project: Partial<IReactorProject>, options?: ProcessOptions): Partial<IReactorProject> | Promise<Partial<IReactorProject>>;
   /**
    * Returns true if the processor supports the project type.
    * @param project 
