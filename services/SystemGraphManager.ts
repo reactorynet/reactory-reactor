@@ -390,7 +390,11 @@ class SystemGraphManager implements ISystemGraphManager {
         limit,
         0
       );
-      const ids = searchResults.results.map((r) => context.utils.hash(r.id));
+      const ids = searchResults.results.map((r) => {
+        if (typeof (r as any).nodeId === 'number') return (r as any).nodeId;
+        if (typeof r.id === 'number') return r.id;
+        return nodeId(String(r.id));
+      });
       const persisted = await this.getNodes(ids);
       const persistedById = new Map(persisted.map((n) => [n.id, n]));
       return searchResults.results.map((r, i) => {

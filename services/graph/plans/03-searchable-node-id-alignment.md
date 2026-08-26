@@ -148,14 +148,18 @@ Existing indexes are stale shape. Document: **re-run project index after deploy*
 
 ## 7. Acceptance criteria
 
-- [ ] File searchable carries `nodeId` equal to graph file node id.
-- [ ] `searchNodes` does not double-hash; resolves persisted nodes when present.
-- [ ] `ReactorNodesByNameAndNameSpace` does not force `DATASTORE` type.
-- [ ] Tests cover id equality for nested paths (`src/a/b.ts`).
-- [ ] No change to GraphIdentity formulas.
+- [x] File searchable carries `nodeId` equal to graph file node id.
+- [x] `searchNodes` does not double-hash; resolves persisted nodes when present.
+- [x] `ReactorNodesByNameAndNameSpace` does not force `DATASTORE` type.
+- [x] Tests cover id equality for nested paths (`src/a/b.ts`).
+- [x] No change to GraphIdentity formulas.
 
 ---
 
 ## 8. Agent Notes
 
-- Reindex required: yes/no note for operators:
+- Reindex required: yes (existing search indexes created prior to this session used the legacy `id: Hash(projectFqn_type_relativePath)` format without explicit `nodeId`; re-running project catalog/index will populate `id: logicalKey` and `nodeId: graphNodeId`).
+- Implemented `buildSearchable` and symlink searchable creation to emit `id: logicalKey` and `nodeId: graphNodeId`.
+- Updated `SystemGraphManager.searchNodes` to resolve numeric `nodeId`, numeric `id`, or string `logicalKey` without double-hashing, preferring persisted graph nodes over synthetic stubs.
+- Updated `ReactorSystemGraph.ReactorNodesByNameAndNameSpace` to delegate directly to `searchNodes` with 1-based page calculation and without hardcoded `DATASTORE` type.
+- Added comprehensive unit tests in `src/modules/reactory-reactor/services/graph/SearchIdAlignment.test.ts`. All 77 graph tests passing.

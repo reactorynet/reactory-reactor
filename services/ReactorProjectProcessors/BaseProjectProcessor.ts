@@ -1015,22 +1015,21 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     try {
       const content = fs.readFileSync(fileSpec.path, "utf-8");
       const lines = content.split("\n");
-      const fileName = fileSpec.path.split(path.sep).pop();
-      // Key the searchable on the project-relative path, not the bare file name:
-      // large repos have many files that share a basename (e.g. index.ts), and a
-      // basename-only id collapses them to one id, so most get overwritten in the
-      // search index (thousands of files silently lost).
+      const fqn = projectFqn(project);
       const relativePath = normalizeRelative(
         path.relative(project.repoPath || "", fileSpec.path)
       );
-      const idString = `${projectFqn(project)}_${fileSpec.type}_${relativePath}`;
+      const logicalKey = pathLogicalKey(fqn, relativePath);
+      const graphNodeId = nodeId(logicalKey);
       return {
-        id: Hash(idString),
+        id: logicalKey,
+        nodeId: graphNodeId,
         name: `${fileSpec.type}_${relativePath}`,
         nameSpace: project.nameSpace,
         version: project.version,
         source: content.slice(0, MAX_SEARCHABLE_CONTENT),
         path: fileSpec.path,
+        relativePath,
         metrics: [{ unit: "lines", value: lines.length, name: "Line Count" }],
         type: { id: fileSpec.type, name: fileSpec.type },
       } as Reactory.Models.ISearchable;
@@ -1230,13 +1229,18 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
         } as ReactorNodeLink);
       }
 
+      const symlinkLogicalKey = pathLogicalKey(projectFqn(next), (symlinkNode.data as TreeNodeData).relativePath);
+      const symlinkNodeId = nodeId(symlinkLogicalKey);
+
       searchables.push({
-        id: Hash(`${projectFqn(next)}_symlink_${(symlinkNode.data as TreeNodeData).relativePath}`),
+        id: symlinkLogicalKey,
+        nodeId: symlinkNodeId,
         name: `symlink_${(symlinkNode.data as TreeNodeData).relativePath}`,
         nameSpace: next.nameSpace,
         version: next.version,
         source: symlinkNode.description,
         path: record.fullPath,
+        relativePath: (symlinkNode.data as TreeNodeData).relativePath,
         type: { id: "symlink", name: "symlink" },
       } as Reactory.Models.ISearchable);
     }

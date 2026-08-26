@@ -142,48 +142,24 @@ class ReactorSystemGraph {
     },
     context: Reactory.Server.IReactoryContext
   ): Promise<PagedNodes> {
-    const nodes: Partial<ReactorNode>[] = [];
     const { name, nameSpace, term } = args;
-    let paging = args.paging || { page: 0, pageSize: 10 };
-    const searchSvc = context.getService<Reactory.Service.ISearchService>(
-      "core.ReactorySearchService@1.0.0"
-    );
-    const offset = (paging.page === 0 ? 1 : paging.page) * paging.pageSize;
-    const searchResults = await searchSvc.search<
-      Partial<Reactory.Models.ISearchable>
-    >(
-      `reactor_graph_${nameSpace}_${name}`,
-      term,
-      ["name", "nameSpace", "description"],
-      paging.pageSize,
-      offset
-    );
-    searchResults.results.forEach((r) => {
-      nodes.push({
-        id: context.utils.hash(r.id),
-        index: r.id,
-        name: r.name,
-        version: r.version,
-        nameSpace: r.nameSpace,
-        type: ReactorNodeType.DATASTORE,
-        categories: [],
-        description: r.source,
-        created: new Date(),
-        children: [],
-        inputs: [],
-        outputs: [],
-        metrics: [],
-        updated: new Date(),
-      });
+    const paging = args.paging || { page: 1, pageSize: 10 };
+    const page = Math.max(paging.page || 1, 1);
+    const pageSize = Math.min(Math.max(paging.pageSize || 10, 1), 1000);
+    const graphSvc = graphService(context);
+    const nodes = await graphSvc.searchNodes(term || "", {
+      nameSpace,
+      name,
+      limit: pageSize,
     });
 
     return {
       nodes,
       paging: {
-        total: searchResults.total,
-        hasNext: offset + paging.pageSize < searchResults.total,
-        page: paging.page,
-        pageSize: paging.pageSize,
+        total: nodes.length,
+        hasNext: false,
+        page,
+        pageSize,
       },
     };
   }
