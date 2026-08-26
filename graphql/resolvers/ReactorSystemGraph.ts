@@ -31,6 +31,7 @@ import {
   ReactorLinkType,
 } from "@reactory/server-modules/reactory-reactor/types/model.types";
 import { ReactorNodeModel } from "@reactory/server-modules/reactory-reactor/models/ReactorGraphNode";
+import { nodeId } from "@reactory/server-modules/reactory-reactor/services/graph/GraphIdentity";
 import { ReactorNodeLinkModel } from "@reactory/server-modules/reactory-reactor/models/ReactorNodeLink";
 
 import OBJID from "@reactory/server-core/utils/ObjectId";
@@ -710,19 +711,55 @@ class ReactorSystemGraph {
     return allNodes.filter((node) => args.type.includes(node.type));
   }
 
+  /**
+   * Resolve the graph node for a conversation by its deterministic id.
+   *
+   * `ProcessConversationStep` upserts the node as
+   * `nodeId("conversation::<conversationId>")`, and `id` is indexed and unique,
+   * so this is one index hit. The conversation id appears nowhere in the node's
+   * `name` or `description` (they hold "Conversation: <title>"), which is why
+   * searching for it via `ReactorNodesByTerm` can never match — and why doing
+   * so costs a full collection scan plus a catalog load every time.
+   */
+  @query("ReactorConversationNode")
+  async ReactorConversationNode(
+    _: any,
+    args: { conversationId: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode> | null> {
+    if (!args.conversationId) return null;
+    const id = nodeId(`conversation::${args.conversationId}`);
+    const node = (await ReactorNodeModel.findOne({ id }).lean()) as any;
+    return node || null;
+  }
+
   @query("ReactorNodesByTerm")
   async ReactorNodesByTerm(
     _: any,
     args: { term: string },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    const term = args.term || "";
-    // Persisted regex search over name/description across all indexed nodes.
+    const term = (args.term || "").trim();
+    if (term === "") return [];
+
+    // `name` and `description` carry no index, so this regex is a collection
+    // scan no matter what. Keep the result cap modest and refuse the shapes
+    // that can only ever scan for nothing: a bare id is a caller using the
+    // wrong query (see ReactorConversationNode).
+    const looksLikeObjectId = /^[0-9a-f]{24}$/i.test(term);
+    if (looksLikeObjectId) {
+      context.warn(
+        `[ReactorSystemGraph] ReactorNodesByTerm called with what looks like an ObjectId ("${term}"). ` +
+        `Node names and descriptions never contain raw ids — use ReactorConversationNode or ReactorNode(id:) instead.`
+      );
+      return [];
+    }
+
     const rx = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
     const persisted = (await ReactorNodeModel.find({
       $or: [{ name: rx }, { description: rx }],
     })
-      .limit(1000)
+      .limit(100)
       .lean()) as any[];
     if (persisted && persisted.length) return persisted;
 
