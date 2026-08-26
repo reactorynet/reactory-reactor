@@ -123,7 +123,7 @@ types/
 | 01 | `01-persist-folder-hierarchy.md` | P0 | M | done | |
 | 02 | `02-project-scoped-gc-and-schema.md` | P0 | M | done | |
 | 03 | `03-searchable-node-id-alignment.md` | P0 | S | done | |
-| 04 | `04-catalog-lookup-o1.md` | P0 | S | pending | |
+| 04 | `04-catalog-lookup-o1.md` | P0 | S | done | |
 | 05 | `05-manager-cleanup-and-getproject.md` | P1 | S | pending | |
 | 06 | `06-graphql-facade-and-paging.md` | P1 | M | pending | |
 | 07 | `07-mongo-indexes-and-project-fields.md` | P1 | S | pending | |
@@ -189,7 +189,7 @@ Program is **done** when:
 - [ ] Persisted graph preserves folder hierarchy (`parentId` chain).
 - [ ] Re-index GC removes deleted file/symbol/edge nodes per project.
 - [x] Search hits resolve to real graph nodes (same id space).
-- [ ] Catalog node/project lookup is O(1) (no full project list scan).
+- [x] Catalog node/project lookup is O(1) (no full project list scan).
 - [ ] `getProject` on manager does not throw.
 - [ ] GraphQL graph queries go through manager (no ad-hoc model filters for core paths).
 - [ ] Mongo indexes match hot queries; `projectId` is first-class.

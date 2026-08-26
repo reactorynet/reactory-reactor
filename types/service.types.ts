@@ -1065,6 +1065,7 @@ export interface IReactorProjectMetrics {
 
 export interface IReactorProject extends Reactory.IComponentFqnDefinition {
   id?: number | string;
+  graphRootId?: number;
   client?: Reactory.Models.TReactoryClient; // ReactoryClient
   organization?: Partial<Reactory.Models.IOrganization> | Partial<Reactory.Models.IOrganizationDocument>; // ReactoryOrganization
   businessUnit?: Partial<Reactory.Models.TBusinessUnit>; // BusinessUnit
@@ -1162,6 +1163,12 @@ export interface ReactorProjectService extends Reactory.Service.IReactoryService
    * @param idOrPath 
    */
   getProject(idOrPath: string): Promise<Partial<IReactorProject>>;
+
+  /**
+   * Returns a project by its deterministic graph root node ID
+   * @param id 
+   */
+  getProjectByGraphRootId(id: number): Promise<Partial<IReactorProject>>;
 
   /**
    * Creates a new project
@@ -1283,7 +1290,7 @@ export interface ISystemGraphManager extends Reactory.Service.IReactoryDefaultSe
   /**
    * Returns the root catalog nodes
    */
-  getCatalogNodes(): Promise<ReactorNode[]>;
+  getCatalogNodes(paging?: { page?: number; pageSize?: number }): Promise<ReactorNode[]>;
   /**
    * 
    * @param id 

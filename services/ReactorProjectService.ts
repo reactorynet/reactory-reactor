@@ -32,6 +32,7 @@ import {
   MarkdownProjectProcessor,
   FileProjectProcessor,
 } from "./SystemGraphProjectProviders";
+import { nodeId, projectLogicalKey } from "./graph/GraphIdentity";
 import logger from "@reactory/server-core/logging";
 
 @service({
@@ -354,6 +355,7 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
     const total = await ReactorProjectModel.countDocuments(query);
     const projectsRaw = await ReactorProjectModel.find(query, {
       _id: 1,
+      graphRootId: 1,
       fqn: 1,
       name: 1,
       nameSpace: 1,
@@ -415,6 +417,7 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
     }
     return ReactorProjectModel.findOne(query, {
       _id: 1,
+      graphRootId: 1,
       fqn: 1,
       name: 1,
       nameSpace: 1,
@@ -557,6 +560,10 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
         throw new Error(
           `Failed to process owner team for project ${project.name}: ${ownerTeamError.message}`
         );
+      }
+
+      if (!project.graphRootId && (project.name || project.fqn)) {
+        project.graphRootId = nodeId(projectLogicalKey(project));
       }
 
       const created = await ReactorProjectModel.create(project);
@@ -736,6 +743,7 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       }
 
       project.updated = new Date();
+      project.graphRootId = nodeId(projectLogicalKey(project));
       // Only determine type/subtypes/processor for local path
       if (spec.repoPath && !spec.repoUrl) {
         project.projectTypes = await this.detectProjectTypes(project);
@@ -750,7 +758,7 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
     // Helper to create a new project
     const createNewProject = async (spec: Partial<IReactorProject>) => {
       const now = new Date();
-      return this.createProject({
+      const newProj: Partial<IReactorProject> = {
         ...spec,
         name:
           spec.name ||
@@ -760,7 +768,9 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
         }@${spec.version || "unknown"}`,
         created: now,
         updated: now,
-      });
+      };
+      newProj.graphRootId = nodeId(projectLogicalKey(newProj));
+      return this.createProject(newProj);
     };
 
     let project: Partial<IReactorProject> = null;
@@ -894,9 +904,94 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
     return this.detectProjectTypes(project);
   }
 
+  async getProjectByGraphRootId(id: number): Promise<Partial<IReactorProject>> {
+    if (id === undefined || id === null) return null;
+    const numericId = typeof id === 'number' ? id : Number(id);
+    if (isNaN(numericId)) return null;
+
+    const project = await ReactorProjectModel.findOne({ graphRootId: numericId }, {
+      _id: 1,
+      graphRootId: 1,
+      fqn: 1,
+      name: 1,
+      nameSpace: 1,
+      version: 1,
+      repoPath: 1,
+      repoUrl: 1,
+      projectTypes: 1,
+      lastSync: 1,
+      description: 1,
+      tasksUrl: 1,
+      primaryDocumentation: 1,
+      secondaryDocumentation: 1,
+      primarySlackChannel: 1,
+      secondarySlackChannels: 1,
+      dependencies: 1,
+      pathSpecs: 1,
+      files: 1,
+      deployments: 1,
+      dashboards: 1,
+      processor: 1,
+      processorOptions: 1,
+      processors: 1,
+      ownerTeam: 1,
+      teams: 1,
+      engineers: 1,
+      activeBranch: 1,
+      mainBranch: 1,
+      branches: 1,
+      tags: 1,
+    }, {
+      populate: [
+        'businessUnit',
+        'organization',
+        'ownerTeam',
+        'teams',
+      ],
+    }).lean() as Partial<IReactorProject>;
+
+    if (project) {
+      return {
+        ...project,
+        id: (project as any)._id?.toString() || project.id,
+      };
+    }
+
+    // Lazy backfill: If not found by graphRootId, check if any project matches when computing nodeId(projectLogicalKey(p)).
+    const unindexed = await ReactorProjectModel.find({
+      $or: [{ graphRootId: { $exists: false } }, { graphRootId: null }],
+    }).lean();
+
+    for (const candidate of unindexed) {
+      const rootId = nodeId(projectLogicalKey(candidate as any));
+      if (rootId === numericId) {
+        // Lazy backfill: set graphRootId
+        await ReactorProjectModel.updateOne(
+          { _id: candidate._id },
+          { $set: { graphRootId: rootId } }
+        );
+        return {
+          ...candidate,
+          id: candidate._id?.toString(),
+          graphRootId: rootId,
+        } as Partial<IReactorProject>;
+      }
+    }
+
+    return null;
+  }
+
   async getProjectForCatalogNode(node: any): Promise<Partial<IReactorProject>> {
-    if (!node || !node.id) return null;
-    return ReactorProjectModel.findOne({ _id: node.id }).lean();
+    if (!node || node.id === undefined || node.id === null) return null;
+    const numId = typeof node.id === 'number' ? node.id : Number(node.id);
+    if (!isNaN(numId)) {
+      const byRoot = await this.getProjectByGraphRootId(numId);
+      if (byRoot) return byRoot;
+    }
+    if (typeof node.id === 'string' && ObjectId.isValid(node.id)) {
+      return this.getProject(node.id);
+    }
+    return null;
   }
 
   async sync(project: IReactorProject): Promise<IReactorProject> {

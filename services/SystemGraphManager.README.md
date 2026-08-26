@@ -145,6 +145,8 @@ A reference originates from the **section containing it** where there is one, ot
 
 **Searchable node ID alignment (Session 03):** Search index documents carry `id: logicalKey` (string) and `nodeId: graphNodeId` (deterministic number matching the graph file node). `SystemGraphManager.searchNodes` resolves hits without double-hashing (handling explicit numeric `nodeId`, numeric `id`, or string `logicalKey`), preferring persisted graph nodes over synthetic fallbacks. GraphQL `ReactorNodesByNameAndNameSpace` delegates to `searchNodes` directly.
 
+**O(1) catalog node & reverse project lookups (Session 04):** `ReactorProject` stores and indexes `graphRootId` (deterministic `nodeId(projectLogicalKey(project))`), with lazy backfill on reads for legacy records. `SystemGraphManager.getCatalogNode` resolves catalog roots directly via persisted roots or `projectService.getProjectByGraphRootId` in O(1) time without materializing the full project list. `getProjectForCatalogNode` routes directly through `getProjectByGraphRootId`. `getCatalogNodes` supports optional pagination defaulting to `pageSize: 100`.
+
 ## 6. SystemGraphManager methods
 
 | Method | Status |

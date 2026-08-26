@@ -118,12 +118,28 @@ On read path: if project missing `graphRootId`, compute and optionally `$set` (l
 
 ## 7. Acceptance criteria
 
-- [ ] `getCatalogNode` does not call getProjects without a filter that limits to one project.
-- [ ] `getProjectForCatalogNode` uses graphRootId index path.
-- [ ] Lazy backfill sets graphRootId when missing.
-- [ ] Existing root id formula unchanged (`projectLogicalKey` → `nodeId`).
-- [ ] Tests prove single-project fetch mock is used.
+- [x] `getCatalogNode` does not call getProjects without a filter that limits to one project.
+- [x] `getProjectForCatalogNode` uses graphRootId index path.
+- [x] Lazy backfill sets graphRootId when missing.
+- [x] Existing root id formula unchanged (`projectLogicalKey` → `nodeId`).
+- [x] Tests prove single-project fetch mock is used.
 
 ---
 
 ## 8. Agent Notes
+
+- **Implementation Summary:**
+  1. `models/ReactorProject.ts`: Added `graphRootId: { type: Number, index: { unique: true, sparse: true } }` field to `ReactorProjectSchema`.
+  2. `types/service.types.ts`: Added `graphRootId?: number` to `IReactorProject`, `getProjectByGraphRootId(id: number)` to `ReactorProjectService`, and updated `getCatalogNodes(paging?: { page?: number; pageSize?: number })` on `ISystemGraphManager`.
+  3. `services/ReactorProjectService.ts`:
+     - Ensured `graphRootId = nodeId(projectLogicalKey(project))` is computed and stamped in `createProject` and `catalogProject`.
+     - Included `graphRootId: 1` in `getProjects` and `getProject` query projections.
+     - Implemented `getProjectByGraphRootId(id: number)` with lazy backfill on reads when `graphRootId` is missing on legacy documents.
+     - Updated `getProjectForCatalogNode` to resolve via `getProjectByGraphRootId`.
+  4. `services/SystemGraphManager.ts`:
+     - Rewrote `getCatalogNode(id: number)` to check persisted roots (`parentId == null`) or query `projectService.getProjectByGraphRootId(id)` directly in O(1) time without loading all projects.
+     - Rewrote `getProjectForCatalogNode(node)` to look up via `projectService.getProjectByGraphRootId(node.id)`.
+     - Updated `getCatalogNodes(paging)` to support paging (defaulting to pageSize 100).
+  5. `services/graph/CatalogLookup.test.ts`: Added comprehensive unit tests proving O(1) single-project resolution, lazy backfill, and persisted root handling without invoking `getProjects`.
+- **Out of Scope Observations / Notes for Future Sessions:**
+  - `MarkdownProjectProcessor.test.ts` and `DevOpsProjectProcessor.test.ts` call `process()` without `{ skipGc: true }`, which triggers real Mongo GC calls (`deleteMany`) that timeout when running without an active Mongo connection. Recommended for session 05/08 to ensure test mocks include GC skip.

@@ -693,12 +693,13 @@ class SystemGraphManager implements ISystemGraphManager {
   }
 
 
-  async getCatalogNodes(): Promise<ReactorNode[]> {
-    const that = this;
+  async getCatalogNodes(paging?: { page?: number; pageSize?: number }): Promise<ReactorNode[]> {
+    const page = paging?.page || 1;
+    const pageSize = paging?.pageSize || 100;
     const pagedProjects = await this.projectService.getProjects({
       paging: {
-        page: 1,
-        pageSize: 1000
+        page,
+        pageSize,
       },
       filter: {},
       search: ''
@@ -707,7 +708,7 @@ class SystemGraphManager implements ISystemGraphManager {
 
     const promises: Promise<ReactorNode | null>[] = pagedProjects.projects.map(async (project) => { 
       try {
-        const node = await that.getProjectNode(project);
+        const node = await this.getProjectNode(project);
         if (node) nodes.push(node);
         return node;
       } catch (err) {
@@ -722,13 +723,17 @@ class SystemGraphManager implements ISystemGraphManager {
   }
 
   async getCatalogNode(id: number): Promise<ReactorNode> { 
-    const allNodes = await this.getCatalogNodes();
-    const node = allNodes.find((n) => n.id === id);
-    if(!node) {
-      throw new ApiError(`Node ${id} not found`, 400);
+    // 1. Try persisted SYSTEM/DATASTORE root
+    const persisted = (await ReactorNodeModel.findOne({ id }).lean()) as unknown as ReactorNode;
+    if (persisted && persisted.parentId == null) return persisted;
+
+    // 2. Project by graphRootId
+    const project = await this.projectService.getProjectByGraphRootId(id);
+    if (!project) {
+      throw new ApiError(`Node ${id} not found`, 404);
     }
 
-    return node;
+    return this.getProjectNode(project);
   }
 
   /**
@@ -783,15 +788,20 @@ class SystemGraphManager implements ISystemGraphManager {
   }
 
   async getProjectForCatalogNode(node: Partial<ReactorNode>): Promise<Partial<IReactorProject>> {
-    // Map a catalog node id back to its project. Node ids are the deterministic
-    // hash of the project's logical key, so match on that rather than assuming
-    // node.id equals the raw project id.
-    const { projects } = await this.projectService.getProjects({
-      paging: { page: 1, pageSize: 1000 },
-    });
-    const project = projects.find(
-      (p) => nodeId(projectLogicalKey(p)) === node.id || `${p.id}` === `${node.id}`
-    );
+    if (!node || (node.id === undefined && !node.name)) {
+      throw new ApiError("Node is required", 400);
+    }
+
+    let project: Partial<IReactorProject> | null = null;
+    if (node.id !== undefined && node.id !== null) {
+      project = await this.projectService.getProjectByGraphRootId(node.id);
+      if (!project && typeof node.id === "string") {
+        project = await this.projectService.getProject(String(node.id));
+      }
+    }
+    if (!project && node.name) {
+      project = await this.projectService.getProject(node.name);
+    }
 
     if (!project) {
       throw new ApiError(`Project for node ${node.name || node.id} not found`, 404);

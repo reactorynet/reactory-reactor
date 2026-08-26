@@ -117,6 +117,7 @@ const ReactorProjectSchema: Schema = new Schema({
   name: String,
   nameSpace: String,
   version: String,
+  graphRootId: { type: Number, index: { unique: true, sparse: true } },
   repoPath: String,
   repoUrl: String,
   projectTypes: [String], 
