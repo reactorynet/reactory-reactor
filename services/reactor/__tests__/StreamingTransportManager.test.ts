@@ -58,7 +58,7 @@ describe('StreamingTransportManager', () => {
       expect(manager.hasTransport(SSE_ID)).toBe(true);
     });
 
-    it('should evict a previous transport for the same chat session on reconnect', async () => {
+    it('should support multiple concurrent transports for the same chat session without eviction', async () => {
       await manager.registerTransport({
         sessionId: SSE_ID,
         chatSessionId: CHAT_ID,
@@ -73,9 +73,14 @@ describe('StreamingTransportManager', () => {
         transport: newTransport,
       });
 
-      expect(mockTransport.close).toHaveBeenCalled();
-      expect(manager.hasTransport(SSE_ID)).toBe(false);
+      expect(manager.hasTransport(SSE_ID)).toBe(true);
       expect(manager.hasTransport(newSseId)).toBe(true);
+
+      const event = makeEvent();
+      await manager.sendEventToSession(CHAT_ID, event);
+
+      expect(mockTransport.sendEvent).toHaveBeenCalledWith(event);
+      expect(newTransport.sendEvent).toHaveBeenCalledWith(event);
     });
 
     it('should handle transport initialization failure', async () => {

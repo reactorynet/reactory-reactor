@@ -22,7 +22,8 @@ import { ChatSessionResourceManager } from './ChatSessionResourceManager';
 export class StreamingTransportManager implements Reactory.Service.IReactoryService {
   private readonly context: Reactory.Server.IReactoryContext;
   private readonly transports = new Map<string, StreamingTransport>();
-  private readonly chatSessions = new Map<string, string>();
+  private readonly chatSessions = new Map<string, Set<string>>();
+  private readonly sseToChatMap = new Map<string, string>();
   private readonly activityTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private sessionManager: StreamingSessionManager;
 
@@ -63,14 +64,10 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
   }
 
   /**
-   * Resolve a chatSessionId from an SSE session ID by reverse-looking up
-   * the chatSessions map.
+   * Resolve a chatSessionId from an SSE session ID.
    */
   private chatIdForSse(sseSessionId: string): string | undefined {
-    for (const [chatId, sseId] of this.chatSessions.entries()) {
-      if (sseId === sseSessionId) return chatId;
-    }
-    return undefined;
+    return this.sseToChatMap.get(sseSessionId);
   }
 
   /**
@@ -152,7 +149,7 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
   private async evictTransport(sseSessionId: string, reason: string): Promise<void> {
     const transport = this.transports.get(sseSessionId);
     if (!transport) return;
-    const chatId = this.chatIdForSse(sseSessionId);
+    const chatId = this.sseToChatMap.get(sseSessionId);
     this.slog("info", `Evicting transport ${sseSessionId} (${reason}, connected: ${transport.isConnected})`, undefined, chatId);
     try {
       await transport.close();
@@ -160,8 +157,13 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
       this.slog("warn", `Error closing transport ${sseSessionId}: ${err.message}`, undefined, chatId);
     }
     this.transports.delete(sseSessionId);
+    this.sseToChatMap.delete(sseSessionId);
     if (chatId) {
-      this.chatSessions.delete(chatId);
+      const set = this.chatSessions.get(chatId);
+      if (set) {
+        set.delete(sseSessionId);
+        if (set.size === 0) this.chatSessions.delete(chatId);
+      }
     }
   }
 
@@ -180,24 +182,22 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
       transportType: transport.constructor.name,
     }, chatSessionId);
 
-    // If a transport already exists for this SSE session ID, close and replace it.
+    // If a transport already exists for this exact SSE session ID, close and replace it.
     await this.evictTransport(sessionId, 'same SSE session ID re-registration');
-
-    // On reconnect the chatSessionId may already map to a DIFFERENT (old) SSE
-    // session whose transport is dead.  Clean that up so the old transport
-    // doesn't leak and the mapping is deterministic.
-    const previousSseId = this.chatSessions.get(chatSessionId);
-    if (previousSseId && previousSseId !== sessionId) {
-      await this.evictTransport(previousSseId, `replaced by new SSE session for chat ${chatSessionId}`);
-    }
 
     try {
       await transport.initialize();
       this.transports.set(sessionId, transport);
-      this.chatSessions.set(chatSessionId, sessionId);
+      this.sseToChatMap.set(sessionId, chatSessionId);
+      let sseSet = this.chatSessions.get(chatSessionId);
+      if (!sseSet) {
+        sseSet = new Set<string>();
+        this.chatSessions.set(chatSessionId, sseSet);
+      }
+      sseSet.add(sessionId);
 
       this.slog("info", `Transport registered successfully`, {
-        chatSessions: Array.from(this.chatSessions.entries()),
+        chatSessions: Array.from(this.chatSessions.entries()).map(([k, v]) => [k, Array.from(v)]),
         transports: Array.from(this.transports.keys()),
       }, chatSessionId);
 
@@ -216,14 +216,14 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
   }
 
   /**
-   * Send an event to a specific session's transport.
+   * Send an event to all connected transports registered for this chat session.
    * If no connected transport exists, the event is buffered and flushed
    * when a transport is re-registered (e.g. on client reconnect).
    */
   async sendEventToSession(chatSessionId: string, event: StreamingEvent): Promise<void> {
-    const sessionId = this.chatSessions.get(chatSessionId);
+    const sseSet = this.chatSessions.get(chatSessionId);
 
-    if (!sessionId) {
+    if (!sseSet || sseSet.size === 0) {
       this.slog("debug", `No session found for chat session ${chatSessionId} — buffering event`, {
         eventType: event.type,
       }, chatSessionId);
@@ -231,50 +231,46 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
       return;
     }
 
-    const transport = this.transports.get(sessionId);
+    const deadSessions: string[] = [];
+    let sentCount = 0;
 
-    if (!transport) {
-      this.slog("debug", `No transport found for SSE session ${sessionId} — buffering event`, {
-        eventType: event.type,
-      }, chatSessionId);
-      this.bufferEvent(chatSessionId, event);
-      return;
+    for (const sessionId of Array.from(sseSet)) {
+      const transport = this.transports.get(sessionId);
+      if (!transport || !transport.isConnected) {
+        deadSessions.push(sessionId);
+        continue;
+      }
+      try {
+        await transport.sendEvent(event);
+        sentCount++;
+        this.throttledUpdateSessionActivity(sessionId);
+      } catch (err: any) {
+        this.slog("error", `Error sending event to SSE session ${sessionId}: ${err.message}`, {
+          eventType: event.type,
+          chatSessionId,
+        }, chatSessionId);
+        if (!transport.isConnected) {
+          deadSessions.push(sessionId);
+        }
+      }
     }
 
-    if (!transport.isConnected) {
-      this.slog("debug", `Transport for SSE session ${sessionId} is disconnected — buffering event`, {
-        eventType: event.type,
-      }, chatSessionId);
-      this.transports.delete(sessionId);
+    for (const deadId of deadSessions) {
+      this.transports.delete(deadId);
+      this.sseToChatMap.delete(deadId);
+      sseSet.delete(deadId);
+    }
+    if (sseSet.size === 0) {
       this.chatSessions.delete(chatSessionId);
       this.bufferEvent(chatSessionId, event);
-      return;
-    }
-
-    try {
-      await transport.sendEvent(event);
-
+    } else if (sentCount > 0) {
       if (event.type === 'tool_call' || event.type === 'complete' || event.type === 'error') {
-        this.slog("debug", `Sent ${event.type} event`, {
+        this.slog("debug", `Sent ${event.type} event to ${sentCount} transport(s)`, {
           eventType: event.type,
           chatSessionId,
           messageId: event.messageId,
         }, chatSessionId);
       }
-
-      this.throttledUpdateSessionActivity(sessionId);
-    } catch (error: any) {
-      this.slog("error", `Error sending event: ${error.message}`, {
-        eventType: event.type,
-        chatSessionId,
-      }, chatSessionId);
-
-      if (!transport.isConnected) {
-        this.transports.delete(sessionId);
-        this.chatSessions.delete(chatSessionId);
-      }
-      this.bufferEvent(chatSessionId, event);
-      throw error;
     }
   }
 
@@ -288,7 +284,7 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
       return; // Already closed or never registered
     }
 
-    const chatId = this.chatIdForSse(sessionId);
+    const chatId = this.sseToChatMap.get(sessionId);
 
     try {
       await transport.close();
@@ -296,8 +292,13 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
       this.slog("warn", `Error closing transport for session ${sessionId}: ${error.message}`, undefined, chatId);
     } finally {
       this.transports.delete(sessionId);
+      this.sseToChatMap.delete(sessionId);
       if (chatId) {
-        this.chatSessions.delete(chatId);
+        const set = this.chatSessions.get(chatId);
+        if (set) {
+          set.delete(sessionId);
+          if (set.size === 0) this.chatSessions.delete(chatId);
+        }
       }
     }
   }
@@ -318,6 +319,8 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
 
     await Promise.all(closePromises);
     this.transports.clear();
+    this.sseToChatMap.clear();
+    this.chatSessions.clear();
   }
 
   /**
@@ -330,11 +333,16 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
     if (!transport) return false;
 
     if (!transport.isConnected) {
-      const chatId = this.chatIdForSse(sessionId);
+      const chatId = this.sseToChatMap.get(sessionId);
       this.slog("debug", `hasTransport: transport for ${sessionId} exists but is disconnected — removing stale entry`, undefined, chatId);
       this.transports.delete(sessionId);
+      this.sseToChatMap.delete(sessionId);
       if (chatId) {
-        this.chatSessions.delete(chatId);
+        const set = this.chatSessions.get(chatId);
+        if (set) {
+          set.delete(sessionId);
+          if (set.size === 0) this.chatSessions.delete(chatId);
+        }
       }
       return false;
     }
@@ -344,13 +352,14 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
 
   /**
    * Check if an active transport exists for a chat (conversation) session.
-   * Convenience method that resolves the chatSessionId → sseSessionId
-   * mapping internally.
    */
   hasActiveTransportForChat(chatSessionId: string): boolean {
-    const sessionId = this.chatSessions.get(chatSessionId);
-    if (!sessionId) return false;
-    return this.hasTransport(sessionId);
+    const sseSet = this.chatSessions.get(chatSessionId);
+    if (!sseSet || sseSet.size === 0) return false;
+    for (const sessionId of Array.from(sseSet)) {
+      if (this.hasTransport(sessionId)) return true;
+    }
+    return false;
   }
 
   /**
@@ -359,12 +368,14 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
    * Best-effort — failures are silently ignored.
    */
   sendHeartbeatToSession(chatSessionId: string): void {
-    const sessionId = this.chatSessions.get(chatSessionId);
-    if (!sessionId) return;
-    const transport = this.transports.get(sessionId);
-    if (!transport || !transport.isConnected) return;
-    if ('sendHeartbeat' in transport && typeof (transport as any).sendHeartbeat === 'function') {
-      (transport as any).sendHeartbeat();
+    const sseSet = this.chatSessions.get(chatSessionId);
+    if (!sseSet || sseSet.size === 0) return;
+    for (const sessionId of Array.from(sseSet)) {
+      const transport = this.transports.get(sessionId);
+      if (!transport || !transport.isConnected) continue;
+      if ('sendHeartbeat' in transport && typeof (transport as any).sendHeartbeat === 'function') {
+        (transport as any).sendHeartbeat();
+      }
     }
   }
 
