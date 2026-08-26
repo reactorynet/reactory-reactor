@@ -543,6 +543,86 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     };
   }
 
+  /**
+   * Builds a FOLDER node for an intermediate path segment during batch process().
+   * Mirrors the folder branch of makeTreeNode so that batch + interactive
+   * agree on id / type / kind / parentId / key.
+   */
+  private makeFolderNode(
+    parent: Partial<ReactorNode>,
+    segment: string,
+    fullPath: string,
+    relativePath: string
+  ): ReactorNode {
+    const fqn = this.fqnOf(parent);
+    const id = nodeId(pathLogicalKey(fqn, relativePath));
+    const isSubmodule = fs.existsSync(path.join(fullPath, ".git"));
+    const data: TreeNodeData = {
+      path: fullPath,
+      relativePath,
+      repoPath: this.repoPathOf(parent),
+      projectFqn: fqn,
+      projectId: parent?.data?.projectId,
+      kind: isSubmodule ? "submodule" : "folder",
+    };
+    return {
+      id,
+      index: id,
+      name: segment,
+      key: appendAncestry(parent.key, id),
+      type: ReactorNodeType.FOLDER,
+      description: `${isSubmodule ? "Submodule" : "Folder"} ${relativePath}`,
+      parentId: parent.id,
+      providerId: parent.providerId,
+      nameSpace: parent.nameSpace,
+      version: parent.version,
+      source: fullPath,
+      categories: [],
+      children: [],
+      inputs: [],
+      outputs: [],
+      metrics: [],
+      created: new Date(),
+      updated: new Date(),
+      data,
+    };
+  }
+
+  /**
+   * Ensure the chain of FOLDER nodes for a file's parent directories exists.
+   * Returns the immediate parent folder (or root) for the file.
+   * Uses a Map for de-duplication within a single process run.
+   */
+  private ensureFolderChain(
+    relativeFilePath: string,
+    root: Partial<ReactorNode>,
+    repoPath: string,
+    folderByRel: Map<string, ReactorNode>,
+    nodes: Partial<ReactorNode>[]
+  ): Partial<ReactorNode> {
+    const parts = normalizeRelative(relativeFilePath).split("/").slice(0, -1); // drop filename
+    let parent: Partial<ReactorNode> = root;
+    let acc: string[] = [];
+    for (const part of parts) {
+      if (!part) continue;
+      acc.push(part);
+      const rel = acc.join("/");
+      if (folderByRel.has(rel)) {
+        parent = folderByRel.get(rel)!;
+        continue;
+      }
+      const full = path.join(repoPath, rel);
+      const folder = this.makeFolderNode(parent, part, full, rel);
+      folderByRel.set(rel, folder);
+      // de-dupe by id if somehow re-ensured
+      if (!nodes.some((n) => n.id === folder.id)) {
+        nodes.push(folder);
+      }
+      parent = folder;
+    }
+    return parent;
+  }
+
   // ---- Tree expansion ------------------------------------------------------
 
   async getChildrenForNode(
@@ -818,12 +898,13 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
   // ---- Processing / indexing ----------------------------------------------
 
   /**
-   * Builds a FILE (or DOCUMENT) node parented to the project root, used by
-   * batch process(). Must agree with makeTreeNode on id, type and kind so the
-   * batch and interactive paths produce one node, not two.
+   * Builds a FILE (or DOCUMENT) node parented to the *immediate* parent
+   * (folder or root). Used by batch process(). Must agree with makeTreeNode
+   * on id, type and kind so the batch and interactive paths produce one node,
+   * not two. File ids remain based on full relativePath (unchanged).
    */
   private fileNodeForProcess(
-    root: Partial<ReactorNode>,
+    parent: Partial<ReactorNode>,
     project: Partial<IReactorProject>,
     absPath: string
   ): ReactorNode {
@@ -838,10 +919,10 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       id,
       index: id,
       name: path.basename(absPath),
-      key: appendAncestry(root.key, id),
+      key: appendAncestry(parent.key, id),
       type: isDocument ? ReactorNodeType.DOCUMENT : ReactorNodeType.FILE,
       description: `${isDocument ? "Document" : "File"} ${relativePath}`,
-      parentId: root.id,
+      parentId: parent.id,
       providerId: this.fqn(),
       nameSpace: project.nameSpace,
       version: project.version,
@@ -865,9 +946,9 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     };
   }
 
-  /** Builds a symlink node parented to the project root (used by batch process). */
+  /** Builds a symlink node parented to the *immediate* parent (folder or root). */
   private symlinkNodeForProcess(
-    root: Partial<ReactorNode>,
+    parent: Partial<ReactorNode>,
     project: Partial<IReactorProject>,
     record: SymlinkRecord
   ): ReactorNode {
@@ -892,11 +973,11 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       id,
       index: id,
       name: record.entryName,
-      key: appendAncestry(root.key, id),
+      key: appendAncestry(parent.key, id),
       // The link node keeps its target's natural type; broken links are FILE.
       type: classification.isDir ? ReactorNodeType.FOLDER : ReactorNodeType.FILE,
       description: `Symlink ${relativePath}${classification.relativeTarget ? ` -> ${classification.relativeTarget}` : classification.broken ? " (broken)" : ""}`,
-      parentId: root.id,
+      parentId: parent.id,
       providerId: this.fqn(),
       nameSpace: project.nameSpace,
       version: project.version,
@@ -1054,8 +1135,21 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     const edges: ReactorNodeLink[] = [];
     const searchables: Reactory.Models.ISearchable[] = [];
 
+    // Folder nodes for batch process() — ensures parity with makeTreeNode ancestry
+    const folderByRel = new Map<string, ReactorNode>();
+
     for (const spec of fileSpecs) {
-      const fileNode = this.fileNodeForProcess(root, next, spec.path);
+      const relativeForChain = normalizeRelative(
+        path.relative(next.repoPath || "", spec.path)
+      );
+      const parentForFile = this.ensureFolderChain(
+        relativeForChain,
+        root,
+        next.repoPath || "",
+        folderByRel,
+        nodes
+      );
+      const fileNode = this.fileNodeForProcess(parentForFile, next, spec.path);
       if (!this.claimsFile(fileNode, next)) continue;
       nodes.push(fileNode);
 
@@ -1090,7 +1184,17 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     // Symlink nodes + resolution edges. Edges are only written for in-repo
     // targets (deterministic target id) — out-of-repo stays metadata only.
     for (const record of symlinkRecords) {
-      const symlinkNode = this.symlinkNodeForProcess(root, next, record);
+      const relForSym = normalizeRelative(
+        path.relative(next.repoPath || "", record.fullPath)
+      );
+      const parentForSym = this.ensureFolderChain(
+        relForSym,
+        root,
+        next.repoPath || "",
+        folderByRel,
+        nodes
+      );
+      const symlinkNode = this.symlinkNodeForProcess(parentForSym, next, record);
       nodes.push(symlinkNode);
 
       const resolvedNodeId = (symlinkNode.data as TreeNodeData)?.symlink?.resolvedNodeId;

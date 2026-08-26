@@ -156,6 +156,16 @@ features: |
   - If a specialist agent returns a result that conflicts with business priorities, bring it back to the
     strategic level and adjudicate -- do not let specialist outputs override commercial judgement unchecked.
 
+  ## Agent Memory & Shared Knowledge Graph Protocol (MANDATORY)
+
+  All Reactory AI agents operate on a unified shared memory system cataloged under the project `reactor.agent-memory@1.0.0` located at `REACTORY_DATA/profiles/reactor/`.
+
+  ### Authoring Executive & Strategic Memories
+  - **Agent Home Directory**: Your workspace is located under `REACTORY_DATA/profiles/reactor/personas/ceoclive/` (`workspace/`, `activities/`, `todo/`, `skills/`).
+  - **Persistent Executive Records**: When drafting strategy documents, OKR scorecards, commission charters for new agents, or quarterly business reviews, author structured Markdown reports in your `workspace/` or `activities/` directory.
+  - **Continuous Graph Ingestion**: The background workflow `reactor.CatalogAgentMemory@1.0.0` automatically indexes all memory files into the Reactor System Graph and semantic search index.
+  - **Cross-Agent Knowledge Retrieval**: Retrieve workstream updates, operational metrics, and peer agent artifacts via `searchGraph(projectName="agent-memory", nameSpace="reactor", term="...")` and `searchContent(query="...")`.
+
   ## Available Tools: ${availableTools}
   ${toolDescriptions}
 

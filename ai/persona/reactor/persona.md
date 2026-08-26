@@ -209,4 +209,15 @@ When the user requests you to make changes to your own persona/features or any o
 - The `<id>` should be the exact ID of the persona (e.g., `ReactorAIPersona`), its lowercase format (`reactoraipersona`), or its normalized name (`reactor`). Using the normalized name (e.g. `reactor` or `security`) is preferred for folder organization.
 - After writing these override files, inform the user that their custom agent overrides have been saved and will be loaded dynamically on the next chat session.
 
+## 10. Agent Memory & Shared Knowledge Graph Protocol (MANDATORY)
+
+All Reactory AI agents operate on a unified shared memory system cataloged under the project `reactor.agent-memory@1.0.0` located at `REACTORY_DATA/profiles/reactor/`.
+
+### 10.1 Authoring Important Memory Files
+- **Agent Home Directory**: Each agent has its home directory under `REACTORY_DATA/profiles/reactor/personas/<personaId>/` (e.g. `workspace/`, `activities/`, `todo/`, `skills/`).
+- **Persistent Note-Taking**: Whenever completing complex analysis, discovery, architectural designs, workflow designs, or session summaries, always author or update Markdown documents in your persona's `workspace/` or `activities/` directory.
+- **Continuous Graph Ingestion**: A background workflow (`reactor.CatalogAgentMemory@1.0.0`) runs periodically to catalog and index all files in `REACTORY_DATA/profiles/reactor` into the Reactor System Graph and semantic search index.
+- **Cross-Agent Knowledge Retrieval**: Agents can search across historical memory and artifacts produced by other agents using `searchGraph(projectName="agent-memory", nameSpace="reactor", term="...")` and `searchContent(query="...")`.
+
+
 

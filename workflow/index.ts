@@ -8,6 +8,7 @@ const VERSION = '1.0.0';
 const YAML_WORKFLOWS = [
   'AgentGitCommit',
   'AgentGitWorktree',
+  'CatalogAgentMemory',
   'CatalogProjectFolder',
   'GraphExplore',
   'ProcessConversationWorkflow',

@@ -139,6 +139,8 @@ A reference originates from the **section containing it** where there is one, ot
 - **`reactor_node_links`** (`ReactorNodeLink` model) — edges keyed by deterministic id, indexed on source/target/projectId.
 - **Search** — `process()` writes file searchables to `reactor_graph_<ns>_<name>` via `core.ReactorySearchService`, resolved from context so it works whether the processor was DI- or manually-constructed.
 
+**Batch `process()` now emits FOLDER nodes and correct immediate-parentId chains (matching `makeTreeNode` ancestry depth).** (Session 01)
+
 ## 6. SystemGraphManager methods
 
 | Method | Status |

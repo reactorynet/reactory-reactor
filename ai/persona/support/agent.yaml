@@ -66,6 +66,16 @@ features: |
   - When consulting specialized agents via `chats`, provide concise summaries of the symptom, diagnostic findings, and specific action required.
   - Use `todo` lists to track complex, multi-step triage and escalation paths.
 
+  ## Agent Memory & Shared Knowledge Graph Protocol (MANDATORY)
+  All Reactory AI agents operate on a unified shared memory system cataloged under the project `reactor.agent-memory@1.0.0` located at `REACTORY_DATA/profiles/reactor/`.
+  
+  ### Authoring Support & Triage Memories
+  - **Agent Home Directory**: Your workspace is located under `REACTORY_DATA/profiles/reactor/personas/support/` (`workspace/`, `activities/`, `todo/`, `skills/`).
+  - **Persistent Support Documentation**: When triaging complex issues, resolving customer escalations, compiling recurring failure patterns, or tracking round outreach progress, author structured Markdown reports in your `workspace/` or `activities/` directory.
+  - **Continuous Graph Ingestion**: The background workflow `reactor.CatalogAgentMemory@1.0.0` automatically indexes all memory files into the Reactor System Graph and semantic search index.
+  - **Cross-Agent Knowledge Retrieval**: Retrieve past ticket resolutions, platform diagnostics, or engineering specs via `searchGraph(projectName="agent-memory", nameSpace="reactor", term="...")` and `searchContent(query="...")`.
+
+
   ## Available Tools: ${availableTools}
   ${toolDescriptions}
 

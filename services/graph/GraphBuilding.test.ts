@@ -5,10 +5,12 @@ import NodeJSProjectProcessor from "../ReactorProjectProcessors/NodeJS/NodeJSPro
 import { analyseTypeScriptFile } from "./analyzers/TypeScriptAnalyzer";
 import {
   nodeId,
+  parseAncestry,
   pathLogicalKey,
   projectFqn,
   projectLogicalKey,
 } from "./GraphIdentity";
+import { writeProject, cleanup } from "./testUtils";
 import { ReactorNodeType } from "../../types/model.types";
 
 /** Minimal in-memory Reactory context for driving processors without DI/Mongo. */
@@ -183,5 +185,134 @@ describe("Graph building (NodeJS/TypeScript)", () => {
 
     // symbol: main function
     expect(analysis.symbols.some((s) => s.name === "main")).toBe(true);
+  });
+
+  describe("process() folder hierarchy persistence (batch vs interactive parity)", () => {
+    let nestedDir: string;
+    let nestedProject: any;
+
+    beforeEach(() => {
+      const res = writeProject(
+        {
+          "package.json": JSON.stringify({ name: "nested-fixture", version: "1.0.0" }),
+          "README.md": "# root doc\n",
+          "src/a/b/hello.ts": "export const hello = () => 'hi';\n",
+          "docs/guide.md": "# Guide\n\nSee [hello](../src/a/b/hello.ts).\n",
+        },
+        { name: "nested-fixture", nameSpace: "test", version: "1.0.0" }
+      );
+      nestedDir = res.dir;
+      nestedProject = res.project;
+    });
+
+    afterEach(() => {
+      cleanup(nestedDir);
+    });
+
+    it("creates intermediate FOLDER nodes and parents files under their immediate folder (not root)", async () => {
+      class CapturingProcessor extends NodeJSProjectProcessor {
+        public captured: { nodes: any[]; edges: any[] } = { nodes: [], edges: [] };
+        protected async persistGraph(nodes: any[], edges: any[]) {
+          this.captured = { nodes, edges };
+        }
+        protected async indexSearchables() {}
+      }
+
+      const p = new CapturingProcessor({}, makeContext());
+      await p.process(nestedProject);
+
+      const fqn = projectFqn(nestedProject);
+      const rootId = nodeId(projectLogicalKey(nestedProject));
+      const root = p.captured.nodes.find((n) => n.id === rootId);
+      expect(root).toBeDefined();
+
+      // Folder nodes must exist
+      const srcFolderId = nodeId(pathLogicalKey(fqn, "src"));
+      const srcAFolderId = nodeId(pathLogicalKey(fqn, "src/a"));
+      const srcABFolderId = nodeId(pathLogicalKey(fqn, "src/a/b"));
+      const docsFolderId = nodeId(pathLogicalKey(fqn, "docs"));
+
+      const srcFolder = p.captured.nodes.find((n) => n.id === srcFolderId);
+      const srcAFolder = p.captured.nodes.find((n) => n.id === srcAFolderId);
+      const srcABFolder = p.captured.nodes.find((n) => n.id === srcABFolderId);
+      const docsFolder = p.captured.nodes.find((n) => n.id === docsFolderId);
+
+      expect(srcFolder).toBeDefined();
+      expect(srcFolder.type).toBe(ReactorNodeType.FOLDER);
+      expect(srcFolder.parentId).toBe(rootId);
+
+      expect(srcAFolder).toBeDefined();
+      expect(srcAFolder.type).toBe(ReactorNodeType.FOLDER);
+      expect(srcAFolder.parentId).toBe(srcFolderId);
+
+      expect(srcABFolder).toBeDefined();
+      expect(srcABFolder.type).toBe(ReactorNodeType.FOLDER);
+      expect(srcABFolder.parentId).toBe(srcAFolderId);
+
+      expect(docsFolder).toBeDefined();
+      expect(docsFolder.type).toBe(ReactorNodeType.FOLDER);
+
+      // File under 3-level folder must be parented to the immediate folder
+      const helloFileId = nodeId(pathLogicalKey(fqn, "src/a/b/hello.ts"));
+      const helloFile = p.captured.nodes.find((n) => n.id === helloFileId);
+      expect(helloFile).toBeDefined();
+      expect(helloFile.type).toBe(ReactorNodeType.FILE);
+      expect(helloFile.parentId).toBe(srcABFolderId); // NOT rootId
+      expect(helloFile.parentId).not.toBe(rootId);
+
+      // id formula for file must be unchanged (full relative path)
+      expect(helloFile.id).toBe(helloFileId);
+
+      // Root level document
+      const readmeId = nodeId(pathLogicalKey(fqn, "README.md"));
+      const readme = p.captured.nodes.find((n) => n.id === readmeId);
+      expect(readme).toBeDefined();
+      expect(readme.type).toBe(ReactorNodeType.DOCUMENT);
+      expect(readme.parentId).toBe(rootId); // top-level lives under root
+
+      // Document under docs/
+      const guideId = nodeId(pathLogicalKey(fqn, "docs/guide.md"));
+      const guide = p.captured.nodes.find((n) => n.id === guideId);
+      expect(guide).toBeDefined();
+      expect(guide.type).toBe(ReactorNodeType.DOCUMENT);
+      expect(guide.parentId).toBe(docsFolderId);
+
+      // Ancestry depth sanity: root -> src -> a -> b -> file
+      const helloKey = helloFile.key;
+      const ancestry = parseAncestry(helloKey);
+      expect(ancestry.length).toBeGreaterThanOrEqual(5); // root|src|a|b|file
+      expect(ancestry[0]).toBe(rootId);
+      expect(ancestry[ancestry.length - 1]).toBe(helloFileId);
+    });
+
+    it("no file or document (except root-level) has parentId === root after process", async () => {
+      class CapturingProcessor extends NodeJSProjectProcessor {
+        public captured: { nodes: any[] } = { nodes: [] };
+        protected async persistGraph(nodes: any[]) {
+          this.captured = { nodes };
+        }
+        protected async indexSearchables() {}
+      }
+      const p = new CapturingProcessor({}, makeContext());
+      await p.process(nestedProject);
+
+      const fqn = projectFqn(nestedProject);
+      const rootId = nodeId(projectLogicalKey(nestedProject));
+
+      const rootLevelFiles = p.captured.nodes.filter(
+        (n) =>
+          (n.type === ReactorNodeType.FILE || n.type === ReactorNodeType.DOCUMENT) &&
+          n.parentId === rootId &&
+          n.id !== rootId
+      );
+      // All of them must be true root-level (no '/' in relativePath)
+      const nonRootLevelWithRootParent = rootLevelFiles.filter((n) => {
+        const rel = (n.data && n.data.relativePath) || "";
+        return rel.includes("/");
+      });
+      expect(nonRootLevelWithRootParent.length).toBe(0);
+      // Sanity: we do have root-level files (package.json + README.md)
+      expect(rootLevelFiles.length).toBeGreaterThanOrEqual(2);
+    });
   });
 });

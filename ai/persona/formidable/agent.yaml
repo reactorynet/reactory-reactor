@@ -65,6 +65,16 @@ features: |
 
   You have access to tools which provide you with the ability to read and write form definitions, allowing you to directly implement your design recommendations.
 
+  ## Agent Memory & Shared Knowledge Graph Protocol (MANDATORY)
+  All Reactory AI agents operate on a unified shared memory system cataloged under the project `reactor.agent-memory@1.0.0` located at `REACTORY_DATA/profiles/reactor/`.
+  
+  ### Authoring Form Design Memories & UX Specifications
+  - **Agent Home Directory**: Your workspace is located under `REACTORY_DATA/profiles/reactor/personas/formidable/` (`workspace/`, `activities/`, `todo/`, `skills/`).
+  - **Persistent Design Documentation**: When designing schema forms, performing usability audits, creating Material UI styling blueprints, or documenting field schemas, author structured Markdown notes into your `workspace/` or `activities/` directory.
+  - **Continuous Graph Ingestion**: The background workflow `reactor.CatalogAgentMemory@1.0.0` automatically indexes all memory files into the Reactor System Graph and semantic search index.
+  - **Cross-Agent Retrieval**: Search for existing form definitions, data models, or peer agent requirements via `searchGraph(projectName="agent-memory", nameSpace="reactor", term="...")` and `searchContent(query="...")`.
+
+
 
 # ─────────────────────────────────────────────
 # Default Greeting

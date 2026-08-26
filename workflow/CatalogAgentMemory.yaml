@@ -1,0 +1,81 @@
+nameSpace: reactor
+name: CatalogAgentMemory
+version: 1.0.0
+description: "Periodically catalogs the agent-memory folder (REACTORY_DATA/profiles/reactor) into the system graph and indexes content for semantic search."
+author: "Reactor"
+tags: ["agent-memory", "catalog", "graph", "search", "indexing", "scheduled"]
+metadata:
+  timeout: 600000
+
+inputs:
+  folder:
+    type: string
+    required: false
+    default: "${env.REACTORY_DATA}/profiles/reactor"
+    description: "Path to the agent profiles directory"
+  name:
+    type: string
+    required: false
+    default: "agent-memory"
+    description: "Project name"
+  nameSpace:
+    type: string
+    required: false
+    default: "reactor"
+    description: "Project namespace"
+  version:
+    type: string
+    required: false
+    default: "1.0.0"
+    description: "Project version"
+
+outputs:
+  projectId:
+    type: string
+    source: "step.catalogProject.outputs.result.id"
+    description: "ID of the cataloged project"
+  status:
+    type: string
+    source: "step.indexProjectContent.outputs.result.status"
+    description: "Indexing completion status"
+
+steps:
+  - id: logStart
+    name: "Log Start"
+    type: log
+    config:
+      level: info
+      message: "Starting Agent Memory cataloging and search indexing..."
+
+  - id: catalogProject
+    name: "Catalog Agent Memory Project & Graph"
+    type: service_invoke
+    dependsOn: logStart
+    config:
+      service: "reactor.ReactorProjectService@1.0.0"
+      method: "catalogProject"
+      params:
+        id: "reactor.agent-memory@1.0.0"
+        name: "${input.name}"
+        nameSpace: "${input.nameSpace}"
+        version: "${input.version}"
+        repoPath: "${input.folder}"
+
+  - id: indexProjectContent
+    name: "Index Agent Memory Content for Search"
+    type: service_invoke
+    dependsOn: catalogProject
+    config:
+      service: "reactor.ReactorProjectService@1.0.0"
+      method: "indexProjectSearch"
+      params:
+        projectId: "${steps.catalogProject.outputs.result.id || 'reactor.agent-memory@1.0.0'}"
+        repoPath: "${steps.catalogProject.outputs.result.repoPath || input.folder}"
+
+  - id: logCompletion
+    name: "Log Completion"
+    type: log
+    dependsOn: indexProjectContent
+    config:
+      level: info
+      message: "Agent Memory cataloging and search indexing completed successfully."
