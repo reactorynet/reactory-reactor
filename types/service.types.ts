@@ -1466,6 +1466,27 @@ export interface ProcessOptions {
   runId?: string;
   skipGc?: boolean;
   forceFull?: boolean;
+  linkDocMentions?: boolean;
+}
+
+/**
+ * Structured metrics recorded during a graph processing run.
+ */
+export interface GraphProcessMetrics {
+  projectId: string;
+  projectFqn: string;
+  runId: string;
+  filesDiscovered: number;
+  filesAnalysed: number;
+  filesSkipped: number;
+  foldersCreated: number;
+  nodesUpserted: number;
+  edgesUpserted: number;
+  nodesGcDeleted?: number;
+  edgesGcDeleted?: number;
+  durationMs: number;
+  errors: number;
+  byLanguage?: Record<string, number>;
 }
 
 export interface IProjectProcessor extends ProjectSynchronizer, AttributeProvider, IProjectNodeProvider { 

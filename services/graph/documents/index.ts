@@ -11,13 +11,18 @@ export * from "./DocumentTypes";
 export { parseMarkdown } from "./MarkdownParser";
 export { parsePlainText } from "./PlainTextParser";
 export {
+  buildSymbolIndex,
+  disambiguateSymbol,
   emitDocumentGraph,
-  isCodeTarget,
   isAssetTarget,
+  isCodeTarget,
   isDocumentTarget,
+  linkDocSymbolMentions,
   normalizeExternalUrl,
+  normalizeSymbolIndex,
   resolveDocumentTarget,
   sanitizeFrontmatter,
+  SYMBOL_DENYLIST,
 } from "./DocumentGraphEmitter";
 export type { DocumentGraph } from "./DocumentGraphEmitter";
 
@@ -131,7 +136,8 @@ const MAX_DOCUMENT_BYTES = 2 * 1024 * 1024;
  */
 export const analyseDocumentFile = (
   fileNode: ReactorNode,
-  context?: Reactory.Server.IReactoryContext
+  context?: Reactory.Server.IReactoryContext,
+  options?: DocumentGraphOptions
 ): DocumentGraph => {
   const empty: DocumentGraph = { symbols: [], externals: [], edges: [], filePatch: {} };
   const data = fileNode?.data || {};
@@ -169,7 +175,7 @@ export const analyseDocumentFile = (
 
   try {
     const outline = parseDocument(content, format);
-    return emitDocumentGraph(fileNode, outline);
+    return emitDocumentGraph(fileNode, outline, options, content);
   } catch (err) {
     context?.error(
       `Document analysis failed for ${data.relativePath}: ${(err as Error).message}`

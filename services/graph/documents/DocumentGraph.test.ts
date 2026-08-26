@@ -2,7 +2,15 @@ import path from "path";
 import { ReactorLinkType, ReactorNodeType } from "../../../types/model.types";
 import { nodeId, pathLogicalKey, projectFqn, symbolLogicalKey } from "../GraphIdentity";
 import { cleanup, fileNodeFor, writeProject, TestProject } from "../testUtils";
-import { analyseDocumentFile, documentFormatFor, isDocumentFile } from ".";
+import {
+  analyseDocumentFile,
+  buildSymbolIndex,
+  disambiguateSymbol,
+  documentFormatFor,
+  isDocumentFile,
+  linkDocSymbolMentions,
+  SYMBOL_DENYLIST,
+} from ".";
 import {
   normalizeExternalUrl,
   resolveDocumentTarget,
@@ -406,5 +414,240 @@ describe("analyseDocumentFile - resilience", () => {
     expect(graph.edges).toHaveLength(0);
     expect(graph.filePatch.description).toBe("Document EMPTY.md");
     cleanup(dir);
+  });
+});
+
+describe("Documentation symbol mentions (Session 13)", () => {
+  let dir: string;
+  let project: TestProject;
+  let helloServiceId: number;
+  let authHelperId: number;
+  let paymentsHelperId: number;
+  let configSymbolId: number;
+
+  beforeAll(() => {
+    ({ dir, project } = writeProject({
+      "README.md":
+        "# Welcome\n\n" +
+        "See `HelloService` for details.\n" +
+        "Also see `Config` which is denylisted.\n" +
+        "Also check [the docs](./docs/guide.md).\n\n" +
+        "```typescript\n" +
+        "const service = new HelloService();\n" +
+        "```\n",
+      "docs/guide.md":
+        "# Guide\n\n" +
+        "## Payments Section\n\n" +
+        "We use `Helper` in payments.\n" +
+        "We also refer to HelloService in prose.\n",
+      "docs/ambiguous.md":
+        "# Ambiguous\n\n" +
+        "Uses `AmbiguousService` somewhere.\n",
+      "src/services/HelloService.ts": "export class HelloService {}",
+      "src/config/Config.ts": "export class Config {}",
+      "src/payments/Helper.ts": "export class Helper {}",
+      "src/auth/Helper.ts": "export class Helper {}",
+      "src/pkg1/AmbiguousService.ts": "export class AmbiguousService {}",
+      "src/pkg2/AmbiguousService.ts": "export class AmbiguousService {}",
+    }));
+
+    const fqn = projectFqn(project);
+    helloServiceId = nodeId(symbolLogicalKey(fqn, "src/services/HelloService.ts", "HelloService"));
+    configSymbolId = nodeId(symbolLogicalKey(fqn, "src/config/Config.ts", "Config"));
+    paymentsHelperId = nodeId(symbolLogicalKey(fqn, "src/payments/Helper.ts", "Helper"));
+    authHelperId = nodeId(symbolLogicalKey(fqn, "src/auth/Helper.ts", "Helper"));
+  });
+  afterAll(() => cleanup(dir));
+
+  const makeSymbol = (name: string, relPath: string): any => ({
+    id: nodeId(symbolLogicalKey(projectFqn(project), relPath, name)),
+    name,
+    type: ReactorNodeType.PROCESS,
+    data: {
+      kind: "symbol",
+      symbolKind: "class",
+      symbolPath: name,
+      relativePath: relPath,
+      exported: true,
+    },
+  });
+
+  it("emits a MENTIONS edge for unique high-confidence inline code mention `HelloService`", () => {
+    const symbolIndex = buildSymbolIndex([
+      makeSymbol("HelloService", "src/services/HelloService.ts"),
+    ]);
+    const graph = analyseDocumentFile(
+      docNodeFor(project, "README.md"),
+      undefined,
+      { symbolIndex }
+    );
+    const mentionEdge = graph.edges.find(
+      (e) => e.target === helloServiceId && (e.types || []).includes(ReactorLinkType.MENTIONS)
+    );
+    expect(mentionEdge).toBeDefined();
+    expect(mentionEdge!.types).toContain(ReactorLinkType.MENTIONS);
+    expect(mentionEdge!.data).toMatchObject({
+      confidence: 0.9,
+      match: "inline-code",
+    });
+  });
+
+  it("does not emit an edge for ambiguous symbol mentions with no folder/prefix preference", () => {
+    const symbolIndex = buildSymbolIndex([
+      makeSymbol("AmbiguousService", "src/pkg1/AmbiguousService.ts"),
+      makeSymbol("AmbiguousService", "src/pkg2/AmbiguousService.ts"),
+    ]);
+    const graph = analyseDocumentFile(
+      docNodeFor(project, "docs/ambiguous.md"),
+      undefined,
+      { symbolIndex }
+    );
+    const mentionEdges = graph.edges.filter(
+      (e) => (e.types || []).includes(ReactorLinkType.MENTIONS)
+    );
+    expect(mentionEdges).toHaveLength(0);
+  });
+
+  it("does not emit an edge for denylisted words like `Config`", () => {
+    const symbolIndex = buildSymbolIndex([
+      makeSymbol("Config", "src/config/Config.ts"),
+    ]);
+    // Config should not even be indexed by buildSymbolIndex
+    expect(symbolIndex.has("Config")).toBe(false);
+
+    const graph = analyseDocumentFile(
+      docNodeFor(project, "README.md"),
+      undefined,
+      { symbolIndex }
+    );
+    const configEdge = graph.edges.find((e) => e.target === configSymbolId);
+    expect(configEdge).toBeUndefined();
+  });
+
+  it("preserves explicit path links without regression", () => {
+    const symbolIndex = buildSymbolIndex([
+      makeSymbol("HelloService", "src/services/HelloService.ts"),
+    ]);
+    const graph = analyseDocumentFile(
+      docNodeFor(project, "README.md"),
+      undefined,
+      { symbolIndex }
+    );
+    const docLink = graph.edges.find((e) => e.target === fileId(project, "docs/guide.md"));
+    expect(docLink).toBeDefined();
+    expect(docLink!.types).toContain(ReactorLinkType.REFERENCE);
+  });
+
+  it("supports disabling symbol mention edges via linkDocMentions: false", () => {
+    const symbolIndex = buildSymbolIndex([
+      makeSymbol("HelloService", "src/services/HelloService.ts"),
+    ]);
+    const graph = analyseDocumentFile(
+      docNodeFor(project, "README.md"),
+      undefined,
+      { symbolIndex, linkDocMentions: false }
+    );
+    const mentionEdge = graph.edges.find(
+      (e) => e.target === helloServiceId && (e.types || []).includes(ReactorLinkType.MENTIONS)
+    );
+    expect(mentionEdge).toBeUndefined();
+  });
+
+  it("disambiguates duplicate symbol names by preferring the same directory/path prefix", () => {
+    const { dir: subDir, project: subProj } = writeProject({
+      "src/payments/README.md": "# Payments\n\nUses `Helper` internally.\n",
+      "src/payments/Helper.ts": "export class Helper {}",
+      "src/auth/Helper.ts": "export class Helper {}",
+    });
+    const subPaymentsHelperId = nodeId(
+      symbolLogicalKey(projectFqn(subProj), "src/payments/Helper.ts", "Helper")
+    );
+    const subAuthHelperId = nodeId(
+      symbolLogicalKey(projectFqn(subProj), "src/auth/Helper.ts", "Helper")
+    );
+    const subSymbolIndex = buildSymbolIndex([
+      {
+        id: subPaymentsHelperId,
+        name: "Helper",
+        type: ReactorNodeType.PROCESS,
+        data: { kind: "symbol", symbolKind: "class", relativePath: "src/payments/Helper.ts", exported: true },
+      },
+      {
+        id: subAuthHelperId,
+        name: "Helper",
+        type: ReactorNodeType.PROCESS,
+        data: { kind: "symbol", symbolKind: "class", relativePath: "src/auth/Helper.ts", exported: true },
+      },
+    ]);
+    const graph = analyseDocumentFile(
+      docNodeFor(subProj, "src/payments/README.md"),
+      undefined,
+      { symbolIndex: subSymbolIndex }
+    );
+    const edge = graph.edges.find(
+      (e) => (e.types || []).includes(ReactorLinkType.MENTIONS)
+    );
+    expect(edge).toBeDefined();
+    expect(edge!.target).toBe(subPaymentsHelperId);
+    expect(edge!.target).not.toBe(subAuthHelperId);
+    cleanup(subDir);
+  });
+
+  it("emits MENTIONS edge for PascalCase symbol mentions in prose (not code ticks)", () => {
+    const symbolIndex = buildSymbolIndex([
+      makeSymbol("HelloService", "src/services/HelloService.ts"),
+    ]);
+    const graph = analyseDocumentFile(
+      docNodeFor(project, "docs/guide.md"),
+      undefined,
+      { symbolIndex }
+    );
+    const proseMention = graph.edges.find(
+      (e) =>
+        e.target === helloServiceId &&
+        (e.types || []).includes(ReactorLinkType.MENTIONS) &&
+        e.data?.match === "prose-pascal"
+    );
+    expect(proseMention).toBeDefined();
+    expect(proseMention!.data.confidence).toBe(0.9);
+  });
+
+  it("does not extract symbol mentions from fenced code block bodies", () => {
+    const { dir: codeDir, project: codeProj } = writeProject({
+      "README.md":
+        "# Code Block Test\n\n" +
+        "```ts\n" +
+        "const myInstance = new IsolatedService();\n" +
+        "```\n",
+    });
+    const isolatedSym = makeSymbol("IsolatedService", "src/IsolatedService.ts");
+    const symbolIndex = buildSymbolIndex([isolatedSym]);
+    const graph = analyseDocumentFile(
+      docNodeFor(codeProj, "README.md"),
+      undefined,
+      { symbolIndex }
+    );
+    const mention = graph.edges.find(
+      (e) => (e.types || []).includes(ReactorLinkType.MENTIONS)
+    );
+    expect(mention).toBeUndefined();
+    cleanup(codeDir);
+  });
+
+  it("attaches MENTIONS edges to the section containing the mention", () => {
+    const symbolIndex = buildSymbolIndex([
+      makeSymbol("HelloService", "src/services/HelloService.ts"),
+    ]);
+    const graph = analyseDocumentFile(
+      docNodeFor(project, "docs/guide.md"),
+      undefined,
+      { symbolIndex }
+    );
+    const paymentsSection = graph.symbols.find((s) => s.name === "Payments Section")!;
+    const mention = graph.edges.find(
+      (e) => e.target === helloServiceId && (e.types || []).includes(ReactorLinkType.MENTIONS)
+    );
+    expect(mention).toBeDefined();
+    expect(mention!.source).toBe(paymentsSection.id);
   });
 });

@@ -32,6 +32,7 @@ import {
 } from "@reactory/server-modules/reactory-reactor/types/model.types";
 
 import OBJID from "@reactory/server-core/utils/ObjectId";
+import { publicNode } from "../../services/SystemGraphManager";
 
 interface PagedNodes {
   nodes: Partial<ReactorNode>[];
@@ -169,7 +170,7 @@ class ReactorSystemGraph {
     });
 
     return {
-      nodes,
+      nodes: nodes.map(publicNode),
       paging: {
         total: nodes.length,
         hasNext: false,
@@ -185,7 +186,8 @@ class ReactorSystemGraph {
     args: { id: number; key?: string; ancestry?: string },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>> {
-    return graphService(context).getNode(args.id, args.key || args.ancestry);
+    const node = await graphService(context).getNode(args.id, args.key || args.ancestry);
+    return publicNode(node);
   }
 
   @property("ReactorNode", "dependencies")
@@ -194,9 +196,10 @@ class ReactorSystemGraph {
     _: any,
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    return relatedNodes(node, context, "dependencies", [
+    const nodes = await relatedNodes(node, context, "dependencies", [
       ReactorLinkType.DEPENDENCY,
     ]);
+    return nodes.map(publicNode);
   }
 
   @property("ReactorNode", "dependents")
@@ -205,9 +208,10 @@ class ReactorSystemGraph {
     _: any,
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    return relatedNodes(node, context, "dependents", [
+    const nodes = await relatedNodes(node, context, "dependents", [
       ReactorLinkType.DEPENDENCY,
     ]);
+    return nodes.map(publicNode);
   }
 
   @property("ReactorNode", "inputs")
@@ -216,7 +220,8 @@ class ReactorSystemGraph {
     _: any,
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    return relatedNodes(node, context, "dependents", [ReactorLinkType.INPUT]);
+    const nodes = await relatedNodes(node, context, "dependents", [ReactorLinkType.INPUT]);
+    return nodes.map(publicNode);
   }
 
   @property("ReactorNode", "outputs")
@@ -225,7 +230,8 @@ class ReactorSystemGraph {
     _: any,
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    return relatedNodes(node, context, "dependencies", [ReactorLinkType.OUTPUT]);
+    const nodes = await relatedNodes(node, context, "dependencies", [ReactorLinkType.OUTPUT]);
+    return nodes.map(publicNode);
   }
 
   @property("ReactorNode", "parent")
@@ -235,7 +241,8 @@ class ReactorSystemGraph {
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode> | null> {
     if (node?.parentId === undefined || node?.parentId === null) return null;
-    return resolveNodeById(node.parentId, context);
+    const parent = await resolveNodeById(node.parentId, context);
+    return parent ? publicNode(parent) : null;
   }
 
   @property("ReactorNodeLink", "source")
@@ -244,7 +251,8 @@ class ReactorSystemGraph {
     _: any,
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>> {
-    return resolveNodeById(link.source, context);
+    const source = await resolveNodeById(link.source, context);
+    return source ? publicNode(source) : null;
   }
 
   @property("ReactorNodeLink", "target")
@@ -253,7 +261,8 @@ class ReactorSystemGraph {
     _: any,
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>> {
-    return resolveNodeById(link.target, context);
+    const target = await resolveNodeById(link.target, context);
+    return target ? publicNode(target) : null;
   }
 
   @property("ReactorNodeLink", "sourceId")
@@ -305,7 +314,8 @@ class ReactorSystemGraph {
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
     const ids = (args.ids || []).slice(0, 500);
-    return graphService(context).getNodes(ids);
+    const nodes = await graphService(context).getNodes(ids);
+    return nodes.map(publicNode);
   }
 
   @query("ReactorNodeLinks")
@@ -338,6 +348,7 @@ class ReactorSystemGraph {
     },
     context: Reactory.Server.IReactoryContext
   ): Promise<any> {
+    const partnerId = context.partner?._id?.toString() || (context.user as any)?.partner?._id?.toString();
     const subgraph = await graphService(context).getSubgraph(args.rootId, {
       depth: args.depth,
       direction: (args.direction?.toLowerCase() as "in" | "out" | "both") || "both",
@@ -346,9 +357,11 @@ class ReactorSystemGraph {
       limit: args.limit,
       includeContainment: args.includeContainment,
       materialize: args.materialize,
+      partnerId,
     });
     return {
       ...subgraph,
+      nodes: (subgraph.nodes || []).map(publicNode),
       nodeCount: subgraph.stats?.nodeCount ?? subgraph.nodes.length,
       linkCount: subgraph.stats?.linkCount ?? subgraph.links.length,
       depthReached: subgraph.stats?.depthReached ?? 0,
@@ -367,7 +380,7 @@ class ReactorSystemGraph {
       linkTypes: args.linkTypes,
     });
     const nodes = path.found ? await graphSvc.getNodes(path.nodeIds) : [];
-    return { found: path.found, nodes, links: path.links };
+    return { found: path.found, nodes: nodes.map(publicNode), links: path.links };
   }
 
   @property("ReactorNode", "children")
@@ -377,7 +390,8 @@ class ReactorSystemGraph {
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
     if (node && node.id) { 
-      return graphService(context).getChildren([node] as ReactorNode[]);
+      const children = await graphService(context).getChildren([node] as ReactorNode[]);
+      return children.map(publicNode);
     } else {
       context.warn("No node id provided for getChildrenForNode");
     }
@@ -490,7 +504,7 @@ class ReactorSystemGraph {
         page,
         pageSize,
       },
-      nodes,
+      nodes: nodes.map(publicNode),
     };
   }
 
@@ -696,7 +710,8 @@ class ReactorSystemGraph {
     args: { ids: number[] },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    return graphService(context).findNodesByCategory(args.ids);
+    const nodes = await graphService(context).findNodesByCategory(args.ids);
+    return nodes.map(publicNode);
   }
 
   @query("ReactorNodesForType")
@@ -705,7 +720,8 @@ class ReactorSystemGraph {
     args: { type: string[] },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    return graphService(context).findNodesByType(args.type);
+    const nodes = await graphService(context).findNodesByType(args.type);
+    return nodes.map(publicNode);
   }
 
   @query("ReactorNodesByTerm")
@@ -714,7 +730,9 @@ class ReactorSystemGraph {
     args: { term: string },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    return graphService(context).searchNodes(args.term || "", { limit: 100 });
+    const partnerId = context.partner?._id?.toString() || (context.user as any)?.partner?._id?.toString();
+    const nodes = await graphService(context).searchNodes(args.term || "", { limit: 100, partnerId });
+    return nodes.map(publicNode);
   }
 
   @query("ReactorProject")
@@ -956,7 +974,8 @@ class ReactorSystemGraph {
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>> {
     const { id, data } = args;
-    return graphService(context).updateNode(id, { data });
+    const node = await graphService(context).updateNode(id, { data });
+    return publicNode(node);
   }
 
   @mutation("ReactorLinkCrossProjectDeps")

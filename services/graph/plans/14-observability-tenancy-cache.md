@@ -112,12 +112,19 @@ Optional `onStartup` log of index presence / collection stats — keep light.
 
 ## 4. Acceptance criteria
 
-- [ ] Process emits structured metrics with counts
-- [ ] Cache keys for written node ids cleared after process (or documented if impossible)
-- [ ] Absolute paths not returned on GraphQL node payloads (test)
-- [ ] Tenant filter hook present; no regression when partnerId absent
-- [ ] README ops section updated
+- [x] Process emits structured metrics with counts
+- [x] Cache keys for written node ids cleared after process (or documented if impossible)
+- [x] Absolute paths not returned on GraphQL node payloads (test)
+- [x] Tenant filter hook present; no regression when partnerId absent
+- [x] README ops section updated
 
 ---
 
 ## 5. Agent Notes
+
+- **Implementation Details**:
+  - **Structured Process Metrics**: Added `GraphProcessMetrics` to `service.types.ts`. `BaseProjectProcessor.process` tracks `filesDiscovered`, `filesAnalysed`, `filesSkipped`, `foldersCreated`, `nodesUpserted`, `edgesUpserted`, `nodesGcDeleted`, `edgesGcDeleted`, `durationMs`, `errors`, and `byLanguage`, logging as `graph.process.complete` and setting `processor.lastMetrics`.
+  - **Cache Busting**: Node cache keys (`REACTOR_NODE_<id>`) for all written/updated nodes are invalidated after `process()` and on `updateNode()`.
+  - **Tenancy & Scoping**: `BaseProjectProcessor.persistGraph` stamps `partnerId` and `organizationId` from project/context metadata onto persisted nodes and links. `SystemGraphManager` methods (`getNodeLinks`, `searchNodes`, `findLinks`, `getSubgraph`) support optional tenant filtering via `partnerId` with safe fallback when absent.
+  - **Path Redaction**: Added `publicNode` in `SystemGraphManager` to redact absolute filesystem paths from public GraphQL outputs (replacing `source` and `data.path` with relative paths and removing internal `data.repoPath`), and integrated it into all node-returning resolvers in `graphql/resolvers/ReactorSystemGraph.ts`.
+  - Added dedicated unit test suite in `ObservabilityTenancyCache.test.ts` covering redaction, metrics emission, cache invalidation, and tenancy metadata stamping. All tests green.

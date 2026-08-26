@@ -95,12 +95,22 @@ O(symbols + doc text). For large projects build index once per process.
 
 ## 6. Acceptance criteria
 
-- [ ] High-confidence unique mentions create MENTIONS edges
-- [ ] Ambiguous names create zero edges
-- [ ] I4 held (target exists)
-- [ ] DocumentGraph tests green
-- [ ] Toggle to disable
+- [x] High-confidence unique mentions create MENTIONS edges
+- [x] Ambiguous names create zero edges
+- [x] I4 held (target exists)
+- [x] DocumentGraph tests green
+- [x] Toggle to disable
 
 ---
 
 ## 7. Agent Notes
+
+- **Implementation Details**:
+  - Added `SymbolIndexEntry`, `SymbolIndex`, `DocMentionData`, `DocMentionMatchKind`, and `DocumentGraphOptions` to `DocumentTypes.ts`.
+  - Implemented `buildSymbolIndex`, `normalizeSymbolIndex`, `disambiguateSymbol`, `linkDocSymbolMentions`, and `SYMBOL_DENYLIST` in `DocumentGraphEmitter.ts`.
+  - `buildSymbolIndex` extracts exported or top-level symbols (classes, functions, interfaces, types, enums), excluding stopwords (`data`, `test`, `config`, `index`, `get`, `set`, `type`, `props`, `state`, `value`, `item`, `list`, `name`, `file`, `path`) and short identifiers (< 3 characters).
+  - Scans document text (excluding fenced code block bodies) for inline code spans (`` `SymbolName` ``) and PascalCase/CamelCase prose words, emitting `MENTIONS` edges with `{ confidence: 0.9, match: 'inline-code' | 'prose-pascal' }` parented to the originating section.
+  - Disambiguation prioritizes same-folder candidates or longest common path prefix; unresolved ties emit zero edges to prevent false links (Invariant I4).
+  - Added second-pass document mention linking to `BaseProjectProcessor.process` so batch indexing connects documentation with code symbols across the whole project.
+  - Added feature flag `linkDocMentions` (defaulting to true) to allow disabling mention edge extraction.
+  - Added full test coverage in `DocumentGraph.test.ts` and `GraphBuilding.test.ts`. All tests green.

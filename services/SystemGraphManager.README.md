@@ -160,6 +160,14 @@ A reference originates from the **section containing it** where there is one, ot
 
 **Cross-project external dependency linking (Session 12):** `SystemGraphManager.linkExternalProjects(projectId?)` resolves external dependency nodes (e.g. `npm:<pkg>`) against the catalog publisher index (matching `package.json` names, `project.name`, and `publishedPackages`), creating idempotent `REFERENCE` / `DEPENDENCY` edges from external nodes to target project root nodes. Self-links are prevented, and missing publishers create no edges (Invariant I4). Runs automatically at the end of `catalogProject` or on demand via `ReactorLinkCrossProjectDeps` GraphQL mutation.
 
+**Documentation symbol mentions (Session 13):** `BaseProjectProcessor.process` performs a second pass matching high-confidence symbol name mentions in documents (inline code `` `Symbol` `` and prose PascalCase) against the project's exported/top-level symbol index, emitting `MENTIONS` edges with `{ confidence: 0.9, match: 'inline-code' | 'prose-pascal' }`. Ambiguous names across folders are disambiguated by same-folder / longest path prefix or skipped to prevent false linkages (Invariant I4). Common stopwords (`Config`, `Data`, `Test`, etc.) are denylisted. Mentions can be disabled via `linkDocMentions: false`.
+
+**Observability, cache busting, tenancy & path redaction (Session 14):**
+- **Observability:** `BaseProjectProcessor.process` emits structured metrics (`GraphProcessMetrics`) containing file discovery, analysis, skip, folder, node, edge, and GC delete counts, execution duration (`durationMs`), error count, and language breakdown (`byLanguage`), logged as `graph.process.complete`.
+- **Cache Invalidation:** Node cache keys (`REACTOR_NODE_<id>`) are automatically cleared upon `process()` graph writes and on `updateNode()` mutations.
+- **Tenancy:** Node/edge persistence stamps `partnerId` and `organizationId` from project/context metadata. `SystemGraphManager` query methods (`getNodeLinks`, `searchNodes`, `findLinks`, `getSubgraph`) support optional tenant filtering by `partnerId` with safe fallback when absent.
+- **Path Redaction:** `publicNode` redacts absolute filesystem paths from public GraphQL projections (replacing absolute `source` and `data.path` with relative paths and removing internal `data.repoPath`), while internal processes preserve absolute paths for operations.
+
 ## 6. SystemGraphManager methods
 
 | Method | Status |

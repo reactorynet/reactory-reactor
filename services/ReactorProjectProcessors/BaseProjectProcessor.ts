@@ -10,6 +10,7 @@ import {
   IProjectProcessor,
   ReactorNodeAttributes,
   KnownReactorProjectTypes,
+  GraphProcessMetrics,
 } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import {
   ReactorDataNode,
@@ -34,7 +35,10 @@ import { ReactorNodeModel } from "@reactory/server-modules/reactory-reactor/mode
 import { ReactorNodeLinkModel } from "@reactory/server-modules/reactory-reactor/models/ReactorNodeLink";
 import {
   DOCUMENT_LANGUAGES,
+  DocumentGraphOptions,
+  SymbolIndex,
   analyseDocumentFile,
+  buildSymbolIndex,
   documentFormatFor,
 } from "../graph/documents";
 
@@ -174,6 +178,7 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
   abstract version: string;
   description?: string;
   tags?: string[];
+  lastMetrics?: GraphProcessMetrics;
 
   /** Directory names that are never descended into. */
   protected ignoredDirectories = new Set<string>([
@@ -1061,7 +1066,14 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
   protected async persistGraph(
     nodes: Partial<ReactorNode>[],
     edges: ReactorNodeLink[],
-    meta?: { projectId?: any; projectFqn?: string; runId?: string; indexedAt?: Date }
+    meta?: {
+      projectId?: any;
+      projectFqn?: string;
+      runId?: string;
+      indexedAt?: Date;
+      partnerId?: any;
+      organizationId?: any;
+    }
   ): Promise<void> {
     // Stamp project/run metadata (single choke point) before building ops.
     // This ensures every node/edge written by process() carries projectId/runId/indexedAt.
@@ -1071,6 +1083,8 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
         if (meta.projectFqn) entity.projectFqn = meta.projectFqn;
         if (meta.runId) entity.runId = meta.runId;
         if (meta.indexedAt) entity.indexedAt = meta.indexedAt;
+        if (meta.partnerId !== undefined) entity.partnerId = String(meta.partnerId);
+        if (meta.organizationId !== undefined) entity.organizationId = String(meta.organizationId);
       }
     };
 
@@ -1261,8 +1275,11 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
    */
   async process(
     project: Partial<IReactorProject>,
-    options?: { runId?: string; skipGc?: boolean; forceFull?: boolean }
+    options?: { runId?: string; skipGc?: boolean; forceFull?: boolean; linkDocMentions?: boolean }
   ): Promise<Partial<IReactorProject>> {
+    const startTime = Date.now();
+    let errorCount = 0;
+    const byLanguage: Record<string, number> = {};
     const next = { ...project };
     // Canonicalize the repo path so it agrees with the realpath'd file paths
     // the walker produces — otherwise path.relative degrades to ../.. walks
@@ -1293,8 +1310,15 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     let skippedCount = 0;
     const seenNodeIds = new Set<number>();
     const seenEdgeIds = new Set<number>();
+    const allSymbols: ReactorNode[] = [];
+    const documentNodes: ReactorNode[] = [];
 
     for (const spec of fileSpecs) {
+      const detectedLang = this.languageForFile(spec.path);
+      if (detectedLang) {
+        byLanguage[detectedLang] = (byLanguage[detectedLang] || 0) + 1;
+      }
+
       const relativeForChain = normalizeRelative(
         path.relative(next.repoPath || "", spec.path)
       );
@@ -1347,6 +1371,12 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
           try {
             const analysis = await this.analyseFileFull(fileNode);
             nodes.push(...analysis.symbols);
+            if (analysis.symbols.length > 0) {
+              allSymbols.push(...analysis.symbols);
+            }
+            if (fileNode.type === ReactorNodeType.DOCUMENT || fileNode.data?.kind === "document") {
+              documentNodes.push(fileNode);
+            }
             analysis.externals.forEach((e) => externals.set(e.id, e));
             edges.push(...analysis.edges);
             // Analysis may enrich the file's own node (a document's title,
@@ -1361,6 +1391,7 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
               }
             }
           } catch (err) {
+            errorCount++;
             this.context.warn(
               `analyseFileFull failed for ${spec.path}: ${(err as Error).message}`
             );
@@ -1416,22 +1447,84 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
 
     nodes.push(...externals.values());
 
+    // Second pass: Document symbol mentions (Session 13)
+    if (options?.linkDocMentions !== false && allSymbols.length > 0 && documentNodes.length > 0) {
+      const symbolIndex = buildSymbolIndex(allSymbols);
+      if (symbolIndex.size > 0) {
+        for (const docNode of documentNodes) {
+          try {
+            const mentionGraph = analyseDocumentFile(docNode, this.context, {
+              symbolIndex,
+              linkDocMentions: true,
+            });
+            for (const mentionEdge of mentionGraph.edges) {
+              if ((mentionEdge.types || []).includes(ReactorLinkType.MENTIONS)) {
+                if (!edges.some((existing) => existing.id === mentionEdge.id)) {
+                  if (next.id && !mentionEdge.projectId) {
+                    mentionEdge.projectId = next.id as string | number;
+                  }
+                  edges.push(mentionEdge);
+                }
+              }
+            }
+          } catch (err) {
+            this.context.warn(
+              `Document mention linking failed for ${docNode.data?.relativePath}: ${(err as Error).message}`
+            );
+          }
+        }
+      }
+    }
+
     const runId = options?.runId || randomUUID();
     const indexedAt = new Date();
+    const partnerId =
+      (next as any).partnerId ||
+      next.client?._id?.toString() ||
+      next.client?.id?.toString() ||
+      (this.context?.partner as any)?._id?.toString() ||
+      (this.context?.partner as any)?.id?.toString();
+
+    const organizationId =
+      (next as any).organizationId ||
+      next.organization?._id?.toString() ||
+      next.organization?.id?.toString();
+
     const meta = {
       projectId: next.id,
       projectFqn: projectFqn(next),
       runId,
       indexedAt,
+      partnerId,
+      organizationId,
     };
 
     // Ensure any edges that arrived without projectId get stamped here too (defense in depth).
     for (const e of edges) {
       if (!e.projectId && meta.projectId) e.projectId = meta.projectId as any;
+      if (!e.partnerId && partnerId) e.partnerId = partnerId;
+      if (!e.organizationId && organizationId) e.organizationId = organizationId;
     }
 
     await this.persistGraph(nodes, edges, meta);
     await this.indexSearchables(next, searchables);
+
+    // Cache bust: clear REACTOR_NODE_* for all written node ids
+    for (const n of nodes) {
+      if (n && n.id !== undefined && n.id !== null) {
+        try {
+          if (typeof (this.context as any).clearValue === "function") {
+            await (this.context as any).clearValue(`REACTOR_NODE_${n.id}`);
+          } else if (typeof (this.context as any).removeValue === "function") {
+            await (this.context as any).removeValue(`REACTOR_NODE_${n.id}`);
+          } else if (typeof this.context.setValue === "function") {
+            await this.context.setValue(`REACTOR_NODE_${n.id}`, null);
+          }
+        } catch {
+          // cache clear best-effort
+        }
+      }
+    }
 
     // Re-stamp skipped unchanged nodes & edges with the new runId & indexedAt so GC preserves them
     if (seenNodeIds.size > 0) {
@@ -1441,20 +1534,52 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       await this.touchEdges(Array.from(seenEdgeIds), { runId, indexedAt });
     }
 
+    let nodesGcDeleted = 0;
+    let edgesGcDeleted = 0;
     // Project-scoped GC: remove nodes/edges for this project with a different runId.
     // Safeguards: only when projectId present; only if not skipGc; never delete 'manual' runId.
     if (!options?.skipGc && meta.projectId && isMongoAvailable(ReactorNodeModel.deleteMany)) {
       try {
         const pid = String(meta.projectId);
-        await ReactorNodeModel.deleteMany({ projectId: pid, runId: { $nin: [runId, 'manual'] } });
-        await ReactorNodeLinkModel.deleteMany({ projectId: pid, runId: { $nin: [runId, 'manual'] } });
+        const [nodeDelRes, edgeDelRes] = await Promise.all([
+          ReactorNodeModel.deleteMany({ projectId: pid, runId: { $nin: [runId, 'manual'] } }),
+          ReactorNodeLinkModel.deleteMany({ projectId: pid, runId: { $nin: [runId, 'manual'] } }),
+        ]);
+        nodesGcDeleted = nodeDelRes?.deletedCount || 0;
+        edgesGcDeleted = edgeDelRes?.deletedCount || 0;
       } catch (gcErr) {
         this.context.warn(`gcStaleGraph failed: ${(gcErr as Error).message}`);
+        errorCount++;
       }
     }
 
+    const durationMs = Date.now() - startTime;
+    const metrics: GraphProcessMetrics = {
+      projectId: String(next.id || ""),
+      projectFqn: projectFqn(next),
+      runId,
+      filesDiscovered: fileSpecs.length,
+      filesAnalysed: analysedCount,
+      filesSkipped: skippedCount,
+      foldersCreated: folderByRel.size,
+      nodesUpserted: nodes.length,
+      edgesUpserted: edges.length,
+      nodesGcDeleted,
+      edgesGcDeleted,
+      durationMs,
+      errors: errorCount,
+      byLanguage,
+    };
+    this.lastMetrics = metrics;
+
+    try {
+      this.context.info("graph.process.complete", metrics as any);
+    } catch {
+      this.context.info(`graph.process.complete: ${JSON.stringify(metrics)}`);
+    }
+
     this.context.info(
-      `process ${next.name}: analysed=${analysedCount} skipped=${skippedCount} folders=${folderByRel.size} edges=${edges.length} (runId=${runId})`
+      `process ${next.name}: analysed=${analysedCount} skipped=${skippedCount} folders=${folderByRel.size} edges=${edges.length} (runId=${runId}, duration=${durationMs}ms)`
     );
     return next;
   }

@@ -132,8 +132,8 @@ types/
 | 10 | `10-typescript-path-aliases.md` | P2 | M | done | |
 | 11 | `11-treesitter-python-and-engine-guard.md` | P2 | M | done | |
 | 12 | `12-cross-project-externals.md` | P3 | M | done | |
-| 13 | `13-docs-symbol-mentions.md` | P3 | M | pending | |
-| 14 | `14-observability-tenancy-cache.md` | P4 | M | pending | |
+| 13 | `13-docs-symbol-mentions.md` | P3 | M | done | |
+| 14 | `14-observability-tenancy-cache.md` | P4 | M | done | |
 
 Status values: `pending` | `in_progress` | `blocked` | `done` | `wontfix`
 

@@ -1,3 +1,4 @@
+import path from "path";
 import Reactory from "@reactorynet/reactory-core";
 import ApiError from "@reactory/server-core/exceptions";
 import { randomUUID } from "crypto";
@@ -10,6 +11,29 @@ import { ReactorNodeLinkModel } from '../models/ReactorNodeLink';
 import { ReactorProjectModel } from '../models/ReactorProject';
 import { linkId, nodeId, projectLogicalKey } from './graph/GraphIdentity';
 import { service } from "@reactory/server-core/application/decorators";
+
+/**
+ * Redacts absolute filesystem paths from public/GraphQL-facing node payloads.
+ * Internal services and processors still use absolute paths.
+ */
+export function publicNode(node: Partial<ReactorNode>): Partial<ReactorNode> {
+  if (!node) return node;
+  const copy: Partial<ReactorNode> = { ...node };
+  if (copy.source && path.isAbsolute(copy.source)) {
+    copy.source = copy.data?.relativePath || "[redacted]";
+  }
+  if (copy.data && typeof copy.data === "object") {
+    const dataCopy = { ...copy.data };
+    if (dataCopy.path && path.isAbsolute(dataCopy.path)) {
+      dataCopy.path = dataCopy.relativePath || undefined;
+    }
+    if (dataCopy.repoPath && path.isAbsolute(dataCopy.repoPath)) {
+      delete dataCopy.repoPath;
+    }
+    copy.data = dataCopy;
+  }
+  return copy;
+}
 
 @service({
   name: "SystemGraphManager",
@@ -189,12 +213,13 @@ class SystemGraphManager implements ISystemGraphManager {
       types?: string[];
       limit?: number;
       projectId?: string;
+      partnerId?: string;
     } = {}
   ): Promise<ReactorNodeLink[]> {
     const ids = Array.from(new Set((nodeIds || []).filter((id) => id !== undefined && id !== null)));
     if (ids.length === 0) return [];
 
-    const { direction = 'both', types, projectId } = opts;
+    const { direction = 'both', types, projectId, partnerId } = opts;
     const limit = Math.min(Math.max(opts.limit ?? 500, 1), 2000);
 
     const or: any[] = [];
@@ -204,6 +229,7 @@ class SystemGraphManager implements ISystemGraphManager {
     const query: any = { $or: or };
     if (types && types.length) query.types = { $in: types };
     if (projectId) query.projectId = projectId;
+    if (partnerId) query.partnerId = partnerId;
 
     return ReactorNodeLinkModel.find(query).limit(limit).lean() as unknown as ReactorNodeLink[];
   }
@@ -253,6 +279,7 @@ class SystemGraphManager implements ISystemGraphManager {
       const edges = await this.getNodeLinks(frontier, {
         direction,
         types: opts.linkTypes as string[] | undefined,
+        partnerId: opts.partnerId,
         // Fetch generously; node limit is what actually bounds the result.
         limit: Math.min(remaining * 4, 2000),
       });
@@ -267,7 +294,9 @@ class SystemGraphManager implements ISystemGraphManager {
 
       // Containment: children of the frontier via parentId.
       if (includeContainment) {
-        const children = (await ReactorNodeModel.find({ parentId: { $in: frontier } })
+        const childQuery: any = { parentId: { $in: frontier } };
+        if (opts.partnerId) childQuery.partnerId = opts.partnerId;
+        const children = (await ReactorNodeModel.find(childQuery)
           .limit(Math.max(remaining, 1))
           .lean()) as unknown as ReactorNode[];
         for (const child of children) {
@@ -385,7 +414,7 @@ class SystemGraphManager implements ISystemGraphManager {
    */
   async searchNodes(
     term: string,
-    opts: { nameSpace?: string; name?: string; limit?: number } = {}
+    opts: { nameSpace?: string; name?: string; limit?: number; partnerId?: string } = {}
   ): Promise<Partial<ReactorNode>[]> {
     const { context } = this;
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
@@ -426,9 +455,11 @@ class SystemGraphManager implements ISystemGraphManager {
 
     const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, (ch) => "\\" + ch);
     const rx = new RegExp(escaped, "i");
-    const persisted = (await ReactorNodeModel.find({
+    const mongoQuery: any = {
       $or: [{ name: rx }, { description: rx }],
-    })
+    };
+    if (opts.partnerId) mongoQuery.partnerId = opts.partnerId;
+    const persisted = (await ReactorNodeModel.find(mongoQuery)
       .limit(limit)
       .lean()) as unknown as Partial<ReactorNode>[];
     if (persisted && persisted.length) return persisted;
@@ -575,6 +606,7 @@ class SystemGraphManager implements ISystemGraphManager {
     targets?: number[];
     types?: string[];
     projectId?: string;
+    partnerId?: string;
     paging?: PagingRequest;
   } = {}): Promise<{ links: ReactorNodeLink[]; paging: PagingResult }> {
     const page = Math.max(options.paging?.page || 1, 1);
@@ -589,6 +621,7 @@ class SystemGraphManager implements ISystemGraphManager {
     if (or.length) query.$or = or;
     if (options.types && options.types.length) query.types = { $in: options.types };
     if (options.projectId) query.projectId = options.projectId;
+    if (options.partnerId) query.partnerId = options.partnerId;
 
     const [links, total] = await Promise.all([
       ReactorNodeLinkModel.find(query)
@@ -627,7 +660,13 @@ class SystemGraphManager implements ISystemGraphManager {
     }
 
     try {
-      await this.context.setValue(`REACTOR_NODE_${id}`, null);
+      if (typeof (this.context as any).clearValue === "function") {
+        await (this.context as any).clearValue(`REACTOR_NODE_${id}`);
+      } else if (typeof (this.context as any).removeValue === "function") {
+        await (this.context as any).removeValue(`REACTOR_NODE_${id}`);
+      } else if (typeof this.context.setValue === "function") {
+        await this.context.setValue(`REACTOR_NODE_${id}`, null);
+      }
     } catch {
       // cache clear best-effort
     }
