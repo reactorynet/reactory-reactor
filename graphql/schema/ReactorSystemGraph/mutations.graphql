@@ -99,6 +99,12 @@ type ReactorProjectUpdateFailure {
 
 union ReactorProjectUpdateResult = ReactorProjectUpdateSuccess | ReactorProjectUpdateFailure
 
+type ReactorLinkCrossProjectResult {
+  createdLinks: Int!
+  totalExternals: Int!
+  message: String
+}
+
 
 union ReactorProjectDocumentationUpdateResult = ReactorProjectDocumentationUpdateSuccess | ReactorProjectDocumentationUpdateFailure
 
@@ -116,4 +122,5 @@ type Mutation {
   ReactorUpdateProjectDocumentation(projectId: String!, additionalDocumentation: [ReactorProjectDocumentationInput!]!): ReactorProjectDocumentationUpdateResult!
   ReactorUpdateProject(projectId: String!, updates: ReactorProjectInput!): ReactorProjectUpdateResult!
   ReactorUpdateNode(id: Int!, data: Any!): ReactorNode!
+  ReactorLinkCrossProjectDeps(projectId: String): ReactorLinkCrossProjectResult!
 }

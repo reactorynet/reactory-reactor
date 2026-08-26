@@ -1100,6 +1100,7 @@ export interface IReactorProject extends Reactory.IComponentFqnDefinition {
   mainBranch?: string;
   branches?: string[];
   tags?: string[];
+  publishedPackages?: string[];
   created?: Date;
   updated?: Date;
   errors?: any[]; // ReactorProjectError[]
@@ -1274,6 +1275,16 @@ export interface ReactorProjectService extends Reactory.Service.IReactoryService
    * Returns the status of an asynchronous catalog job.
    */
   getCatalogJobStatus(jobId: string): Promise<ReactorCatalogJobStatus>;
+
+  /**
+   * Links external dependency nodes to publisher project root nodes for matched package names.
+   */
+  linkExternalProjects(projectId?: string): Promise<{ createdLinks: number; totalExternals: number }>;
+
+  /**
+   * Returns an index mapping published package names to project metadata.
+   */
+  getPublishedPackagesIndex(): Promise<Map<string, { projectId: string; graphRootId: number; name: string; fqn: string }>>;
 
 }
 

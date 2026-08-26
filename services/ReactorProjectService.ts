@@ -387,6 +387,7 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       mainBranch: 1,
       branches: 1,
       tags: 1,
+      publishedPackages: 1,
     }, {
       populate: ['businessUnit', 'organization', 'ownerTeam', 'owner'],
     })
@@ -747,6 +748,23 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
 
       project.updated = new Date();
       project.graphRootId = nodeId(projectLogicalKey(project));
+      // Detect published package names
+      if (!project.publishedPackages || project.publishedPackages.length === 0) {
+        const pkgs = new Set<string>();
+        if (project.name) pkgs.add(project.name);
+        if (project.repoPath) {
+          try {
+            const pkgJsonPath = path.join(project.repoPath, "package.json");
+            if (fs.existsSync(pkgJsonPath)) {
+              const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
+              if (pkgJson.name) pkgs.add(pkgJson.name);
+            }
+          } catch {
+            // ignore
+          }
+        }
+        project.publishedPackages = Array.from(pkgs);
+      }
       // Only determine type/subtypes/processor for local path
       if (spec.repoPath && !spec.repoUrl) {
         project.projectTypes = await this.detectProjectTypes(project);
@@ -773,6 +791,22 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
         updated: now,
       };
       newProj.graphRootId = nodeId(projectLogicalKey(newProj));
+      if (!newProj.publishedPackages || newProj.publishedPackages.length === 0) {
+        const pkgs = new Set<string>();
+        if (newProj.name) pkgs.add(newProj.name);
+        if (newProj.repoPath) {
+          try {
+            const pkgJsonPath = path.join(newProj.repoPath, "package.json");
+            if (fs.existsSync(pkgJsonPath)) {
+              const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
+              if (pkgJson.name) pkgs.add(pkgJson.name);
+            }
+          } catch {
+            // ignore
+          }
+        }
+        newProj.publishedPackages = Array.from(pkgs);
+      }
       return this.createProject(newProj);
     };
 
@@ -1224,6 +1258,39 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       startedAt: instance.startedAt || instance.startTime,
       completedAt: instance.completedAt || instance.endTime,
     };
+  }
+
+  async getPublishedPackagesIndex(): Promise<Map<string, { projectId: string; graphRootId: number; name: string; fqn: string }>> {
+    const publisherMap = new Map<string, { projectId: string; graphRootId: number; name: string; fqn: string }>();
+    const paged = await this.getProjects({ paging: { page: 1, pageSize: 5000 } });
+    for (const p of paged.projects || []) {
+      const pId = String(p._id || p.id);
+      const graphRootId = p.graphRootId || nodeId(projectLogicalKey(p));
+      const fqn = p.fqn || `${p.nameSpace}.${p.name}@${p.version || "1.0.0"}`;
+      const name = p.name || fqn;
+
+      const pkgs = new Set<string>();
+      if (p.name) pkgs.add(p.name);
+      if (Array.isArray(p.publishedPackages)) {
+        p.publishedPackages.forEach((pkg) => { if (pkg) pkgs.add(pkg); });
+      }
+      if (p.repoPath) {
+        try {
+          const pkgJsonPath = path.join(p.repoPath, "package.json");
+          if (fs.existsSync(pkgJsonPath)) {
+            const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, "utf-8"));
+            if (pkgJson.name) pkgs.add(pkgJson.name);
+          }
+        } catch {
+          // ignore
+        }
+      }
+
+      for (const pkg of pkgs) {
+        publisherMap.set(pkg, { projectId: pId, graphRootId, name, fqn });
+      }
+    }
+    return publisherMap;
   }
 
   async getAttributes(node: any): Promise<ReactorNodeAttributes[]> {

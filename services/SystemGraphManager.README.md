@@ -158,6 +158,8 @@ A reference originates from the **section containing it** where there is one, ot
 
 **Async catalog & index jobs (Session 09):** `ReactorSyncCatalogNodes` and `ReactorIndexNodes` default to asynchronous execution (`async: true`), enqueuing catalog jobs via `enqueueCatalog` and returning `ReactorCatalogJobAccepted` with a `jobId` in < 1s. The jobs execute through the `reactor.CatalogProjectGraph@1.0.0` YAML workflow on the Reactory durable workflow engine. `async: false` is supported for synchronous/script execution. `ReactorCatalogJobStatus` query maps workflow instance status to `PENDING | RUNNING | COMPLETE | FAILED`. Re-enqueuing an active project without `forceFull` returns the existing `jobId` (idempotent).
 
+**Cross-project external dependency linking (Session 12):** `SystemGraphManager.linkExternalProjects(projectId?)` resolves external dependency nodes (e.g. `npm:<pkg>`) against the catalog publisher index (matching `package.json` names, `project.name`, and `publishedPackages`), creating idempotent `REFERENCE` / `DEPENDENCY` edges from external nodes to target project root nodes. Self-links are prevented, and missing publishers create no edges (Invariant I4). Runs automatically at the end of `catalogProject` or on demand via `ReactorLinkCrossProjectDeps` GraphQL mutation.
+
 ## 6. SystemGraphManager methods
 
 | Method | Status |
@@ -169,6 +171,7 @@ A reference originates from the **section containing it** where there is one, ot
 | `getProjectForCatalogNode` | ✅ Mongo-backed, matched by deterministic id |
 | `catalogProject` / `catalogProjects` | ✅ `catalogProjects` now awaits + isolates errors |
 | `getLinks / createLink / updateLink / deleteLink` | ✅ backed by `reactor_node_links` (idempotent upserts) |
+| `linkExternalProjects` | ✅ cross-project external node to publisher root linking |
 | `enqueueCatalog / getCatalogJobStatus` | ✅ async workflow job submission & status polling |
 | `getCategoryNodes` | ✅ static taxonomy |
 
@@ -209,7 +212,7 @@ Under Jest every test file gets a fresh module registry — and a fresh `globalT
 
 1. **Deeper edges** — resolve `Obj.method()` calls where `Obj` is a locally instantiated variable (needs light type inference), `new X()` construction edges, endpoint↔handler, DB FK/view/proc references (TSql), DI wiring.
 2. **Higher-fidelity non-TS analyzers** — the Python/Java/C# scanners are heuristic (constructors skipped for Java/C#; cross-file same-package/namespace bases only resolve through explicit import bindings). A real parser (tree-sitter / language server) would raise precision if needed.
-3. **Cross-project edges** — link external `npm:`/`java:`/`cs:` dependency nodes to the actual project node that publishes them.
+3. **Cross-project edges** — ✅ completed via `linkExternalProjects` linking external dependency nodes to publisher project roots.
 4. **Category assignment** — attach nodes to the `DefaultReactorNodeCategories` taxonomy during analysis.
 5. **Persist folder nodes on demand** if full-tree queries (not just analysed artifacts) become necessary.
 6. **Native rst/adoc parsers** — both currently route through the plain-text parser, which picks up their underline/prefix headings but not directives, includes or attribute references. `parseDocument` in `services/graph/documents/index.ts` is the single seam to slot them into.

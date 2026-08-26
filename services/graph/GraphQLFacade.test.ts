@@ -204,6 +204,7 @@ describe("Session 06 — GraphQL Façade Consistency & Paging Fixes", () => {
         findNodesByCategory: jest.fn().mockResolvedValue([]),
         findLinks: jest.fn().mockResolvedValue({ links: [], paging: { total: 0, page: 1, pageSize: 25, hasNext: false } }),
         updateNode: jest.fn().mockResolvedValue({ id: 10, data: { updated: true } }),
+        linkExternalProjects: jest.fn().mockResolvedValue({ createdLinks: 3, totalExternals: 5 }),
       };
 
       ctx.setService("reactor.SystemGraphManager@1.0.0", mockGraphSvc);
@@ -272,6 +273,17 @@ describe("Session 06 — GraphQL Façade Consistency & Paging Fixes", () => {
 
       expect(mockGraphSvc.updateNode).toHaveBeenCalledWith(50, { data: { name: "custom" } });
       expect(res).toEqual(updatedNode);
+    });
+
+    it("ReactorLinkCrossProjectDeps delegates to manager.linkExternalProjects", async () => {
+      const res = await resolver.ReactorLinkCrossProjectDeps(null, { projectId: "proj-1" }, ctx);
+
+      expect(mockGraphSvc.linkExternalProjects).toHaveBeenCalledWith("proj-1");
+      expect(res).toEqual({
+        createdLinks: 3,
+        totalExternals: 5,
+        message: "Created 3 cross-project link(s) across 5 external dependency node(s)",
+      });
     });
   });
 });

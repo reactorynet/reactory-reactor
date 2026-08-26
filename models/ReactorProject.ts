@@ -152,6 +152,7 @@ const ReactorProjectSchema: Schema = new Schema({
   mainBranch: String,
   branches: [String],
   tags: [String],
+  publishedPackages: [String],
   created: { type: Date, default: () => new Date() },
   updated: { type: Date, default: () => new Date() },
   errors: [ErrorSchema],

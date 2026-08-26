@@ -7,6 +7,7 @@ import Hash from "@reactory/server-core/utils/hash";
 import { ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorLinkType, ReactorNodeType, ReactorSubgraph, ReactorSubgraphOptions, ReactorCatalogJobStatus } from "../types/model.types";
 import { DefaultReactorNodeCategories, ReactorNodeModel } from '../models/ReactorGraphNode';
 import { ReactorNodeLinkModel } from '../models/ReactorNodeLink';
+import { ReactorProjectModel } from '../models/ReactorProject';
 import { linkId, nodeId, projectLogicalKey } from './graph/GraphIdentity';
 import { service } from "@reactory/server-core/application/decorators";
 
@@ -62,6 +63,7 @@ class SystemGraphManager implements ISystemGraphManager {
     this.updateNode = this.updateNode.bind(this);
     this.getChildren = this.getChildren.bind(this);
     this.getProjectForCatalogNode = this.getProjectForCatalogNode.bind(this);
+    this.linkExternalProjects = this.linkExternalProjects.bind(this);
     this.enqueueCatalog = this.enqueueCatalog.bind(this);
     this.getCatalogJobStatus = this.getCatalogJobStatus.bind(this);
     this.setSearchService = this.setSearchService.bind(this);
@@ -708,6 +710,14 @@ class SystemGraphManager implements ISystemGraphManager {
         this.context.error(`catalogProject: error processing with ${fqn}: ${(err as Error).message}`);
       }
     }
+    // Link external dependencies across projects after cataloging
+    try {
+      if (projectSpec.id || (projectSpec as any)._id) {
+        await this.linkExternalProjects(String(projectSpec.id || (projectSpec as any)._id));
+      }
+    } catch (linkErr) {
+      this.context.warn(`catalogProject: linkExternalProjects failed: ${(linkErr as Error).message}`);
+    }
     return results;
   }
 
@@ -888,6 +898,145 @@ class SystemGraphManager implements ISystemGraphManager {
   
   async getCategoryNodes(): Promise<ReactorNodeCategory[]> {
       return DefaultReactorNodeCategories;
+  }
+
+  async linkExternalProjects(
+    projectId?: string
+  ): Promise<{ createdLinks: number; totalExternals: number }> {
+    const publisherMap = new Map<string, { projectId: string; graphRootId: number; name: string; fqn: string }>();
+
+    let allProjects: Partial<IReactorProject>[] = [];
+    if (this.projectService && typeof this.projectService.getPublishedPackagesIndex === 'function') {
+      try {
+        const indexMap = await this.projectService.getPublishedPackagesIndex();
+        for (const [k, v] of indexMap.entries()) {
+          publisherMap.set(k, v);
+        }
+      } catch (err) {
+        this.context.warn(`linkExternalProjects: getPublishedPackagesIndex error: ${(err as Error).message}`);
+      }
+    }
+
+    if (publisherMap.size === 0) {
+      try {
+        if (this.projectService && typeof this.projectService.getProjects === 'function') {
+          const paged = await this.projectService.getProjects({ paging: { page: 1, pageSize: 5000 } });
+          allProjects = paged.projects || [];
+        } else {
+          allProjects = (await ReactorProjectModel.find({}).lean()) as unknown as Partial<IReactorProject>[];
+        }
+      } catch {
+        try {
+          allProjects = (await ReactorProjectModel.find({}).lean()) as unknown as Partial<IReactorProject>[];
+        } catch {
+          allProjects = [];
+        }
+      }
+
+      for (const p of allProjects) {
+        const pId = String(p._id || p.id);
+        const graphRootId = p.graphRootId || nodeId(projectLogicalKey(p));
+        const fqn = p.fqn || `${p.nameSpace}.${p.name}@${p.version || "1.0.0"}`;
+        const name = p.name || fqn;
+        const published = new Set<string>();
+
+        if (p.name) published.add(p.name);
+        if (Array.isArray(p.publishedPackages)) {
+          p.publishedPackages.forEach((pkg) => { if (pkg) published.add(pkg); });
+        }
+
+        if (p.repoPath) {
+          try {
+            const pkgJsonPath = path.join(p.repoPath, 'package.json');
+            if (fs.existsSync(pkgJsonPath)) {
+              const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+              if (pkgJson.name) published.add(pkgJson.name);
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        for (const pkgName of published) {
+          publisherMap.set(pkgName, { projectId: pId, graphRootId, name, fqn });
+        }
+      }
+    }
+
+    let extQuery: any = {
+      type: ReactorNodeType.DEPENDENCY,
+      'data.kind': 'external',
+    };
+    if (projectId) {
+      extQuery.$or = [
+        { projectId: String(projectId) },
+        { 'data.projectId': String(projectId) },
+      ];
+    }
+
+    let externalNodes: ReactorNode[] = [];
+    try {
+      externalNodes = (await ReactorNodeModel.find(extQuery).lean()) as unknown as ReactorNode[];
+    } catch (err) {
+      this.context.warn(`linkExternalProjects: query external nodes error: ${(err as Error).message}`);
+      return { createdLinks: 0, totalExternals: 0 };
+    }
+
+    let createdLinks = 0;
+    const now = new Date();
+    const ops: any[] = [];
+
+    for (const extNode of externalNodes) {
+      const pkgName = extNode.data?.package || extNode.name;
+      if (!pkgName) continue;
+
+      const publisher = publisherMap.get(pkgName);
+      if (!publisher) continue; // Invariant I4: missing publisher -> no edge
+
+      const sourceProjectId = String(extNode.projectId || extNode.data?.projectId || '');
+      if (sourceProjectId && sourceProjectId === publisher.projectId) continue; // No self-link
+      if (extNode.parentId === publisher.graphRootId) continue;
+
+      const id = linkId(extNode.id, publisher.graphRootId, ReactorLinkType.REFERENCE);
+      const edge = {
+        id,
+        source: extNode.id,
+        target: publisher.graphRootId,
+        type: ReactorLinkType.REFERENCE,
+        types: [ReactorLinkType.REFERENCE, ReactorLinkType.DEPENDENCY],
+        title: pkgName,
+        description: `Links external dependency ${pkgName} to project ${publisher.name}`,
+        projectId: sourceProjectId || undefined,
+        updated: now,
+        data: {
+          packageName: pkgName,
+          crossProject: true,
+          targetProjectFqn: publisher.fqn,
+        },
+      };
+
+      ops.push({
+        updateOne: {
+          filter: { id },
+          update: {
+            $set: edge,
+            $setOnInsert: { id, created: now, runId: 'manual' },
+          },
+          upsert: true,
+        },
+      });
+      createdLinks++;
+    }
+
+    if (ops.length > 0) {
+      try {
+        await ReactorNodeLinkModel.bulkWrite(ops, { ordered: false });
+      } catch (err) {
+        this.context.warn(`linkExternalProjects bulkWrite failed: ${(err as Error).message}`);
+      }
+    }
+
+    return { createdLinks, totalExternals: externalNodes.length };
   }
   
   async enqueueCatalog(

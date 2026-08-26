@@ -958,6 +958,20 @@ class ReactorSystemGraph {
     const { id, data } = args;
     return graphService(context).updateNode(id, { data });
   }
+
+  @mutation("ReactorLinkCrossProjectDeps")
+  async ReactorLinkCrossProjectDeps(
+    _: any,
+    args: { projectId?: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<{ createdLinks: number; totalExternals: number; message: string }> {
+    const graphSvc = graphService(context);
+    const result = await graphSvc.linkExternalProjects(args.projectId);
+    return {
+      ...result,
+      message: `Created ${result.createdLinks} cross-project link(s) across ${result.totalExternals} external dependency node(s)`,
+    };
+  }
 }
 
 export default ReactorSystemGraph;
