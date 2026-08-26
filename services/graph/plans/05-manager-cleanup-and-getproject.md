@@ -78,12 +78,18 @@ $setOnInsert: { id, created: now, runId: 'manual' }
 
 ## 4. Acceptance criteria
 
-- [ ] `getProject` never throws “not implemented”
-- [ ] No unused `kvp`
-- [ ] Subgraph materialize path does not scan all nodes with `.some`
-- [ ] Existing manager/traversal tests green
-- [ ] No GraphQL schema changes
+- [x] `getProject` never throws “not implemented”
+- [x] No unused `kvp`
+- [x] Subgraph materialize path does not scan all nodes with `.some`
+- [x] Existing manager/traversal tests green
+- [x] No GraphQL schema changes
 
 ---
 
 ## 5. Agent Notes
+
+- **`SystemGraphManager.getProject` implemented:** Delegated to `projectService.getProject(pathSpec)` with proper 400 error validation when `pathSpec` is missing and 404 ApiError when the project is not found.
+- **Dead code removed:** Deleted unused `kvp` map and old commented TSql code block in `getProject`.
+- **`getSubgraph` child index O(1) optimization:** Replaced `nodesById.values().some(...)` with a `childCountByParent` Map tracked during BFS traversal, containment queries, lazy materialization, and node resolution.
+- **Manual link runId stamping:** Updated `createLink` to set `runId: 'manual'` in `$setOnInsert` for GC exclusion.
+- **Tests:** Extended `__tests__/unit/SystemGraphManagerTraversal.unit.test.ts` to cover `getProject`, `createLink` stamping `runId: 'manual'`, and `getSubgraph` lazy materialization with O(1) child index. All 20 tests pass.

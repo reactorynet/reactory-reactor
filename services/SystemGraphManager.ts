@@ -10,17 +10,6 @@ import { ReactorNodeLinkModel } from '../models/ReactorNodeLink';
 import { linkId, nodeId, projectLogicalKey } from './graph/GraphIdentity';
 import { service } from "@reactory/server-core/application/decorators";
 
-const kvp = {
-  "tsql": ReactorNodeType.DATASTORE,
-  "java": ReactorNodeType.SYSTEM,
-  "csharp": ReactorNodeType.SYSTEM,
-  "javascript": ReactorNodeType.SYSTEM,
-  "typescript": ReactorNodeType.SYSTEM,
-  "python": ReactorNodeType.SYSTEM,
-  "react-web": ReactorNodeType.CONSUMER,  
-  "react-native": ReactorNodeType.CONSUMER,
-}
-
 @service({
   name: "SystemGraphManager",
     nameSpace: "reactor",
@@ -230,12 +219,16 @@ class SystemGraphManager implements ISystemGraphManager {
 
     const nodesById = new Map<number, Partial<ReactorNode>>();
     const linksById = new Map<number, Partial<ReactorNodeLink>>();
+    const childCountByParent = new Map<number, number>();
     let truncated = false;
     let depthReached = 0;
     let materializations = 0;
 
     const [root] = await this.getNodes([rootId]);
     nodesById.set(rootId, root);
+    if (root?.parentId != null) {
+      childCountByParent.set(root.parentId, (childCountByParent.get(root.parentId) || 0) + 1);
+    }
 
     let frontier: number[] = [rootId];
 
@@ -271,6 +264,9 @@ class SystemGraphManager implements ISystemGraphManager {
           .lean()) as unknown as ReactorNode[];
         for (const child of children) {
           if (nodeTypeFilter && !nodeTypeFilter.has(String(child.type))) continue;
+          if (child.parentId != null) {
+            childCountByParent.set(child.parentId, (childCountByParent.get(child.parentId) || 0) + 1);
+          }
           const containsId = linkId(child.parentId, child.id, ReactorLinkType.CONTAINS);
           if (!linksById.has(containsId)) {
             linksById.set(containsId, {
@@ -300,7 +296,7 @@ class SystemGraphManager implements ISystemGraphManager {
             truncated = truncated || materializations >= materializeBudget;
             break;
           }
-          const hasPersistedChild = Array.from(nodesById.values()).some((n) => n.parentId === parent.id);
+          const hasPersistedChild = (childCountByParent.get(parent.id) || 0) > 0;
           if (hasPersistedChild) continue;
           materializations++;
           const children = await this.getChildren([parent as ReactorNode]);
@@ -312,6 +308,9 @@ class SystemGraphManager implements ISystemGraphManager {
             if (nodeTypeFilter && !nodeTypeFilter.has(String(child.type))) continue;
             if (!nodesById.has(child.id)) {
               nodesById.set(child.id, child);
+              if (child.parentId != null) {
+                childCountByParent.set(child.parentId, (childCountByParent.get(child.parentId) || 0) + 1);
+              }
               nextFrontier.add(child.id);
             }
             const containsId = linkId(parent.id, child.id, ReactorLinkType.CONTAINS);
@@ -343,6 +342,9 @@ class SystemGraphManager implements ISystemGraphManager {
             continue;
           }
           nodesById.set(node.id, node);
+          if (node.parentId != null) {
+            childCountByParent.set(node.parentId, (childCountByParent.get(node.parentId) || 0) + 1);
+          }
         }
       }
 
@@ -500,7 +502,7 @@ class SystemGraphManager implements ISystemGraphManager {
           types: [type as ReactorLinkType],
           updated: now,
         },
-        $setOnInsert: { id, created: now },
+        $setOnInsert: { id, created: now, runId: 'manual' },
       },
       { upsert: true }
     );
@@ -527,47 +529,11 @@ class SystemGraphManager implements ISystemGraphManager {
     return this.projectService.getProjects(filter);
   }
 
-  getProject(pathSpec: string): Promise<IReactorProject> {
-    // if (!pathSpec) {
-    //   throw new ApiError('A path is required to create a project', 400);
-    // }
-
-    // if(fs.existsSync(pathSpec)) {
-
-    //   const project: Partial<IReactorProject> = {
-    //     pathSpecs: [
-    //       {
-    //         path: path.join(pathSpec, 'Tables'),
-    //         filter: '.sql',
-    //         type: 'Table',
-    //         id: '',
-    //       },
-    //       {
-    //         path: path.join(pathSpec, 'Views'),
-    //         filter: '.sql',
-    //         type: 'View',
-    //         id: '',
-    //       },
-    //       {
-    //         path: path.join(pathSpec, 'Stored Procedures'),
-    //         filter: '.sql',
-    //         type: 'Stored Procedure',
-    //         id: '',
-    //       },
-    //       {
-    //         path: path.join(pathSpec, 'Functions'),
-    //         filter: '.sql',
-    //         type: 'Function',
-    //         id: '',
-    //       },
-    //     ],
-    //     providerId: 'reactor.TSqlProjectProcessor@1.0.0',
-    //   }
-    //   return Promise.resolve(project as IReactorProject);
-    // } else {
-    //   throw new ApiError(`Path ${pathSpec} does not exist`, 400);
-    // }
-    throw new Error("Method not implemented.");
+  async getProject(pathSpec: string): Promise<IReactorProject> {
+    if (!pathSpec) throw new ApiError('A path or id is required', 400);
+    const project = await this.projectService.getProject(pathSpec);
+    if (!project) throw new ApiError(`Project ${pathSpec} not found`, 404);
+    return project as IReactorProject;
   }
 
   async catalogProject(projectSpec: Partial<IReactorProject>): Promise<Reactory.Models.ISearchable[]> {

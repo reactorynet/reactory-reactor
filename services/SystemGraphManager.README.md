@@ -147,6 +147,8 @@ A reference originates from the **section containing it** where there is one, ot
 
 **O(1) catalog node & reverse project lookups (Session 04):** `ReactorProject` stores and indexes `graphRootId` (deterministic `nodeId(projectLogicalKey(project))`), with lazy backfill on reads for legacy records. `SystemGraphManager.getCatalogNode` resolves catalog roots directly via persisted roots or `projectService.getProjectByGraphRootId` in O(1) time without materializing the full project list. `getProjectForCatalogNode` routes directly through `getProjectByGraphRootId`. `getCatalogNodes` supports optional pagination defaulting to `pageSize: 100`.
 
+**SystemGraphManager cleanup & getProject delegation (Session 05):** `SystemGraphManager.getProject` delegates directly to `ReactorProjectService.getProject(pathSpec)` and handles 400/404 errors. Dead static mapping (`kvp`) and commented historical code were removed. `getSubgraph` lazy materialization maintains a `childCountByParent` map for O(1) checks on existing persisted children rather than an O(N) array scan. Manual edge creation via `createLink` stamps `runId: 'manual'` in `$setOnInsert` for GC exclusion.
+
 ## 6. SystemGraphManager methods
 
 | Method | Status |

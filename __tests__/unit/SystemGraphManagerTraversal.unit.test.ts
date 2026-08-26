@@ -58,6 +58,8 @@ const matchLinkQuery = (query: any): any[] => {
   return rows;
 };
 
+const lastUpdateCall: { filter?: any; update?: any; options?: any } = {};
+
 jest.mock('@reactory/server-modules/reactory-reactor/models/ReactorGraphNode', () => ({
   DefaultReactorNodeCategories: [],
   ReactorNodeModel: {
@@ -69,6 +71,29 @@ jest.mock('@reactory/server-modules/reactory-reactor/models/ReactorGraphNode', (
 jest.mock('@reactory/server-modules/reactory-reactor/models/ReactorNodeLink', () => ({
   ReactorNodeLinkModel: {
     find: jest.fn((query: any) => makeQuery(() => matchLinkQuery(query))),
+    findOne: jest.fn((query: any) => {
+      const link = graph.links.find((l) => l.id === query?.id);
+      return {
+        lean: jest.fn(async () => link || null),
+      };
+    }),
+    updateOne: jest.fn(async (filter: any, update: any, options: any) => {
+      lastUpdateCall.filter = filter;
+      lastUpdateCall.update = update;
+      lastUpdateCall.options = options;
+      const existingIndex = graph.links.findIndex((l) => l.id === filter?.id);
+      const doc = {
+        id: filter?.id,
+        ...(update?.$set || {}),
+        ...(update?.$setOnInsert || {}),
+      };
+      if (existingIndex >= 0) {
+        graph.links[existingIndex] = { ...graph.links[existingIndex], ...(update?.$set || {}) };
+      } else if (options?.upsert) {
+        graph.links.push(doc);
+      }
+      return { acknowledged: true };
+    }),
   },
 }));
 
@@ -253,4 +278,74 @@ describe('SystemGraphManager traversal façade', () => {
       expect(path).toEqual({ found: true, nodeIds: [7], links: [] });
     });
   });
+
+  describe('getProject', () => {
+    it('throws 400 ApiError if pathSpec is not provided', async () => {
+      await expect(manager.getProject('')).rejects.toThrow('A path or id is required');
+      await expect(manager.getProject(null as any)).rejects.toThrow('A path or id is required');
+    });
+
+    it('throws 404 ApiError if projectService.getProject returns null', async () => {
+      const mockProjectService = {
+        getProject: jest.fn().mockResolvedValue(null),
+      };
+      manager.setProjectService(mockProjectService);
+
+      await expect(manager.getProject('non-existent')).rejects.toThrow('Project non-existent not found');
+      expect(mockProjectService.getProject).toHaveBeenCalledWith('non-existent');
+    });
+
+    it('returns the project when found by projectService', async () => {
+      const mockProject = { id: 'p1', name: 'TestProject', nameSpace: 'test', version: '1.0.0' };
+      const mockProjectService = {
+        getProject: jest.fn().mockResolvedValue(mockProject),
+      };
+      manager.setProjectService(mockProjectService);
+
+      const result = await manager.getProject('test-project-spec');
+      expect(result).toEqual(mockProject);
+      expect(mockProjectService.getProject).toHaveBeenCalledWith('test-project-spec');
+    });
+  });
+
+  describe('createLink', () => {
+    it('stamps runId: "manual" in $setOnInsert', async () => {
+      const sourceNode = node(10, 'Source');
+      const targetNode = node(20, 'Target');
+
+      const created = await manager.createLink(sourceNode, 'DEPENDENCY', targetNode);
+      expect(lastUpdateCall.update?.$setOnInsert).toBeDefined();
+      expect(lastUpdateCall.update.$setOnInsert.runId).toBe('manual');
+      expect(created.source).toBe(10);
+      expect(created.target).toBe(20);
+    });
+  });
+
+  describe('getSubgraph O(1) child index & lazy materialization', () => {
+    it('skips getChildren when frontier node already has persisted child in childCountByParent', async () => {
+      const getChildrenSpy = jest.spyOn(manager, 'getChildren').mockResolvedValue([]);
+
+      // Parent 1 has persisted child 5 with parentId 1
+      graph.nodes = [
+        node(1, 'folder', { type: 'FOLDER', providerId: 'test.Provider@1.0.0' }),
+        node(5, 'file', { parentId: 1, type: 'FILE' }),
+      ];
+
+      const res = await manager.getSubgraph(1, { depth: 2, materialize: true });
+      expect(getChildrenSpy).not.toHaveBeenCalled();
+      expect(res.nodes.map((n: any) => n.id).sort()).toEqual([1, 5]);
+    });
+
+    it('materializes children via getChildren when frontier node has no persisted child', async () => {
+      const childNode = node(100, 'lazychild', { parentId: 1, type: 'FILE' });
+      const getChildrenSpy = jest.spyOn(manager, 'getChildren').mockResolvedValue([childNode]);
+
+      graph.nodes = [
+        node(1, 'emptyfolder', { type: 'FOLDER', providerId: 'test.Provider@1.0.0' }),
+      ];
+
+      const res = await manager.getSubgraph(1, { depth: 2, materialize: true });
+      expect(getChildrenSpy).toHaveBeenCalled();
+      expect(res.nodes.map((n: any) => n.id).sort()).toEqual([1, 100]);
+    });
 });
