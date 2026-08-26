@@ -223,8 +223,11 @@ class OpenAIService extends AIProviderBase {
       chatTools = dynamicTools;
     }
 
+    const seen = new Set<string>();
     chatTools.forEach((tool: MacroToolDefinition) => {
-      if (tool.type === "function") {
+      if (tool.type === "function" && tool.function?.name) {
+        if (seen.has(tool.function.name)) return;
+        seen.add(tool.function.name);
         const { function: func } = tool;
         tools.push({
           type: "function",

@@ -15,7 +15,6 @@ import DataMacros from './data';
 import ModuleMacros from './develop/module';
 import PlaywrightMacros from './playwright';
 import SkillsMacros from './skills';
-import ImageMacros from './image';
 import SupportMacros, {
   GetSupportTicket,
   ListSupportTickets,

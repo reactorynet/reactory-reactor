@@ -160,13 +160,19 @@ class AnthropicService extends AIProviderBase {
   private convertToolsToAnthropicFormat(tools?: MacroToolDefinition[]): Anthropic.Messages.Tool[] | undefined {
     if (!tools || tools.length === 0) return undefined;
 
-    return tools
-      .filter(t => t.type === "function" && t.function?.name)
-      .map(tool => ({
-        name: tool.function.name,
-        description: tool.function.description || "",
-        input_schema: (tool.function.parameters || { type: "object", properties: {} }) as Anthropic.Messages.Tool.InputSchema,
-      }));
+    const seen = new Set<string>();
+    const result: Anthropic.Messages.Tool[] = [];
+    for (const tool of tools) {
+      if (tool.type === "function" && tool.function?.name && !seen.has(tool.function.name)) {
+        seen.add(tool.function.name);
+        result.push({
+          name: tool.function.name,
+          description: tool.function.description || "",
+          input_schema: (tool.function.parameters || { type: "object", properties: {} }) as Anthropic.Messages.Tool.InputSchema,
+        });
+      }
+    }
+    return result.length > 0 ? result : undefined;
   }
 
   /**

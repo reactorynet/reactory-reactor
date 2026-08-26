@@ -6240,64 +6240,79 @@ export default class ReactorConversationService
     tools: MacroToolDefinition[];    
   } {
 
-    let macros: MacroComponentDefinition<unknown>[] = [];
-    let tools: MacroToolDefinition[] = [];
+    const macroMap = new Map<string, MacroComponentDefinition<unknown>>();
+    const toolMap = new Map<string, MacroToolDefinition>();
 
-     // add the macros and tools to the conversation
-     if (args.macros) {
+    // 1. Add client-side macros reported from the client
+    if (args.macros) {
       args.macros.forEach((macro) => {
-        macros.push({
+        const key = macro.alias || macro.name;
+        if (key && !macroMap.has(key)) {
+          macroMap.set(key, {
+            name: macro.name,
+            nameSpace: macro.nameSpace,
+            description: macro.description,
+            version: macro.version,
+            component: macro.component,
+            runat: "client", // these are client side macros
+            roles: macro?.roles ?? [],
+            alias: macro.alias,
+          });
+        }
+      });
+    }
+
+    // 2. Add server-side macros defined on the persona (if not already added)
+    args.persona.macros?.forEach((macro) => {
+      const key = macro.alias || macro.name;
+      if (key && !macroMap.has(key)) {
+        macroMap.set(key, {
           name: macro.name,
           nameSpace: macro.nameSpace,
           description: macro.description,
           version: macro.version,
-          component: macro.component,
-          runat: "client", // these are client side macros
-          roles: macro?.roles ?? [],
-          alias: macro.alias,
+          runat: "server", // these are server side macros
+          roles: macro.roles ?? [],
+          alias: macro.alias || macro.name,
+          enabled: macro.enabled ?? true,
         });
+      }
+    });
+
+    // 3. Add client-side tools reported from the client
+    if (args.tools) {
+      args.tools.forEach((tool) => {
+        const toolName = tool.function?.name || (tool as any).name;
+        if (toolName && !toolMap.has(toolName)) {
+          toolMap.set(toolName, {
+            type: tool.type ?? "function",
+            runat: tool.runat ?? "client",
+            enabled: tool.enabled ?? true,
+            roles: tool.roles ?? [],
+            function: tool.function,
+          });
+        }
       });
     }
 
-    // only add the macros defined on the persona.
-    args.persona.macros?.forEach((macro) => {
-      macros.push({
-        name: macro.name,
-        nameSpace: macro.nameSpace,
-        description: macro.description,
-        version: macro.version,
-        runat: "server", // these are server side macros
-        roles: macro.roles ?? [],
-        alias: macro.alias || macro.name,
-        enabled: macro.enabled ?? true,
-      });
-    });
-
-    // add the client side tools to the conversation
-    if (args.tools) {
-      args.tools.forEach((tool) => {
-        tools.push({
+    // 4. Add server-side tools defined on the persona (if not already added)
+    args.persona.tools?.forEach((tool) => {
+      const toolName = tool.function?.name || (tool as any).name;
+      if (toolName && !toolMap.has(toolName)) {
+        toolMap.set(toolName, {
           type: tool.type ?? "function",
-          runat: tool.runat ?? "client",
+          runat: tool.runat ?? "server", // these are server side tools
           enabled: tool.enabled ?? true,
           roles: tool.roles ?? [],
           function: tool.function,
         });
-      });
-    }
-
-    // only add the tools defined on the persona.
-    args.persona.tools?.forEach((tool) => {
-      tools.push({
-        type: tool.type ?? "function",
-        runat: tool.runat ?? "server", // these are server side tools
-        enabled: tool.enabled ?? true,
-        roles: tool.roles ?? [],
-        function: tool.function,
-      });
+      }
     });
 
-    return { macros, tools };
+    return {
+      macros: Array.from(macroMap.values()),
+      tools: Array.from(toolMap.values()),
+    };
   }
 
   private async createInitiateSSEResponse(chatSessionId: string, conversation: ReactorConversationDocument): Promise<ReactorInitiateSSEResponse> {

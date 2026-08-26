@@ -459,7 +459,10 @@ class GoogleAIService extends AIProviderBase {
       return [{ functionDeclarations: [] }];
     }
 
+    const seen = new Set<string>();
     tools.forEach((tool: MacroToolDefinition) => {
+      if (!tool.function?.name || seen.has(tool.function.name)) return;
+      seen.add(tool.function.name);
       const functionDeclaration: FunctionDeclaration = {
         name: tool.function.name,
         description: tool.function.description,
