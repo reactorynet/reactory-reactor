@@ -32,6 +32,11 @@ const ReactorNodeLinkSchema: Schema<ReactorNodeLink> = new Schema<ReactorNodeLin
 
 // Fast lookup of all edges touching a node in either direction.
 ReactorNodeLinkSchema.index({ source: 1, target: 1 });
+ReactorNodeLinkSchema.index({ projectId: 1, runId: 1 });
+ReactorNodeLinkSchema.index({ source: 1, types: 1 });
+ReactorNodeLinkSchema.index({ target: 1, types: 1 });
+ReactorNodeLinkSchema.index({ projectId: 1, source: 1 });
+ReactorNodeLinkSchema.index({ projectId: 1, target: 1 });
 
 const ReactorNodeLinkModelName = 'ReactorNodeLink';
 const ReactorNodeLinkModel = mongoose.model<ReactorNodeLink>(

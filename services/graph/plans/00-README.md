@@ -126,7 +126,7 @@ types/
 | 04 | `04-catalog-lookup-o1.md` | P0 | S | done | |
 | 05 | `05-manager-cleanup-and-getproject.md` | P1 | S | done | |
 | 06 | `06-graphql-facade-and-paging.md` | P1 | M | done | |
-| 07 | `07-mongo-indexes-and-project-fields.md` | P1 | S | pending | |
+| 07 | `07-mongo-indexes-and-project-fields.md` | P1 | S | done | |
 | 08 | `08-incremental-reindex.md` | P1 | L | pending | |
 | 09 | `09-async-catalog-jobs.md` | P1 | M | pending | |
 | 10 | `10-typescript-path-aliases.md` | P2 | M | pending | |
@@ -192,7 +192,7 @@ Program is **done** when:
 - [x] Catalog node/project lookup is O(1) (no full project list scan).
 - [x] `getProject` on manager does not throw.
 - [x] GraphQL graph queries go through manager (no ad-hoc model filters for core paths).
-- [ ] Mongo indexes match hot queries; `projectId` is first-class.
+- [x] Mongo indexes match hot queries; `projectId` is first-class.
 - [ ] Incremental re-index skips unchanged files by hash.
 - [ ] Heavy catalog/index mutations are async jobs.
 - [ ] All listed tests green; README future-work items updated.

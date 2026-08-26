@@ -256,6 +256,13 @@ const ReactorNodeSchema: Schema<ReactorNode> = new Schema<ReactorNode>({
   },
 });
 
+// Compound indexes for graph queries, containment, and project-scoped GC
+ReactorNodeSchema.index({ projectId: 1, runId: 1 });
+ReactorNodeSchema.index({ projectId: 1, parentId: 1 });
+ReactorNodeSchema.index({ projectId: 1, type: 1 });
+ReactorNodeSchema.index({ type: 1, name: 1 });
+ReactorNodeSchema.index({ projectFqn: 1, type: 1 });
+
 
 const ReactorNodeUISchema: Schema<ReactorNodeUI> = new Schema<ReactorNodeUI>({ 
   id: ObjectId,
