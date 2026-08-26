@@ -1385,6 +1385,32 @@ export interface ISystemGraphManager extends Reactory.Service.IReactoryDefaultSe
    */
   deleteLink(link: ReactorNodeLink): Promise<ReactorNodeLink>;
 
+  /**
+   * Find nodes by node types with an optional result limit.
+   */
+  findNodesByType(types: string[], limit?: number): Promise<Partial<ReactorNode>[]>;
+
+  /**
+   * Find nodes by category ids with an optional result limit.
+   */
+  findNodesByCategory(categoryIds: number[], limit?: number): Promise<Partial<ReactorNode>[]>;
+
+  /**
+   * Paged edge lookup filtered by sources, targets, types, or projectId.
+   */
+  findLinks(options?: {
+    sources?: number[];
+    targets?: number[];
+    types?: string[];
+    projectId?: string;
+    paging?: PagingRequest;
+  }): Promise<{ links: ReactorNodeLink[]; paging: PagingResult }>;
+
+  /**
+   * Updates node fields, persists changes, and invalidates ephemeral cache.
+   */
+  updateNode(id: number, patch: Partial<ReactorNode>): Promise<Partial<ReactorNode>>;
+
 }
 
 export interface IProjectNodeProvider {

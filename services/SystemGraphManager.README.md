@@ -149,6 +149,8 @@ A reference originates from the **section containing it** where there is one, ot
 
 **SystemGraphManager cleanup & getProject delegation (Session 05):** `SystemGraphManager.getProject` delegates directly to `ReactorProjectService.getProject(pathSpec)` and handles 400/404 errors. Dead static mapping (`kvp`) and commented historical code were removed. `getSubgraph` lazy materialization maintains a `childCountByParent` map for O(1) checks on existing persisted children rather than an O(N) array scan. Manual edge creation via `createLink` stamps `runId: 'manual'` in `$setOnInsert` for GC exclusion.
 
+**GraphQL Façade consistency & paging fixes (Session 06):** GraphQL graph operations in `ReactorSystemGraph.ts` are thin wrappers over `SystemGraphManager` (direct model imports `ReactorNodeModel` and `ReactorNodeLinkModel` removed). Added `normalizePaging` helper ensuring 1-based page indexing (`skip = (page - 1) * pageSize`), added manager query helpers `findNodesByType`, `findNodesByCategory`, `findLinks`, and `updateNode` (with ephemeral cache invalidation), and capped unbounded type/term queries to max 500 items.
+
 ## 6. SystemGraphManager methods
 
 | Method | Status |
