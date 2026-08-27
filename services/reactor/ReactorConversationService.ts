@@ -29,6 +29,7 @@ import GoogleAIService from "./providers/GoogleAIService";
 import { v4 } from "uuid";
 import { ObjectId } from "mongodb";
 import safeUrl from "@reactory/server-core/utils/url/safeUrl";
+import { sseUriRoot } from "./streaming/sseOrigin";
 import resolveImageUrls from "@reactory/server-modules/reactory-reactor/utils/resolveImageUrls";
 import { ChatCompletion, ChatCompletionMessage } from "openai/resources";
 import ReactorMacroService from "./providers/ReactorMacroService";
@@ -6344,7 +6345,7 @@ export default class ReactorConversationService
       capabilities: session.capabilities
     });
     
-    const sseUrl = new URL(safeUrl([process.env.API_URI_ROOT || "http://localhost:4000", `reactor-chat/streaming/sse/${session.sessionId}`]));
+    const sseUrl = new URL(safeUrl([sseUriRoot(), `reactor-chat/streaming/sse/${session.sessionId}`]));
     const clientKeyString = `${this.context.partner.key.toUpperCase().replace(/-/g, "_")}_APPLICATION_USERNAME`;
     const clientPasswordString = `${this.context.partner.key.toUpperCase().replace(/-/g, "_")}_APPLICATION_PASSWORD`;
     sseUrl.searchParams.set('transport', 'sse');

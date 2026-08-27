@@ -30,6 +30,9 @@ import {
   ReactorNodeLink,
   ReactorLinkType,
 } from "@reactory/server-modules/reactory-reactor/types/model.types";
+import { ReactorNodeModel } from "@reactory/server-modules/reactory-reactor/models/ReactorGraphNode";
+import { nodeId } from "@reactory/server-modules/reactory-reactor/services/graph/GraphIdentity";
+import { ReactorNodeLinkModel } from "@reactory/server-modules/reactory-reactor/models/ReactorNodeLink";
 
 import OBJID from "@reactory/server-core/utils/ObjectId";
 import { publicNode } from "../../services/SystemGraphManager";
@@ -720,8 +723,64 @@ class ReactorSystemGraph {
     args: { type: string[] },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    const nodes = await graphService(context).findNodesByType(args.type);
-    return nodes.map(publicNode);
+    // Query the persisted graph first; fall back to catalog roots if nothing
+    // has been indexed yet.
+    const persisted = (await ReactorNodeModel.find({
+      type: { $in: args.type },
+    })
+      .limit(1000)
+      .lean()) as any[];
+    if (persisted && persisted.length) return persisted;
+
+    const graphSvc = context.getService<ISystemGraphManager>(
+      "reactor.SystemGraphManager@1.0.0"
+    );
+    const allNodes = await graphSvc.getCatalogNodes();
+    return allNodes.filter((node) => args.type.includes(node.type));
+  }
+
+  /**
+   * Resolve the graph node for a conversation by its deterministic id.
+   *
+   * `ProcessConversationStep` upserts the node as
+   * `nodeId("conversation::<conversationId>")`, and `id` is indexed and unique,
+   * so this is one index hit. The conversation id appears nowhere in the node's
+   * `name` or `description` (they hold "Conversation: <title>"), which is why
+   * searching for it via `ReactorNodesByTerm` can never match — and why doing
+   * so costs a full collection scan plus a catalog load every time.
+   */
+  @query("ReactorConversationNode")
+  async ReactorConversationNode(
+    _: any,
+    args: { conversationId: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode> | null> {
+    if (!args.conversationId) return null;
+    const id = nodeId(`conversation::${args.conversationId}`);
+    const node = (await ReactorNodeModel.findOne({ id }).lean()) as any;
+    return node || null;
+  }
+
+  /**
+   * Resolve the graph node for a conversation by its deterministic id.
+   *
+   * `ProcessConversationStep` upserts the node as
+   * `nodeId("conversation::<conversationId>")`, and `id` is indexed and unique,
+   * so this is one index hit. The conversation id appears nowhere in the node's
+   * `name` or `description` (they hold "Conversation: <title>"), which is why
+   * searching for it via `ReactorNodesByTerm` can never match — and why doing
+   * so costs a full collection scan plus a catalog load every time.
+   */
+  @query("ReactorConversationNode")
+  async ReactorConversationNode(
+    _: any,
+    args: { conversationId: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<Partial<ReactorNode> | null> {
+    if (!args.conversationId) return null;
+    const id = nodeId(`conversation::${args.conversationId}`);
+    const node = (await ReactorNodeModel.findOne({ id }).lean()) as any;
+    return node || null;
   }
 
   @query("ReactorNodesByTerm")
@@ -730,9 +789,40 @@ class ReactorSystemGraph {
     args: { term: string },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    const partnerId = context.partner?._id?.toString() || (context.user as any)?.partner?._id?.toString();
-    const nodes = await graphService(context).searchNodes(args.term || "", { limit: 100, partnerId });
-    return nodes.map(publicNode);
+    const term = (args.term || "").trim();
+    if (term === "") return [];
+
+    // `name` and `description` carry no index, so this regex is a collection
+    // scan no matter what. Keep the result cap modest and refuse the shapes
+    // that can only ever scan for nothing: a bare id is a caller using the
+    // wrong query (see ReactorConversationNode).
+    const looksLikeObjectId = /^[0-9a-f]{24}$/i.test(term);
+    if (looksLikeObjectId) {
+      context.warn(
+        `[ReactorSystemGraph] ReactorNodesByTerm called with what looks like an ObjectId ("${term}"). ` +
+        `Node names and descriptions never contain raw ids — use ReactorConversationNode or ReactorNode(id:) instead.`
+      );
+      return [];
+    }
+
+    const rx = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
+    const persisted = (await ReactorNodeModel.find({
+      $or: [{ name: rx }, { description: rx }],
+    })
+      .limit(100)
+      .lean()) as any[];
+    if (persisted && persisted.length) return persisted;
+
+    const graphSvc = context.getService<ISystemGraphManager>(
+      "reactor.SystemGraphManager@1.0.0"
+    );
+    const allNodes = await graphSvc.getCatalogNodes();
+    const lower = term.toLowerCase();
+    return allNodes.filter(
+      (node) =>
+        (node.name && node.name.toLowerCase().includes(lower)) ||
+        (node.description && node.description.toLowerCase().includes(lower))
+    );
   }
 
   @query("ReactorProject")

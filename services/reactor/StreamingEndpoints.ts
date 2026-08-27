@@ -5,7 +5,9 @@ import { SSETransport } from './StreamingTransport';
 import { StreamingEvent, StreamingSession } from './types/streaming.types';
 import { ChatSessionResourceManager } from './ChatSessionResourceManager';
 import { ShellSessionManager } from './ShellSessionManager';
+import passport from 'passport';
 import safeUrl from '@reactory/server-core/utils/url/safeUrl';
+import { sseUriRoot } from './streaming/sseOrigin';
 import Helpers from 'authentication/strategies/helpers';
 
 /**
@@ -47,8 +49,20 @@ export class StreamingEndpoints {
     app.post('/reactor-chat/streaming/events/:sessionId', this.handleSendEvent.bind(this));
 
     // Standalone streaming-session creation (used by the shell widget / workflow
-    // console to obtain a dedicated SSE channel independent of a chat turn).
-    app.post('/reactor-chat/streaming/session', this.handleCreateSession.bind(this));
+    // console and the multi-session FAB hub to obtain a dedicated SSE channel
+    // independent of a chat turn).
+    //
+    // This route needs an authenticated *user*, not just a validated partner:
+    // it mints the SSE URL's JWT and owns the streaming session. The base
+    // middleware chain (cors → session → body → context → client) only
+    // populates `context.partner`; `context.user` is set by the JWT strategy,
+    // which runs per route. Without this, `getJwtTokenForUser` throws
+    // "User object cannot be null".
+    app.post(
+      '/reactor-chat/streaming/session',
+      passport.authenticate('jwt', { session: false }),
+      this.handleCreateSession.bind(this),
+    );
 
     // Session management endpoints
     app.get('/reactor-chat/streaming/session/:sessionId/status', this.handleSessionStatus.bind(this));
@@ -285,14 +299,35 @@ export class StreamingEndpoints {
    */
   static async handleCreateSession(req: Reactory.Server.ReactoryExpressRequest, res: Response): Promise<void> {
     const { context } = req;
+    const { channelId: requestedChannelId } = req.body || {};
     try {
       const sessionManager = context.getService<StreamingSessionManager>('reactor.StreamingSessionManager@1.0.0');
-      const { channelId } = req.body || {};
+      const channelId = requestedChannelId;
       if (!channelId || typeof channelId !== 'string') {
+        slog(context, "warn", `Streaming session creation rejected: channelId is required`, {
+          received: typeof requestedChannelId,
+        });
         res.status(400).json({ error: 'channelId is required' });
         return;
       }
-      const userId = context.user?._id ? String(context.user._id) : 'anonymous';
+
+      if (!context.user || context.user.anon === true) {
+        slog(context, "warn", `Streaming session creation rejected: no authenticated user`, {
+          channelId,
+          partner: context.partner?.key,
+          anon: context.user?.anon === true,
+        }, channelId);
+        res.status(401).json({ error: 'An authenticated user is required to create a streaming session' });
+        return;
+      }
+
+      slog(context, "info", `Creating standalone streaming session for channel ${channelId}`, {
+        channelId,
+        user: context.user?._id,
+        partner: context.partner?.key,
+      }, channelId);
+
+      const userId = String(context.user._id);
       const session = await sessionManager.createSession({
         conversationId: channelId,
         userId,
@@ -304,7 +339,7 @@ export class StreamingEndpoints {
       // ReactorConversationService.createInitiateSSEResponse. Auth travels as
       // query params because EventSource cannot set headers, and x-client-pwd
       // is a server-only secret the browser cannot supply itself.
-      const sseUrl = new URL(safeUrl([process.env.API_URI_ROOT || 'http://localhost:4000', `reactor-chat/streaming/sse/${session.sessionId}`]));
+      const sseUrl = new URL(safeUrl([sseUriRoot(), `reactor-chat/streaming/sse/${session.sessionId}`]));
       const partnerKey = context.partner?.key?.toUpperCase().replace(/-/g, '_') || '';
       sseUrl.searchParams.set('transport', 'sse');
       sseUrl.searchParams.set('no-upgrade', 'true');
@@ -313,6 +348,14 @@ export class StreamingEndpoints {
       sseUrl.searchParams.set('x-client-key', (process.env[`${partnerKey}_APPLICATION_USERNAME`] as string) || '');
       sseUrl.searchParams.set('x-client-pwd', (process.env[`${partnerKey}_APPLICATION_PASSWORD`] as string) || '');
 
+      slog(context, "info", `Standalone streaming session created for channel ${channelId}`, {
+        channelId,
+        sessionId: session.sessionId,
+        expiresAt: session.expiresAt,
+        hasClientKey: !!sseUrl.searchParams.get('x-client-key'),
+        hasClientPwd: !!sseUrl.searchParams.get('x-client-pwd'),
+      }, channelId);
+
       res.json({
         sessionId: session.sessionId,
         channelId,
@@ -320,6 +363,10 @@ export class StreamingEndpoints {
         expiresAt: session.expiresAt,
       });
     } catch (error: any) {
+      slog(context, "error", `Failed to create streaming session: ${error?.message || 'Unknown error'}`, {
+        channelId: requestedChannelId,
+        stack: error?.stack,
+      }, typeof requestedChannelId === 'string' ? requestedChannelId : undefined);
       res.status(500).json({ error: 'Failed to create streaming session', details: error?.message || 'Unknown error' });
     }
   }

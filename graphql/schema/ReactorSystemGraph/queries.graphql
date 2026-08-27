@@ -32,6 +32,14 @@ extend type Query {
   ReactorNode(id: Int!, key: String): ReactorNode
   ReactorNodesForType(type: [ReactorNodeType]): [ReactorNode!]
   ReactorNodesByTerm(term: String!): [ReactorNode!]
+  """
+  The graph node representing a chat conversation, or null if the conversation
+  has not been graphed yet. A single indexed lookup on the node's deterministic
+  id — do NOT use ReactorNodesByTerm for this: a conversation id never appears
+  in a node's name or description, so that search always scans the whole
+  collection and always returns nothing.
+  """
+  ReactorConversationNode(conversationId: String!): ReactorNode
   ReactorNodesByNameAndNameSpace(name: String!, nameSpace: String!, term: String, paging: PagingRequest): ReactorPagedNodes
   ReactorProjects(filter: ReactorProjectFilter): ReactorPagedProjects
   # id is the project's ObjectId string, FQN, name or repo path.
