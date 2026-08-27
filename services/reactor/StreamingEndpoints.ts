@@ -21,9 +21,16 @@ function slog(
   chatSessionId?: string,
 ): void {
   const prefixed = `[StreamingEndpoints] ${message}`;
-  context[level](prefixed, meta);
+  // Never let a log call be the reason a request fails — see the note on
+  // ReactorConversationService.sessionLog.
+  try {
+    const safeLevel = typeof (context as any)?.[level] === 'function' ? level : 'error';
+    context[safeLevel](prefixed, meta);
+  } catch { /* swallow */ }
   if (chatSessionId) {
-    ChatSessionResourceManager.forSession(chatSessionId)?.[level](prefixed, meta);
+    try {
+      ChatSessionResourceManager.forSession(chatSessionId)?.[level](prefixed, meta);
+    } catch { /* swallow */ }
   }
 }
 

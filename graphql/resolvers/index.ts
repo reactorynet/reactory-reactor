@@ -8,8 +8,8 @@ import ReactorGraphPerspective from './ReactorGraphPerspective';
 import ReactorSystem from './Platform/ReactorSystem';
 import ReactorProviders from './ReactorProviders';
 import MCPRegistryResolvers from '../mcp/resolvers';
-
 import ReactorProviderAuth from './ReactorProviderAuth';
+import ReactorAIUsage from './ReactorAIUsage';
 
 export default mergeGraphResolver([
   ReactorChat,
@@ -20,7 +20,7 @@ export default mergeGraphResolver([
   ReactorTool,
   ReactorSystem,
   MCPRegistryResolvers,
-
   ReactorProviders,
-  ReactorProviderAuth
+  ReactorProviderAuth,
+  ReactorAIUsage,
 ]);

@@ -115,11 +115,17 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
     meta?: Record<string, unknown>,
     chatSessionId?: string,
   ): void {
-    this.context[level](`[StreamingTransportManager] ${message}`, meta);
+    const prefixed = `[StreamingTransportManager] ${message}`;
+    // Never let a log call be the reason a request fails — see the note on
+    // ReactorConversationService.sessionLog.
+    try {
+      const safeLevel = typeof (this.context as any)?.[level] === 'function' ? level : 'error';
+      this.context[safeLevel](prefixed, meta);
+    } catch { /* swallow */ }
     if (chatSessionId) {
-      ChatSessionResourceManager.forSession(chatSessionId)?.[level](
-        `[StreamingTransportManager] ${message}`, meta
-      );
+      try {
+        ChatSessionResourceManager.forSession(chatSessionId)?.[level](prefixed, meta);
+      } catch { /* swallow */ }
     }
   }
 

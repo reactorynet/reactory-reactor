@@ -13,6 +13,8 @@ import { ReactorNodeLinkModelComponentRegistryEntry } from './ReactorNodeLink';
 import { ReactorGraphPerspectiveModelComponentRegistryEntry } from './ReactorGraphPerspective';
 import MCPRegistryModel from './MCPRegistry';
 import MCPInstalledConnectorModel from './MCPInstalledConnector';
+import ReactorAIUsageModel, { ReactorAIUsageModelComponentRegistryEntry } from './ReactorAIUsage';
+import ReactorUserBudgetModel, { ReactorUserBudgetModelComponentRegistryEntry } from './ReactorUserBudget';
 
 export const MCPRegistryModelComponentRegistryEntry = {
   nameSpace: 'reactory',
@@ -28,6 +30,12 @@ export const MCPInstalledConnectorModelComponentRegistryEntry = {
   component: MCPInstalledConnectorModel,
 };
 
+export {
+  ReactorAIUsageModel,
+  ReactorAIUsageModelComponentRegistryEntry,
+  ReactorUserBudgetModel,
+  ReactorUserBudgetModelComponentRegistryEntry,
+};
 
 export default [
   ReactoryPersonaComponentRegistryEntry,
@@ -43,4 +51,6 @@ export default [
   MCPInstalledConnectorModelComponentRegistryEntry,
   SecurityPersonaComponentRegistryEntry,
   WorkflowWillPersonaComponentRegistryEntry,
+  ReactorAIUsageModelComponentRegistryEntry,
+  ReactorUserBudgetModelComponentRegistryEntry,
 ];

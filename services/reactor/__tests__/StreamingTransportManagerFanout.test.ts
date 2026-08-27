@@ -258,3 +258,40 @@ describe('StreamingTransportManager keepalive', () => {
     expect(transport.sendHeartbeat).not.toHaveBeenCalled();
   });
 });
+
+describe('StreamingTransportManager logging safety', () => {
+  /**
+   * A log call must never be the reason a request fails. `slog` is reached from
+   * catch blocks and from the event-delivery path, so a level the context does
+   * not implement used to throw straight out of sendEventToSession and fail the
+   * chat turn — reporting the logging call as the cause and hiding the real one.
+   */
+  it('does not throw when the context lacks the requested level', async () => {
+    (StreamingTransportManager as any).instance = undefined;
+    const partialContext = { error: jest.fn() } as any; // no debug/info/warn
+    const manager = new StreamingTransportManager({}, partialContext);
+    (manager as any).sessionManager = mockSessionManager;
+
+    const transport = createMockTransport();
+    await expect(
+      manager.registerTransport({ sessionId: SSE_ID, chatSessionId: CHAT_ID, transport }),
+    ).resolves.toBeUndefined();
+
+    await expect(manager.sendEventToSession(CHAT_ID, makeEvent())).resolves.toBeUndefined();
+    expect(transport.sendEvent).toHaveBeenCalledTimes(1);
+    expect(partialContext.error).toHaveBeenCalled(); // fell back rather than threw
+  });
+
+  it('does not throw when the context has no logging methods at all', async () => {
+    (StreamingTransportManager as any).instance = undefined;
+    const manager = new StreamingTransportManager({}, {} as any);
+    (manager as any).sessionManager = mockSessionManager;
+
+    const transport = createMockTransport();
+    await expect(
+      manager.registerTransport({ sessionId: SSE_ID, chatSessionId: CHAT_ID, transport }),
+    ).resolves.toBeUndefined();
+    await expect(manager.sendEventToSession(CHAT_ID, makeEvent())).resolves.toBeUndefined();
+    expect(transport.sendEvent).toHaveBeenCalledTimes(1);
+  });
+});

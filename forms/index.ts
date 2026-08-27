@@ -14,6 +14,9 @@ import ReactorProjectTeamForm from "./projectTeamPanel";
 import ReactorProjectDeploymentsForm from "./projectDeployments";
 import ProviderConfigForm from "./providerConfig";
 import ReactorAgentGitCommitForm from "./AgentGitCommit";
+import UsageDashboardForm from "./UsageDashboard";
+import UserBudgetAdminForm from "./UserBudgetAdmin";
+
 export default [
   GraphExplorerForm,
   ProjectIndexForm,  
@@ -31,4 +34,6 @@ export default [
   ReactorProjectTeamForm,
   ReactorProjectDeploymentsForm,
   ProviderConfigForm,
+  UsageDashboardForm,
+  UserBudgetAdminForm,
 ];

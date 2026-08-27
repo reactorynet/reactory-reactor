@@ -633,8 +633,18 @@ export default class ReactorConversationService
     conversationId?: string,
     personaId?: string
   ): void {
-    // Always log to the global context logger
-    this.context[level](message, meta);
+    // A logger must never be the thing that fails a request. `sessionLog` is
+    // called from catch blocks all over this service, so a bad level here turns
+    // a swallowed, non-fatal error into a failed chat turn whose reported cause
+    // is the logging call — which is exactly how a mis-typed level ("warning")
+    // spent months masking a telemetry failure. Types do not catch it: this
+    // service runs through babel-node, so the union is advisory only.
+    const safeLevel = typeof (this.context as any)?.[level] === 'function' ? level : 'error';
+    try {
+      this.context[safeLevel](message, meta);
+    } catch {
+      // Nothing useful left to do — never propagate out of a log call.
+    }
 
     // Additionally log to the session-specific file if available
     if (conversationId) {
@@ -644,7 +654,12 @@ export default class ReactorConversationService
         sessionLogger = this.getSessionLogger(conversationId, personaId);
       }
       if (sessionLogger) {
-        sessionLogger[level](message, meta);
+        try {
+          const loggerLevel = typeof (sessionLogger as any)[level] === 'function' ? level : 'error';
+          sessionLogger[loggerLevel](message, meta);
+        } catch {
+          // as above
+        }
       }
     }
   }
@@ -3988,6 +4003,7 @@ export default class ReactorConversationService
           const MAX_TOOL_ITERATIONS = (conversation as any).maxToolIterations
             || parseInt(process.env.REACTOR_MAX_TOOL_ITERATIONS || '100', 10);
           let iteration = 0;
+          let hasClientToolsPending = false;
 
           // Send periodic SSE heartbeats to keep the connection alive while
           // the server executes tools. Without this, proxies/browsers may
@@ -4059,7 +4075,7 @@ export default class ReactorConversationService
               }
             }
 
-            let hasClientToolsPending = false;
+            hasClientToolsPending = false;
 
             for (const toolCall of toolCalls) {
               const toolName = toolCall.function?.name;
@@ -4555,6 +4571,36 @@ export default class ReactorConversationService
       // Update token count after adding AI response — prefer provider-reported usage
       const providerTotalTokens = response?.usage?.totalTokens || (response?.usage as any)?.total_tokens;
       await this.updateConversationTokenCount(conversation._id.toString(), providerTotalTokens);
+
+      // Record AI usage telemetry event
+      try {
+        const usageService = this.context.getService<any>('reactor.ReactorAIUsageService@1.0.0');
+        if (usageService && typeof usageService.recordUsage === 'function') {
+          const promptTokens = response?.usage?.promptTokens || (response?.usage as any)?.prompt_tokens || 0;
+          const completionTokens = response?.usage?.completionTokens || (response?.usage as any)?.completion_tokens || 0;
+          const totalTokens = response?.usage?.totalTokens || (response?.usage as any)?.total_tokens || (promptTokens + completionTokens);
+
+          await usageService.recordUsage({
+            userId: (conversation.user as any)?._id || conversation.user,
+            organizationId: (this.context.user as any)?.organization?._id,
+            businessUnitId: (this.context.user as any)?.businessUnit?._id,
+            chatSessionId: conversation._id.toString(),
+            parentSessionId: conversation.parentSessionId,
+            personaId: conversation.personaId,
+            provider: conversation.providerId || (conversation as any).provider || 'default',
+            model: conversation.modelId,
+            promptTokens,
+            completionTokens,
+            totalTokens,
+            use_case: conversation.use_case || 'standalone',
+            status: 'success',
+            toolCallsCount: aiMessage.tool_calls?.length || 0,
+            toolsUsed: aiMessage.tool_calls?.map((tc: any) => tc.function?.name || tc.name).filter(Boolean) || [],
+          });
+        }
+      } catch (usageErr: any) {
+        this.sessionLog("warn", "Failed to record AI usage telemetry", { error: usageErr.message, stack: usageErr.stack }, conversation._id?.toString(), conversation.personaId);
+      }
 
       // Check if auto-compaction is needed
       const convMaxTokens = conversation.maxTokens;

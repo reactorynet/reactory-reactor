@@ -7,6 +7,7 @@ import ReactorConversationService from "./reactor/ReactorConversationService";
 import ReactorCapabilityService from "./reactor/ReactorCapabilityService";
 import ReactorMessageProcessingService from "./reactor/ReactorMessageProcessingService";
 import ReactorProviderService from "./reactor/ReactorProviderService";
+import ReactorAIUsageService from "./reactor/ReactorAIUsageService";
 import SystemGraphManager from "./SystemGraphManager";
 import ReactorProjectService from './ReactorProjectService';
 import ReactorMacroService from "./reactor/providers/ReactorMacroService";
@@ -36,6 +37,7 @@ export default [
   ReactorCapabilityService,
   ReactorMessageProcessingService,
   ReactorProviderService,
+  ReactorAIUsageService,
   OpenAIService,
   PersonaService,
   GoogleAIService,

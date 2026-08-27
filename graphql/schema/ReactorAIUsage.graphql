@@ -1,0 +1,231 @@
+"""
+An individual AI model turn usage ledger record.
+"""
+type ReactorAIUsageRecord {
+  id: String!
+  userId: String!
+  user: User
+  organizationId: String
+  businessUnitId: String
+  chatSessionId: String
+  parentSessionId: String
+  personaId: String
+  provider: String!
+  model: String!
+  promptTokens: Int!
+  completionTokens: Int!
+  totalTokens: Int!
+  costUsdCents: Float!
+  costUsd: Float!
+  costCurrency: String!
+  durationMs: Int
+  timeToFirstTokenMs: Int
+  use_case: String
+  status: String!
+  errorCode: String
+  errorMessage: String
+  toolCallsCount: Int
+  toolsUsed: [String!]
+  createdAt: Date!
+  updatedAt: Date!
+}
+
+"""
+A single day or period data point in an AI usage time series.
+"""
+type ReactorAIUsageTimeSeriesPoint {
+  date: String!
+  promptTokens: Int!
+  completionTokens: Int!
+  totalTokens: Int!
+  costUsdCents: Float!
+  costUsd: Float!
+  requests: Int!
+}
+
+"""
+Breakdown of token usage and costs per model.
+"""
+type ReactorModelUsageBreakdown {
+  model: String!
+  provider: String!
+  promptTokens: Int!
+  completionTokens: Int!
+  totalTokens: Int!
+  costUsdCents: Float!
+  costUsd: Float!
+  requests: Int!
+}
+
+"""
+Breakdown of token usage and costs per provider.
+"""
+type ReactorProviderUsageBreakdown {
+  provider: String!
+  totalTokens: Int!
+  costUsdCents: Float!
+  costUsd: Float!
+  requests: Int!
+}
+
+"""
+Breakdown of token usage and costs per user (admin view).
+"""
+type ReactorUserUsageBreakdown {
+  userId: String!
+  firstName: String
+  lastName: String
+  email: String
+  totalTokens: Int!
+  costUsdCents: Float!
+  costUsd: Float!
+  requests: Int!
+}
+
+"""
+Aggregated AI usage summary with metrics, time-series trend, and model/provider breakdowns.
+"""
+type ReactorAIUsageSummary {
+  totalPromptTokens: Int!
+  totalCompletionTokens: Int!
+  totalTokens: Int!
+  totalCostUsdCents: Float!
+  totalCostUsd: Float!
+  totalRequests: Int!
+  avgDurationMs: Int
+  errorCount: Int!
+  timeSeries: [ReactorAIUsageTimeSeriesPoint!]!
+  modelBreakdown: [ReactorModelUsageBreakdown!]!
+  providerBreakdown: [ReactorProviderUsageBreakdown!]!
+  userBreakdown: [ReactorUserUsageBreakdown!]
+}
+
+"""
+Paginated list of AI usage ledger records.
+"""
+type ReactorAIUsageQueryResult {
+  records: [ReactorAIUsageRecord!]!
+  total: Int!
+  page: Int!
+  pageSize: Int!
+  hasNext: Boolean!
+}
+
+"""
+User AI budget definition and current period spend status.
+"""
+type ReactorUserBudget {
+  id: String!
+  userId: String!
+  user: User
+  organizationId: String
+  monthlyTokenLimit: Int
+  dailyTokenLimit: Int
+  monthlyCostLimitUsd: Float
+  dailyCostLimitUsd: Float
+  currentMonthTokens: Int!
+  currentMonthCostUsd: Float!
+  currentDayTokens: Int!
+  currentDayCostUsd: Float!
+  alertThresholdPercent: Int!
+  hardStop: Boolean!
+  status: String!
+  lastResetDate: Date
+  lastDailyResetDate: Date
+  notes: String
+  createdAt: Date!
+  updatedAt: Date!
+}
+
+"""
+Status of the current user's AI budget quota and allowed status.
+"""
+type ReactorUserUsageStatus {
+  allowed: Boolean!
+  status: String!
+  percentageUsed: Int!
+  reason: String
+  budget: ReactorUserBudget
+}
+
+"""
+Filter for querying AI usage summaries and ledger records.
+"""
+input ReactorUsageFilterInput {
+  userId: String
+  organizationId: String
+  businessUnitId: String
+  provider: String
+  model: String
+  personaId: String
+  startDate: String
+  endDate: String
+  use_case: String
+}
+
+"""
+Input for setting or updating a user's AI budget.
+"""
+input ReactorSetUserBudgetInput {
+  userId: String!
+  monthlyTokenLimit: Int
+  dailyTokenLimit: Int
+  monthlyCostLimitUsd: Float
+  dailyCostLimitUsd: Float
+  alertThresholdPercent: Int
+  hardStop: Boolean
+  notes: String
+}
+
+"""
+Filter for querying user budgets.
+"""
+input ReactorBudgetFilterInput {
+  userId: String
+  organizationId: String
+  status: String
+}
+
+extend type Query {
+  """
+  Get aggregated AI usage summary (admin or filtered view).
+  """
+  ReactorAIUsageSummary(filter: ReactorUsageFilterInput): ReactorAIUsageSummary!
+
+  """
+  Get paginated AI usage ledger records (admin or filtered view).
+  """
+  ReactorAIUsageList(filter: ReactorUsageFilterInput, page: Int, pageSize: Int): ReactorAIUsageQueryResult!
+
+  """
+  Get aggregated AI usage summary for the currently authenticated user.
+  """
+  ReactorMyAIUsage(filter: ReactorUsageFilterInput): ReactorAIUsageSummary!
+
+  """
+  Get the current user's AI quota and budget enforcement status.
+  """
+  ReactorUserUsageStatus: ReactorUserUsageStatus!
+
+  """
+  Get user budgets list (admin view).
+  """
+  ReactorUserBudgets(filter: ReactorBudgetFilterInput): [ReactorUserBudget!]!
+
+  """
+  Get a specific user's budget settings.
+  """
+  ReactorUserBudget(userId: String!): ReactorUserBudget
+}
+
+extend type Mutation {
+  """
+  Set or update a user's AI usage budget (admin only).
+  """
+  ReactorSetUserBudget(input: ReactorSetUserBudgetInput!): ReactorUserBudget!
+
+  """
+  Delete a user's AI usage budget (admin only).
+  """
+  ReactorDeleteUserBudget(id: String!): Boolean!
+}

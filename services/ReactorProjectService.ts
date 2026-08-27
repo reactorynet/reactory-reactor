@@ -566,6 +566,13 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
         project.graphRootId = nodeId(projectLogicalKey(project));
       }
 
+      if ((project as any).id && !ObjectId.isValid((project as any).id)) {
+        delete (project as any).id;
+      }
+      if ((project as any)._id && !ObjectId.isValid((project as any)._id)) {
+        delete (project as any)._id;
+      }
+
       const created = await ReactorProjectModel.create(project);
       // Return a plain object (mirroring getProject/updateProject which use
       // .lean()). A raw Mongoose document loses all of its fields when spread
@@ -758,8 +765,11 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
     // Helper to create a new project
     const createNewProject = async (spec: Partial<IReactorProject>) => {
       const now = new Date();
+      const { id, _id, ...cleanSpec } = spec as any;
       const newProj: Partial<IReactorProject> = {
-        ...spec,
+        ...cleanSpec,
+        ...(id && ObjectId.isValid(id) ? { id } : {}),
+        ...(_id && ObjectId.isValid(_id) ? { _id } : {}),
         name:
           spec.name ||
           (spec.repoPath ? spec.repoPath.split("/").pop() : undefined),

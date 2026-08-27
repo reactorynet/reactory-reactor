@@ -117,7 +117,12 @@ class GoogleAIService extends AIProviderBase {
     message: string,
     meta?: Record<string, unknown>,
   ): void {
-    this.context[level](`[GoogleAI] ${message}`, meta);
+    // Never let a log call be the reason a request fails — see the note on
+    // ReactorConversationService.sessionLog.
+    try {
+      const safeLevel = typeof (this.context as any)?.[level] === 'function' ? level : 'error';
+      this.context[safeLevel](`[GoogleAI] ${message}`, meta);
+    } catch { /* swallow */ }
     const chatId = this.chatState?.id?.toString?.() || (this.chatState as any)?._id?.toString?.();
     if (chatId) {
       ChatSessionResourceManager.forSession(chatId)?.[level](`[GoogleAI] ${message}`, meta);
