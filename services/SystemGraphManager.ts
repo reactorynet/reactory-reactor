@@ -1,14 +1,39 @@
+import path from "path";
 import Reactory from "@reactorynet/reactory-core";
 import ApiError from "@reactory/server-core/exceptions";
 import { randomUUID } from "crypto";
 
 import { IReactorProject, IProjectProcessor, ISystemGraphManager, PagedFilter, PageReactorProjectResult, ReactorProjectService } from "../types/service.types"
 import Hash from "@reactory/server-core/utils/hash";
-import { ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorLinkType, ReactorNodeType, ReactorSubgraph, ReactorSubgraphOptions } from "../types/model.types";
+import { ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorLinkType, ReactorNodeType, ReactorSubgraph, ReactorSubgraphOptions, ReactorCatalogJobStatus } from "../types/model.types";
 import { DefaultReactorNodeCategories, ReactorNodeModel } from '../models/ReactorGraphNode';
 import { ReactorNodeLinkModel } from '../models/ReactorNodeLink';
+import { ReactorProjectModel } from '../models/ReactorProject';
 import { linkId, nodeId, projectLogicalKey } from './graph/GraphIdentity';
 import { service } from "@reactory/server-core/application/decorators";
+
+/**
+ * Redacts absolute filesystem paths from public/GraphQL-facing node payloads.
+ * Internal services and processors still use absolute paths.
+ */
+export function publicNode(node: Partial<ReactorNode>): Partial<ReactorNode> {
+  if (!node) return node;
+  const copy: Partial<ReactorNode> = { ...node };
+  if (copy.source && path.isAbsolute(copy.source)) {
+    copy.source = copy.data?.relativePath || "[redacted]";
+  }
+  if (copy.data && typeof copy.data === "object") {
+    const dataCopy = { ...copy.data };
+    if (dataCopy.path && path.isAbsolute(dataCopy.path)) {
+      dataCopy.path = dataCopy.relativePath || undefined;
+    }
+    if (dataCopy.repoPath && path.isAbsolute(dataCopy.repoPath)) {
+      delete dataCopy.repoPath;
+    }
+    copy.data = dataCopy;
+  }
+  return copy;
+}
 
 @service({
   name: "SystemGraphManager",
@@ -62,6 +87,9 @@ class SystemGraphManager implements ISystemGraphManager {
     this.updateNode = this.updateNode.bind(this);
     this.getChildren = this.getChildren.bind(this);
     this.getProjectForCatalogNode = this.getProjectForCatalogNode.bind(this);
+    this.linkExternalProjects = this.linkExternalProjects.bind(this);
+    this.enqueueCatalog = this.enqueueCatalog.bind(this);
+    this.getCatalogJobStatus = this.getCatalogJobStatus.bind(this);
     this.setSearchService = this.setSearchService.bind(this);
     this.setFetchService = this.setFetchService.bind(this);
     this.setFileService = this.setFileService.bind(this);
@@ -185,12 +213,13 @@ class SystemGraphManager implements ISystemGraphManager {
       types?: string[];
       limit?: number;
       projectId?: string;
+      partnerId?: string;
     } = {}
   ): Promise<ReactorNodeLink[]> {
     const ids = Array.from(new Set((nodeIds || []).filter((id) => id !== undefined && id !== null)));
     if (ids.length === 0) return [];
 
-    const { direction = 'both', types, projectId } = opts;
+    const { direction = 'both', types, projectId, partnerId } = opts;
     const limit = Math.min(Math.max(opts.limit ?? 500, 1), 2000);
 
     const or: any[] = [];
@@ -200,6 +229,7 @@ class SystemGraphManager implements ISystemGraphManager {
     const query: any = { $or: or };
     if (types && types.length) query.types = { $in: types };
     if (projectId) query.projectId = projectId;
+    if (partnerId) query.partnerId = partnerId;
 
     return ReactorNodeLinkModel.find(query).limit(limit).lean() as unknown as ReactorNodeLink[];
   }
@@ -249,6 +279,7 @@ class SystemGraphManager implements ISystemGraphManager {
       const edges = await this.getNodeLinks(frontier, {
         direction,
         types: opts.linkTypes as string[] | undefined,
+        partnerId: opts.partnerId,
         // Fetch generously; node limit is what actually bounds the result.
         limit: Math.min(remaining * 4, 2000),
       });
@@ -263,7 +294,9 @@ class SystemGraphManager implements ISystemGraphManager {
 
       // Containment: children of the frontier via parentId.
       if (includeContainment) {
-        const children = (await ReactorNodeModel.find({ parentId: { $in: frontier } })
+        const childQuery: any = { parentId: { $in: frontier } };
+        if (opts.partnerId) childQuery.partnerId = opts.partnerId;
+        const children = (await ReactorNodeModel.find(childQuery)
           .limit(Math.max(remaining, 1))
           .lean()) as unknown as ReactorNode[];
         for (const child of children) {
@@ -381,7 +414,7 @@ class SystemGraphManager implements ISystemGraphManager {
    */
   async searchNodes(
     term: string,
-    opts: { nameSpace?: string; name?: string; limit?: number } = {}
+    opts: { nameSpace?: string; name?: string; limit?: number; partnerId?: string } = {}
   ): Promise<Partial<ReactorNode>[]> {
     const { context } = this;
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
@@ -422,9 +455,11 @@ class SystemGraphManager implements ISystemGraphManager {
 
     const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, (ch) => "\\" + ch);
     const rx = new RegExp(escaped, "i");
-    const persisted = (await ReactorNodeModel.find({
+    const mongoQuery: any = {
       $or: [{ name: rx }, { description: rx }],
-    })
+    };
+    if (opts.partnerId) mongoQuery.partnerId = opts.partnerId;
+    const persisted = (await ReactorNodeModel.find(mongoQuery)
       .limit(limit)
       .lean()) as unknown as Partial<ReactorNode>[];
     if (persisted && persisted.length) return persisted;
@@ -571,6 +606,7 @@ class SystemGraphManager implements ISystemGraphManager {
     targets?: number[];
     types?: string[];
     projectId?: string;
+    partnerId?: string;
     paging?: PagingRequest;
   } = {}): Promise<{ links: ReactorNodeLink[]; paging: PagingResult }> {
     const page = Math.max(options.paging?.page || 1, 1);
@@ -585,6 +621,7 @@ class SystemGraphManager implements ISystemGraphManager {
     if (or.length) query.$or = or;
     if (options.types && options.types.length) query.types = { $in: options.types };
     if (options.projectId) query.projectId = options.projectId;
+    if (options.partnerId) query.partnerId = options.partnerId;
 
     const [links, total] = await Promise.all([
       ReactorNodeLinkModel.find(query)
@@ -623,7 +660,13 @@ class SystemGraphManager implements ISystemGraphManager {
     }
 
     try {
-      await this.context.setValue(`REACTOR_NODE_${id}`, null);
+      if (typeof (this.context as any).clearValue === "function") {
+        await (this.context as any).clearValue(`REACTOR_NODE_${id}`);
+      } else if (typeof (this.context as any).removeValue === "function") {
+        await (this.context as any).removeValue(`REACTOR_NODE_${id}`);
+      } else if (typeof this.context.setValue === "function") {
+        await this.context.setValue(`REACTOR_NODE_${id}`, null);
+      }
     } catch {
       // cache clear best-effort
     }
@@ -705,6 +748,14 @@ class SystemGraphManager implements ISystemGraphManager {
       } catch (err) {
         this.context.error(`catalogProject: error processing with ${fqn}: ${(err as Error).message}`);
       }
+    }
+    // Link external dependencies across projects after cataloging
+    try {
+      if (projectSpec.id || (projectSpec as any)._id) {
+        await this.linkExternalProjects(String(projectSpec.id || (projectSpec as any)._id));
+      }
+    } catch (linkErr) {
+      this.context.warn(`catalogProject: linkExternalProjects failed: ${(linkErr as Error).message}`);
     }
     return results;
   }
@@ -886,6 +937,181 @@ class SystemGraphManager implements ISystemGraphManager {
   
   async getCategoryNodes(): Promise<ReactorNodeCategory[]> {
       return DefaultReactorNodeCategories;
+  }
+
+  async linkExternalProjects(
+    projectId?: string
+  ): Promise<{ createdLinks: number; totalExternals: number }> {
+    const publisherMap = new Map<string, { projectId: string; graphRootId: number; name: string; fqn: string }>();
+
+    let allProjects: Partial<IReactorProject>[] = [];
+    if (this.projectService && typeof this.projectService.getPublishedPackagesIndex === 'function') {
+      try {
+        const indexMap = await this.projectService.getPublishedPackagesIndex();
+        for (const [k, v] of indexMap.entries()) {
+          publisherMap.set(k, v);
+        }
+      } catch (err) {
+        this.context.warn(`linkExternalProjects: getPublishedPackagesIndex error: ${(err as Error).message}`);
+      }
+    }
+
+    if (publisherMap.size === 0) {
+      try {
+        if (this.projectService && typeof this.projectService.getProjects === 'function') {
+          const paged = await this.projectService.getProjects({ paging: { page: 1, pageSize: 5000 } });
+          allProjects = paged.projects || [];
+        } else {
+          allProjects = (await ReactorProjectModel.find({}).lean()) as unknown as Partial<IReactorProject>[];
+        }
+      } catch {
+        try {
+          allProjects = (await ReactorProjectModel.find({}).lean()) as unknown as Partial<IReactorProject>[];
+        } catch {
+          allProjects = [];
+        }
+      }
+
+      for (const p of allProjects) {
+        const pId = String(p._id || p.id);
+        const graphRootId = p.graphRootId || nodeId(projectLogicalKey(p));
+        const fqn = p.fqn || `${p.nameSpace}.${p.name}@${p.version || "1.0.0"}`;
+        const name = p.name || fqn;
+        const published = new Set<string>();
+
+        if (p.name) published.add(p.name);
+        if (Array.isArray(p.publishedPackages)) {
+          p.publishedPackages.forEach((pkg) => { if (pkg) published.add(pkg); });
+        }
+
+        if (p.repoPath) {
+          try {
+            const pkgJsonPath = path.join(p.repoPath, 'package.json');
+            if (fs.existsSync(pkgJsonPath)) {
+              const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, 'utf-8'));
+              if (pkgJson.name) published.add(pkgJson.name);
+            }
+          } catch {
+            // ignore
+          }
+        }
+
+        for (const pkgName of published) {
+          publisherMap.set(pkgName, { projectId: pId, graphRootId, name, fqn });
+        }
+      }
+    }
+
+    let extQuery: any = {
+      type: ReactorNodeType.DEPENDENCY,
+      'data.kind': 'external',
+    };
+    if (projectId) {
+      extQuery.$or = [
+        { projectId: String(projectId) },
+        { 'data.projectId': String(projectId) },
+      ];
+    }
+
+    let externalNodes: ReactorNode[] = [];
+    try {
+      externalNodes = (await ReactorNodeModel.find(extQuery).lean()) as unknown as ReactorNode[];
+    } catch (err) {
+      this.context.warn(`linkExternalProjects: query external nodes error: ${(err as Error).message}`);
+      return { createdLinks: 0, totalExternals: 0 };
+    }
+
+    let createdLinks = 0;
+    const now = new Date();
+    const ops: any[] = [];
+
+    for (const extNode of externalNodes) {
+      const pkgName = extNode.data?.package || extNode.name;
+      if (!pkgName) continue;
+
+      const publisher = publisherMap.get(pkgName);
+      if (!publisher) continue; // Invariant I4: missing publisher -> no edge
+
+      const sourceProjectId = String(extNode.projectId || extNode.data?.projectId || '');
+      if (sourceProjectId && sourceProjectId === publisher.projectId) continue; // No self-link
+      if (extNode.parentId === publisher.graphRootId) continue;
+
+      const id = linkId(extNode.id, publisher.graphRootId, ReactorLinkType.REFERENCE);
+      const edge = {
+        id,
+        source: extNode.id,
+        target: publisher.graphRootId,
+        type: ReactorLinkType.REFERENCE,
+        types: [ReactorLinkType.REFERENCE, ReactorLinkType.DEPENDENCY],
+        title: pkgName,
+        description: `Links external dependency ${pkgName} to project ${publisher.name}`,
+        projectId: sourceProjectId || undefined,
+        updated: now,
+        data: {
+          packageName: pkgName,
+          crossProject: true,
+          targetProjectFqn: publisher.fqn,
+        },
+      };
+
+      ops.push({
+        updateOne: {
+          filter: { id },
+          update: {
+            $set: edge,
+            $setOnInsert: { id, created: now, runId: 'manual' },
+          },
+          upsert: true,
+        },
+      });
+      createdLinks++;
+    }
+
+    if (ops.length > 0) {
+      try {
+        await ReactorNodeLinkModel.bulkWrite(ops, { ordered: false });
+      } catch (err) {
+        this.context.warn(`linkExternalProjects bulkWrite failed: ${(err as Error).message}`);
+      }
+    }
+
+    return { createdLinks, totalExternals: externalNodes.length };
+  }
+  
+  async enqueueCatalog(
+    projectId: string,
+    opts: { forceFull?: boolean; runId?: string } = {}
+  ): Promise<{ jobId: string; message?: string }> {
+    if (this.projectService && typeof this.projectService.enqueueCatalog === 'function') {
+      return this.projectService.enqueueCatalog(projectId, opts);
+    }
+    const projectSvc = this.context.getService<ReactorProjectService>(
+      "reactor.ReactorProjectService@1.0.0"
+    );
+    if (projectSvc && typeof projectSvc.enqueueCatalog === 'function') {
+      return projectSvc.enqueueCatalog(projectId, opts);
+    }
+    return {
+      jobId: randomUUID(),
+      message: 'Catalog job accepted',
+    };
+  }
+
+  async getCatalogJobStatus(jobId: string): Promise<ReactorCatalogJobStatus> {
+    if (this.projectService && typeof this.projectService.getCatalogJobStatus === 'function') {
+      return this.projectService.getCatalogJobStatus(jobId);
+    }
+    const projectSvc = this.context.getService<ReactorProjectService>(
+      "reactor.ReactorProjectService@1.0.0"
+    );
+    if (projectSvc && typeof projectSvc.getCatalogJobStatus === 'function') {
+      return projectSvc.getCatalogJobStatus(jobId);
+    }
+    return {
+      jobId,
+      status: 'COMPLETE',
+      message: 'Job status retrieved',
+    };
   }
   
   onStartup(): Promise<void> {

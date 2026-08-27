@@ -117,6 +117,10 @@ export interface ReactorNodeLink {
   description?: string
   /** The project this edge belongs to, used for scoping queries. */
   projectId?: string | number
+  /** Optional partner/tenant id owning this edge. */
+  partnerId?: string | number
+  /** Optional organization id owning this edge. */
+  organizationId?: string | number
   /** Run id for the process() invocation that wrote this edge (for project-scoped GC). */
   runId?: string
   /** When this edge was (re)indexed. */
@@ -159,6 +163,10 @@ export interface ReactorNode extends Reactory.IComponentFqnDefinition {
   updated?: Date
   /** Project id (stringified) owning this node. */
   projectId?: string | number
+  /** Optional partner/tenant id owning this node. */
+  partnerId?: string | number
+  /** Optional organization id owning this node. */
+  organizationId?: string | number
   /** Project FQN (nameSpace.name@version) for scoping. */
   projectFqn?: string
   /** Run id for the process() invocation that wrote this node (for project-scoped GC). */
@@ -181,6 +189,8 @@ export interface ReactorDataNode<T> extends ReactorNode {
 export interface ReactorSubgraphOptions {
   /** BFS depth from the root node. Default 2, hard cap 5. */
   depth?: number
+  /** Optional partner/tenant id filter. */
+  partnerId?: string
   /** Which edge directions to follow from the frontier. Default 'both'. */
   direction?: 'in' | 'out' | 'both'
   /** Restrict traversal to edges carrying at least one of these types. */
@@ -258,6 +268,25 @@ export interface ReactorNodeUI {
   node: ReactorNode | ReactorDataNode<any>
   position: ReactorNodePosition
   options: ReactorNodeOption[]
+}
+
+export type ReactorCatalogJobState = 'PENDING' | 'RUNNING' | 'COMPLETE' | 'FAILED';
+
+export interface ReactorCatalogJobStats {
+  filesProcessed?: number;
+  nodesCreated?: number;
+  linksCreated?: number;
+  durationMs?: number;
+}
+
+export interface ReactorCatalogJobStatus {
+  jobId: string;
+  status: ReactorCatalogJobState;
+  message?: string;
+  error?: string;
+  stats?: ReactorCatalogJobStats;
+  startedAt?: Date;
+  completedAt?: Date;
 }
 
 /**

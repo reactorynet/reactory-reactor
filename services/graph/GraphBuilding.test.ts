@@ -11,7 +11,7 @@ import {
   projectLogicalKey,
 } from "./GraphIdentity";
 import { writeProject, cleanup } from "./testUtils";
-import { ReactorNodeType } from "../../types/model.types";
+import { ReactorLinkType, ReactorNodeType } from "../../types/model.types";
 
 /** Minimal in-memory Reactory context for driving processors without DI/Mongo. */
 const makeContext = () => {
@@ -410,5 +410,41 @@ describe("Graph building (NodeJS/TypeScript)", () => {
       }
       delLink.mockRestore();
     }, 15000);
+
+    it("process() emits MENTIONS edges linking docs to code symbols in second pass", async () => {
+      const { dir: docDir, project: docProject } = writeProject({
+        "package.json": JSON.stringify({ name: "doc-fixture", version: "1.0.0" }),
+        "src/service.ts": "export class AccountService { getAccount() {} }",
+        "README.md": "# Account System\n\nSee `AccountService` for account operations.\n",
+      });
+
+      class CapturingProcessor extends NodeJSProjectProcessor {
+        public captured: { nodes: any[]; edges: any[] } = { nodes: [], edges: [] };
+        protected async persistGraph(nodes: any[], edges: any[]) {
+          this.captured = { nodes, edges };
+        }
+        protected async indexSearchables() {}
+      }
+
+      const p = new CapturingProcessor({}, makeContext());
+      await p.process(docProject, { skipGc: true, linkDocMentions: true });
+
+      const accountServiceSymbol = p.captured.nodes.find(
+        (n) => n.name === "AccountService" && n.data?.kind === "symbol"
+      );
+      expect(accountServiceSymbol).toBeDefined();
+
+      const mentionEdge = p.captured.edges.find(
+        (e) =>
+          e.target === accountServiceSymbol!.id &&
+          (e.types || []).includes(ReactorLinkType.MENTIONS)
+      );
+      expect(mentionEdge).toBeDefined();
+      expect(mentionEdge!.data).toMatchObject({
+        confidence: 0.9,
+        match: "inline-code",
+      });
+      cleanup(docDir);
+    });
   });
 });

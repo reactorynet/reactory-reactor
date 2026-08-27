@@ -88,11 +88,25 @@ Exact string match on package name only. No fuzzy.
 
 ## 6. Acceptance criteria
 
-- [ ] Cross-project edge created for exact published name match
-- [ ] Idempotent via linkId
-- [ ] Does not require network
-- [ ] GC: edges either re-created each run or runId manual — document choice
+- [x] Cross-project edge created for exact published name match
+- [x] Idempotent via linkId
+- [x] Does not require network
+- [x] GC: edges either re-created each run or runId manual — document choice
 
 ---
 
 ## 7. Agent Notes
+
+- **Implementation**:
+  - `ReactorProjectSchema` / `IReactorProject`: Added `publishedPackages: [String]` property to persist project package aliases.
+  - `ReactorProjectService`: Added `getPublishedPackagesIndex()` mapping published package names (from `name`, `publishedPackages`, and repository `package.json`) to project metadata (`projectId`, `graphRootId`, `name`, `fqn`).
+  - `SystemGraphManager.linkExternalProjects(projectId?)`:
+    - Queries external dependency nodes (`type: DEPENDENCY, data.kind: "external"`), matches package names against the publisher map.
+    - Emits deterministic `REFERENCE` + `DEPENDENCY` edges from external nodes to target publisher project root nodes (`graphRootId`).
+    - Stamped with `runId: 'manual'` in `$setOnInsert` so project-scoped GC preserves cross-project edges across rebuilds.
+    - Prevents self-links to the same project and creates no dangling edges when a publisher is missing (preserving Invariant I4).
+    - Integrated automatically into `SystemGraphManager.catalogProject` and exposed via `ReactorLinkCrossProjectDeps` GraphQL mutation.
+- **Tests**:
+  - Added test suite in `services/graph/CrossProjectExternals.test.ts` covering matched package linking, multiple package aliases, self-link prevention, missing publisher handling, idempotency, and publisher index discovery.
+  - Added GraphQL mutation tests in `services/graph/GraphQLFacade.test.ts`.
+  - All 16 graph test suites (186 tests) and 9 processor suites (37 tests) passing.

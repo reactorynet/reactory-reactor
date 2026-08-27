@@ -59,9 +59,9 @@ All processors now extend **`BaseProjectProcessor`**, which provides:
 |-----------|-----------|-----------|------------------------|------|
 | **NodeJS** | `package.json` (detects `typescript`/`react`) | ✅ (base) | ✅ TypeScript AST analyzer | nodejs |
 | **ReactNative** | `react-native` dep | ✅ (base) | ✅ TypeScript AST analyzer | react-native |
-| **Python** | requirements/setup/pyproject | ✅ (base) | ✅ Python analyzer | python |
-| **Java** | pom/gradle/ant | ✅ (base) | ✅ Java + Kotlin analyzers | java |
-| **CSharp** | `.csproj`/`.sln` | ✅ (base) | ✅ C# analyzer | csharp |
+| **Python** | requirements/setup/pyproject | ✅ (base) | ✅ Python Tree-sitter AST analyzer (with heuristic fallback) | python |
+| **Java** | pom/gradle/ant | ✅ (base) | ✅ Java + Kotlin Tree-sitter AST analyzers | java |
+| **CSharp** | `.csproj`/`.sln` | ✅ (base) | ✅ C# Tree-sitter AST analyzer | csharp |
 | **TSql** | `.sqlproj`/`.dacpac` | ✅ (base) + Connections node, DATASTORE root, rich menus | — | tsql |
 | **Markdown** | documents in root or a docs dir (`docs`, `adr`, `rfcs`, …), or a docs-site config (`mkdocs.yml`, `docusaurus.config.*`, …) | ✅ (base) | ✅ document analyzer (§4); claims documents only on hybrid projects | markdown |
 | **File** | any repoPath (**fallback only** — used when nothing else claims the project) | ✅ (base) | documents only (base default) | — |
@@ -72,7 +72,7 @@ All processors now extend **`BaseProjectProcessor`**, which provides:
 ## 3. TypeScript analyzer (`services/graph/analyzers/TypeScriptAnalyzer.ts`)
 
 Parses `.ts/.tsx/.js/.jsx` with the TypeScript compiler API in four passes and returns `{ symbols, externals, edges }`:
-- **Pass 1 — imports:** builds an import-binding map (local name → resolved file / npm package) and emits `DEPENDENCY` edges (relative imports resolved via extension/`index` lookup; bare imports → external dependency node; `export … from` re-exports).
+- **Pass 1 — imports:** builds an import-binding map (local name → resolved file / npm package) and emits `DEPENDENCY` edges (relative imports resolved via extension/`index` lookup; non-relative imports resolved via `tsconfig.json` `compilerOptions.paths` and `baseUrl` against in-repo files via `tsconfigPaths.ts`, cached per repo; bare package imports → external dependency node; `export … from` re-exports).
 - **Pass 2 — symbols:** classes (+ one level of methods), functions, interfaces, type aliases, enums, exported const/arrow functions — each a deterministic child node with line number, `symbolKind`, and `exported` flag.
 - **Pass 3 — inheritance:** `extends` → `INHERITS` edge, `implements` → `IMPLEMENTS` edge, resolved to the base type's node (same file or via import bindings).
 - **Pass 4 — calls:** walks each callable body for call expressions and emits `CALL` edges — `this.method()` → the sibling method, local calls → the local symbol, and cross-file calls resolved through import bindings.
@@ -81,11 +81,12 @@ Edges are de-duplicated by deterministic id. `ReactorLinkType` was extended with
 
 ### Other language analyzers (`services/graph/analyzers/`)
 
-No AST parser is available in-runtime for Python/Java/C#, so these are careful **heuristic scanners** sharing a `GraphEmitter` (deterministic node/edge construction + local-symbol/import-binding resolution) and, for C-family languages, `sanitizeCLike` (blanks comments/strings), `matchBrace`, `topLevelMembers` and `emitBraceTypes` in `support.ts`.
+AST parsers via `TreeSitterEngine` (with resilient heuristic fallback for Python/C-family) share a `GraphEmitter` (deterministic node/edge construction + local-symbol/import-binding resolution):
 
-- **PythonAnalyzer** — indentation-aware: classes, functions, methods; `import`/`from … import` (relative imports resolved to in-repo files, absolute → external); base-class `INHERITS`; `self.method()`, local and construction `CALL` edges.
-- **JavaAnalyzer** — brace-based: classes/interfaces/enums, methods; `import` deps; `extends`→`INHERITS`, `implements`→`IMPLEMENTS`; `this.method()`/sibling `CALL` edges. Constructors (no return type) are intentionally not surfaced.
-- **CSharpAnalyzer** — brace-based: classes/structs/interfaces/enums, methods; `using` deps; base list `: Base, IFoo` split into `INHERITS`/`IMPLEMENTS` via the `IXxx` naming convention; `this.method()`/sibling `CALL` edges.
+- **PythonAnalyzer** — Tree-sitter AST analyzer with indentation heuristic fallback: classes, functions, methods; `import`/`from … import` (relative imports resolved to in-repo files, absolute → external); base-class `INHERITS`; `self.method()`, local and construction `CALL` edges.
+- **JavaAnalyzer** — Tree-sitter AST analyzer: classes/interfaces/enums/records, methods and constructors; `import` deps; `extends`→`INHERITS`, `implements`→`IMPLEMENTS`; `this.method()`/sibling and `new X()` `CALL` edges.
+- **CSharpAnalyzer** — Tree-sitter AST analyzer: classes/structs/interfaces/enums, methods and constructors; `using` deps; base list `: Base, IFoo` resolved locally or via `IXxx` fallback; `this.method()`/sibling and `new X()` `CALL` edges.
+- **KotlinAnalyzer** — Tree-sitter AST analyzer: classes/interfaces/objects, functions and constructors; `import` deps; `constructor_invocation`→`INHERITS` vs `user_type`→`IMPLEMENTS`; `this.method()` and constructor `CALL` edges.
 
 All emit the same `{ symbols, externals, edges }` shape and id-space as the TS analyzer, so persistence, edges and GraphQL resolution work identically. Unresolved references (builtins, cross-namespace bases without an import binding) produce **no** edge, which keeps the graph clean rather than guessing.
 
@@ -153,6 +154,20 @@ A reference originates from the **section containing it** where there is one, ot
 
 **MongoDB Indexes for Graph & Link Models (Session 07):** Declared compound indexes on `reactor_nodes` (`{ projectId: 1, runId: 1 }`, `{ projectId: 1, parentId: 1 }`, `{ projectId: 1, type: 1 }`, `{ type: 1, name: 1 }`, `{ projectFqn: 1, type: 1 }`) and `reactor_node_links` (`{ projectId: 1, runId: 1 }`, `{ source: 1, types: 1 }`, `{ target: 1, types: 1 }`, `{ projectId: 1, source: 1 }`, `{ projectId: 1, target: 1 }`), plus unique sparse index on `reactor_projects.graphRootId`. Production index builds can be executed via Mongoose `syncIndexes()` during scheduled maintenance or directly in MongoDB shell (`db.reactor_nodes.createIndex(...)`, `db.reactor_node_links.createIndex(...)`).
 
+**Incremental re-index by content hash (Session 08):** `BaseProjectProcessor.process` computes a SHA-256 `contentHash` for each file. Unchanged files bypass `analyseFileFull` and search index rebuilding. Descendant symbols/sections and edges for skipped files are touched with the current `runId` so they are preserved during project-scoped GC. `forceFull: true` option forces complete re-analysis.
+
+**Async catalog & index jobs (Session 09):** `ReactorSyncCatalogNodes` and `ReactorIndexNodes` default to asynchronous execution (`async: true`), enqueuing catalog jobs via `enqueueCatalog` and returning `ReactorCatalogJobAccepted` with a `jobId` in < 1s. The jobs execute through the `reactor.CatalogProjectGraph@1.0.0` YAML workflow on the Reactory durable workflow engine. `async: false` is supported for synchronous/script execution. `ReactorCatalogJobStatus` query maps workflow instance status to `PENDING | RUNNING | COMPLETE | FAILED`. Re-enqueuing an active project without `forceFull` returns the existing `jobId` (idempotent).
+
+**Cross-project external dependency linking (Session 12):** `SystemGraphManager.linkExternalProjects(projectId?)` resolves external dependency nodes (e.g. `npm:<pkg>`) against the catalog publisher index (matching `package.json` names, `project.name`, and `publishedPackages`), creating idempotent `REFERENCE` / `DEPENDENCY` edges from external nodes to target project root nodes. Self-links are prevented, and missing publishers create no edges (Invariant I4). Runs automatically at the end of `catalogProject` or on demand via `ReactorLinkCrossProjectDeps` GraphQL mutation.
+
+**Documentation symbol mentions (Session 13):** `BaseProjectProcessor.process` performs a second pass matching high-confidence symbol name mentions in documents (inline code `` `Symbol` `` and prose PascalCase) against the project's exported/top-level symbol index, emitting `MENTIONS` edges with `{ confidence: 0.9, match: 'inline-code' | 'prose-pascal' }`. Ambiguous names across folders are disambiguated by same-folder / longest path prefix or skipped to prevent false linkages (Invariant I4). Common stopwords (`Config`, `Data`, `Test`, etc.) are denylisted. Mentions can be disabled via `linkDocMentions: false`.
+
+**Observability, cache busting, tenancy & path redaction (Session 14):**
+- **Observability:** `BaseProjectProcessor.process` emits structured metrics (`GraphProcessMetrics`) containing file discovery, analysis, skip, folder, node, edge, and GC delete counts, execution duration (`durationMs`), error count, and language breakdown (`byLanguage`), logged as `graph.process.complete`.
+- **Cache Invalidation:** Node cache keys (`REACTOR_NODE_<id>`) are automatically cleared upon `process()` graph writes and on `updateNode()` mutations.
+- **Tenancy:** Node/edge persistence stamps `partnerId` and `organizationId` from project/context metadata. `SystemGraphManager` query methods (`getNodeLinks`, `searchNodes`, `findLinks`, `getSubgraph`) support optional tenant filtering by `partnerId` with safe fallback when absent.
+- **Path Redaction:** `publicNode` redacts absolute filesystem paths from public GraphQL projections (replacing absolute `source` and `data.path` with relative paths and removing internal `data.repoPath`), while internal processes preserve absolute paths for operations.
+
 ## 6. SystemGraphManager methods
 
 | Method | Status |
@@ -164,13 +179,15 @@ A reference originates from the **section containing it** where there is one, ot
 | `getProjectForCatalogNode` | ✅ Mongo-backed, matched by deterministic id |
 | `catalogProject` / `catalogProjects` | ✅ `catalogProjects` now awaits + isolates errors |
 | `getLinks / createLink / updateLink / deleteLink` | ✅ backed by `reactor_node_links` (idempotent upserts) |
+| `linkExternalProjects` | ✅ cross-project external node to publisher root linking |
+| `enqueueCatalog / getCatalogJobStatus` | ✅ async workflow job submission & status polling |
 | `getCategoryNodes` | ✅ static taxonomy |
 
 ## 7. GraphQL surface
 
 - **Node relationships:** `ReactorNode.dependencies / dependents / inputs / outputs / parent` resolve via the edge store; `ReactorNodeLink.source / target` resolve node objects from ids.
-- **Search queries** `ReactorNodesForType` / `ReactorNodesByTerm` query the **persisted graph** (with catalog fallback) instead of filtering the full list in memory.
-- **Mutations** match the schema: `ReactorCreateNodeLink`, `ReactorUpdateNodeLink`, `ReactorDeleteNodeLink`, `ReactorSyncCatalogNodes`, `ReactorIndexNodes`, `ReactorSaveSystemGraph` — all implemented (the previous throwing/misnamed stubs are gone).
+- **Search queries** `ReactorNodesForType` / `ReactorNodesByTerm` query the **persisted graph** (with catalog fallback) instead of filtering the full list in memory. `ReactorCatalogJobStatus` exposes async job execution status (`PENDING`, `RUNNING`, `COMPLETE`, `FAILED`).
+- **Mutations** match the schema: `ReactorCreateNodeLink`, `ReactorUpdateNodeLink`, `ReactorDeleteNodeLink`, `ReactorSyncCatalogNodes` (default async, returning `ReactorCatalogJobAccepted`), `ReactorIndexNodes` (default async), `ReactorSaveSystemGraph` — all implemented (the previous throwing/misnamed stubs are gone).
 
 ## 8. Tests (no Mongo required)
 
@@ -203,12 +220,11 @@ Under Jest every test file gets a fresh module registry — and a fresh `globalT
 
 1. **Deeper edges** — resolve `Obj.method()` calls where `Obj` is a locally instantiated variable (needs light type inference), `new X()` construction edges, endpoint↔handler, DB FK/view/proc references (TSql), DI wiring.
 2. **Higher-fidelity non-TS analyzers** — the Python/Java/C# scanners are heuristic (constructors skipped for Java/C#; cross-file same-package/namespace bases only resolve through explicit import bindings). A real parser (tree-sitter / language server) would raise precision if needed.
-3. **Cross-project edges** — link external `npm:`/`java:`/`cs:` dependency nodes to the actual project node that publishes them.
-4. **Incremental re-index** — only reprocess changed files (mtime/hash) rather than the whole repo.
-5. **Category assignment** — attach nodes to the `DefaultReactorNodeCategories` taxonomy during analysis.
-6. **Persist folder nodes on demand** if full-tree queries (not just analysed artifacts) become necessary.
-7. **Native rst/adoc parsers** — both currently route through the plain-text parser, which picks up their underline/prefix headings but not directives, includes or attribute references. `parseDocument` in `services/graph/documents/index.ts` is the single seam to slot them into.
-8. **Docs↔code inference beyond explicit links** — a document that *names* a symbol (rather than linking a path) produces no `DOCUMENTS` edge today. Matching prose mentions against the project's symbol index would connect far more of the documentation, at some precision cost.
-9. **Cross-project topics/resources** — `TOPIC` and `RESOURCE` nodes are project-scoped so their `parentId` stays stable. Answering "which projects reference this runbook?" means grouping on `data.url` / `data.slug` across projects, or introducing a global tier.
+3. **Cross-project edges** — ✅ completed via `linkExternalProjects` linking external dependency nodes to publisher project roots.
+4. **Category assignment** — attach nodes to the `DefaultReactorNodeCategories` taxonomy during analysis.
+5. **Persist folder nodes on demand** if full-tree queries (not just analysed artifacts) become necessary.
+6. **Native rst/adoc parsers** — both currently route through the plain-text parser, which picks up their underline/prefix headings but not directives, includes or attribute references. `parseDocument` in `services/graph/documents/index.ts` is the single seam to slot them into.
+7. **Docs↔code inference beyond explicit links** — a document that *names* a symbol (rather than linking a path) produces no `DOCUMENTS` edge today. Matching prose mentions against the project's symbol index would connect far more of the documentation, at some precision cost.
+8. **Cross-project topics/resources** — `TOPIC` and `RESOURCE` nodes are project-scoped so their `parentId` stays stable. Answering "which projects reference this runbook?" means grouping on `data.url` / `data.slug` across projects, or introducing a global tier.
 
 _Reflects the code on this branch. Key files: `services/graph/GraphIdentity.ts`, `services/graph/analyzers/TypeScriptAnalyzer.ts`, `services/graph/documents/` (`MarkdownParser.ts`, `DocumentGraphEmitter.ts`), `services/ReactorProjectProcessors/BaseProjectProcessor.ts`, `services/SystemGraphManager.ts`, `models/ReactorNodeLink.ts`, `models/ReactorGraphNode.ts`, `graphql/resolvers/ReactorSystemGraph.ts`._

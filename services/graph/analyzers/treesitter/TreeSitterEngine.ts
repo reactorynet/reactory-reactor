@@ -17,7 +17,7 @@
 import fs from "fs";
 import path from "path";
 
-export type TreeSitterLanguageId = "java" | "csharp" | "kotlin";
+export type TreeSitterLanguageId = "java" | "csharp" | "kotlin" | "python";
 
 interface LoadResult {
   Parser: any | null;
@@ -107,6 +107,7 @@ const GRAMMAR_MODULE: Record<TreeSitterLanguageId, string> = {
   java: "tree-sitter-java",
   csharp: "tree-sitter-c-sharp",
   kotlin: "@tree-sitter-grammars/tree-sitter-kotlin",
+  python: "tree-sitter-python",
 };
 
 /**
@@ -168,6 +169,10 @@ const loadLanguage = async (lang: TreeSitterLanguageId): Promise<LoadResult> => 
       Language = grammar.c_sharp();
     } else if (grammar && grammar.c_sharp) {
       Language = grammar.c_sharp;
+    } else if (grammar && typeof grammar.python === "function") {
+      Language = grammar.python();
+    } else if (grammar && grammar.python) {
+      Language = grammar.python;
     } else if (grammar && grammar.default) {
       Language = grammar.default;
     } else {

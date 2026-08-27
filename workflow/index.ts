@@ -10,6 +10,7 @@ const YAML_WORKFLOWS = [
   'AgentGitWorktree',
   'CatalogAgentMemory',
   'CatalogProjectFolder',
+  'CatalogProjectGraph',
   'GraphExplore',
   'ProcessConversationWorkflow',
 ];

@@ -2,7 +2,7 @@ import Reactory from '@reactorynet/reactory-core';
 import OpenAI from "openai"
 import GoogleGenAI from "google-genai";
 import { TReactorConversationDocument, TReactorConversationModel, ReactorConversationHistoryItem } from "../models/ReactorChatState"
-import { AIAudioChatParams, AIChatCompletion, AIChatParams, AIFile, AIFineTuningEvent, AIFineTuningJob, AIImage, AIImageGenerationParams, AIListResponse, AIModel, CreateAIFineTuningJobParams, ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorNodeType, ReactorProviderConfig, ReactorSubgraph, ReactorSubgraphOptions } from "./model.types"
+import { AIAudioChatParams, AIChatCompletion, AIChatParams, AIFile, AIFineTuningEvent, AIFineTuningJob, AIImage, AIImageGenerationParams, AIListResponse, AIModel, CreateAIFineTuningJobParams, ReactorCatalogJobStatus, ReactorDataNode, ReactorNode, ReactorNodeCategory, ReactorNodeLink, ReactorNodeType, ReactorProviderConfig, ReactorSubgraph, ReactorSubgraphOptions } from "./model.types"
 import { PagingRequest, PagingResult } from "@reactory/server-core/database/types"
 import { ObjectId } from "mongodb"
 import { ChatState, MacroComponentDefinition, MacroToolDefinition, Schema, ToolApprovalMode } from '../ai/openai/types/chat';
@@ -1077,6 +1077,7 @@ export interface IReactorProject extends Reactory.IComponentFqnDefinition {
   repoUrl?: string;
   projectTypes: KnownReactorProjectTypes[];  
   lastSync?: Date;
+  indexingJobId?: string;
   description?: string;
   tasksUrl?: string;
   primaryDocumentation: ReactorProjectDocumentation;
@@ -1099,6 +1100,7 @@ export interface IReactorProject extends Reactory.IComponentFqnDefinition {
   mainBranch?: string;
   branches?: string[];
   tags?: string[];
+  publishedPackages?: string[];
   created?: Date;
   updated?: Date;
   errors?: any[]; // ReactorProjectError[]
@@ -1261,6 +1263,29 @@ export interface ReactorProjectService extends Reactory.Service.IReactoryService
    */
   getProjectMetrics(project: Partial<IReactorProject>, startDate?: Date, endDate?: Date): Promise<IReactorProjectMetrics[]>;
 
+  /**
+   * Enqueues an asynchronous catalog job for a project.
+   */
+  enqueueCatalog(
+    projectId: string,
+    opts?: { forceFull?: boolean; runId?: string }
+  ): Promise<{ jobId: string; message?: string }>;
+
+  /**
+   * Returns the status of an asynchronous catalog job.
+   */
+  getCatalogJobStatus(jobId: string): Promise<ReactorCatalogJobStatus>;
+
+  /**
+   * Links external dependency nodes to publisher project root nodes for matched package names.
+   */
+  linkExternalProjects(projectId?: string): Promise<{ createdLinks: number; totalExternals: number }>;
+
+  /**
+   * Returns an index mapping published package names to project metadata.
+   */
+  getPublishedPackagesIndex(): Promise<Map<string, { projectId: string; graphRootId: number; name: string; fqn: string }>>;
+
 }
 
 export interface ISystemGraphManager extends Reactory.Service.IReactoryDefaultService {
@@ -1411,6 +1436,19 @@ export interface ISystemGraphManager extends Reactory.Service.IReactoryDefaultSe
    */
   updateNode(id: number, patch: Partial<ReactorNode>): Promise<Partial<ReactorNode>>;
 
+  /**
+   * Enqueues an asynchronous catalog job for a project.
+   */
+  enqueueCatalog(
+    projectId: string,
+    opts?: { forceFull?: boolean; runId?: string }
+  ): Promise<{ jobId: string; message?: string }>;
+
+  /**
+   * Returns the status of an asynchronous catalog job.
+   */
+  getCatalogJobStatus(jobId: string): Promise<ReactorCatalogJobStatus>;
+
 }
 
 export interface IProjectNodeProvider {
@@ -1424,6 +1462,33 @@ export interface IProjectNodeProvider {
 }
 
 
+export interface ProcessOptions {
+  runId?: string;
+  skipGc?: boolean;
+  forceFull?: boolean;
+  linkDocMentions?: boolean;
+}
+
+/**
+ * Structured metrics recorded during a graph processing run.
+ */
+export interface GraphProcessMetrics {
+  projectId: string;
+  projectFqn: string;
+  runId: string;
+  filesDiscovered: number;
+  filesAnalysed: number;
+  filesSkipped: number;
+  foldersCreated: number;
+  nodesUpserted: number;
+  edgesUpserted: number;
+  nodesGcDeleted?: number;
+  edgesGcDeleted?: number;
+  durationMs: number;
+  errors: number;
+  byLanguage?: Record<string, number>;
+}
+
 export interface IProjectProcessor extends ProjectSynchronizer, AttributeProvider, IProjectNodeProvider { 
   getFileSpecs(project: Partial<IReactorProject>): Partial<IReactorProjectFileSpec>[];
   setFileSpecs(project: Partial<IReactorProject>, specs: Partial<IReactorProjectFileSpec>[]): Promise<Partial<IReactorProject>>;
@@ -1432,8 +1497,9 @@ export interface IProjectProcessor extends ProjectSynchronizer, AttributeProvide
    * searchables to the search index. Returns the (possibly enriched) project.
    * May run asynchronously.
    * @param project
+   * @param options
    */
-  process(project: Partial<IReactorProject>): Partial<IReactorProject> | Promise<Partial<IReactorProject>>;
+  process(project: Partial<IReactorProject>, options?: ProcessOptions): Partial<IReactorProject> | Promise<Partial<IReactorProject>>;
   /**
    * Returns true if the processor supports the project type.
    * @param project 

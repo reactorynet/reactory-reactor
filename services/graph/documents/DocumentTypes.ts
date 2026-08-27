@@ -145,6 +145,35 @@ export const DEFAULT_PARSE_OPTIONS: Required<DocumentParseOptions> = {
   maxLinks: 1000,
 };
 
+/** Match kind for symbol mentions extracted from documentation. */
+export type DocMentionMatchKind = "inline-code" | "prose-pascal";
+
+/** Metadata attached to a MENTIONS edge originating in documentation. */
+export interface DocMentionData {
+  confidence: number;
+  match: DocMentionMatchKind;
+  symbolName?: string;
+  line?: number;
+}
+
+/** An entry in the project symbol index used to link documentation mentions. */
+export interface SymbolIndexEntry {
+  id: number;
+  name: string;
+  relativePath: string;
+}
+
+/** Project symbol index mapping symbol name to its candidate node entries. */
+export type SymbolIndex = Map<string, SymbolIndexEntry[]>;
+
+/** Options passed to document graphing and symbol mention linking. */
+export interface DocumentGraphOptions {
+  /** Symbol index or symbols list for detecting mentions in document text. */
+  symbolIndex?: SymbolIndex | Map<string, number[]> | Map<string, SymbolIndexEntry[]> | any[];
+  /** Feature flag: toggle emission of symbol mentions edges (default true). */
+  linkDocMentions?: boolean;
+}
+
 /** Words per minute used to derive `DocMetrics.readingMinutes`. */
 export const READING_WPM = 200;
 

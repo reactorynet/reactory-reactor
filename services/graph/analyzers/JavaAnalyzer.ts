@@ -1,5 +1,5 @@
 import fs from "fs";
-import Parser from "tree-sitter";
+import type Parser from "tree-sitter";
 import Reactory from "@reactorynet/reactory-core";
 import { ReactorNode, ReactorNodeType, ReactorLinkType } from "../../../types/model.types";
 import { FileAnalysis, GraphEmitter } from "./support";

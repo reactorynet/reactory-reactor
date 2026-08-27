@@ -27,6 +27,7 @@ const SAMPLES: Record<TreeSitterLanguageId, { source: string; rootType: string }
   java: { source: "class Sample { void run() {} }", rootType: "program" },
   csharp: { source: "class Sample { void Run() {} }", rootType: "compilation_unit" },
   kotlin: { source: "class Sample { fun run() {} }", rootType: "source_file" },
+  python: { source: "class Sample:\n    def run(self):\n        pass", rootType: "module" },
 };
 
 const LANGUAGES = Object.keys(SAMPLES) as TreeSitterLanguageId[];

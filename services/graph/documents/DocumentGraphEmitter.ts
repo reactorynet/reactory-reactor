@@ -14,7 +14,16 @@ import {
   pathLogicalKey,
   symbolLogicalKey,
 } from "../GraphIdentity";
-import { DocLink, DocumentOutline, slugify } from "./DocumentTypes";
+import {
+  DocLink,
+  DocMentionData,
+  DocMentionMatchKind,
+  DocumentGraphOptions,
+  DocumentOutline,
+  SymbolIndex,
+  SymbolIndexEntry,
+  slugify,
+} from "./DocumentTypes";
 
 /**
  * The graph produced from one document. Mirrors the code analyzers'
@@ -279,6 +288,172 @@ const resourceLabel = (href: string): string => {
   }
 };
 
+/** Common words excluded from symbol mention matching. */
+export const SYMBOL_DENYLIST = new Set<string>([
+  "data",
+  "test",
+  "config",
+  "index",
+  "get",
+  "set",
+  "type",
+  "props",
+  "state",
+  "value",
+  "item",
+  "list",
+  "name",
+  "file",
+  "path",
+]);
+
+/**
+ * Builds a project symbol index from an array of symbol nodes.
+ *
+ * Only includes:
+ *  - exported === true OR top-level functions/classes
+ *  - name length >= 3
+ *  - not in SYMBOL_DENYLIST
+ */
+export const buildSymbolIndex = (
+  nodes: (ReactorNode | Partial<ReactorNode>)[]
+): SymbolIndex => {
+  const index: SymbolIndex = new Map();
+  if (!nodes || !Array.isArray(nodes)) return index;
+
+  for (const node of nodes) {
+    if (!node || typeof node.name !== "string") continue;
+    const name = node.name.trim();
+    if (name.length < 3) continue;
+    if (SYMBOL_DENYLIST.has(name.toLowerCase())) continue;
+
+    // Must not be a folder, document, section, topic, resource, or external package dependency
+    if (
+      node.type === ReactorNodeType.FOLDER ||
+      node.type === ReactorNodeType.DOCUMENT ||
+      node.type === ReactorNodeType.SECTION ||
+      node.type === ReactorNodeType.TOPIC ||
+      node.type === ReactorNodeType.RESOURCE ||
+      node.type === ReactorNodeType.DEPENDENCY
+    ) {
+      continue;
+    }
+
+    const data = node.data || {};
+    const isExported = data.exported === true;
+    const kind = data.symbolKind || data.kind;
+    const isTopLevelKind =
+      kind === "class" ||
+      kind === "function" ||
+      kind === "interface" ||
+      kind === "type" ||
+      kind === "enum" ||
+      node.type === ReactorNodeType.PROCESS ||
+      node.type === ReactorNodeType.FUNCTION ||
+      node.type === ReactorNodeType.INTERFACE;
+
+    const isTopLevelPath =
+      data.kind === "symbol" &&
+      (!data.symbolPath || !data.symbolPath.includes("."));
+
+    if (!isExported && !isTopLevelKind && !isTopLevelPath) {
+      continue;
+    }
+
+    const relativePath = data.relativePath || "";
+    const entry: SymbolIndexEntry = {
+      id: node.id as number,
+      name,
+      relativePath,
+    };
+
+    const existing = index.get(name);
+    if (existing) {
+      if (!existing.some((e) => e.id === node.id)) {
+        existing.push(entry);
+      }
+    } else {
+      index.set(name, [entry]);
+    }
+  }
+
+  return index;
+};
+
+/** Normalises symbol index inputs (Map, array of nodes, etc.) into a SymbolIndex. */
+export const normalizeSymbolIndex = (
+  input?: SymbolIndex | Map<string, number[]> | Map<string, SymbolIndexEntry[]> | any[]
+): SymbolIndex => {
+  if (!input) return new Map();
+  if (Array.isArray(input)) {
+    return buildSymbolIndex(input as ReactorNode[]);
+  }
+  const normalized: SymbolIndex = new Map();
+  for (const [key, val] of input.entries()) {
+    if (typeof key !== "string" || key.length < 3) continue;
+    if (SYMBOL_DENYLIST.has(key.toLowerCase())) continue;
+    if (Array.isArray(val)) {
+      if (val.length === 0) continue;
+      if (typeof val[0] === "number") {
+        normalized.set(
+          key,
+          (val as number[]).map((id) => ({ id, name: key, relativePath: "" }))
+        );
+      } else {
+        normalized.set(key, val as SymbolIndexEntry[]);
+      }
+    }
+  }
+  return normalized;
+};
+
+const commonPrefixDepth = (p1: string, p2: string): number => {
+  if (!p1 || !p2) return 0;
+  const seg1 = normalizeRelative(p1).split("/");
+  const seg2 = normalizeRelative(p2).split("/");
+  let depth = 0;
+  // Compare directory components (exclude filename)
+  while (depth < seg1.length - 1 && depth < seg2.length - 1 && seg1[depth] === seg2[depth]) {
+    depth++;
+  }
+  return depth;
+};
+
+/**
+ * Disambiguates candidate symbol entries for a mention in a given document:
+ *  - If exactly 1 candidate -> confidence 0.9
+ *  - If multiple -> prefer same-folder / longest common path prefix; else skip (null)
+ */
+export const disambiguateSymbol = (
+  candidates: SymbolIndexEntry[],
+  docRelativePath: string
+): SymbolIndexEntry | null => {
+  if (!candidates || candidates.length === 0) return null;
+  if (candidates.length === 1) return candidates[0];
+
+  const docRel = normalizeRelative(docRelativePath);
+  const docDir = path.dirname(docRel);
+
+  // 1. Same folder preference
+  const sameFolder = candidates.filter(
+    (c) => c.relativePath && path.dirname(normalizeRelative(c.relativePath)) === docDir
+  );
+  if (sameFolder.length === 1) return sameFolder[0];
+  if (sameFolder.length > 1) {
+    return null; // Ambiguous within same folder
+  }
+
+  // 2. Longest common path prefix preference
+  const depths = candidates.map((c) => commonPrefixDepth(docRel, c.relativePath));
+  const maxDepth = Math.max(...depths);
+  if (maxDepth > 0) {
+    const best = candidates.filter((_, idx) => depths[idx] === maxDepth);
+    if (best.length === 1) return best[0];
+  }
+
+  return null;
+};
+
 /**
  * Builds the graph for one parsed document.
  *
@@ -296,7 +471,9 @@ const resourceLabel = (href: string): string => {
  */
 export const emitDocumentGraph = (
   fileNode: ReactorNode,
-  outline: DocumentOutline
+  outline: DocumentOutline,
+  options?: DocumentGraphOptions,
+  sourceContent?: string
 ): DocumentGraph => {
   const data = fileNode.data || {};
   const fqn: string = data.projectFqn;
@@ -634,6 +811,157 @@ export const emitDocumentGraph = (
     );
   });
 
+  // ---- symbol mentions edges (Session 13) -----------------------------------
+
+  if (options?.linkDocMentions !== false && options?.symbolIndex) {
+    const symbolIndex = normalizeSymbolIndex(options.symbolIndex);
+    if (symbolIndex.size > 0) {
+      let docContent: string | null = sourceContent ?? null;
+      if (docContent === null) {
+        if (typeof fileNode.data?.content === "string") {
+          docContent = fileNode.data.content;
+        } else if (filePath && fs.existsSync(filePath)) {
+          try {
+            docContent = fs.readFileSync(filePath, "utf-8");
+          } catch {
+            docContent = null;
+          }
+        }
+      }
+
+      const findSectionForLine = (lineNo: number): ReactorNode => {
+        let matched: ReactorNode | null = null;
+        let maxLevel = -1;
+        outline.sections.forEach((sec, idx) => {
+          if (lineNo >= sec.line && lineNo <= sec.endLine) {
+            if (sec.level > maxLevel) {
+              maxLevel = sec.level;
+              matched = sectionNodes[idx];
+            }
+          }
+        });
+        return matched || fileNode;
+      };
+
+      // 1. Check code block language identifiers (fenced code language identifiers only)
+      outline.codeBlocks.forEach((b) => {
+        if (b.language && b.language.length >= 3 && !SYMBOL_DENYLIST.has(b.language.toLowerCase())) {
+          const candidates = symbolIndex.get(b.language);
+          if (candidates) {
+            const match = disambiguateSymbol(candidates, relativePath);
+            if (match) {
+              const source =
+                b.sectionIndex !== undefined && sectionNodes[b.sectionIndex]
+                  ? sectionNodes[b.sectionIndex]
+                  : findSectionForLine(b.line);
+              addEdge(
+                source.id,
+                match.id,
+                [ReactorLinkType.MENTIONS],
+                b.language,
+                `${relativePath} mentions ${b.language}`,
+                { confidence: 0.9, match: "inline-code", line: b.line }
+              );
+            }
+          }
+        }
+      });
+
+      // 2. Scan document lines (excluding code block bodies)
+      if (docContent) {
+        const lines = docContent.split(/\r?\n/);
+        const codeBlockRanges = outline.codeBlocks.map((b) => ({
+          start: b.line,
+          end: b.endLine,
+        }));
+
+        for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
+          const lineNo = lineIdx + 1;
+          const inCodeBody = codeBlockRanges.some(
+            (r) => lineNo > r.start && lineNo < r.end
+          );
+          if (inCodeBody) continue;
+
+          const rawLine = lines[lineIdx];
+          if (!rawLine || !rawLine.trim()) continue;
+
+          const source = findSectionForLine(lineNo);
+
+          // A. Inline code spans `...`
+          let maskedLine = "";
+          let i = 0;
+          while (i < rawLine.length) {
+            if (rawLine[i] === "`") {
+              let run = 0;
+              while (rawLine[i + run] === "`") run++;
+              const fence = "`".repeat(run);
+              const close = rawLine.indexOf(fence, i + run);
+              if (close === -1) {
+                maskedLine += rawLine.slice(i, i + run);
+                i += run;
+                continue;
+              }
+              const spanContent = rawLine.slice(i + run, close).trim();
+              if (
+                spanContent.length >= 3 &&
+                !SYMBOL_DENYLIST.has(spanContent.toLowerCase()) &&
+                /^[A-Za-z_][A-Za-z0-9_]{2,}$/.test(spanContent)
+              ) {
+                const candidates = symbolIndex.get(spanContent);
+                if (candidates) {
+                  const match = disambiguateSymbol(candidates, relativePath);
+                  if (match) {
+                    addEdge(
+                      source.id,
+                      match.id,
+                      [ReactorLinkType.MENTIONS],
+                      spanContent,
+                      `${relativePath} mentions ${spanContent}`,
+                      { confidence: 0.9, match: "inline-code", line: lineNo }
+                    );
+                  }
+                }
+              }
+              maskedLine += " ".repeat(close + run - i);
+              i = close + run;
+              continue;
+            }
+            maskedLine += rawLine[i];
+            i++;
+          }
+
+          // B. Prose Pascal/CamelCase words (outside inline code spans and link targets)
+          const proseOnly = maskedLine
+            .replace(/!\[([^\]]*)\]\([^)]*\)/g, "$1")
+            .replace(/\[([^\]]*)\]\([^)]*\)/g, "$1")
+            .replace(/\[([^\]]*)\]\[[^\]]*\]/g, "$1")
+            .replace(/<[^>]+>/g, " ");
+
+          const PROSE_PASCAL_RE = /\b([A-Z][A-Za-z0-9_]{2,})\b/g;
+          let match: RegExpExecArray | null;
+          while ((match = PROSE_PASCAL_RE.exec(proseOnly)) !== null) {
+            const symbolName = match[1];
+            if (SYMBOL_DENYLIST.has(symbolName.toLowerCase())) continue;
+            const candidates = symbolIndex.get(symbolName);
+            if (candidates) {
+              const resolved = disambiguateSymbol(candidates, relativePath);
+              if (resolved) {
+                addEdge(
+                  source.id,
+                  resolved.id,
+                  [ReactorLinkType.MENTIONS],
+                  symbolName,
+                  `${relativePath} mentions ${symbolName}`,
+                  { confidence: 0.9, match: "prose-pascal", line: lineNo }
+                );
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
   // ---- file node patch ----------------------------------------------------
 
   const codeLanguages = Array.from(
@@ -712,6 +1040,25 @@ const collectFrontmatterRefs = (outline: DocumentOutline): string[] => {
   };
   FRONTMATTER_REF_FIELDS.forEach((field) => push(fm[field]));
   return out;
+};
+
+/**
+ * Standalone second-pass helper to extract and return MENTIONS edges for a document
+ * given a project symbol index.
+ */
+export const linkDocSymbolMentions = (
+  fileNode: ReactorNode,
+  outline: DocumentOutline,
+  symbolIndex: SymbolIndex | Map<string, number[]> | any[],
+  sourceContent?: string
+): ReactorNodeLink[] => {
+  const graph = emitDocumentGraph(
+    fileNode,
+    outline,
+    { symbolIndex, linkDocMentions: true },
+    sourceContent
+  );
+  return graph.edges.filter((e) => (e.types || []).includes(ReactorLinkType.MENTIONS));
 };
 
 export default emitDocumentGraph;

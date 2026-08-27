@@ -153,12 +153,12 @@ context.info(`process ${name}: analysed=${n} skipped=${s} folders=${f} edges=${e
 
 ## 6. Acceptance criteria
 
-- [ ] Unchanged file does not call `analyseFileFull`
-- [ ] Unchanged symbols survive GC (touched runId)
-- [ ] Changed file re-analyses and replaces symbol set (old symbols GC’d)
-- [ ] forceFull re-analyses all
-- [ ] Log includes skip counts
-- [ ] GraphBuilding still green; new incremental tests green
+- [x] Unchanged file does not call `analyseFileFull`
+- [x] Unchanged symbols survive GC (touched runId)
+- [x] Changed file re-analyses and replaces symbol set (old symbols GC’d)
+- [x] forceFull re-analyses all
+- [x] Log includes skip counts
+- [x] GraphBuilding still green; new incremental tests green
 
 ---
 
@@ -174,3 +174,12 @@ context.info(`process ${name}: analysed=${n} skipped=${s} folders=${f} edges=${e
 ---
 
 ## 8. Agent Notes
+
+- **Content Hashing:** Added `fileContentHash` SHA-256 helper and stamped `contentHash` onto file nodes during batch `process()`.
+- **Incremental Skip Logic:** Added `loadPreviousNodes`, `loadDescendantNodeIds`, `loadEdgeIdsTouching`, `touchNodes`, and `touchEdges` to `BaseProjectProcessor`.
+- **GC Preservation:** Skipped unchanged files have their node and all descendant symbol/section nodes and touching edge ids touched with the new `runId` and `indexedAt` timestamp so project-scoped GC does not discard them.
+- **Search Rebuild Skip:** Unchanged files skip search indexing to avoid redundant payload writes.
+- **`forceFull` Flag:** Added `forceFull?: boolean` option to `process()` (and `ProcessOptions` in `service.types.ts`) allowing caller to force a complete re-analysis.
+- **Metrics Log:** Included skip and analysed counts in `context.info` logging (`process ${name}: analysed=${n} skipped=${s} folders=${f} edges=${e} (runId=${runId})`).
+- **Resilience:** Added `isMongoAvailable` guard so in-memory unit tests run fast without hanging on disconnected Mongoose buffers.
+- **Tests:** Added `services/graph/IncrementalProcess.test.ts` (5/5 tests passing) verifying initial analysis, full skipping on second run, single-file incremental re-analysis on modification, forceFull override, and SHA-256 hashing. All 100 graph suite tests green.

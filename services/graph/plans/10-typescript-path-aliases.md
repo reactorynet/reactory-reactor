@@ -82,12 +82,21 @@ Also: unmatched `@scope/pkg` still external.
 
 ## 5. Acceptance criteria
 
-- [ ] Path alias in-repo resolves to file id via GraphIdentity
-- [ ] Relative imports unchanged
-- [ ] Missing alias target does not throw; no dangling edge (I4)
-- [ ] Config cached per repo (spy read count ≤ 1 per process batch ideally)
-- [ ] Tests green
+- [x] Path alias in-repo resolves to file id via GraphIdentity
+- [x] Relative imports unchanged
+- [x] Missing alias target does not throw; no dangling edge (I4)
+- [x] Config cached per repo (spy read count ≤ 1 per process batch ideally)
+- [x] Tests green
 
 ---
 
 ## 6. Agent Notes
+
+- **Implementation**:
+  - Implemented `services/graph/analyzers/tsconfigPaths.ts` supporting `tsconfig.json` / `tsconfig.build.json` discovery walking up directories up to `repoPath`, memoizing directory-to-config lookups and parsed `TsconfigInfo` in Maps.
+  - Implemented wildcard and exact path pattern matching (longest prefix match descending) against `compilerOptions.paths` and `compilerOptions.baseUrl`, resolving against candidate extensions (`.ts`, `.tsx`, `.d.ts`, `.js`, `.jsx`, `.mjs`, `.cjs`) and directory `index` files.
+  - Integrated `resolveTsconfigImport` into Pass 1 of `TypeScriptAnalyzer.ts` before external fallback, binding local names with `relativeTarget` to seamlessly resolve cross-file CALL and INHERITS/IMPLEMENTS edges in later passes.
+  - Unmatched imports or missing alias targets gracefully fall back to external dependency nodes without throwing or creating dangling edges (invariant I4 preserved).
+- **Tests**:
+  - Added comprehensive test suite in `TypeScriptAnalyzer.test.ts` covering wildcard aliases, exact aliases, nested wildcards, baseUrl-relative imports, cross-file inherits/calls via aliases, external package fallbacks, missing alias targets, caching spy checks (read count ≤ 1), and boundary checking.
+  - All 15 graph suites (177 tests) and 9 processor suites (37 tests) passing green.

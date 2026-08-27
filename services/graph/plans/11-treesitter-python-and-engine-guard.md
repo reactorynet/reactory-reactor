@@ -80,14 +80,25 @@ If grammar missing at runtime, analyzer must still pass heuristic tests (null la
 
 ## 5. Acceptance criteria
 
-- [ ] Python uses engine first, heuristic fallback second
-- [ ] No bare tree-sitter requires outside engine (test enforced)
-- [ ] Multi-grammar load test includes python
-- [ ] Optional dependency does not hard-fail module boot
-- [ ] README updated
+- [x] Python uses engine first, heuristic fallback second
+- [x] No bare tree-sitter requires outside engine (test enforced)
+- [x] Multi-grammar load test includes python
+- [x] Optional dependency does not hard-fail module boot
+- [x] README updated
 
 ---
 
 ## 6. Agent Notes
 
-- Grammar package version pinned:
+- **Grammar package version pinned**: `tree-sitter-python@0.23.6`.
+- **TreeSitterEngine**:
+  - Added `"python"` to `TreeSitterLanguageId` union and mapped grammar module `tree-sitter-python`.
+  - Updated multi-grammar Jest test in `TreeSitterEngine.test.ts` to test Java, C#, Kotlin, and Python AST parsing in a single process without prototype clobbering.
+- **PythonAnalyzer**:
+  - Implemented `analysePythonWithTreeSitter` utilizing tree-sitter AST nodes (`class_definition`, `function_definition`, `import_statement`, `import_from_statement`, `call`, `attribute`).
+  - Added resilient fallback to `analysePythonHeuristic` (the line/indentation scanner) when `tree-sitter-python` is not available or encounters errors.
+- **Invariant I7 Guard**:
+  - Enforced `import type Parser from "tree-sitter"` across all analyzers (`JavaAnalyzer.ts`, `CSharpAnalyzer.ts`, `KotlinAnalyzer.ts`, `PythonAnalyzer.ts`).
+  - Added automated architectural guard test in `PythonAnalyzer.test.ts` checking all analyzer files outside `treesitter/` for forbidden bare `require('tree-sitter')` or runtime value imports from `tree-sitter`.
+- **Test Coverage**:
+  - All 15 graph suites (180 tests) and 9 processor suites (37 tests) passing green.

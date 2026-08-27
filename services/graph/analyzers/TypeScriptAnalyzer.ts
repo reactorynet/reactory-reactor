@@ -16,6 +16,7 @@ import {
   pathLogicalKey,
   symbolLogicalKey,
 } from "../GraphIdentity";
+import { resolveTsconfigImport } from "./tsconfigPaths";
 
 export interface FileAnalysis {
   /** Symbol nodes discovered in the file (children of the file node). */
@@ -197,6 +198,26 @@ export const analyseTypeScriptFile = (
       });
       namedLocals.forEach((n) => importBindings.set(n, { relativeTarget: targetRel }));
     } else {
+      const resolvedAlias = resolveTsconfigImport(filePath, specifier, repoPath);
+      if (resolvedAlias) {
+        const targetRel = normalizeRelative(path.relative(repoPath, resolvedAlias));
+        if (!targetRel.startsWith("..")) {
+          const targetId = nodeId(pathLogicalKey(fqn, targetRel));
+          pushEdge({
+            id: linkId(fileNode.id, targetId, ReactorLinkType.DEPENDENCY),
+            source: fileNode.id,
+            target: targetId,
+            types: [ReactorLinkType.DEPENDENCY, ReactorLinkType.DIRECT],
+            title: specifier,
+            description: `imports ${names.join(", ") || "*"} from ${specifier}`,
+            projectId: data.projectId,
+            data: { specifier, importedNames: names, resolved: targetRel },
+          });
+          namedLocals.forEach((n) => importBindings.set(n, { relativeTarget: targetRel }));
+          return;
+        }
+      }
+
       const { pkg, id } = externalIdFor(specifier);
       pushEdge({
         id: linkId(fileNode.id, id, ReactorLinkType.DEPENDENCY),

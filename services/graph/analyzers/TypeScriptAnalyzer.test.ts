@@ -1,5 +1,7 @@
 import path from "path";
+import fs from "fs";
 import { analyseTypeScriptFile } from "./TypeScriptAnalyzer";
+import { clearTsconfigCache, findTsconfigPath, loadTsconfig, resolveTsconfigImport } from "./tsconfigPaths";
 import {
   makeContext,
   writeProject,
@@ -139,5 +141,186 @@ export function main() { const h = new Helper(); return helper(); }
     const a = analyseTypeScriptFile(fileNode(project, "src/util.ts"), ctx);
     const ids = a.edges.map((e) => e.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  describe("tsconfig path aliases and baseUrl resolution (Session 10)", () => {
+    let tsconfigDir: string;
+    let tsconfigProject: TestProject;
+    let tsconfigFqn: string;
+
+    beforeAll(() => {
+      clearTsconfigCache();
+      ({ dir: tsconfigDir, project: tsconfigProject } = writeProject({
+        "tsconfig.json": JSON.stringify({
+          compilerOptions: {
+            baseUrl: ".",
+            paths: {
+              "@lib/*": ["src/lib/*"],
+              "@common": ["src/common/index.ts"],
+              "@deep/nested/*": ["src/deep/*/impl"],
+            },
+          },
+        }),
+        "src/lib/util.ts": `export const x = 1;
+export function utilFn() { return x; }
+`,
+        "src/common/index.ts": `export class CommonBase {
+  doCommon() { return 'common'; }
+}
+`,
+        "src/deep/sub/impl.ts": `export function deepFn() { return 42; }
+`,
+        "src/components/widget.ts": `export function renderWidget() { return 'widget'; }
+`,
+        "src/main.ts": `import { x, utilFn } from '@lib/util';
+import { CommonBase } from '@common';
+import { deepFn } from '@deep/nested/sub';
+import { renderWidget } from 'src/components/widget';
+import _ from 'lodash';
+import { externalVal } from '@scope/pkg';
+import { missingVal } from '@lib/missing';
+
+export class App extends CommonBase {
+  run() {
+    this.doCommon();
+    return utilFn() + deepFn();
+  }
+}
+`,
+      }));
+      tsconfigFqn = projectFqn(tsconfigProject);
+    });
+
+    afterAll(() => {
+      cleanup(tsconfigDir);
+      clearTsconfigCache();
+    });
+
+    const tsSym = (rel: string, symbolPath: string) =>
+      nodeId(symbolLogicalKey(tsconfigFqn, rel, symbolPath));
+
+    it("resolves wildcard path alias (@lib/*) to in-repo file node id", () => {
+      const a = analyseTypeScriptFile(fileNode(tsconfigProject, "src/main.ts"), ctx);
+      const utilFileId = nodeId(pathLogicalKey(tsconfigFqn, "src/lib/util.ts"));
+
+      const utilEdge = a.edges.find((e) => e.target === utilFileId);
+      expect(utilEdge).toBeDefined();
+      expect(utilEdge!.types).toContain("DEPENDENCY" as any);
+      expect(utilEdge!.data.specifier).toBe("@lib/util");
+      expect(utilEdge!.data.resolved).toBe("src/lib/util.ts");
+
+      // Verify it was NOT registered as an external npm package
+      const externalLib = a.externals.find((e) => e.name === "@lib");
+      expect(externalLib).toBeUndefined();
+    });
+
+    it("resolves exact path alias (@common) to in-repo file node id", () => {
+      const a = analyseTypeScriptFile(fileNode(tsconfigProject, "src/main.ts"), ctx);
+      const commonFileId = nodeId(pathLogicalKey(tsconfigFqn, "src/common/index.ts"));
+
+      const commonEdge = a.edges.find((e) => e.target === commonFileId);
+      expect(commonEdge).toBeDefined();
+      expect(commonEdge!.data.specifier).toBe("@common");
+      expect(commonEdge!.data.resolved).toBe("src/common/index.ts");
+    });
+
+    it("resolves nested wildcard path alias (@deep/nested/*)", () => {
+      const a = analyseTypeScriptFile(fileNode(tsconfigProject, "src/main.ts"), ctx);
+      const deepFileId = nodeId(pathLogicalKey(tsconfigFqn, "src/deep/sub/impl.ts"));
+
+      const deepEdge = a.edges.find((e) => e.target === deepFileId);
+      expect(deepEdge).toBeDefined();
+      expect(deepEdge!.data.resolved).toBe("src/deep/sub/impl.ts");
+    });
+
+    it("resolves baseUrl + relative specifier (src/components/widget)", () => {
+      const a = analyseTypeScriptFile(fileNode(tsconfigProject, "src/main.ts"), ctx);
+      const widgetFileId = nodeId(pathLogicalKey(tsconfigFqn, "src/components/widget.ts"));
+
+      const widgetEdge = a.edges.find((e) => e.target === widgetFileId);
+      expect(widgetEdge).toBeDefined();
+      expect(widgetEdge!.data.resolved).toBe("src/components/widget.ts");
+    });
+
+    it("resolves cross-file INHERITS and CALL edges via path aliases", () => {
+      const a = analyseTypeScriptFile(fileNode(tsconfigProject, "src/main.ts"), ctx);
+      const appClassId = tsSym("src/main.ts", "App");
+      const appRunId = tsSym("src/main.ts", "App.run");
+
+      // App extends CommonBase (from @common -> src/common/index.ts)
+      const inherits = a.edges.find(
+        (e) => e.source === appClassId && e.types?.includes("INHERITS" as any)
+      );
+      expect(inherits).toBeDefined();
+      expect(inherits!.target).toBe(tsSym("src/common/index.ts", "CommonBase"));
+
+      // App.run() calls utilFn() (from @lib/util -> src/lib/util.ts)
+      const utilCall = a.edges.find(
+        (e) => e.source === appRunId && e.target === tsSym("src/lib/util.ts", "utilFn")
+      );
+      expect(utilCall).toBeDefined();
+
+      // App.run() calls deepFn() (from @deep/nested/sub -> src/deep/sub/impl.ts)
+      const deepCall = a.edges.find(
+        (e) => e.source === appRunId && e.target === tsSym("src/deep/sub/impl.ts", "deepFn")
+      );
+      expect(deepCall).toBeDefined();
+    });
+
+    it("leaves unmatched bare package imports as external dependency nodes", () => {
+      const a = analyseTypeScriptFile(fileNode(tsconfigProject, "src/main.ts"), ctx);
+
+      // lodash
+      const lodashExternal = a.externals.find((e) => e.name === "lodash");
+      expect(lodashExternal).toBeDefined();
+      expect(lodashExternal!.id).toBe(nodeId("npm:lodash"));
+
+      // @scope/pkg
+      const scopeExternal = a.externals.find((e) => e.name === "@scope/pkg");
+      expect(scopeExternal).toBeDefined();
+      expect(scopeExternal!.id).toBe(nodeId("npm:@scope/pkg"));
+    });
+
+    it("missing alias target falls back without throwing and preserves non-dangling edge (I4)", () => {
+      expect(() => {
+        const a = analyseTypeScriptFile(fileNode(tsconfigProject, "src/main.ts"), ctx);
+        const missingExt = a.externals.find((e) => e.name === "@lib/missing");
+        expect(missingExt).toBeDefined();
+        const missingEdge = a.edges.find((e) => e.target === missingExt!.id);
+        expect(missingEdge).toBeDefined();
+      }).not.toThrow();
+    });
+
+    it("caches tsconfig parsing per project repo (read count <= 1 per batch)", () => {
+      clearTsconfigCache();
+      const readSpy = jest.spyOn(fs, "readFileSync");
+      const initialCallCount = readSpy.mock.calls.filter((c) =>
+        String(c[0]).includes("tsconfig.json")
+      ).length;
+
+      // Analyze multiple files in the same project
+      analyseTypeScriptFile(fileNode(tsconfigProject, "src/main.ts"), ctx);
+      analyseTypeScriptFile(fileNode(tsconfigProject, "src/lib/util.ts"), ctx);
+      analyseTypeScriptFile(fileNode(tsconfigProject, "src/common/index.ts"), ctx);
+
+      const tsconfigReads = readSpy.mock.calls.filter((c) =>
+        String(c[0]).includes("tsconfig.json")
+      ).length - initialCallCount;
+
+      expect(tsconfigReads).toBeLessThanOrEqual(1);
+      readSpy.mockRestore();
+    });
+
+    it("finds tsconfig in parent folders up to repo root and stops at repo boundary", () => {
+      const configPath = findTsconfigPath(
+        path.join(tsconfigProject.repoPath, "src/lib/util.ts"),
+        tsconfigProject.repoPath
+      );
+      expect(configPath).toBe(path.join(tsconfigProject.repoPath, "tsconfig.json"));
+
+      // Outside repo should return null
+      const nonRepo = findTsconfigPath("/tmp/nonexistent/file.ts", "/tmp/nonexistent");
+      expect(nonRepo).toBeNull();
+    });
   });
 });

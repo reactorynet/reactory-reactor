@@ -1,5 +1,29 @@
 # Query types for system graph
 
+enum ReactorCatalogJobState {
+  PENDING
+  RUNNING
+  COMPLETE
+  FAILED
+}
+
+type ReactorCatalogJobStats {
+  filesProcessed: Int
+  nodesCreated: Int
+  linksCreated: Int
+  durationMs: Int
+}
+
+type ReactorCatalogJobStatus {
+  jobId: String!
+  status: ReactorCatalogJobState!
+  message: String
+  error: String
+  stats: ReactorCatalogJobStats
+  startedAt: Date
+  completedAt: Date
+}
+
 extend type Query {
   ReactorCatalogNodes(paging: PagingRequest): ReactorPagedNodes
   ReactorNodeCategories(filter: ReactorNodeCategoryFilter): [ReactorNodeCategory!]
@@ -22,4 +46,5 @@ extend type Query {
   ReactorProject(id: String!): ReactorProject
   ReactorProjectByName(name: String!): ReactorProject
   ReactorProjectMetrics(projectMetricsQuery: ReactorProjectMetricsQueryInput!): [ReactorProjectMetrics]      
+  ReactorCatalogJobStatus(jobId: String!): ReactorCatalogJobStatus
 }
