@@ -24,6 +24,7 @@ import { PagingRequest } from "@reactory/server-core/database/types";
 import Hash from "@reactory/server-core/utils/hash";
 import {
   appendAncestry,
+  canonicalProjectId,
   linkId,
   nodeId,
   normalizeRelative,
@@ -633,10 +634,7 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       const full = path.join(repoPath, rel);
       const folder = this.makeFolderNode(parent, part, full, rel);
       folderByRel.set(rel, folder);
-      // de-dupe by id if somehow re-ensured
-      if (!nodes.some((n) => n.id === folder.id)) {
-        nodes.push(folder);
-      }
+      nodes.push(folder);
       parent = folder;
     }
     return parent;
@@ -1052,7 +1050,7 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
         nameSpace: project.nameSpace,
         version: project.version,
         source: content.slice(0, MAX_SEARCHABLE_CONTENT),
-        path: fileSpec.path,
+        path: relativePath,
         relativePath,
         metrics: [{ unit: "lines", value: lines.length, name: "Line Count" }],
         type: { id: fileSpec.type, name: fileSpec.type },
@@ -1074,7 +1072,7 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       partnerId?: any;
       organizationId?: any;
     }
-  ): Promise<void> {
+  ): Promise<{ ok: boolean; nodeOps: number; edgeOps: number; error?: string }> {
     // Stamp project/run metadata (single choke point) before building ops.
     // This ensures every node/edge written by process() carries projectId/runId/indexedAt.
     const stamp = (entity: any) => {
@@ -1119,11 +1117,13 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       if (edgeOps.length && isMongoAvailable(ReactorNodeLinkModel.bulkWrite)) {
         await ReactorNodeLinkModel.bulkWrite(edgeOps, { ordered: false });
       }
+      return { ok: true, nodeOps: nodeOps.length, edgeOps: edgeOps.length };
     } catch (err) {
       const e = err as Error;
       this.context.error(
         `persistGraph failed (nodes=${nodes.length}->${nodeOps.length} ops, edges=${edges.length}->${edgeOps.length} ops): ${e.message}\n${e.stack || ""}`
       );
+      return { ok: false, nodeOps: nodeOps.length, edgeOps: edgeOps.length, error: e.message };
     }
   }
 
@@ -1156,10 +1156,11 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
   protected async loadPreviousNodes(
     project: Partial<IReactorProject>
   ): Promise<Map<number, Partial<ReactorNode>>> {
-    if (!project.id || !isMongoAvailable(ReactorNodeModel.find)) return new Map();
+    const pid = canonicalProjectId(project);
+    if (!pid || !isMongoAvailable(ReactorNodeModel.find)) return new Map();
     try {
       const previous = (await ReactorNodeModel.find({
-        projectId: String(project.id),
+        projectId: pid,
         type: { $in: [ReactorNodeType.FILE, ReactorNodeType.DOCUMENT] },
       })
         .select({ id: 1, contentHash: 1, parentId: 1, data: 1, type: 1 })
@@ -1172,31 +1173,38 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
   }
 
   /**
-   * Loads descendant symbol / section node ids for an unchanged file.
+   * Loads descendant symbol / section node ids for an unchanged file using BFS.
    */
   protected async loadDescendantNodeIds(
-    parentId: number,
+    rootParentId: number,
     projectId: string
   ): Promise<number[]> {
     if (!isMongoAvailable(ReactorNodeModel.find)) return [];
     try {
-      const children = (await ReactorNodeModel.find({
-        parentId,
-        projectId: String(projectId),
-      })
-        .select({ id: 1 })
-        .lean()) as unknown as { id: number }[];
-      const ids = children.map((c) => c.id);
-      if (ids.length > 0) {
-        const subChildren = (await ReactorNodeModel.find({
-          parentId: { $in: ids },
+      const all: number[] = [];
+      let frontier = [rootParentId];
+      const visited = new Set<number>([rootParentId]);
+      const MAX_NODES = 50_000;
+      const MAX_DEPTH = 64;
+
+      for (let depth = 0; depth < MAX_DEPTH && frontier.length > 0 && all.length < MAX_NODES; depth++) {
+        const children = (await ReactorNodeModel.find({
+          parentId: { $in: frontier },
           projectId: String(projectId),
         })
           .select({ id: 1 })
           .lean()) as unknown as { id: number }[];
-        subChildren.forEach((sc) => ids.push(sc.id));
+
+        const next: number[] = [];
+        for (const c of children) {
+          if (visited.has(c.id)) continue;
+          visited.add(c.id);
+          all.push(c.id);
+          next.push(c.id);
+        }
+        frontier = next;
       }
-      return ids;
+      return all;
     } catch (err) {
       this.context.warn(`loadDescendantNodeIds failed: ${(err as Error).message}`);
       return [];
@@ -1281,6 +1289,10 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     let errorCount = 0;
     const byLanguage: Record<string, number> = {};
     const next = { ...project };
+    const projectId = canonicalProjectId(next);
+    if (projectId) {
+      next.id = projectId as any;
+    }
     // Canonicalize the repo path so it agrees with the realpath'd file paths
     // the walker produces — otherwise path.relative degrades to ../.. walks
     // and analyzers drop resolved in-repo edges (e.g. /var vs /private/var
@@ -1439,7 +1451,7 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
         nameSpace: next.nameSpace,
         version: next.version,
         source: symlinkNode.description,
-        path: record.fullPath,
+        path: (symlinkNode.data as TreeNodeData).relativePath,
         relativePath: (symlinkNode.data as TreeNodeData).relativePath,
         type: { id: "symlink", name: "symlink" },
       } as Reactory.Models.ISearchable);
@@ -1506,23 +1518,31 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       if (!e.organizationId && organizationId) e.organizationId = organizationId;
     }
 
-    await this.persistGraph(nodes, edges, meta);
+    const persistResult = (await this.persistGraph(nodes, edges, meta)) || {
+      ok: true,
+      nodeOps: nodes.length,
+      edgeOps: edges.length,
+    };
+    if (!persistResult.ok) {
+      errorCount++;
+    }
     await this.indexSearchables(next, searchables);
 
-    // Cache bust: clear REACTOR_NODE_* for all written node ids
-    for (const n of nodes) {
-      if (n && n.id !== undefined && n.id !== null) {
-        try {
-          if (typeof (this.context as any).clearValue === "function") {
-            await (this.context as any).clearValue(`REACTOR_NODE_${n.id}`);
-          } else if (typeof (this.context as any).removeValue === "function") {
-            await (this.context as any).removeValue(`REACTOR_NODE_${n.id}`);
-          } else if (typeof this.context.setValue === "function") {
-            await this.context.setValue(`REACTOR_NODE_${n.id}`, null);
-          }
-        } catch {
-          // cache clear best-effort
+    // Cache bust: clear REACTOR_NODE_* for all written and skipped/seen node ids
+    const bustIds = new Set<number>();
+    nodes.forEach((n) => n && n.id !== undefined && n.id !== null && bustIds.add(n.id));
+    seenNodeIds.forEach((id) => bustIds.add(id));
+    for (const id of bustIds) {
+      try {
+        if (typeof (this.context as any).clearValue === "function") {
+          await (this.context as any).clearValue(`REACTOR_NODE_${id}`);
+        } else if (typeof (this.context as any).removeValue === "function") {
+          await (this.context as any).removeValue(`REACTOR_NODE_${id}`);
+        } else if (typeof this.context.setValue === "function") {
+          await this.context.setValue(`REACTOR_NODE_${id}`, null);
         }
+      } catch {
+        // cache clear best-effort
       }
     }
 
@@ -1537,8 +1557,14 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     let nodesGcDeleted = 0;
     let edgesGcDeleted = 0;
     // Project-scoped GC: remove nodes/edges for this project with a different runId.
-    // Safeguards: only when projectId present; only if not skipGc; never delete 'manual' runId.
-    if (!options?.skipGc && meta.projectId && isMongoAvailable(ReactorNodeModel.deleteMany)) {
+    // Safeguards: only when projectId present; only if persistGraph succeeded; only if not skipGc; never delete 'manual' runId.
+    const canGc =
+      !options?.skipGc &&
+      !!meta.projectId &&
+      persistResult.ok &&
+      isMongoAvailable(ReactorNodeModel.deleteMany);
+
+    if (canGc) {
       try {
         const pid = String(meta.projectId);
         const [nodeDelRes, edgeDelRes] = await Promise.all([
@@ -1551,6 +1577,10 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
         this.context.warn(`gcStaleGraph failed: ${(gcErr as Error).message}`);
         errorCount++;
       }
+    } else if (!options?.skipGc && meta.projectId && !persistResult.ok) {
+      this.context.error(`GC skipped because persistGraph failed: ${persistResult.error}`);
+    } else if (!options?.skipGc && !meta.projectId) {
+      this.context.warn(`GC skipped because projectId is missing for project ${next.name || next.fqn}`);
     }
 
     const durationMs = Date.now() - startTime;

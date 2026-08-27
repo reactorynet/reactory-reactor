@@ -35,6 +35,7 @@ import {
   FileProjectProcessor,
 } from "./SystemGraphProjectProviders";
 import { nodeId, projectLogicalKey } from "./graph/GraphIdentity";
+import { runProcessorsForProject } from "./graph/runProcessorsForProject";
 import logger from "@reactory/server-core/logging";
 
 @service({
@@ -906,43 +907,43 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
    * @param project
    */
   async processProject(
-    project: Partial<IReactorProject>
+    project: Partial<IReactorProject>,
+    opts?: any
   ): Promise<Partial<IReactorProject>> {
     if (!project || !project.repoPath) {
       throw new Error("Project must have a repoPath to be processed");
     }
 
-    if (!project.processors || project.processors.length === 0) {
-      // If no processors are defined, detect them
-      project.processors = await this.detectProjectProcessors(project);
-    }
-
-    if (!project.processors || project.processors.length === 0) {
-      return project; // No processors to run
-    }
-
-    // Iterate through each processor and run its process method
-    for (const processorConfig of project.processors) {
-      const processor = this.processors[processorConfig.id];
-      if (processor && typeof processor.process === "function") {
-        try {
-          const nextProject = await processor.process(project);
-          if (nextProject) {
-            project = { ...project, ...nextProject };
+    const { project: processedProject } = await runProcessorsForProject({
+      project,
+      getProcessor: (idOrFqn) => {
+        if (this.processors[idOrFqn]) return this.processors[idOrFqn];
+        for (const [key, proc] of Object.entries(this.processors)) {
+          if (
+            `${proc.nameSpace}.${proc.name}@${proc.version}` === idOrFqn ||
+            proc.name.toLowerCase().startsWith(idOrFqn.toLowerCase()) ||
+            idOrFqn.toLowerCase().includes(key.toLowerCase())
+          ) {
+            return proc;
           }
-        } catch (error) {
-          this.context.error(
-            `Error processing project with ${processor.name}: ${error.message}`
-          );
         }
-      } else {
-        this.context.warn(
-          `Processor ${processorConfig.processor} not found or does not implement process method`
-        );
-      }
-    }
+        return this.context.getService<IProjectProcessor>(idOrFqn);
+      },
+      detectFqns: async () => {
+        const detected = await this.detectProjectProcessors(project);
+        return (detected || []).map((d) => d.processor || d.id).filter(Boolean);
+      },
+      opts,
+      onAfterAll: async (pid) => {
+        const graph = this.context.getService<any>("reactor.SystemGraphManager@1.0.0");
+        if (graph?.linkExternalProjects) {
+          await graph.linkExternalProjects(pid);
+        }
+      },
+      log: this.context,
+    });
 
-    return project;
+    return processedProject;
   }
 
   async determineProjectType(
