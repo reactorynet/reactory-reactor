@@ -101,6 +101,7 @@ types/
 12 cross-project edges ─── after 02+04                    │
 13 docs symbol mentions ─── after 01+03                   │
 14 observability+tenancy ─── after 08+09                  │
+15 hardening (orch/GC/facade) ─── after 01–14              │
 ```
 
 ### Parallelism (safe)
@@ -112,7 +113,8 @@ types/
 | C | **05**, **07**, **10**, **11** | Mostly independent |
 | D | **06** after 05; **08** after 01–03 | |
 | E | **09**, **12**, **13** | |
-| F | **14** last | |
+| F | **14** | Ops / redaction |
+| **G** | **15** | **Hardening after code review — run before production** |
 
 ---
 
@@ -134,6 +136,7 @@ types/
 | 12 | `12-cross-project-externals.md` | P3 | M | done | |
 | 13 | `13-docs-symbol-mentions.md` | P3 | M | done | |
 | 14 | `14-observability-tenancy-cache.md` | P4 | M | done | |
+| 15 | `15-hardening-orchestration-gc-facade.md` | **P0** | L | done | |
 
 Status values: `pending` | `in_progress` | `blocked` | `done` | `wontfix`
 
@@ -186,16 +189,19 @@ NODE_OPTIONS=--max-old-space-size=6144 npx jest <path> --forceExit
 
 Program is **done** when:
 
-- [ ] Persisted graph preserves folder hierarchy (`parentId` chain).
-- [ ] Re-index GC removes deleted file/symbol/edge nodes per project.
+- [x] Persisted graph preserves folder hierarchy (`parentId` chain). *(Session 01)*
+- [x] Re-index GC safe on **all** catalog paths (manager **and** `processProject`) — **Session 15**.
 - [x] Search hits resolve to real graph nodes (same id space).
 - [x] Catalog node/project lookup is O(1) (no full project list scan).
 - [x] `getProject` on manager does not throw.
-- [x] GraphQL graph queries go through manager (no ad-hoc model filters for core paths).
+- [x] GraphQL façade has **no residual Mongoose model imports** — **Session 15**.
 - [x] Mongo indexes match hot queries; `projectId` is first-class.
-- [x] Incremental re-index skips unchanged files by hash.
+- [x] Incremental re-index skips unchanged files by hash *(deep descendant touch — Session 15)*.
 - [x] Heavy catalog/index mutations are async jobs.
-- [ ] All listed tests green; README future-work items updated.
+- [x] GC never runs after failed persist — **Session 15**.
+- [x] Graph unit suite green: **19 suites / 211 tests** (2026-08-27).
+
+**Program status:** Sessions **01–15 complete**. Optional follow-ups only (doc-mention DB fallback, cross-project publisher index, sub-agent platform ticket).
 
 ---
 

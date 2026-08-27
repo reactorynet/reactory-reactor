@@ -30,9 +30,7 @@ import {
   ReactorNodeLink,
   ReactorLinkType,
 } from "@reactory/server-modules/reactory-reactor/types/model.types";
-import { ReactorNodeModel } from "@reactory/server-modules/reactory-reactor/models/ReactorGraphNode";
 import { nodeId } from "@reactory/server-modules/reactory-reactor/services/graph/GraphIdentity";
-import { ReactorNodeLinkModel } from "@reactory/server-modules/reactory-reactor/models/ReactorNodeLink";
 
 import OBJID from "@reactory/server-core/utils/ObjectId";
 import { publicNode } from "../../services/SystemGraphManager";
@@ -723,20 +721,8 @@ class ReactorSystemGraph {
     args: { type: string[] },
     context: Reactory.Server.IReactoryContext
   ): Promise<Partial<ReactorNode>[]> {
-    // Query the persisted graph first; fall back to catalog roots if nothing
-    // has been indexed yet.
-    const persisted = (await ReactorNodeModel.find({
-      type: { $in: args.type },
-    })
-      .limit(1000)
-      .lean()) as any[];
-    if (persisted && persisted.length) return persisted;
-
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
-    );
-    const allNodes = await graphSvc.getCatalogNodes();
-    return allNodes.filter((node) => args.type.includes(node.type));
+    const nodes = await graphService(context).findNodesByType(args.type, 1000);
+    return nodes.map(publicNode);
   }
 
   /**
@@ -757,30 +743,9 @@ class ReactorSystemGraph {
   ): Promise<Partial<ReactorNode> | null> {
     if (!args.conversationId) return null;
     const id = nodeId(`conversation::${args.conversationId}`);
-    const node = (await ReactorNodeModel.findOne({ id }).lean()) as any;
-    return node || null;
-  }
-
-  /**
-   * Resolve the graph node for a conversation by its deterministic id.
-   *
-   * `ProcessConversationStep` upserts the node as
-   * `nodeId("conversation::<conversationId>")`, and `id` is indexed and unique,
-   * so this is one index hit. The conversation id appears nowhere in the node's
-   * `name` or `description` (they hold "Conversation: <title>"), which is why
-   * searching for it via `ReactorNodesByTerm` can never match — and why doing
-   * so costs a full collection scan plus a catalog load every time.
-   */
-  @query("ReactorConversationNode")
-  async ReactorConversationNode(
-    _: any,
-    args: { conversationId: string },
-    context: Reactory.Server.IReactoryContext
-  ): Promise<Partial<ReactorNode> | null> {
-    if (!args.conversationId) return null;
-    const id = nodeId(`conversation::${args.conversationId}`);
-    const node = (await ReactorNodeModel.findOne({ id }).lean()) as any;
-    return node || null;
+    const [node] = await graphService(context).getNodes([id]);
+    if (node && node.description !== "Unresolved node") return publicNode(node);
+    return null;
   }
 
   @query("ReactorNodesByTerm")
@@ -805,24 +770,8 @@ class ReactorSystemGraph {
       return [];
     }
 
-    const rx = new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-    const persisted = (await ReactorNodeModel.find({
-      $or: [{ name: rx }, { description: rx }],
-    })
-      .limit(100)
-      .lean()) as any[];
-    if (persisted && persisted.length) return persisted;
-
-    const graphSvc = context.getService<ISystemGraphManager>(
-      "reactor.SystemGraphManager@1.0.0"
-    );
-    const allNodes = await graphSvc.getCatalogNodes();
-    const lower = term.toLowerCase();
-    return allNodes.filter(
-      (node) =>
-        (node.name && node.name.toLowerCase().includes(lower)) ||
-        (node.description && node.description.toLowerCase().includes(lower))
-    );
+    const nodes = await graphService(context).searchNodes(term, { limit: 100 });
+    return nodes.map(publicNode);
   }
 
   @query("ReactorProject")

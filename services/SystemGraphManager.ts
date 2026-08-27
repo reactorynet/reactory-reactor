@@ -1,4 +1,5 @@
 import path from "path";
+import mongoose from "mongoose";
 import Reactory from "@reactorynet/reactory-core";
 import ApiError from "@reactory/server-core/exceptions";
 import { randomUUID } from "crypto";
@@ -10,7 +11,14 @@ import { DefaultReactorNodeCategories, ReactorNodeModel } from '../models/Reacto
 import { ReactorNodeLinkModel } from '../models/ReactorNodeLink';
 import { ReactorProjectModel } from '../models/ReactorProject';
 import { linkId, nodeId, projectLogicalKey } from './graph/GraphIdentity';
+import { runProcessorsForProject } from './graph/runProcessorsForProject';
 import { service } from "@reactory/server-core/application/decorators";
+
+function isMongoAvailable(modelFn?: any): boolean {
+  if (mongoose.connection?.readyState === 1) return true;
+  if (modelFn && (modelFn.mock || modelFn._isMockFunction)) return true;
+  return false;
+}
 
 /**
  * Redacts absolute filesystem paths from public/GraphQL-facing node payloads.
@@ -689,75 +697,22 @@ class SystemGraphManager implements ISystemGraphManager {
 
   async catalogProject(projectSpec: Partial<IReactorProject>): Promise<Reactory.Models.ISearchable[]> {
     const { context } = this;
-    const providerId = projectSpec.providerId;
-
-    if (providerId) {
-      const processorService = context.getService(providerId) as IProjectProcessor;
-      if (!processorService) {
-        throw new ApiError(`Processor ${providerId} not found`, 400);
-      }
-      // Single explicit processor path: still use a runId so GC works when this is the only processor.
-      const runId = randomUUID();
-      return await processorService.process(projectSpec as IReactorProject, { runId, skipGc: false });
-    }
-
-    // Auto-resolve processor(s) from project.processors or projectService
-    const processorFqns: string[] = [];
-    if (projectSpec.processors && projectSpec.processors.length > 0) {
-      for (const p of projectSpec.processors) {
-        if (p.processor) processorFqns.push(p.processor);
-      }
-    }
-
-    if (processorFqns.length === 0) {
-      try {
-        const detected = await this.projectService.getProcessors(projectSpec as IReactorProject);
-        for (const proc of detected || []) {
-          if ((proc as any).processor) processorFqns.push((proc as any).processor);
-        }
-      } catch {
-        // ignore
-      }
-    }
-
-    if (processorFqns.length === 0) {
-      // Nothing claimed the project: fall back to the generic file walker,
-      // which still produces the folder/file tree and outlines any documents
-      // it finds (document analysis lives in BaseProjectProcessor).
-      processorFqns.push("reactor.FileProjectProcessor@1.0.0");
-    }
-
-    // Generate ONE shared runId for this catalog invocation so multi-processor
-    // runs (e.g. NodeJS + Markdown) stamp the same runId and only the final
-    // processor performs GC (Option A from session 02 plan).
-    const sharedRunId = randomUUID();
-    const n = processorFqns.length;
-    let results: Reactory.Models.ISearchable[] = [];
-    for (let i = 0; i < n; i++) {
-      const fqn = processorFqns[i];
-      const isLast = i === n - 1;
-      try {
-        const procService = context.getService(fqn) as IProjectProcessor;
-        if (procService) {
-          const res = await procService.process(projectSpec as IReactorProject, {
-            runId: sharedRunId,
-            skipGc: !isLast, // only last processor runs GC
-          });
-          if (res) results = results.concat(res);
-        }
-      } catch (err) {
-        this.context.error(`catalogProject: error processing with ${fqn}: ${(err as Error).message}`);
-      }
-    }
-    // Link external dependencies across projects after cataloging
-    try {
-      if (projectSpec.id || (projectSpec as any)._id) {
-        await this.linkExternalProjects(String(projectSpec.id || (projectSpec as any)._id));
-      }
-    } catch (linkErr) {
-      this.context.warn(`catalogProject: linkExternalProjects failed: ${(linkErr as Error).message}`);
-    }
-    return results;
+    const result = await runProcessorsForProject({
+      project: projectSpec,
+      getProcessor: (fqn) => context.getService(fqn) as IProjectProcessor,
+      detectFqns: async () => {
+        const detected =
+          (await (this.projectService as any)?.getProcessors?.(projectSpec as IReactorProject)) ||
+          (await this.projectService?.detectProjectProcessors?.(projectSpec as IReactorProject));
+        return (detected || []).map((d: any) => d.processor || d.id).filter(Boolean);
+      },
+      opts: {},
+      onAfterAll: async (pid) => {
+        await this.linkExternalProjects(pid);
+      },
+      log: this.context,
+    });
+    return result.results as Reactory.Models.ISearchable[];
   }
 
   async catalogProjects(projects: Partial<IReactorProject>[]): Promise<Partial<IReactorProject>[]> {
@@ -942,6 +897,9 @@ class SystemGraphManager implements ISystemGraphManager {
   async linkExternalProjects(
     projectId?: string
   ): Promise<{ createdLinks: number; totalExternals: number }> {
+    if (!isMongoAvailable(ReactorNodeModel.find)) {
+      return { createdLinks: 0, totalExternals: 0 };
+    }
     const publisherMap = new Map<string, { projectId: string; graphRootId: number; name: string; fqn: string }>();
 
     let allProjects: Partial<IReactorProject>[] = [];

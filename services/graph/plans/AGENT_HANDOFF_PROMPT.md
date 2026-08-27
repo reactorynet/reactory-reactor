@@ -34,4 +34,13 @@ Wave B: `02`, `03`, `04` (02 after 01 merges)
 Wave C: `05`, `07`, `10`, `11`  
 Wave D: `06`, `08`  
 Wave E: `09`, `12`, `13`  
-Wave F: `14`
+Wave F: `14`  
+Wave G: `15` — **hardening (required before production)** — file: `15-hardening-orchestration-gc-facade.md`
+
+### If 01–14 are already on master
+
+Start with Session **15** only:
+
+```text
+SESSION_FILE=15-hardening-orchestration-gc-facade.md
+```
