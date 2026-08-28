@@ -252,7 +252,25 @@ export class StreamingEndpoints {
           transport
         });
 
-        slog(context, "info", `Transport registered successfully for session: ${sessionId}`, undefined, chatId);
+        const subscribers = transportManager.getChatTransportCount(chatId);
+        slog(context, "info", `Transport registered successfully for session: ${sessionId}`, {
+          // Who connected, and whether this conversation now has more than one
+          // subscriber. `client-instance` is `<tab>:<mount>` from useSSE: the
+          // same tab id with a different suffix means two chat components
+          // mounted in one tab, a different tab id means another tab, and an
+          // absent value means the connection came from somewhere other than
+          // the active-chat stream (e.g. the background session hub).
+          clientInstance: (req.query?.['client-instance'] as string) || 'unset',
+          subscribersForConversation: subscribers,
+        }, chatId);
+
+        if (subscribers > 1) {
+          slog(context, "warn", `Conversation ${chatId} now has ${subscribers} live transports — every event is delivered to each`, {
+            chatSessionId: chatId,
+            subscribersForConversation: subscribers,
+            clientInstance: (req.query?.['client-instance'] as string) || 'unset',
+          }, chatId);
+        }
 
       } catch (error: any) {
         slog(context, "error", `Error registering transport: ${error.message}`, {

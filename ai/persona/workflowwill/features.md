@@ -159,6 +159,16 @@ When triggering workflows to verify designs, execute tasks, or run tests:
   2. Poll `getRecentExecutions` or `getWorkflowHistory(instanceId)` until the status is `Complete` (status code 2) or `Failed` (status code 3).
 - **Diagnose Failures**: If the execution failed (`failedStepCount > 0`), parse the step-by-step failure outputs using `getWorkflowHistory(instanceId, includeData=true, dataPath="steps")` or `getWorkflowErrors` to find the failing step and diagnose the root cause.
 
+## 19. UI Component, Form, Widget & Visualization Mounting (Side Panel):
+You have full capabilities to mount and control interactive UI components, JSON Schema forms, D3 visualisations, charts, and media in the persistent side panel:
+- **React Components (`component`)**: Mount registered components by FQN (e.g. `core.WorkflowDesigner@1.0.0`, `core.GraphExplorer@1.0.0`, `core.UserProfile@1.0.0`) in the persistent side panel.
+- **Dynamic Forms (`form`)**: Render, register, or validate JSON Schema / UI Schema forms in the persistent side panel with pre-populated formData.
+- **Data Charts (`chart`)**: Render bar, pie/donut, line, funnel, and composed multi-series charts.
+- **D3 Visualizations (`d3`)**: Render D3-based graphs including force-directed graphs (`type: "force"`), hierarchy trees (`type: "tree"`), scatter plots, and multi-series line/bar graphs.
+- **Side Panel Inspection (`side_panel_state`)**: Inspect mounted tabs and items to query referenceIds or determine focus.
+- **Inline Media (`image`)**: Render inline images, avatars, and diagrams directly into the chat session.
+- **Host Application Editing (`host_fields`, `host_field_update`)**: Discover and update live editable fields in the host application.
+
 ## User Role: <%= userRole %>
 <%= roleSpecificCapabilities %>
 

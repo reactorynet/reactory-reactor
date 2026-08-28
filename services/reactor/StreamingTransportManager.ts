@@ -423,6 +423,22 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
    * when a transport is re-registered (e.g. on client reconnect).
    */
   async sendEventToSession(chatSessionId: string, event: StreamingEvent): Promise<void> {
+    // Stamp the conversation onto the event if the emit site did not.
+    //
+    // StreamingEventFactory.base defaults `conversationId` to "" when a caller
+    // omits its ids, and plenty of emit sites do. The client uses that field to
+    // decide whether an event belongs to the chat window it is showing, and its
+    // guard can only reject a *mismatch* — an empty value slips through and the
+    // payload lands in whichever chat happens to be active. With several
+    // sessions streaming at once that is a cross-chat content leak.
+    //
+    // This is the one place every event passes through, and `chatSessionId` is
+    // the routing key, so it is the authoritative answer. Assigned in place
+    // rather than cloned: this runs per streamed token.
+    if (!event.conversationId) {
+      event.conversationId = chatSessionId;
+    }
+
     // Snapshot our own subscription BEFORE delivering: delivering can prune the
     // last dead transport for this conversation and unsubscribe us, and Redis
     // will still be counting us as a subscriber when the publish below lands.
@@ -433,19 +449,28 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
     // Deliver to whatever this process holds, then hand the event to every
     // other process so the transports they hold get it too.
     const sentCount = await this.deliverLocal(chatSessionId, event);
-    const remoteCount = await this.publishEvent(chatSessionId, event, wasSubscribed);
 
     if (sentCount > 0) {
+      // Delivered here, so the publish result cannot change any decision below
+      // — and this runs once per streamed token, on the provider's own loop.
+      // Awaiting a Redis round-trip per token would put network latency in
+      // series with generation. ioredis pipelines on one connection, so order
+      // is preserved without the await.
+      void this.publishEvent(chatSessionId, event, wasSubscribed);
+
       if (event.type === 'tool_call' || event.type === 'complete' || event.type === 'error') {
         this.slog("debug", `Sent ${event.type} event to ${sentCount} local transport(s)`, {
           eventType: event.type,
           chatSessionId,
           messageId: event.messageId,
-          remoteSubscribers: remoteCount,
         }, chatSessionId);
       }
       return;
     }
+
+    // Nothing delivered locally, so whether this needs buffering depends on
+    // whether anyone else received it. Worth waiting for — and rare.
+    const remoteCount = await this.publishEvent(chatSessionId, event, wasSubscribed);
 
     // Another process is subscribed for this conversation, so it holds the
     // transport and has delivered the event. Buffering here would duplicate it
@@ -535,6 +560,7 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
       const selfSubscribed = wasSubscribed || this.subscribedChannels.has(channel) ? 1 : 0;
       return Math.max(0, (receivers || 0) - selfSubscribed);
     } catch (err: any) {
+      // Never rejects: one caller deliberately does not await this.
       this.slog("warn", `Failed to publish streaming event for ${chatSessionId}: ${err.message}`, {
         eventType: event.type,
       }, chatSessionId);
@@ -691,6 +717,18 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
         this.lastWriteAt.set(sessionId, Date.now());
       }
     }
+  }
+
+  /**
+   * How many transports this process holds for one conversation.
+   *
+   * More than one is legitimate — a second tab, a second mounted chat
+   * component — and every event is delivered to all of them. Exposed so the
+   * connection log can say when a conversation gains a second subscriber,
+   * which is otherwise invisible until someone reads a token stream twice.
+   */
+  getChatTransportCount(chatSessionId: string): number {
+    return this.chatSessions.get(chatSessionId)?.size ?? 0;
   }
 
   /**
