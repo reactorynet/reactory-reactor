@@ -2334,6 +2334,30 @@ export default class ReactorConversationService
       userId: this.context.user?._id,
     }, chatSessionId, personaId);
 
+    // Guard against concurrent execution if the session is already processing
+    const existingConv = await ReactorConversationModel.findOne({
+      _id: chatSessionId,
+      user: this.context.user,
+    }).select('processing').lean().exec();
+
+    if (existingConv?.processing) {
+      this.sessionLog("warn", "continueToolExecution called but conversation is already processing", {
+        chatSessionId,
+        personaId,
+      }, chatSessionId, personaId);
+      return {
+        __typename: "ReactorChatMessage",
+        id: new ObjectId().toString(),
+        role: "assistant",
+        content: "Tool execution is already in progress.",
+        timestamp: new Date(),
+        tool_calls: [],
+        tool_results: [],
+        tool_errors: [],
+        sessionId: chatSessionId,
+      };
+    }
+
     // Optionally update maxToolIterations before resuming
     if (maxToolIterations != null && maxToolIterations >= 1) {
       await ReactorConversationModel.findOneAndUpdate(
@@ -2352,6 +2376,43 @@ export default class ReactorConversationService
       role: 'user',
       streamingMode: streamingMode || StreamingMode.NONE,
     });
+  }
+
+  /**
+   * Updates the execution status of a specific tool call within an assistant message in conversation history.
+   *
+   * @param chatSessionId - The conversation ID
+   * @param toolCallId - The tool call ID (e.g. call_xyz)
+   * @param status - The new status ('pending' | 'running' | 'success' | 'error')
+   */
+  async updateToolCallStatus(
+    chatSessionId: string,
+    toolCallId: string,
+    status: 'pending' | 'running' | 'success' | 'error'
+  ): Promise<void> {
+    if (!chatSessionId || !toolCallId) return;
+    try {
+      await ReactorConversationModel.findOneAndUpdate(
+        {
+          _id: chatSessionId,
+          "history.tool_calls.id": toolCallId,
+        },
+        {
+          $set: {
+            "history.$[msg].tool_calls.$[tc].status": status,
+            updated: new Date(),
+          },
+        },
+        {
+          arrayFilters: [
+            { "msg.tool_calls.id": toolCallId },
+            { "tc.id": toolCallId },
+          ],
+        }
+      ).exec();
+    } catch (e: any) {
+      this.context.error(`Failed to update tool call status for ${toolCallId} in session ${chatSessionId}: ${e.message}`);
+    }
   }
 
   /**
@@ -2391,6 +2452,12 @@ export default class ReactorConversationService
 
     // Set the interrupt flag — the AUTO loop checks this at each iteration
     ReactorConversationService.interruptedSessions.set(chatSessionId, reason || '');
+
+    // Clear processing flag immediately
+    await ReactorConversationModel.findOneAndUpdate(
+      { _id: chatSessionId },
+      { $set: { processing: false, updated: new Date() } }
+    ).exec();
 
     // Send an SSE event to the client immediately
     if (await this.streamingTransportManager.hasTransport(chatSessionId)) {
@@ -3995,6 +4062,11 @@ export default class ReactorConversationService
         // When the AI returns tool calls and the conversation is in AUTO mode,
         // execute tools directly on the server instead of round-tripping to the client.
         const effectiveConversationId = chatSessionId || conversation._id.toString();
+
+        await ReactorConversationModel.findByIdAndUpdate(
+          effectiveConversationId,
+          { $set: { processing: true, updated: new Date() } }
+        ).exec();
         const responseToolCalls = response?.tool_calls || response?.choices?.[0]?.message?.tool_calls || [];
         if (
           conversation.toolApprovalMode === ToolApprovalMode.AUTO &&
@@ -4167,6 +4239,9 @@ export default class ReactorConversationService
                 }
               }
 
+              // Atomically mark this tool call as 'running' in MongoDB
+              await this.updateToolCallStatus(effectiveConversationId, toolCall.id, 'running');
+
               try {
                 const macroResult = await this.executeMacro({
                   macro: toolName,
@@ -4213,6 +4288,7 @@ export default class ReactorConversationService
                   toolName,
                   conversationId: effectiveConversationId,
                 });
+                await this.updateToolCallStatus(effectiveConversationId, toolCall.id, 'error');
                 // Add an error tool result to history so the AI knows the tool failed
                 await ReactorConversationModel.findOneAndUpdate(
                   { _id: effectiveConversationId },
@@ -4416,10 +4492,22 @@ export default class ReactorConversationService
           }
         }
 
+        await ReactorConversationModel.findByIdAndUpdate(
+          effectiveConversationId,
+          { $set: { processing: false, updated: new Date() } }
+        ).exec();
+
         // Return adapted response
         return this.attachStructuredContent(adapter.adaptResponse(response), providerConfig);
       } catch (error: any) {
         lastError = error;
+
+        if (chatSessionId) {
+          await ReactorConversationModel.findByIdAndUpdate(
+            chatSessionId,
+            { $set: { processing: false, updated: new Date() } }
+          ).exec();
+        }
 
         // Check if this is a retryable error
         const isRetryable = this.isRetryableError(error);
@@ -4546,6 +4634,11 @@ export default class ReactorConversationService
         }
 
         // Use findOneAndUpdate for atomic update
+        const toolCallsWithStatus = (aiMessage.tool_calls || []).map((tc: any) => ({
+          ...tc,
+          status: tc.status || 'pending',
+        }));
+
         await ReactorConversationModel.findOneAndUpdate(
           { _id: conversation._id },
           {
@@ -4558,7 +4651,7 @@ export default class ReactorConversationService
                 thinking,
                 images,
                 timestamp: new Date(),
-                tool_calls: aiMessage.tool_calls,
+                tool_calls: toolCallsWithStatus,
                 tool_results: [],
               },
             },
@@ -4835,6 +4928,10 @@ export default class ReactorConversationService
       }
 
       // Execute the macro
+      if (callId) {
+        await this.updateToolCallStatus(chatSessionId, callId, 'running');
+      }
+
       const macroFunction = this.macroService.getMacro(macroDef.name);
       if (!macroFunction) {
         throw new Error(`Macro ${macro} not found in macro registry`);
@@ -4938,10 +5035,15 @@ export default class ReactorConversationService
             },
           }
         ).exec();
+
+        await this.updateToolCallStatus(chatSessionId, callId, 'success');
       }
 
       return adapter.adaptResponse(toolResult);
     } catch (error: any) {
+      if (callId) {
+        await this.updateToolCallStatus(chatSessionId, callId, 'error');
+      }
       const correlationId = v4();
       this.sessionLog("error", `Error executing macro: ${error.message}`, {
         error: error.message,
@@ -5176,6 +5278,12 @@ export default class ReactorConversationService
           },
         },
       ).exec();
+
+      await this.updateToolCallStatus(
+        chatSessionId,
+        toolResult.toolCallId,
+        toolResult.isError ? 'error' : 'success'
+      );
 
       this.sessionLog("debug", `[completeClientToolCalls] Persisted result for tool "${toolResult.toolName}" (callId: ${toolResult.toolCallId})`, {
         isError: toolResult.isError,

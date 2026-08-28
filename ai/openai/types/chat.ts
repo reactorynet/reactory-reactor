@@ -243,6 +243,10 @@ export type ChatState = {
    */
   updated?: Date
   /**
+   * Indicates whether the conversation is currently processing a message or executing tool calls.
+   */
+  processing?: boolean
+  /**
    * 
    * The macros that are available for the chat session.
    * */
