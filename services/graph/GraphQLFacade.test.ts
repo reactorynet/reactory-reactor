@@ -229,7 +229,8 @@ describe("Session 06 — GraphQL Façade Consistency & Paging Fixes", () => {
 
       const res = await resolver.ReactorNodesForType(null, { type: [ReactorNodeType.FILE] }, ctx);
 
-      expect(mockGraphSvc.findNodesByType).toHaveBeenCalledWith([ReactorNodeType.FILE]);
+      // Resolver caps/passes an explicit limit (legacy default 1000) to the manager façade.
+      expect(mockGraphSvc.findNodesByType).toHaveBeenCalledWith([ReactorNodeType.FILE], 1000);
       expect(res).toEqual([{ id: 1, type: ReactorNodeType.FILE }]);
     });
 

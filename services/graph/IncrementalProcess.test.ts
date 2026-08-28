@@ -240,4 +240,135 @@ describe("Session 08 — Incremental Re-Index by Content Hash", () => {
       expect.stringMatching(/process inc-fixture: analysed=4 skipped=0/)
     );
   });
+
+  describe("Session 15 — Hardening (Deep touch, GC safety, relative searchables)", () => {
+    it("loadDescendantNodeIds BFS retrieves descendants across 3+ levels", async () => {
+      const ctx = makeContext();
+      const processor = new NodeJSProjectProcessor({}, ctx);
+
+      // Mock find to return multi-level hierarchy:
+      // level 1: rootParent 100 -> children 101, 102
+      // level 2: 101 -> 103, 102 -> 104
+      // level 3: 103 -> 105
+      // level 4: 105 -> []
+      const findMock = jest.fn().mockImplementation((query: any) => {
+        const inIds = query?.parentId?.$in || [];
+        let results: { id: number }[] = [];
+        if (inIds.includes(100)) {
+          results.push({ id: 101 }, { id: 102 });
+        } else if (inIds.includes(101) || inIds.includes(102)) {
+          if (inIds.includes(101)) results.push({ id: 103 });
+          if (inIds.includes(102)) results.push({ id: 104 });
+        } else if (inIds.includes(103) || inIds.includes(104)) {
+          if (inIds.includes(103)) results.push({ id: 105 });
+        }
+        return {
+          select: jest.fn().mockReturnValue({
+            lean: jest.fn().mockResolvedValue(results),
+          }),
+        };
+      });
+
+      const { ReactorNodeModel } = require("../../models/ReactorGraphNode");
+      const origFind = ReactorNodeModel.find;
+      ReactorNodeModel.find = findMock;
+
+      try {
+        const descendantIds = await (processor as any).loadDescendantNodeIds(100, "test-proj-id");
+        expect(descendantIds).toEqual(expect.arrayContaining([101, 102, 103, 104, 105]));
+        expect(descendantIds).toHaveLength(5);
+      } finally {
+        ReactorNodeModel.find = origFind;
+      }
+    });
+
+    it("GC deleteMany is skipped if persistGraph fails", async () => {
+      const ctx = makeContext();
+      const processor = new NodeJSProjectProcessor({}, ctx);
+
+      const { ReactorNodeModel } = require("../../models/ReactorGraphNode");
+      const { ReactorNodeLinkModel } = require("../../models/ReactorNodeLink");
+
+      const origBulkWrite = ReactorNodeModel.bulkWrite;
+      const origDeleteMany = ReactorNodeModel.deleteMany;
+
+      const deleteManyMock = jest.fn().mockResolvedValue({ deletedCount: 5 });
+      ReactorNodeModel.bulkWrite = jest.fn().mockRejectedValue(new Error("Mongo connection dropped"));
+      ReactorNodeModel.deleteMany = deleteManyMock;
+      ReactorNodeLinkModel.deleteMany = jest.fn().mockResolvedValue({ deletedCount: 0 });
+
+      try {
+        const project = {
+          id: "proj-persist-fail",
+          name: "fail-test",
+          nameSpace: "test",
+          repoPath: tempDir,
+          version: "1.0.0",
+        };
+
+        await processor.process(project, { runId: "run-fail", skipGc: false });
+
+        // deleteMany should NOT have been called because persistGraph failed
+        expect(deleteManyMock).not.toHaveBeenCalled();
+        expect(ctx.error).toHaveBeenCalledWith(
+          expect.stringMatching(/GC skipped because persistGraph failed/)
+        );
+      } finally {
+        ReactorNodeModel.bulkWrite = origBulkWrite;
+        ReactorNodeModel.deleteMany = origDeleteMany;
+      }
+    });
+
+    it("GC is skipped and warning logged when projectId is missing", async () => {
+      const ctx = makeContext();
+      const processor = new NodeJSProjectProcessor({}, ctx);
+
+      const { ReactorNodeModel } = require("../../models/ReactorGraphNode");
+      const origDeleteMany = ReactorNodeModel.deleteMany;
+      const deleteManyMock = jest.fn().mockResolvedValue({ deletedCount: 0 });
+      ReactorNodeModel.deleteMany = deleteManyMock;
+
+      try {
+        const projectWithoutId = {
+          name: "no-id-proj",
+          nameSpace: "test",
+          repoPath: tempDir,
+          version: "1.0.0",
+        };
+
+        await processor.process(projectWithoutId, { runId: "run-no-id", skipGc: false });
+
+        expect(deleteManyMock).not.toHaveBeenCalled();
+        expect(ctx.warn).toHaveBeenCalledWith(
+          expect.stringMatching(/GC skipped because projectId is missing/)
+        );
+      } finally {
+        ReactorNodeModel.deleteMany = origDeleteMany;
+      }
+    });
+
+    it("buildSearchable does not expose absolute filesystem paths in path field", () => {
+      const ctx = makeContext();
+      const processor = new NodeJSProjectProcessor({}, ctx);
+
+      const project = {
+        id: "proj-1",
+        name: "test-proj",
+        nameSpace: "test",
+        repoPath: "/var/projects/my-repo",
+        version: "1.0.0",
+      };
+
+      const fileSpec = {
+        path: "/var/projects/my-repo/src/index.ts",
+        type: "typescript",
+      };
+
+      const searchable = (processor as any).buildSearchable(project, fileSpec, "const x = 1;");
+      expect(searchable).toBeDefined();
+      expect(searchable.path).toBe("src/index.ts");
+      expect(searchable.path).not.toContain("/var/projects/my-repo");
+      expect(searchable.relativePath).toBe("src/index.ts");
+    });
+  });
 });

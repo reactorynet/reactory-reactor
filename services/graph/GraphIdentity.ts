@@ -89,6 +89,20 @@ export const rootAncestry = (key: string): number | undefined =>
   parseAncestry(key).shift();
 
 /**
+ * Canonical string representation of a project id, or undefined if absent.
+ */
+export const canonicalProjectId = (
+  project: Partial<IReactorProject>
+): string | undefined => {
+  const raw =
+    (project as any)?.id ??
+    (project as any)?._id ??
+    null;
+  if (raw == null || raw === "") return undefined;
+  return String(raw);
+};
+
+/**
  * Deterministic edge id from its endpoints and primary type. Making the id a
  * function of (source, target, type) means the same relationship discovered on
  * two runs collapses to one edge rather than duplicating.
