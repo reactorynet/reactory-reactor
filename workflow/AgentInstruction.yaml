@@ -39,11 +39,11 @@ inputs:
 outputs:
   agentResponse:
     type: string
-    source: "${steps.instructAgent.outputs.content}"
+    source: step.instructAgent.content
     description: "The text content of the agent's response."
   sessionId:
     type: string
-    source: "${steps.instructAgent.outputs.sessionId}"
+    source: step.instructAgent.sessionId
     description: "The ID of the chat session, for continuing the conversation."
 steps:
   - id: startWorkflowLog
