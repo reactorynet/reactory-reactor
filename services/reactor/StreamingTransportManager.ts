@@ -423,6 +423,22 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
    * when a transport is re-registered (e.g. on client reconnect).
    */
   async sendEventToSession(chatSessionId: string, event: StreamingEvent): Promise<void> {
+    // Stamp the conversation onto the event if the emit site did not.
+    //
+    // StreamingEventFactory.base defaults `conversationId` to "" when a caller
+    // omits its ids, and plenty of emit sites do. The client uses that field to
+    // decide whether an event belongs to the chat window it is showing, and its
+    // guard can only reject a *mismatch* — an empty value slips through and the
+    // payload lands in whichever chat happens to be active. With several
+    // sessions streaming at once that is a cross-chat content leak.
+    //
+    // This is the one place every event passes through, and `chatSessionId` is
+    // the routing key, so it is the authoritative answer. Assigned in place
+    // rather than cloned: this runs per streamed token.
+    if (!event.conversationId) {
+      event.conversationId = chatSessionId;
+    }
+
     // Snapshot our own subscription BEFORE delivering: delivering can prune the
     // last dead transport for this conversation and unsubscribe us, and Redis
     // will still be counting us as a subscriber when the publish below lands.
@@ -701,6 +717,18 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
         this.lastWriteAt.set(sessionId, Date.now());
       }
     }
+  }
+
+  /**
+   * How many transports this process holds for one conversation.
+   *
+   * More than one is legitimate — a second tab, a second mounted chat
+   * component — and every event is delivered to all of them. Exposed so the
+   * connection log can say when a conversation gains a second subscriber,
+   * which is otherwise invisible until someone reads a token stream twice.
+   */
+  getChatTransportCount(chatSessionId: string): number {
+    return this.chatSessions.get(chatSessionId)?.size ?? 0;
   }
 
   /**

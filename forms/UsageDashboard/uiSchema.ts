@@ -6,7 +6,7 @@ const uiSchema: Reactory.Schema.IFormUISchema = {
       height: 0,
     },
     showSubmit: false,
-    showRefresh: false,
+    showRefresh: true,
     componentType: "div",
     style: {
       display: "flex",
@@ -31,6 +31,14 @@ const uiSchema: Reactory.Schema.IFormUISchema = {
   },
   "ui:grid-layout": [
     {
+      startDate: { xs: 12, sm: 6, md: 2, lg: 2, xl: 2 },
+      endDate: { xs: 12, sm: 6, md: 2, lg: 2, xl: 2 },
+      provider: { xs: 12, sm: 6, md: 2, lg: 2, xl: 2 },
+      model: { xs: 12, sm: 6, md: 2, lg: 2, xl: 2 },
+      personaId: { xs: 12, sm: 6, md: 2, lg: 2, xl: 2 },
+      use_case: { xs: 12, sm: 6, md: 2, lg: 2, xl: 2 },
+    },
+    {
       totalTokens: { xs: 12, sm: 6, md: 2, lg: 2, xl: 2 },
       totalPromptTokens: { xs: 12, sm: 6, md: 2, lg: 2, xl: 2 },
       totalCompletionTokens: { xs: 12, sm: 6, md: 2, lg: 2, xl: 2 },
@@ -49,6 +57,62 @@ const uiSchema: Reactory.Schema.IFormUISchema = {
       records: { xs: 12, sm: 12, md: 12, lg: 12, xl: 12 },
     },
   ],
+  startDate: {
+    "ui:widget": "DateWidget",
+    "ui:title": "Start Date",
+    "ui:options": {
+      placeholder: "YYYY-MM-DD",
+    },
+  },
+  endDate: {
+    "ui:widget": "DateWidget",
+    "ui:title": "End Date",
+    "ui:options": {
+      placeholder: "YYYY-MM-DD",
+    },
+  },
+  provider: {
+    "ui:widget": "SelectWidget",
+    "ui:title": "Provider",
+    "ui:options": {
+      selectOptions: [
+        { value: "all", label: "All Providers" },
+        { value: "openai", label: "OpenAI" },
+        { value: "anthropic", label: "Anthropic" },
+        { value: "google", label: "Google Vertex/Gemini" },
+        { value: "ollama", label: "Ollama" },
+        { value: "mistral", label: "Mistral" },
+        { value: "openrouter", label: "OpenRouter" },
+      ],
+    },
+  },
+  model: {
+    "ui:widget": "InputWidget",
+    "ui:title": "Model Filter",
+    "ui:options": {
+      placeholder: "e.g. gpt-4o, claude-3-5...",
+    },
+  },
+  personaId: {
+    "ui:widget": "InputWidget",
+    "ui:title": "Persona Filter",
+    "ui:options": {
+      placeholder: "e.g. reactor, security...",
+    },
+  },
+  use_case: {
+    "ui:widget": "SelectWidget",
+    "ui:title": "Use Case",
+    "ui:options": {
+      selectOptions: [
+        { value: "all", label: "All Use Cases" },
+        { value: "standalone", label: "Standalone Chat" },
+        { value: "workflow", label: "Workflow Runner" },
+        { value: "support", label: "Support Ticket" },
+        { value: "task", label: "Scheduled Task" },
+      ],
+    },
+  },
   totalTokens: {
     "ui:widget": "LabelWidget",
     "ui:title": "Total Tokens",

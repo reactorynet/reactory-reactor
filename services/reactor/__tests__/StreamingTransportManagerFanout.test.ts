@@ -169,6 +169,57 @@ describe('StreamingTransportManager cross-process fanout', () => {
     expect(t.sendEvent).not.toHaveBeenCalled(); // remote handled it, nothing buffered
   });
 
+  /**
+   * StreamingEventFactory defaults conversationId to "" when an emit site omits
+   * its ids, and the client's "is this event for the chat I am showing?" guard
+   * can only reject a mismatch — an empty value passes and the payload lands in
+   * whichever chat is active. With several sessions streaming that leaks one
+   * chat's response into another's window.
+   */
+  it('reports how many transports a conversation holds', async () => {
+    expect(manager.getChatTransportCount(CHAT_ID)).toBe(0);
+
+    await manager.registerTransport({ sessionId: SSE_ID, chatSessionId: CHAT_ID, transport });
+    expect(manager.getChatTransportCount(CHAT_ID)).toBe(1);
+
+    await manager.registerTransport({ sessionId: 'sse-2', chatSessionId: CHAT_ID, transport: createMockTransport() });
+    expect(manager.getChatTransportCount(CHAT_ID)).toBe(2);
+
+    await manager.closeTransport('sse-2');
+    expect(manager.getChatTransportCount(CHAT_ID)).toBe(1);
+
+    await manager.closeTransport(SSE_ID);
+    expect(manager.getChatTransportCount(CHAT_ID)).toBe(0);
+  });
+
+  it('stamps the conversation onto an unlabelled event', async () => {
+    await manager.registerTransport({ sessionId: SSE_ID, chatSessionId: CHAT_ID, transport });
+
+    const unlabelled = { ...makeEvent('complete'), conversationId: '', messageId: '' };
+    await manager.sendEventToSession(CHAT_ID, unlabelled as StreamingEvent);
+
+    expect(transport.sendEvent).toHaveBeenCalledTimes(1);
+    expect(transport.sendEvent.mock.calls[0][0].conversationId).toBe(CHAT_ID);
+  });
+
+  it('leaves an already-labelled event alone', async () => {
+    await manager.registerTransport({ sessionId: SSE_ID, chatSessionId: CHAT_ID, transport });
+
+    const labelled = { ...makeEvent('complete'), conversationId: 'some-other-chat' };
+    await manager.sendEventToSession(CHAT_ID, labelled as StreamingEvent);
+
+    expect(transport.sendEvent.mock.calls[0][0].conversationId).toBe('some-other-chat');
+  });
+
+  it('stamps before publishing, so other processes see the label too', async () => {
+    const unlabelled = { ...makeEvent('token'), conversationId: '' };
+    publish.mockResolvedValue(1);
+    await manager.sendEventToSession(CHAT_ID, unlabelled as StreamingEvent);
+
+    const [, payload] = publish.mock.calls[0];
+    expect(JSON.parse(payload).event.conversationId).toBe(CHAT_ID);
+  });
+
   it('does not buffer when a remote process received the event', async () => {
     publish.mockResolvedValue(1); // one remote subscriber, none local
     await manager.sendEventToSession(CHAT_ID, makeEvent());

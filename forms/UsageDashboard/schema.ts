@@ -3,6 +3,38 @@ const schema: Reactory.Schema.ISchema = {
   title: "AI Usage & Telemetry Dashboard",
   description: "Monitor and analyze AI token consumption, provider activity, and spending metrics",
   properties: {
+    startDate: {
+      type: "string",
+      title: "Start Date",
+      format: "date",
+    },
+    endDate: {
+      type: "string",
+      title: "End Date",
+      format: "date",
+    },
+    provider: {
+      type: "string",
+      title: "Provider",
+      enum: ["all", "openai", "anthropic", "google", "ollama", "mistral", "openrouter"],
+      default: "all",
+    },
+    model: {
+      type: "string",
+      title: "Model",
+      description: "Filter by specific model name",
+    },
+    personaId: {
+      type: "string",
+      title: "Persona",
+      description: "Filter by agent persona identifier",
+    },
+    use_case: {
+      type: "string",
+      title: "Use Case",
+      enum: ["all", "standalone", "workflow", "support", "task"],
+      default: "all",
+    },
     totalTokens: {
       type: "number",
       title: "Total Tokens Used",

@@ -52,6 +52,14 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
           }
         }
       }`,
+      variables: {
+        'formData.startDate': 'filter.startDate',
+        'formData.endDate': 'filter.endDate',
+        'formData.provider': 'filter.provider',
+        'formData.model': 'filter.model',
+        'formData.personaId': 'filter.personaId',
+        'formData.use_case': 'filter.use_case',
+      },
       resultType: 'object',
       resultMap: {
         'totalPromptTokens': 'totalPromptTokens',
@@ -129,6 +137,14 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
           hasNext
         }
       }`,
+      variables: {
+        'formData.startDate': 'filter.startDate',
+        'formData.endDate': 'filter.endDate',
+        'formData.provider': 'filter.provider',
+        'formData.model': 'filter.model',
+        'formData.personaId': 'filter.personaId',
+        'formData.use_case': 'filter.use_case',
+      },
       resultType: 'object',
       resultMap: {
         'records': 'records',
