@@ -142,6 +142,33 @@ describe('StreamingTransportManager cross-process fanout', () => {
     expect(transport.sendEvent).toHaveBeenCalledTimes(1);
   });
 
+  /**
+   * This runs once per streamed token on the provider's own loop. Awaiting a
+   * Redis round-trip per token would put network latency in series with
+   * generation, which is exactly the bottleneck a slow local model exposes.
+   */
+  it('does not wait on the publish when the event was delivered locally', async () => {
+    let settled = false;
+    publish.mockImplementation(() => new Promise(() => { /* never resolves */ }));
+
+    await manager.registerTransport({ sessionId: SSE_ID, chatSessionId: CHAT_ID, transport });
+    await manager.sendEventToSession(CHAT_ID, makeEvent()).then(() => { settled = true; });
+
+    expect(settled).toBe(true);
+    expect(transport.sendEvent).toHaveBeenCalledTimes(1);
+    expect(publish).toHaveBeenCalledTimes(1); // dispatched, just not awaited
+  });
+
+  it('still waits on the publish when nothing was delivered locally', async () => {
+    // Here the count decides whether the event needs buffering, so it matters.
+    publish.mockResolvedValue(2);
+    await expect(manager.sendEventToSession(CHAT_ID, makeEvent())).resolves.toBeUndefined();
+
+    const t = createMockTransport();
+    await manager.registerTransport({ sessionId: 'sse-late', chatSessionId: CHAT_ID, transport: t });
+    expect(t.sendEvent).not.toHaveBeenCalled(); // remote handled it, nothing buffered
+  });
+
   it('does not buffer when a remote process received the event', async () => {
     publish.mockResolvedValue(1); // one remote subscriber, none local
     await manager.sendEventToSession(CHAT_ID, makeEvent());
