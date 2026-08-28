@@ -114,6 +114,8 @@ export interface ReactorConversationDocument {
   created: Date
   // The date the conversation was last
   updated: Date
+  // Indicates whether the conversation is currently processing a message/tools
+  processing?: boolean
   // The tool approval mode for the conversation
   toolApprovalMode: ToolApprovalMode
   // The maximum number of auto tool call iterations before pausing for user confirmation
@@ -262,6 +264,10 @@ const ReactorConversationSchema = new Schema({
   updated: {
     type: Date,
     default: () => { return new Date() }
+  },
+  processing: {
+    type: Boolean,
+    default: false,
   },
   toolApprovalMode: {
     type: String,

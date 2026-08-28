@@ -107,6 +107,7 @@ class ReactorChatResolver {
         vars: conversation.vars || {},
         created: conversation.created,
         updated: conversation.updated,
+        processing: !!conversation.processing,
         toolApprovalMode:
           conversation.toolApprovalMode || ToolApprovalMode.PROMPT,
         tools: conversation?.tools || [],
@@ -800,6 +801,22 @@ class ReactorChatResolver {
       if (!sseSessionId) return false;
       const hasTransport = await conversationService.streamingTransportManager.hasTransport(sseSessionId);
       return !!hasTransport;
+    } catch {
+      return false;
+    }
+  }
+
+  @property("ReactorChatState", "processing")
+  async ReactorChatStateProcessing(
+    chatState: ChatState,
+    _: any,
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if ((chatState as any).processing !== undefined) return !!(chatState as any).processing;
+    if (!chatState?.id) return false;
+    try {
+      const conv = await ReactorConversationModel.findById(chatState.id).select('processing').lean().exec();
+      return !!conv?.processing;
     } catch {
       return false;
     }

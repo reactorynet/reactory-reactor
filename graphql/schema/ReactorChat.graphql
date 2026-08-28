@@ -480,6 +480,10 @@ type ReactorChatState {
   """
   imageGenerationEnabled: Boolean
   """
+  Indicates whether the chat session is currently processing a message or executing tool calls.
+  """
+  processing: Boolean
+  """
   Indicates whether this chat session currently has an active SSE connection/transport.
   """
   active: Boolean
