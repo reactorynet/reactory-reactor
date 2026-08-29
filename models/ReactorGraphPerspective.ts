@@ -3,15 +3,17 @@ import Reactory from '@reactorynet/reactory-core';
 import { ReactorGraphPerspective } from '../types/model.types';
 
 /**
- * A saved explorer view — node positions, expanded node set and camera —
- * owned by a user and optionally shared. Supersedes the never-wired
+ * A saved explorer view — the complete state needed to reproduce a graph
+ * view in either the 2D or the 3D renderer: node positions, expanded and
+ * hidden sets, type filters, layout, view mode and a world-space camera.
+ * Owned by a user and optionally shared. Supersedes the never-wired
  * ReactorNodeUI type.
  */
 const ReactorGraphPerspectiveSchema: Schema<ReactorGraphPerspective> = new Schema<ReactorGraphPerspective>({
   name: { type: String, required: true },
   owner: { type: String, required: true, index: true },
   projectId: { type: String, index: true },
-  rootNodeId: Number,
+  rootNodeId: { type: Number, index: true },
   nodePositions: [
     {
       _id: false,
@@ -22,6 +24,14 @@ const ReactorGraphPerspectiveSchema: Schema<ReactorGraphPerspective> = new Schem
     },
   ],
   expandedKeys: [String],
+  hiddenNodeIds: [Number],
+  filters: {
+    nodeTypes: [String],
+    linkTypes: [String],
+  },
+  layout: String,
+  viewMode: { type: String, enum: ['TWO_D', 'THREE_D'] },
+  depth: Number,
   viewport: {
     cameraX: Number,
     cameraY: Number,
@@ -32,9 +42,10 @@ const ReactorGraphPerspectiveSchema: Schema<ReactorGraphPerspective> = new Schem
     zoom: Number,
   },
   share: { type: Boolean, default: false },
+  isDefault: { type: Boolean, default: false },
   created: { type: Date, default: () => new Date() },
   updated: { type: Date, default: () => new Date() },
-});
+}, { minimize: false });
 
 // A user's perspective names are unique per project scope.
 ReactorGraphPerspectiveSchema.index({ owner: 1, name: 1, projectId: 1 }, { unique: true });

@@ -1306,6 +1306,12 @@ export interface ISystemGraphManager extends Reactory.Service.IReactoryDefaultSe
    * @param path 
    */
   getProject(path: string): Promise<Partial<IReactorProject>>;
+
+  /**
+   * The project's root node in the system graph (the catalog node an
+   * explorer opens). `index` carries the deterministic numeric node id.
+   */
+  getProjectNode(project: Partial<IReactorProject>): Promise<ReactorDataNode<Partial<IReactorProject>>>;
   
   /**
    * 

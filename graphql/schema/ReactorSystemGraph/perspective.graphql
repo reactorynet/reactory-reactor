@@ -1,5 +1,8 @@
-# Graph perspectives — a saved view of the explorer: node positions, the
-# expanded node set and the camera. Supersedes the never-wired ReactorNodeUI.
+# Graph perspectives — a saved view of the explorer. A perspective is the full
+# state needed to reproduce a view in either renderer (2D board or 3D orbit):
+# which nodes are on canvas and where, what is expanded/hidden, the active
+# type filters, the layout, the view mode and the camera. Supersedes the
+# never-wired ReactorNodeUI.
 
 type ReactorGraphNodePosition {
   nodeId: Int!
@@ -8,6 +11,12 @@ type ReactorGraphNodePosition {
   z: Float
 }
 
+"""
+World-space camera. 2D renderers persist the world point at the viewport
+centre (targetX/targetY) plus zoom; 3D renderers persist the orbit target
+(targetX/Y/Z) and the camera position (cameraX/Y/Z). Never screen-space —
+a perspective must reproduce the same framing at any viewport size.
+"""
 type ReactorGraphViewport {
   cameraX: Float
   cameraY: Float
@@ -18,17 +27,43 @@ type ReactorGraphViewport {
   zoom: Float
 }
 
+enum ReactorGraphViewMode {
+  TWO_D
+  THREE_D
+}
+
+"""
+Active type filters. null / omitted = no filter (everything visible).
+"""
+type ReactorGraphPerspectiveFilters {
+  nodeTypes: [ReactorNodeType!]
+  linkTypes: [ReactorLinkType!]
+}
+
 type ReactorGraphPerspective {
   id: String!
   name: String!
   # Owning user id — resolved server-side, never client supplied.
   owner: String!
+  # True when the requesting user owns the perspective (can update/delete).
+  isOwner: Boolean!
   projectId: String
   rootNodeId: Int
   nodePositions: [ReactorGraphNodePosition!]!
+  # Expanded node ids as strings (kept as String for backwards compatibility).
   expandedKeys: [String!]
+  # Nodes removed from the view by the user (still loaded, never rendered).
+  hiddenNodeIds: [Int!]
+  filters: ReactorGraphPerspectiveFilters
+  # Layout algorithm key understood by the client ("radial" | "force" | "hierarchical").
+  layout: String
+  viewMode: ReactorGraphViewMode
+  # Traversal depth used when (re)loading the root neighbourhood.
+  depth: Int
   viewport: ReactorGraphViewport
   share: Boolean
+  # The owner's default perspective for this root/project — applied on open.
+  isDefault: Boolean
   created: Date
   updated: Date
 }
@@ -50,6 +85,11 @@ input ReactorGraphViewportInput {
   zoom: Float
 }
 
+input ReactorGraphPerspectiveFiltersInput {
+  nodeTypes: [ReactorNodeType!]
+  linkTypes: [ReactorLinkType!]
+}
+
 input ReactorGraphPerspectiveInput {
   # When present the perspective is updated, otherwise created.
   id: String
@@ -58,19 +98,34 @@ input ReactorGraphPerspectiveInput {
   rootNodeId: Int
   nodePositions: [ReactorGraphNodePositionInput!]
   expandedKeys: [String!]
+  hiddenNodeIds: [Int!]
+  filters: ReactorGraphPerspectiveFiltersInput
+  layout: String
+  viewMode: ReactorGraphViewMode
+  depth: Int
   viewport: ReactorGraphViewportInput
   share: Boolean
+  isDefault: Boolean
 }
 
 extend type Query {
   """
   Perspectives visible to the current user — their own plus shared ones.
+  Scope with projectId and/or rootNodeId.
   """
-  ReactorGraphPerspectives(projectId: String, paging: PagingRequest): [ReactorGraphPerspective!]!
+  ReactorGraphPerspectives(projectId: String, rootNodeId: Int, paging: PagingRequest): [ReactorGraphPerspective!]!
   ReactorGraphPerspective(id: String!): ReactorGraphPerspective
 }
 
 extend type Mutation {
+  """
+  Create (no id) or update (id) a perspective. Setting isDefault clears the
+  flag on the owner's other perspectives with the same root/project scope.
+  """
   ReactorSaveGraphPerspective(perspective: ReactorGraphPerspectiveInput!): ReactorGraphPerspective!
+  """
+  Copy a perspective (own or shared) into a new one owned by the caller.
+  """
+  ReactorDuplicateGraphPerspective(id: String!, name: String!): ReactorGraphPerspective!
   ReactorDeleteGraphPerspective(id: String!): Boolean!
 }

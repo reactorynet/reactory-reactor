@@ -419,6 +419,21 @@ class ReactorSystemGraph {
     return `${project.nameSpace}.${project.name}@${project.version || "1.0.0"}`;
   }
 
+  @property("ReactorProject", "graphNodeId")
+  async getProjectGraphNodeId(
+    project: IReactorProject,
+    _args: any,
+    context: Reactory.Server.IReactoryContext
+  ): Promise<number | null> {
+    try {
+      const node = await graphService(context).getProjectNode(project);
+      return node && node.index !== undefined && node.index !== null ? node.index : null;
+    } catch (err) {
+      context.warn(`ReactorProject.graphNodeId: ${(err as Error).message}`);
+      return null;
+    }
+  }
+
   @property("ReactorProject", "repoUrl")
   getProjectRepoUrl(project: IReactorProject, args: any, context: Reactory.Server.IReactoryContext): string {
     if (project.repoUrl) {

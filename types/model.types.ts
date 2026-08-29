@@ -212,9 +212,27 @@ export interface ReactorSubgraphOptions {
 }
 
 /**
- * A saved explorer view: node positions, expanded node set and camera.
- * Supersedes ReactorNodeUI (which was never wired to any resolver).
+ * A saved explorer view: everything needed to reproduce a graph view in the
+ * 2D or 3D renderer — positions, expanded/hidden sets, filters, layout, view
+ * mode and a world-space camera. Supersedes ReactorNodeUI (never wired).
  */
+export type ReactorGraphViewMode = 'TWO_D' | 'THREE_D'
+
+export interface ReactorGraphPerspectiveFilters {
+  nodeTypes?: string[] | null
+  linkTypes?: string[] | null
+}
+
+export interface ReactorGraphViewport {
+  cameraX?: number
+  cameraY?: number
+  cameraZ?: number
+  targetX?: number
+  targetY?: number
+  targetZ?: number
+  zoom?: number
+}
+
 export interface ReactorGraphPerspective {
   id?: string | ObjectId
   name: string
@@ -223,17 +241,16 @@ export interface ReactorGraphPerspective {
   projectId?: string
   rootNodeId?: number
   nodePositions: { nodeId: number; x: number; y: number; z?: number }[]
+  /** Expanded node ids, stringified (historical name). */
   expandedKeys?: string[]
-  viewport?: {
-    cameraX?: number
-    cameraY?: number
-    cameraZ?: number
-    targetX?: number
-    targetY?: number
-    targetZ?: number
-    zoom?: number
-  }
+  hiddenNodeIds?: number[]
+  filters?: ReactorGraphPerspectiveFilters | null
+  layout?: string
+  viewMode?: ReactorGraphViewMode
+  depth?: number
+  viewport?: ReactorGraphViewport
   share?: boolean
+  isDefault?: boolean
   created?: Date
   updated?: Date
 }

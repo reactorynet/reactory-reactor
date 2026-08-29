@@ -378,6 +378,11 @@ type ReactorProject {
   name: String!
   nameSpace: String!
   version: String!
+  """
+  Deterministic id of the project's root node in the system graph — the
+  catalog node an explorer opens for this project. Null until cataloged.
+  """
+  graphNodeId: Int
   avatar: String
   icon: String
   repoPath: String
