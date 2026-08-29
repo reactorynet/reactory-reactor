@@ -9,6 +9,7 @@ import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPerso
 import { IReactorConversationsService } from "../../../types/service.types";
 import { StreamingMode } from "modules/reactory-reactor/services/reactor/types/streaming.types";
 import { ChatsMacroProps } from './types';
+import { v4 } from "uuid";
 import logger from "@reactory/server-core/logging";
 
 
@@ -96,7 +97,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
   state: ChatState
 ): Promise<unknown> => {
   const { context, modelId, providerId } = state;
-  const { action, id, message, files, model = modelId, provider = providerId, providerConfig } = props;
+  const { action, id, message, files, model = modelId, provider = providerId, providerConfig, async: isAsync, wakeParent } = props;
 
   
 
@@ -291,6 +292,146 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
           const targetModelId = resolved.modelId || (resolved.providerId ? state.modelId : persona.modelId) || state.modelId;
           const targetProviderId = resolved.providerId || persona.providerId;
 
+          // ── Non-blocking async dispatch ────────────────────────────────────
+          // When async=true, dispatch the delegation to run in the background and
+          // return immediately with a delegationId the caller can poll via
+          // action="respond". The blocking path below is untouched when async is
+          // falsy.
+          if (isAsync) {
+            const delegationId = v4();
+            const subagentSessionId = new ObjectId().toString();
+
+            // Pre-create the sub-agent conversation with a known _id so the
+            // delegationId ↔ sessionId mapping is available at dispatch time and the
+            // run is recoverable after a crash/disconnect.
+            await ReactorConversationModel.create({
+              _id: subagentSessionId,
+              personaId: persona.id,
+              user: state.context.user,
+              modelId: targetModelId,
+              providerId: targetProviderId,
+              history: [],
+              vars: {},
+              meta: {
+                summary: `Sub-agent delegation ${delegationId} to ${persona.name}`,
+                title: `Delegation to ${persona.name}`,
+              },
+              macros: persona.macros || [],
+              tools: persona.tools || [],
+              started: new Date(),
+              sseSessionId: subagentSessionId,
+              toolApprovalMode: subagentToolMode,
+              parentSessionId: state.id || null,
+              use_case: "standalone",
+            } as any);
+
+            // Persist the delegation record on the PARENT conversation synchronously
+            // (before the fire-and-forget) so the run is recoverable. Also keep the
+            // legacy per-persona var for followup backward-compat.
+            await ReactorConversationModel.findOneAndUpdate(
+              { _id: state.id },
+              {
+                $set: {
+                  [`vars.subagent_delegations.${delegationId}`]: {
+                    status: "dispatched",
+                    personaId: persona.id,
+                    agentName: persona.name,
+                    subagentSessionId,
+                    parentSessionId: state.id,
+                    message,
+                    startedAt: new Date().toISOString(),
+                  },
+                  [`vars.subagent_chat_${persona.id}`]: subagentSessionId,
+                  updated: new Date(),
+                },
+              }
+            ).exec();
+
+            // Keep the in-memory var too so other tools see it this turn.
+            state.vars[`subagent_chat_${persona.id}`] = subagentSessionId;
+
+            // Fire-and-forget runner: execute the sub-agent in the background,
+            // record the result in the delegation record, and (optionally) push a
+            // compact callback into the parent session when it is not processing.
+            void (async () => {
+              try {
+                const response = await conversationService.sendMessage({
+                  personaId: persona.id,
+                  message,
+                  modelId: targetModelId,
+                  providerId: targetProviderId,
+                  chatSessionId: subagentSessionId,
+                  streamingMode: StreamingMode.NONE,
+                  tool_results: undefined,
+                  providerConfig: parsedProviderConfig,
+                });
+                const content = response?.content || response?.message || JSON.stringify(response);
+                await ReactorConversationModel.findOneAndUpdate(
+                  { _id: state.id },
+                  {
+                    $set: {
+                      [`vars.subagent_delegations.${delegationId}.status`]: "complete",
+                      [`vars.subagent_delegations.${delegationId}.response`]: content,
+                      [`vars.subagent_delegations.${delegationId}.completedAt`]: new Date().toISOString(),
+                      updated: new Date(),
+                    },
+                  }
+                ).exec();
+
+                if (wakeParent !== false) {
+                  try {
+                    const parentNow = await ReactorConversationModel.findOne({ _id: state.id }).select("processing").lean().exec();
+                    if (parentNow && !parentNow.processing) {
+                      const summary = typeof content === "string" && content.length > 500 ? `${content.substring(0, 500)}…` : content;
+                      await ReactorConversationModel.findOneAndUpdate(
+                        { _id: state.id },
+                        {
+                          $push: {
+                            history: {
+                              id: new ObjectId(),
+                              role: "system",
+                              content: `[Sub-agent ${persona.name} completed delegation ${delegationId}] ${summary} — full result in vars.subagent_delegations.${delegationId}; retrieve with chats action="respond", id="${delegationId}".`,
+                              timestamp: new Date(),
+                              tool_results: [],
+                            },
+                          },
+                          $set: { updated: new Date() },
+                        }
+                      ).exec();
+                    }
+                  } catch (_) { /* best-effort callback */ }
+                }
+              } catch (err: any) {
+                try {
+                  await ReactorConversationModel.findOneAndUpdate(
+                    { _id: state.id },
+                    {
+                      $set: {
+                        [`vars.subagent_delegations.${delegationId}.status`]: "error",
+                        [`vars.subagent_delegations.${delegationId}.error`]: err?.message || String(err),
+                        [`vars.subagent_delegations.${delegationId}.completedAt`]: new Date().toISOString(),
+                        updated: new Date(),
+                      },
+                    }
+                  ).exec();
+                } catch (_) { /* best-effort error record */ }
+              }
+            })();
+
+            return {
+              success: true,
+              data: {
+                status: "dispatched",
+                delegationId,
+                subagentSessionId,
+                agentId: persona.id,
+                agentName: persona.name,
+              },
+              instructions: `## Delegation Dispatched (non-blocking)\n\nTask sent to **${persona.name}** (${persona.id}).\n- **Delegation ID**: ${delegationId}\n- **Sub-agent Session**: ${subagentSessionId}\n\n### Retrieve the result\n- Call \`chats\` with action="respond", id="${delegationId}" (optionally waitMs=30000) to wait for and fetch the result.\n- You may do other work in the meantime and call respond again later.\n- Do NOT re-send the same task to the agent.\n- Use action="followup", id="${subagentSessionId}" to inspect recent history without waiting.`
+            };
+          }
+          // ── end async dispatch ──────────────────────────────────────────────
+
           const response = await conversationService.sendMessage({
             personaId: persona.id,
             message,
@@ -444,6 +585,136 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
           instructions: `## Sub-Agent Conversation Status\n\n**Agent**: ${existingConv.personaId}\n**Conversation**: ${conversationId}\n**Total Messages**: ${existingConv.history?.length || 0}\n\n### Recent History (${recentHistory.length} items)\nAvailable in data.recentHistory\n\n### Suggested Next Steps:\n- Use action="followup", id="${id}", message="..." to send a follow-up\n- Use action="followup", id="${id}", historyCount=ToolApprovalMode.AUTO0 for more history`
         };
       }
+      case "respond": {
+        if (!id) {
+          return {
+            success: false,
+            error: "The 'respond' action requires an id (delegationId or sub-agent conversation id).",
+            instructions: `## Missing ID\n\nProvide the delegationId returned by an async speakto, or a sub-agent conversation id.\n\n### Recovery Options:\n- Use the delegationId from the "dispatched" response\n- Use \`chats\` with action="personas" and speakto (async=true) to dispatch a new delegation`
+          };
+        }
+
+        const waitMs = Math.max(0, Math.min(120000, props.waitMs || 30000));
+        const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+        // 1. Resolve the delegation record (from the parent conversation's vars).
+        const parentConv = await ReactorConversationModel.findOne({ _id: state.id }).lean().exec();
+        let record: any = (parentConv?.vars?.subagent_delegations as any)?.[id];
+        const delegationId = id;
+
+        if (!record) {
+          // 2. Otherwise treat id as a sub-agent conversation id (mirror followup)
+          //    and build an implicit record from it.
+          const subConv = await ReactorConversationModel.findOne({ _id: id, user: state.context.user }).lean().exec();
+          if (!subConv) {
+            return {
+              success: false,
+              error: `No delegation found for id "${id}".`,
+              instructions: `## Not Found\n\nNo delegation record or sub-agent conversation with id "${id}".\n\n### Recovery Options:\n- Verify the delegationId from the dispatched response\n- Use \`chats\` with action="personas" and speakto (async=true) to dispatch a new delegation`
+            };
+          }
+          record = {
+            status: (subConv.history || []).some((h: any) => h.role === "assistant" && h.content) ? "complete" : "dispatched",
+            personaId: subConv.personaId,
+            agentName: subConv.personaId,
+            subagentSessionId: id,
+            startedAt: subConv.started ? new Date(subConv.started).toISOString() : undefined,
+          };
+        }
+
+        const subagentSessionId = record.subagentSessionId || id;
+
+        // 3. Bounded poll while the delegation is still running.
+        let rec = record;
+        let waited = 0;
+        while (rec.status === "dispatched" && waited < waitMs) {
+          await sleep(500);
+          waited += 500;
+          const fresh = await ReactorConversationModel.findOne({ _id: state.id }).lean().exec();
+          const freshRec = (fresh?.vars?.subagent_delegations as any)?.[delegationId];
+          if (freshRec) rec = freshRec;
+        }
+
+        // 4. Resolve the actual result text. Prefer the stored response; fall back
+        //    to the sub-agent conversation's last assistant message (covers implicit
+        //    and stale records where the run actually finished).
+        let finalResponse: string | undefined = rec.response;
+        if (!finalResponse) {
+          const subConv = await ReactorConversationModel.findOne({ _id: subagentSessionId }).lean().exec();
+          const lastAssistant = [...(subConv?.history || [])].reverse().find((h: any) => h.role === "assistant" && h.content);
+          finalResponse = lastAssistant?.content;
+          // A stale "dispatched" that actually finished becomes complete.
+          if (rec.status === "dispatched" && finalResponse) rec = { ...rec, status: "complete" };
+        }
+
+        // 5. Complete branch.
+        if (rec.status === "complete") {
+          try {
+            await ReactorConversationModel.findOneAndUpdate(
+              { _id: state.id },
+              {
+                $set: {
+                  [`vars.subagent_delegations.${delegationId}.collected`]: true,
+                  [`vars.subagent_delegations.${delegationId}.collectedAt`]: new Date().toISOString(),
+                  updated: new Date(),
+                },
+              }
+            ).exec();
+          } catch (_) { /* best-effort collected flag */ }
+
+          const content = finalResponse || "";
+          return {
+            success: true,
+            data: {
+              status: "complete",
+              delegationId,
+              subagentSessionId,
+              personaId: rec.personaId,
+              response: content,
+              completedAt: rec.completedAt,
+            },
+            instructions: `## Delegation Result (complete)\n\n**Agent**: ${rec.agentName || rec.personaId}\n**Delegation**: ${delegationId}\n\n${content}\n\n### Suggested Next Steps:\n- Use this result to continue your task\n- For the full sub-agent transcript use action="followup", id="${subagentSessionId}"`
+          };
+        }
+
+        // 6. Error branch.
+        if (rec.status === "error") {
+          return {
+            success: true,
+            data: {
+              status: "error",
+              delegationId,
+              subagentSessionId,
+              personaId: rec.personaId,
+              error: rec.error,
+              completedAt: rec.completedAt,
+            },
+            instructions: `## Delegation Failed\n\n**Agent**: ${rec.agentName || rec.personaId}\n**Delegation**: ${delegationId}\n\nError: ${rec.error}\n\n### Suggested Next Steps:\n- Retry with action="speakto", id="${rec.personaId}", message=..., async=true\n- Or investigate the error before retrying`
+          };
+        }
+
+        // 7. Still running — return recent history so the caller can decide.
+        const runSubConv = await ReactorConversationModel.findOne({ _id: subagentSessionId }).lean().exec();
+        const recentHistory = (runSubConv?.history || []).slice(-3).map((item: any) => ({
+          role: item.role,
+          content: item.content,
+          tool_calls: item.tool_calls,
+          tool_results: item.tool_results,
+          timestamp: item.timestamp,
+        }));
+        return {
+          success: true,
+          data: {
+            status: "running",
+            delegationId,
+            subagentSessionId,
+            personaId: rec.personaId,
+            waitedMs: waited,
+            recentHistory,
+          },
+          instructions: `## Delegation Still Running\n\n**Agent**: ${rec.agentName || rec.personaId}\n**Delegation**: ${delegationId}\n\nThe sub-agent is still working (waited ${waited}ms).\n\n### Suggested Next Steps:\n- Do other work, then call action="respond", id="${delegationId}" again to keep polling\n- Use action="followup", id="${subagentSessionId}" to inspect recent history without waiting`
+        };
+      }
       case "clear": {
         const chats = await ReactorConversationModel.find({
           user: state.context.user,
@@ -498,7 +769,8 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
     `| exp       | optional | —        | Export a chat session to the data folder for training |`,
     `| train     | —        | —        | Upload training data (also set files and model params) |`,
     `| personas  | —        | —        | List all registered AI agent personas with their ids |`,
-    `| speakto   | required | optional | Delegate to another agent. If message is provided, sends it and returns the response. Automatically resumes previous conversation with the same persona. If message is omitted, switches the active persona. |`,
+    `| speakto   | required | optional | Delegate to another agent. If message is provided, sends it and returns the response. Automatically resumes previous conversation with the same persona. If message is omitted, switches the active persona. Set async=true to dispatch in background (returns delegationId immediately; collect later with respond). |`,
+    `| respond   | required | —        | Retrieve the result of an async speakto delegation. id is the delegationId (or sub-agent conversation id). Polls up to waitMs (default 30s) and returns complete/error/running. |`,
     `| followup  | required | optional | Follow up on a sub-agent conversation. id can be a persona ID (auto-resolves stored conversation) or a direct conversation ID. If message is provided, sends it to the sub-agent. Returns recent history. Use historyCount to control how mToolApprovalMode items (default: 2). |`,
     `| clear     | —        | —        | Delete all chat sessions for the current user |`,
     ``,
@@ -507,6 +779,8 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
     `- Subsequent \`speakto\` calls to the same persona automatically resume the same conversation.`,
     `- Use \`followup\` to inspect history or send follow-up messages without switching context.`,
     `- Sub-agents default to safe_auto tool approval mode (auto if primary agent is in auto mode).`,
+    `- **Non-blocking delegation:** use \`speakto\` with \`async=true\`. The tool returns immediately with status "dispatched" and a \`delegationId\`; the sub-agent runs in the background. Call \`respond\` with that delegationId to wait for and fetch the result (polls up to waitMs, default 30s). The delegation record is persisted in the parent conversation's vars under \`subagent_delegations\`.`,
+    `- When an async delegation completes and the parent session is idle, a compact callback message is pushed into the parent session automatically (suppress with \`wakeParent=false\`).`,
     ``,
     `## Important notes for the speakto action`,
     `- The id must be a valid persona id. Call with action "personas" first to get available ids.`,
@@ -548,27 +822,34 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
       description: "Follow up on a sub-agent conversation or inspect its recent history",
       stem: "followup",
     },
+    {
+      feature: "respond",
+      featureType: Reactory.FeatureType.function,
+      action: ["respond"],
+      description: "Retrieve the result of an async (non-blocking) speakto delegation by delegationId",
+      stem: "respond",
+    },
   ],
   stem: "chats",
-  tags: ["chats", "continue", "delete", "export", "train", "personas", "speakto", "followup", "delegation"],
+  tags: ["chats", "continue", "delete", "export", "train", "personas", "speakto", "followup", "respond", "delegation", "async", "non-blocking"],
   tools: [
     {
       type: "function",
       function: {
         name: "chats",
-        description: "Manage chat sessions: list, create, continue, delete, or export sessions. Delegate questions to other AI agents via the 'speakto' action. Use 'personas' to discover available agent ids before calling 'speakto'.",
+        description: "Manage chat sessions: list, create, continue, delete, or export sessions. Delegate questions to other AI agents via the 'speakto' action. Use 'personas' to discover available agent ids before calling 'speakto'. For long-running sub-agent tasks, use speakto with async=true (returns immediately with a delegationId) and retrieve the result later with action='respond'.",
         icon: "chat",
         parameters: {
           type: "object",
           properties: {
             action: {
               type: "string",
-              enum: ["list", "new", "size", "cont", "del", "exp", "train", "personas", "speakto", "followup", "clear"],
-              description: "The action to perform. Use 'personas' to list available agents before 'speakto'. Use 'followup' to inspect or continue a sub-agent conversation.",
+              enum: ["list", "new", "size", "cont", "del", "exp", "train", "personas", "speakto", "followup", "respond", "clear"],
+              description: "The action to perform. Use 'personas' to list available agents before 'speakto'. Use 'followup' to inspect or continue a sub-agent conversation. Use 'respond' to retrieve the result of an async speakto delegation.",
             },
             id: {
               type: "string",
-              description: "A chat session id (for cont, del, exp), an agent persona id (for speakto, followup), or a direct conversation id (for followup). Required for del, speakto, and followup; optional for cont and exp.",
+              description: "A chat session id (for cont, del, exp), an agent persona id (for speakto, followup), a direct conversation id (for followup), or a delegationId from an async speakto (for respond). Required for del, speakto, followup, and respond; optional for cont and exp.",
             },
             message: {
               type: "string",
@@ -590,6 +871,18 @@ export const ChatsMacroRegistry: MacroComponentDefinition<typeof ChatsMacro> = {
             historyCount: {
               type: "number",
               description: "Number of recent history items to return for the 'followup' action (default: 2).",
+            },
+            async: {
+              type: "boolean",
+              description: "Used with 'speakto' (and a message). When true, dispatches the delegation non-blocking: returns immediately with status 'dispatched' and a delegationId; the sub-agent runs in the background. Retrieve the result later with action='respond', id=<delegationId>. Default false (blocking).",
+            },
+            wakeParent: {
+              type: "boolean",
+              description: "Used with async 'speakto'. When false, suppresses the automatic callback message pushed into the parent session when the delegation completes. Default true.",
+            },
+            waitMs: {
+              type: "number",
+              description: "Used with 'respond'. Milliseconds to wait for a running delegation before returning 'running' status. Clamped to 0–120000. Default 30000.",
             },
             providerConfig: {
               type: "object",

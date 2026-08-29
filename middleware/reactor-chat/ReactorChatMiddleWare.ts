@@ -7,7 +7,7 @@ import { StreamingSessionManager } from "@reactory/server-modules/reactory-react
 import { StreamingTransportManager } from "@reactory/server-modules/reactory-reactor/services/reactor/StreamingTransportManager";
 import RedisService from "@reactory/server-modules/reactory-core/services/RedisService";
 import ReactoryContextProvider from "@reactory/server-core/context/ReactoryContextProvider";
-import UserService from "modules/reactory-core/services/UserService";
+import UserService from "@reactory/server-modules/reactory-core/services/UserService";
 /**
  * Middleware to set up and configure MCP server
  * @param app Express application instance
