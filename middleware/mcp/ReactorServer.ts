@@ -11,7 +11,7 @@ import notificationsHeartbeatHandler from "./handlers/notificationsHeartbeat";
 import notificationsCloseHandler from "./handlers/notificationsClose";
 import notificationsErrorHandler from "./handlers/notificationsError";
 import { RPCError } from "./rpcUtils";
-import ReactorConversationService from "modules/reactory-reactor/services/reactor/ReactorConversationService";
+import ReactorConversationService from "@reactory/server-modules/reactory-reactor/services/reactor/ReactorConversationService";
 
 interface SessionData {
   initialized: boolean;

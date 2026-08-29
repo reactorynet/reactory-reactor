@@ -6,7 +6,7 @@ import { AIAudioChatParams, AIChatCompletion, AIChatParams, AIFile, AIFineTuning
 import { PagingRequest, PagingResult } from "@reactory/server-core/database/types"
 import { ObjectId } from "mongodb"
 import { ChatState, MacroComponentDefinition, MacroToolDefinition, Schema, ToolApprovalMode } from '../ai/openai/types/chat';
-import { ReactoryFileDocument, ReactoryFileModel } from 'modules/reactory-core/models/CoreFile';
+import { ReactoryFileDocument, ReactoryFileModel } from '@reactory/server-modules/reactory-core/models/CoreFile';
 import { PromptMergeStrategy, StreamingMode } from '../services/reactor/types/streaming.types';
 
 

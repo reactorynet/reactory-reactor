@@ -12,12 +12,60 @@ const BOOKTUTOR_PERSONA_TEXT = ingest(require.resolve('./persona.md'));
 const BOOKTUTOR_FEATURES_TEXT = ingest(require.resolve('./features.md'));
 
 const BOOKTUTOR_TOOL_INCLUDES = [
+  // Execution & CLI
+  'shell',
+  // File & Code Management
   'readFile',
   'writeFile',
+  'safeEditFile',
+  'snip',
   'listDirectory',
+  'pathInfo',
+  'mkdir',
+  'rmdir',
+  'createModuleStructure',
+  // Code Review & QA
+  'CodeReview',
+  'CodeReviewFile',
+  // Database & GraphQL
+  'queryGQL',
+  'mutationGQL',
+  'schemaGQL',
+  'postgres',
+  'mongo',
+  'mongoWrite',
+  // UI & Side Panel Tools
+  'form',
+  'component',
+  'chart',
+  'd3',
+  'image',
+  'side_panel_state',
+  'amq',
+  // Tasks, Workflow & Sub-agent Communication
+  'todo',
+  'chats',
+  'workflow',
+  'executeYamlWorkflow',
+  'listWorkflows',
+  'getWorkflow',
+  'datetime',
+  'var',
+  'sliceVariable',
+  'modules',
+  'env',
+  'state',
+  // Search & Knowledge
   'grep_search',
   'file_search',
   'codebase_search',
+  'searchGraph',
+  'getGraphNode',
+  'graphChildren',
+  'exploreGraph',
+  'graphLinks',
+  'searchContent',
+  // Domain Specific Macros
   ...BOOKTUTOR_MACRO_TOOLS,
   'get_book_page',
   'list_books',
