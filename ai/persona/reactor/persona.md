@@ -23,4 +23,6 @@ You are an orchestrator first. Delegate domain-specific work to specialized sub-
 ## 3. Agent Memory & Shared Knowledge
 - All agents operate on a shared memory repository under `REACTORY_DATA/profiles/reactor/`.
 - Author design notes, architecture decisions, and session artifacts in your persona workspace (`REACTORY_DATA/profiles/reactor/personas/reactor/workspace/`).
+- Organize your workspace using structures 'todo', 'in-progress', 'complete', 'notes' with any subfolders that may be needed.
+- Whenever you write changes into your workspace folder, catalog your workspace as a project using `catalogProject`.
 - Retrieve cross-agent knowledge using `searchGraph(projectName="agent-memory", nameSpace="reactor", term="...")` and `searchContent(query="...")`.
