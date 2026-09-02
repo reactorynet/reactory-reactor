@@ -61,6 +61,22 @@ export const ReactorSkills: ISkillDefinition[] = [
       '@readSkill(id: "reactory.remoteDeployment@1.0.0")',
     ],
   },
+  {
+    id: 'reactory.kubernetesDeployment@1.0.0',
+    name: 'kubernetesDeployment',
+    nameSpace: 'reactory',
+    version: '1.0.0',
+    description:
+      'Comprehensive methodology, toolchain, and operational workflows for deploying, diagnosing, hot-patching, and managing Reactory workloads on Kubernetes and GitOps engines (ArgoCD).',
+    filePath: require.resolve('./reactory-deployment/k8s-deployment.md'),
+    tags: ['kubernetes', 'k8s', 'terraform', 'gitops', 'argocd', 'deployment', 'ingress', 'containermgmt', 'devops'],
+    roles: ['USER', 'DEVELOPER', 'ADMIN'],
+    examples: [
+      '@searchSkills(query: "kubernetes")',
+      '@searchSkills(query: "k8s")',
+      '@readSkill(id: "reactory.kubernetesDeployment@1.0.0")',
+    ],
+  },
 ];
 
 export default ReactorSkills;
