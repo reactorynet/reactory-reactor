@@ -120,6 +120,13 @@ const ReactorProjectSchema: Schema = new Schema({
   graphRootId: { type: Number, index: { unique: true, sparse: true } },
   repoPath: String,
   repoUrl: String,
+  // External source spec for registered (non-filesystem) sources (jira, db, ...).
+  source: new Schema({
+    scheme: String,
+    sourceKey: String,
+    settingKey: String,
+    options: Schema.Types.Mixed,
+  }, { _id: false }),
   projectTypes: [String], 
   lastSync: Date,
   indexingJobId: String,

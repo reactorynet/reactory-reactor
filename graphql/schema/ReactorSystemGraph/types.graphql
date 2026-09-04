@@ -20,6 +20,15 @@ enum ReactorNodeType {
   SECTION
   TOPIC
   RESOURCE
+  TICKET
+  BOARD
+  SPRINT
+  PERSON
+  SCHEMA
+  TABLE
+  VIEW
+  COLUMN
+  PROCEDURE
 }
 
 enum ReactorLinkType {
@@ -38,6 +47,12 @@ enum ReactorLinkType {
   DOCUMENTS
   MENTIONS
   EMBEDS
+  BLOCKS
+  DUPLICATES
+  RELATES
+  PART_OF
+  ASSIGNED_TO
+  FOREIGN_KEY
 }
 
 type ReactorNodeCategory {

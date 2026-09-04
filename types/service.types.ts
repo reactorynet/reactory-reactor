@@ -1045,6 +1045,24 @@ export interface IProjectProcessorConfig {
   options?: any; // Options for the processor
 }
 
+/**
+ * Describes an **external source** a project graphs instead of (or alongside)
+ * a repository on disk - a Jira site, a database connection, etc. External
+ * sources are registered (never auto-detected, invariant P3), and providers
+ * resolve credentials at runtime from partner settings via `settingKey`
+ * (invariant P2: no credentials are ever stored on the project or its nodes).
+ */
+export interface IReactorProjectSourceSpec {
+  /** Identity scheme of the source kind: 'jira' | 'db' | ... */
+  scheme: string;
+  /** Stable source-instance identifier (site host, connectionId). */
+  sourceKey: string;
+  /** Partner setting key holding credentials/connection config. */
+  settingKey?: string;
+  /** Provider-specific scope options (projectKeys, jql, schemas, ...). */
+  options?: any;
+}
+
 export interface IReactorProjectMetrics {
   date: Date; // The date for the metrics
   incidents: number; // Number of incidents reported on that date
@@ -1075,6 +1093,8 @@ export interface IReactorProject extends Reactory.IComponentFqnDefinition {
   version: string;
   repoPath?: string;
   repoUrl?: string;
+  /** External source spec for registered (non-filesystem) sources. */
+  source?: IReactorProjectSourceSpec;
   projectTypes: KnownReactorProjectTypes[];  
   lastSync?: Date;
   indexingJobId?: string;

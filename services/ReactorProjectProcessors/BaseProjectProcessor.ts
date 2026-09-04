@@ -1,4 +1,3 @@
-import mongoose, { Schema } from "mongoose";
 import fs from "fs";
 import path from "path";
 import ignore from "ignore";
@@ -8,18 +7,15 @@ import {
   IReactorProject,
   IReactorProjectFileSpec,
   IProjectProcessor,
-  ReactorNodeAttributes,
   KnownReactorProjectTypes,
   GraphProcessMetrics,
 } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import {
-  ReactorDataNode,
   ReactorLinkType,
   ReactorNode,
   ReactorNodeLink,
   ReactorNodeType,
 } from "@reactory/server-modules/reactory-reactor/types/model.types";
-import SVGS from "@reactory/server-modules/reactory-reactor/data/reactor-svgs";
 import { PagingRequest } from "@reactory/server-core/database/types";
 import Hash from "@reactory/server-core/utils/hash";
 import {
@@ -30,10 +26,8 @@ import {
   normalizeRelative,
   pathLogicalKey,
   projectFqn,
-  projectLogicalKey,
 } from "../graph/GraphIdentity";
-import { ReactorNodeModel } from "@reactory/server-modules/reactory-reactor/models/ReactorGraphNode";
-import { ReactorNodeLinkModel } from "@reactory/server-modules/reactory-reactor/models/ReactorNodeLink";
+import BaseGraphProvider from "../ReactorGraphProviders/BaseGraphProvider";
 import {
   DOCUMENT_LANGUAGES,
   DocumentGraphOptions,
@@ -61,13 +55,6 @@ export interface FileAnalysisResult {
     description?: string;
     data?: Record<string, any>;
   };
-}
-
-/** Checks if MongoDB connection is active or if the model method is mocked in tests. */
-function isMongoAvailable(modelFn?: any): boolean {
-  if (mongoose.connection?.readyState === 1) return true;
-  if (modelFn && (modelFn.mock || modelFn._isMockFunction)) return true;
-  return false;
 }
 
 /** Maximum characters of file content stored on a searchable. */
@@ -166,21 +153,10 @@ interface SymlinkRecord {
  * (supportsProject, getProjectTypes, iconKey) and may override analyseFile()
  * to contribute symbol nodes + edges (see the TypeScript analyzer wiring).
  */
-export abstract class BaseProjectProcessor implements IProjectProcessor {
-  context: Reactory.Server.IReactoryContext;
-  props: Reactory.Service.IReactoryServiceProps;
-
-  fileService: Reactory.Service.IReactoryFileService;
-  fetchService: Reactory.Service.IFetchService;
-  searchService: Reactory.Service.ISearchService;
-
-  abstract nameSpace: string;
-  abstract name: string;
-  abstract version: string;
-  description?: string;
-  tags?: string[];
-  lastMetrics?: GraphProcessMetrics;
-
+export abstract class BaseProjectProcessor
+  extends BaseGraphProvider
+  implements IProjectProcessor
+{
   /** Directory names that are never descended into. */
   protected ignoredDirectories = new Set<string>([
     ".git",
@@ -209,14 +185,6 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
 
   /** File names that are ignored during tree expansion. */
   protected ignoredFiles = new Set<string>([".DS_Store", "Thumbs.db"]);
-
-  constructor(
-    props: Reactory.Service.IReactoryServiceProps,
-    context: Reactory.Server.IReactoryContext
-  ) {
-    this.props = props;
-    this.context = context;
-  }
 
   private gitignoreCache: Record<string, any> = {};
 
@@ -268,21 +236,6 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
   }
 
   // ---- Abstract / overridable language hooks -------------------------------
-
-  abstract supportsProject(project: Partial<IReactorProject>): boolean;
-  abstract getProjectTypes(
-    project: Partial<IReactorProject>
-  ): KnownReactorProjectTypes[];
-
-  /** The SVG key (in data/reactor-svgs) used for the project icon. */
-  protected iconKey(): string | null {
-    return null;
-  }
-
-  /** Node type used for the project root. Overridden by e.g. TSql (DATASTORE). */
-  protected rootNodeType(): ReactorNodeType {
-    return ReactorNodeType.SYSTEM;
-  }
 
   /**
    * Deep-analyse a FILE node into symbol nodes, external dependency nodes and
@@ -403,45 +356,6 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
 
   private fqnOf(node: Partial<ReactorNode>): string {
     return node?.data?.projectFqn || projectFqn(node?.data || {});
-  }
-
-  async getProjectNode(
-    project: Partial<IReactorProject>
-  ): Promise<Partial<ReactorDataNode<Partial<IReactorProject>>>> {
-    const fqn = projectFqn(project);
-    const id = nodeId(projectLogicalKey(project));
-    const cacheKey = `REACTOR_NODE_${id}`;
-    const cached = await this.context.getValue<
-      Partial<ReactorDataNode<Partial<IReactorProject>>>
-    >(cacheKey);
-    if (cached) return cached;
-
-    const node: Partial<ReactorDataNode<Partial<IReactorProject>>> = {
-      id,
-      index: id,
-      key: `${id}`,
-      name: project.name,
-      version: project.version,
-      nameSpace: project.nameSpace,
-      providerId: this.fqn(),
-      source: project.repoPath,
-      parentId: null,
-      type: this.rootNodeType(),
-      categories: [],
-      description: project.description,
-      children: [],
-      inputs: [],
-      outputs: [],
-      metrics: [],
-      created: new Date(),
-      updated: new Date(),
-      // Root data is the project itself, augmented with the fields descendants
-      // rely on so the walker never needs a DB round-trip.
-      data: { ...project, repoPath: project.repoPath, projectFqn: fqn, projectId: project.id },
-    };
-
-    await this.context.setValue(cacheKey, node);
-    return node;
   }
 
   /**
@@ -725,13 +639,6 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
       paged.map((c) => this.context.setValue(`REACTOR_NODE_${c.id}`, c))
     );
     return paged;
-  }
-
-  private applyPaging<T>(items: T[], paging?: PagingRequest): T[] {
-    if (!paging || !paging.pageSize) return items;
-    const page = paging.page && paging.page > 0 ? paging.page : 1;
-    const start = (page - 1) * paging.pageSize;
-    return items.slice(start, start + paging.pageSize);
   }
 
   // ---- File discovery ------------------------------------------------------
@@ -1061,214 +968,6 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
   }
 
   /** Upserts nodes and edges by their deterministic ids (idempotent). */
-  protected async persistGraph(
-    nodes: Partial<ReactorNode>[],
-    edges: ReactorNodeLink[],
-    meta?: {
-      projectId?: any;
-      projectFqn?: string;
-      runId?: string;
-      indexedAt?: Date;
-      partnerId?: any;
-      organizationId?: any;
-    }
-  ): Promise<{ ok: boolean; nodeOps: number; edgeOps: number; error?: string }> {
-    // Stamp project/run metadata (single choke point) before building ops.
-    // This ensures every node/edge written by process() carries projectId/runId/indexedAt.
-    const stamp = (entity: any) => {
-      if (meta) {
-        if (meta.projectId !== undefined) entity.projectId = String(meta.projectId);
-        if (meta.projectFqn) entity.projectFqn = meta.projectFqn;
-        if (meta.runId) entity.runId = meta.runId;
-        if (meta.indexedAt) entity.indexedAt = meta.indexedAt;
-        if (meta.partnerId !== undefined) entity.partnerId = String(meta.partnerId);
-        if (meta.organizationId !== undefined) entity.organizationId = String(meta.organizationId);
-      }
-    };
-
-    // Build upsert operations, skipping any entry without a stable id (an
-    // id-less filter would match/replace an arbitrary document). `created` and
-    // `updated` are removed from the $set payload so they never collide with
-    // the $setOnInsert timestamps (MongoDB rejects a field that appears in both
-    // $set and $setOnInsert with "would create a conflict").
-    const toOp = <T extends { id?: number | string }>(entity: T) => {
-      stamp(entity);
-      const { created, updated, ...rest } = entity as T & {
-        created?: Date;
-        updated?: Date;
-      };
-      const now = new Date();
-      return {
-        updateOne: {
-          filter: { id: entity.id },
-          update: { $set: { ...rest, updated: now }, $setOnInsert: { created: now } },
-          upsert: true,
-        },
-      };
-    };
-
-    const nodeOps = nodes.filter((n) => n && n.id !== undefined && n.id !== null).map(toOp);
-    const edgeOps = edges.filter((e) => e && e.id !== undefined && e.id !== null).map(toOp);
-
-    try {
-      if (nodeOps.length && isMongoAvailable(ReactorNodeModel.bulkWrite)) {
-        await ReactorNodeModel.bulkWrite(nodeOps, { ordered: false });
-      }
-      if (edgeOps.length && isMongoAvailable(ReactorNodeLinkModel.bulkWrite)) {
-        await ReactorNodeLinkModel.bulkWrite(edgeOps, { ordered: false });
-      }
-      return { ok: true, nodeOps: nodeOps.length, edgeOps: edgeOps.length };
-    } catch (err) {
-      const e = err as Error;
-      this.context.error(
-        `persistGraph failed (nodes=${nodes.length}->${nodeOps.length} ops, edges=${edges.length}->${edgeOps.length} ops): ${e.message}\n${e.stack || ""}`
-      );
-      return { ok: false, nodeOps: nodeOps.length, edgeOps: edgeOps.length, error: e.message };
-    }
-  }
-
-  /** Writes searchables to the per-project search index. */
-  protected async indexSearchables(
-    project: Partial<IReactorProject>,
-    searchables: Reactory.Models.ISearchable[]
-  ): Promise<void> {
-    if (!searchables.length) return;
-    const search =
-      this.searchService ||
-      this.context.getService<Reactory.Service.ISearchService>(
-        "core.ReactorySearchService@1.0.0"
-      );
-    if (!search) {
-      this.context.warn("No search service available; skipping index");
-      return;
-    }
-    const indexName = `reactor_graph_${project.nameSpace}_${project.name}`;
-    try {
-      await search.index(indexName, searchables);
-    } catch (err) {
-      this.context.error(`Failed to index ${indexName}: ${(err as Error).message}`);
-    }
-  }
-
-  /**
-   * Loads previously persisted FILE/DOCUMENT nodes for incremental comparison.
-   */
-  protected async loadPreviousNodes(
-    project: Partial<IReactorProject>
-  ): Promise<Map<number, Partial<ReactorNode>>> {
-    const pid = canonicalProjectId(project);
-    if (!pid || !isMongoAvailable(ReactorNodeModel.find)) return new Map();
-    try {
-      const previous = (await ReactorNodeModel.find({
-        projectId: pid,
-        type: { $in: [ReactorNodeType.FILE, ReactorNodeType.DOCUMENT] },
-      })
-        .select({ id: 1, contentHash: 1, parentId: 1, data: 1, type: 1 })
-        .lean()) as unknown as Partial<ReactorNode>[];
-      return new Map((previous || []).map((n) => [n.id, n]));
-    } catch (err) {
-      this.context.warn(`loadPreviousNodes failed: ${(err as Error).message}`);
-      return new Map();
-    }
-  }
-
-  /**
-   * Loads descendant symbol / section node ids for an unchanged file using BFS.
-   */
-  protected async loadDescendantNodeIds(
-    rootParentId: number,
-    projectId: string
-  ): Promise<number[]> {
-    if (!isMongoAvailable(ReactorNodeModel.find)) return [];
-    try {
-      const all: number[] = [];
-      let frontier = [rootParentId];
-      const visited = new Set<number>([rootParentId]);
-      const MAX_NODES = 50_000;
-      const MAX_DEPTH = 64;
-
-      for (let depth = 0; depth < MAX_DEPTH && frontier.length > 0 && all.length < MAX_NODES; depth++) {
-        const children = (await ReactorNodeModel.find({
-          parentId: { $in: frontier },
-          projectId: String(projectId),
-        })
-          .select({ id: 1 })
-          .lean()) as unknown as { id: number }[];
-
-        const next: number[] = [];
-        for (const c of children) {
-          if (visited.has(c.id)) continue;
-          visited.add(c.id);
-          all.push(c.id);
-          next.push(c.id);
-        }
-        frontier = next;
-      }
-      return all;
-    } catch (err) {
-      this.context.warn(`loadDescendantNodeIds failed: ${(err as Error).message}`);
-      return [];
-    }
-  }
-
-  /**
-   * Loads edge ids touching any of the specified node ids for an unchanged file.
-   */
-  protected async loadEdgeIdsTouching(
-    nodeIds: number[],
-    projectId: string
-  ): Promise<number[]> {
-    if (!nodeIds.length || !isMongoAvailable(ReactorNodeLinkModel.find)) return [];
-    try {
-      const links = (await ReactorNodeLinkModel.find({
-        projectId: String(projectId),
-        $or: [{ source: { $in: nodeIds } }, { target: { $in: nodeIds } }],
-      })
-        .select({ id: 1 })
-        .lean()) as unknown as { id: number }[];
-      return links.map((l) => l.id);
-    } catch (err) {
-      this.context.warn(`loadEdgeIdsTouching failed: ${(err as Error).message}`);
-      return [];
-    }
-  }
-
-  /**
-   * Bulk-updates runId and indexedAt for skipped unchanged nodes so GC does not delete them.
-   */
-  protected async touchNodes(
-    ids: number[],
-    meta: { runId: string; indexedAt: Date }
-  ): Promise<void> {
-    if (!ids.length || !isMongoAvailable(ReactorNodeModel.updateMany)) return;
-    try {
-      await ReactorNodeModel.updateMany(
-        { id: { $in: ids } },
-        { $set: { runId: meta.runId, indexedAt: meta.indexedAt, updated: new Date() } }
-      );
-    } catch (err) {
-      this.context.warn(`touchNodes failed: ${(err as Error).message}`);
-    }
-  }
-
-  /**
-   * Bulk-updates runId and indexedAt for skipped unchanged edges so GC does not delete them.
-   */
-  protected async touchEdges(
-    ids: number[],
-    meta: { runId: string; indexedAt: Date }
-  ): Promise<void> {
-    if (!ids.length || !isMongoAvailable(ReactorNodeLinkModel.updateMany)) return;
-    try {
-      await ReactorNodeLinkModel.updateMany(
-        { id: { $in: ids } },
-        { $set: { runId: meta.runId, indexedAt: meta.indexedAt, updated: new Date() } }
-      );
-    } catch (err) {
-      this.context.warn(`touchEdges failed: ${(err as Error).message}`);
-    }
-  }
-
   /**
    * Full pipeline for a project: discover files, build the project root + file
    * + symbol + external nodes, resolve edges, persist the graph, and index file
@@ -1490,17 +1189,7 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
 
     const runId = options?.runId || randomUUID();
     const indexedAt = new Date();
-    const partnerId =
-      (next as any).partnerId ||
-      next.client?._id?.toString() ||
-      next.client?.id?.toString() ||
-      (this.context?.partner as any)?._id?.toString() ||
-      (this.context?.partner as any)?.id?.toString();
-
-    const organizationId =
-      (next as any).organizationId ||
-      next.organization?._id?.toString() ||
-      next.organization?.id?.toString();
+    const { partnerId, organizationId } = this.resolveTenancy(next);
 
     const meta = {
       projectId: next.id,
@@ -1532,19 +1221,7 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     const bustIds = new Set<number>();
     nodes.forEach((n) => n && n.id !== undefined && n.id !== null && bustIds.add(n.id));
     seenNodeIds.forEach((id) => bustIds.add(id));
-    for (const id of bustIds) {
-      try {
-        if (typeof (this.context as any).clearValue === "function") {
-          await (this.context as any).clearValue(`REACTOR_NODE_${id}`);
-        } else if (typeof (this.context as any).removeValue === "function") {
-          await (this.context as any).removeValue(`REACTOR_NODE_${id}`);
-        } else if (typeof this.context.setValue === "function") {
-          await this.context.setValue(`REACTOR_NODE_${id}`, null);
-        }
-      } catch {
-        // cache clear best-effort
-      }
-    }
+    await this.bustNodeCache(bustIds);
 
     // Re-stamp skipped unchanged nodes & edges with the new runId & indexedAt so GC preserves them
     if (seenNodeIds.size > 0) {
@@ -1558,25 +1235,13 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     let edgesGcDeleted = 0;
     // Project-scoped GC: remove nodes/edges for this project with a different runId.
     // Safeguards: only when projectId present; only if persistGraph succeeded; only if not skipGc; never delete 'manual' runId.
-    const canGc =
-      !options?.skipGc &&
-      !!meta.projectId &&
-      persistResult.ok &&
-      isMongoAvailable(ReactorNodeModel.deleteMany);
+    const canGc = !options?.skipGc && !!meta.projectId && persistResult.ok;
 
     if (canGc) {
-      try {
-        const pid = String(meta.projectId);
-        const [nodeDelRes, edgeDelRes] = await Promise.all([
-          ReactorNodeModel.deleteMany({ projectId: pid, runId: { $nin: [runId, 'manual'] } }),
-          ReactorNodeLinkModel.deleteMany({ projectId: pid, runId: { $nin: [runId, 'manual'] } }),
-        ]);
-        nodesGcDeleted = nodeDelRes?.deletedCount || 0;
-        edgesGcDeleted = edgeDelRes?.deletedCount || 0;
-      } catch (gcErr) {
-        this.context.warn(`gcStaleGraph failed: ${(gcErr as Error).message}`);
-        errorCount++;
-      }
+      const gc = await this.gcStale(String(meta.projectId), runId);
+      nodesGcDeleted = gc.nodesGcDeleted;
+      edgesGcDeleted = gc.edgesGcDeleted;
+      if (gc.error) errorCount++;
     } else if (!options?.skipGc && meta.projectId && !persistResult.ok) {
       this.context.error(`GC skipped because persistGraph failed: ${persistResult.error}`);
     } else if (!options?.skipGc && !meta.projectId) {
@@ -1629,103 +1294,6 @@ export abstract class BaseProjectProcessor implements IProjectProcessor {
     return this.process(project) as Promise<IReactorProject>;
   }
 
-  // ---- Attributes ----------------------------------------------------------
-
-  async getAttributes(node: ReactorNode): Promise<ReactorNodeAttributes[]> {
-    const attributes: ReactorNodeAttributes[] = [];
-    const key = this.iconKey();
-    if (key && (SVGS as Record<string, string>)[key]) {
-      attributes.push({
-        id: Hash(`${node.id}_icon-svg`),
-        key: "icon",
-        value: { type: "svg", svg: (SVGS as Record<string, string>)[key] },
-      });
-    }
-    attributes.push(...this.documentAttributes(node));
-    return attributes;
-  }
-
-  /**
-   * Inspectable attributes for document and section nodes, so the explorer can
-   * show what a document is about without opening it.
-   */
-  private documentAttributes(node: ReactorNode): ReactorNodeAttributes[] {
-    const data = node?.data;
-    if (!data || typeof data !== "object") return [];
-
-    const attributes: ReactorNodeAttributes[] = [];
-    const push = (attributeKey: string, value: unknown) => {
-      if (value === undefined || value === null || value === "") return;
-      if (Array.isArray(value) && value.length === 0) return;
-      attributes.push({
-        id: Hash(`${node.id}_${attributeKey}`),
-        key: attributeKey,
-        value: Array.isArray(value) ? value.join(", ") : value,
-      });
-    };
-
-    if (data.kind === "document") {
-      push("title", data.documentTitle);
-      push("format", data.documentFormat);
-      push("tags", data.tags);
-      push("sections", data.documentMetrics?.sections);
-      push("reading-minutes", data.documentMetrics?.readingMinutes);
-      push("code-languages", data.codeLanguages);
-      // Frontmatter ownership fields are the ones people actually look for.
-      ["owner", "team", "status", "reviewed", "updated"].forEach((field) =>
-        push(field, data.frontmatter?.[field])
-      );
-    }
-
-    if (data.kind === "section") {
-      push("anchor", data.slug ? `#${data.slug}` : undefined);
-      push("heading-level", data.level);
-      push("lines", data.lines);
-      push("starts-at-line", data.line);
-    }
-
-    if (data.kind === "topic") push("topic", data.label);
-    if (data.kind === "resource") {
-      push("url", data.url);
-      push("host", data.host);
-    }
-
-    return attributes;
-  }
-
-  // ---- Service plumbing ----------------------------------------------------
-
-  fqn(): string {
-    return `${this.nameSpace}.${this.name}@${this.version}`;
-  }
-
-  onStartup(): Promise<void> {
-    return Promise.resolve();
-  }
-
-  toString?(includeVersion?: boolean): string {
-    return `${this.nameSpace}.${this.name}${includeVersion ? `@${this.version}` : ""}`;
-  }
-
-  getExecutionContext(): Reactory.Server.IReactoryContext {
-    return this.context;
-  }
-
-  setExecutionContext(executionContext: Reactory.Server.IReactoryContext): void {
-    this.context = executionContext;
-  }
-
-  setFileService(fileService: Reactory.Service.IReactoryFileService): void {
-    this.fileService = fileService;
-  }
-
-  setFetchService(fetchService: Reactory.Service.IFetchService): void {
-    this.fetchService = fetchService;
-  }
-
-  setReactorySearchService(searchService: Reactory.Service.ISearchService): void {
-    this.searchService = searchService;
-  }
 }
 
 export default BaseProjectProcessor;

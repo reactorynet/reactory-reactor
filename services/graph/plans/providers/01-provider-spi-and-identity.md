@@ -117,6 +117,10 @@ export interface IReactorProjectSourceSpec {
 External providers implement `supportsProject` as
 `project.source?.scheme === this.sourceScheme()` (P3: no network, no fs).
 
+**Guard to lift:** `ReactorProjectService.catalogProject` currently throws
+`"Project must have a repoPath or repoUrl to be cataloged"` (~L658) — relax to
+`repoPath || repoUrl || source` so registered sources flow down the same path.
+
 ### 4.4 Refactor rules
 
 - Move code verbatim; `BaseProjectProcessor` keeps its public surface so all
@@ -146,4 +150,26 @@ External providers implement `supportsProject` as
 
 ## Agent Notes
 
-_(fill in when done)_
+**Done 2026-09-03.** Implemented as designed with these specifics:
+- `BaseGraphProvider` at `services/ReactorGraphProviders/BaseGraphProvider.ts`; also
+  exports `isMongoAvailable` and `GraphPersistMeta`. Extraction added three shared
+  helpers used by both pipelines: `gcStale`, `resolveTenancy`, `bustNodeCache`
+  (verbatim logic lifted out of `BaseProjectProcessor.process`).
+- `loadPreviousNodes(project, types?)` — `undefined` keeps the FILE+DOCUMENT default,
+  `null` (external default via `trackedNodeTypes()`) loads all types.
+- `BaseExternalGraphProvider.getChildrenForNode` default = persisted children
+  (Mongo `parentId` query), name-sorted, paged, cached.
+- External `process()` persists the **root first**, then one persist per discovered
+  batch; a discovery error records `INCOMPLETE`, skips GC, and does **not** throw
+  (matches fs pipeline resilience; job-level failure surfacing is session 07).
+- `catalogProject` lookup key for source-only projects = fqn.
+- `source: 1` added to the three Mongo projections in `ReactorProjectService`.
+- Tests: `services/ReactorGraphProviders/ExternalProvider.test.ts` (18 tests) with
+  `FakeTicketProvider`.
+- Full module verification (2026-09-03): 97 suites — 93 pass / 1231 tests pass; the
+  4 failing suites (7 tests) fail **identically at the pre-session baseline**
+  (verified via stash-run) and are out of scope: `GraphMacros.unit` (a 7th macro,
+  `deletePerspective`, was added without updating the 6-macro assertions),
+  `SystemGraphManagerTraversal.unit` (`ReactorNodeModel.find(...).select` mock gap in
+  `findPath` tests), `StreamingTransportManager` (send-failure rejection expectation),
+  `ImageToolProviderResolution` (image macro not registered). Pre-existing — not fixed here.

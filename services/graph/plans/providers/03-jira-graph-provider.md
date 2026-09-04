@@ -140,4 +140,26 @@ labels (+ comments when opted in). Index name `reactor_graph_<ns>_<name>` as tod
 
 ## Agent Notes
 
-_(fill in when done)_
+**Done 2026-09-03.** As designed, with these deviations/specifics:
+- **reactory-atlassian** (no local .git — gitignored by server root): `JiraIssue` gained
+  `issueLinks` / `parent` / `sprints` (+ `JiraIssueLink`, `JiraSprintRef` types);
+  `mapJiraIssue` maps them (sprint custom field detected defensively — any
+  `customfield_*` holding sprint-shaped objects); `searchIssues` accepts
+  `{ extraFields, nextPageToken }` and returns `{ nextPageToken, isLast }`
+  (the `/rest/api/3/search/jql` endpoint pages by token, not startAt). Also fixed a
+  stale test expectation (`labels`/`components` missing from the expected field list —
+  pre-existing red test in that module).
+- **Lazy browse deviation:** live-API `getChildrenForNode` (§4.6) deferred — the
+  external-provider default (persisted children) serves the explorer after a catalog
+  run. Live browsing can land with session 07's ops work if wanted.
+- **Board membership:** ticket→board PART_OF derived from the sprint field's boardId
+  (zero extra calls); backlog-only tickets carry no board edge (per-board JQL would be
+  needed — noted, not implemented).
+- **Sprint upsert trick:** sprint refs on issues emit stub SPRINT nodes so PART_OF
+  edges never dangle; the board phase upserts the full node over the same
+  deterministic id. A run-level full-ticket id set stops a late stub from overwriting
+  a full TICKET node.
+- Registered in `ReactorProjectService` (`processors["jira"]`) and `services/index.ts`
+  (DI, so `providerId` dispatch resolves). No `jira` SVG exists — `iconKey` deferred.
+- Tests: `Jira/JiraGraphProvider.test.ts` (13) with a mocked reader; atlassian mapping
+  test added to `AtlassianServices.unit.test.ts`.

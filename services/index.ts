@@ -22,6 +22,7 @@ import {
   FileProjectProcessor,
   MarkdownProjectProcessor
 } from './SystemGraphProjectProviders';
+import JiraGraphProvider from "./ReactorGraphProviders/Jira/JiraGraphProvider";
 import DocumentChunkingService from "./reactor/DocumentChunkingService";
 import { StreamingSessionManager } from "./reactor/StreamingSessionManager";
 import { StreamingTransportManager } from "./reactor/StreamingTransportManager";
@@ -53,6 +54,7 @@ export default [
   PythonProjectProcessor,
   BackStageProjectProcessor,
   FileProjectProcessor,
+  JiraGraphProvider,
   DocumentChunkingService,
   MCPRegistryService,
   StreamingSessionManager,

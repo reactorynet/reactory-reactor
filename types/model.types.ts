@@ -36,6 +36,31 @@ export enum ReactorNodeType {
    * host, a ticket, a mailto address.
    */
   RESOURCE = 'RESOURCE',
+  /**
+   * A work item from an external tracker (Jira issue, story, bug, epic).
+   * `data.issueType` disambiguates the concrete kind.
+   */
+  TICKET = 'TICKET',
+  /** An agile board (scrum / kanban) from an external tracker. */
+  BOARD = 'BOARD',
+  /** A sprint / iteration on a BOARD. */
+  SPRINT = 'SPRINT',
+  /**
+   * A person referenced by external entities (an assignee, an owner).
+   * Source-scoped and shared, like TOPIC - two tickets assigned to the same
+   * person attach to one node. Carries display identity only, never emails.
+   */
+  PERSON = 'PERSON',
+  /** A database schema / namespace inside a DATASTORE. */
+  SCHEMA = 'SCHEMA',
+  /** A database table. */
+  TABLE = 'TABLE',
+  /** A database view. */
+  VIEW = 'VIEW',
+  /** A database column inside a TABLE or VIEW. */
+  COLUMN = 'COLUMN',
+  /** A stored procedure / function / routine inside a SCHEMA. */
+  PROCEDURE = 'PROCEDURE',
 }
 
 
@@ -96,6 +121,27 @@ export enum ReactorLinkType {
    * responses from `parentId` — never persisted to reactor_node_links.
    */
   CONTAINS = 'CONTAINS',
+  /** A blocks B (an external tracker "Blocks" issue link). */
+  BLOCKS = 'BLOCKS',
+  /** A duplicates B (an external tracker "Duplicate"/"Cloners" issue link). */
+  DUPLICATES = 'DUPLICATES',
+  /**
+   * A relates to B - the catch-all for external tracker issue links whose type
+   * has no dedicated member; `title` carries the raw link-type name.
+   */
+  RELATES = 'RELATES',
+  /**
+   * A is a member of B (ticket → sprint / epic / board). Distinct from
+   * CONTAINS, which stays synthesized-from-parentId only (invariant I8).
+   */
+  PART_OF = 'PART_OF',
+  /** A is assigned to B (ticket → PERSON). */
+  ASSIGNED_TO = 'ASSIGNED_TO',
+  /**
+   * A foreign-key relationship: column → referenced column, and table →
+   * referenced table. `data.constraintName` carries the constraint.
+   */
+  FOREIGN_KEY = 'FOREIGN_KEY',
 }
 
 export interface ReactorNodeLink {

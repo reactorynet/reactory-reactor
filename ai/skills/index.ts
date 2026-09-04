@@ -77,6 +77,22 @@ export const ReactorSkills: ISkillDefinition[] = [
       '@readSkill(id: "reactory.kubernetesDeployment@1.0.0")',
     ],
   },
+  {
+    id: 'reactory.maestroMobileTesting@1.0.0',
+    name: 'maestroMobileTesting',
+    nameSpace: 'reactory',
+    version: '1.0.0',
+    description:
+      'Comprehensive guide and operational workflows for driving declarative, cross-platform mobile UI automation and end-to-end regression testing on Android emulators and iOS simulators using Maestro.',
+    filePath: require.resolve('./mobile-automation/maestro-testing.md'),
+    tags: ['mobile', 'android', 'ios', 'maestro', 'testing', 'automation', 'e2e', 'playwright-mobile', 'emulator', 'simulator'],
+    roles: ['USER', 'DEVELOPER', 'ADMIN'],
+    examples: [
+      '@searchSkills(query: "maestro")',
+      '@searchSkills(query: "mobile testing")',
+      '@readSkill(id: "reactory.maestroMobileTesting@1.0.0")',
+    ],
+  },
 ];
 
 export default ReactorSkills;

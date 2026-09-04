@@ -74,4 +74,19 @@ Each with the same doc-comment style as `DOCUMENTS`/`MENTIONS`.
 
 ## Agent Notes
 
-_(fill in when done)_
+**Done 2026-09-03.**
+- Server: 9 node types + 6 link types added to `types/model.types.ts` (doc-commented)
+  and mirrored in `graphql/schema/ReactorSystemGraph/types.graphql` (fragment parse
+  verified). Additive only.
+- Drift guard: `services/graph/EnumParity.test.ts` asserts the GraphQL enums equal
+  the TS enums exactly (3 tests).
+- Client (`reactory-pwa-client`): `GraphExplorer/types.ts` unions +
+  `GraphExplorer/constants.ts` NODE color/icon/radius maps and LINK color map;
+  `PART_OF`/`ASSIGNED_TO`/`RELATES` added to `DASHED_LINK_TYPES` (annotative).
+  Palette: tracker family = status-LED amber/indigo/green/pink; DB family = cyan
+  DATASTORE lineage. Both 2D and 3D renderers consume these shared maps with
+  `?? UNKNOWN` fallback; `NeuralGraphViewer` reuses the same engine — no second map.
+  Parity is compiler-enforced (`Record<GraphNodeType, ...>`): scoped tsc exit 0,
+  GraphExplorer suites 62/62, neuralGraph 16/16.
+- Visual check of a hand-inserted TICKET node left to manual verification (needs a
+  running client).

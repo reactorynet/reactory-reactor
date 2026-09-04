@@ -34,6 +34,7 @@ import {
   MarkdownProjectProcessor,
   FileProjectProcessor,
 } from "./SystemGraphProjectProviders";
+import JiraGraphProvider from "./ReactorGraphProviders/Jira/JiraGraphProvider";
 import { nodeId, projectLogicalKey } from "./graph/GraphIdentity";
 import { runProcessorsForProject } from "./graph/runProcessorsForProject";
 import logger from "@reactory/server-core/logging";
@@ -79,6 +80,8 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       context
     );
     this.processors["markdown"] = new MarkdownProjectProcessor(props, context);
+    // External source providers (registered, never fs-detected — invariant P3)
+    this.processors["jira"] = new JiraGraphProvider(props, context);
     this.processors["file"] = new FileProjectProcessor(props, context);
   }
 
@@ -277,6 +280,17 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
   ): Promise<IProjectProcessorConfig[]> {
     const processors: IProjectProcessorConfig[] = [];
 
+    // Registered (non-filesystem) sources are configured, not detected
+    // (invariant P3): when a project has no repoPath its explicitly configured
+    // processors are authoritative, and filesystem probes are never run
+    // against it.
+    if (!project?.repoPath) {
+      const configured = (project?.processors || []).filter(
+        (config) => config && (config.processor || config.id)
+      );
+      if (configured.length > 0) return configured;
+    }
+
     for (const processorKey of Object.keys(this.processors)) {
       // The generic file walker supports every folder, so it would always match.
       // It is only useful when nothing else claimed the project - including it
@@ -284,7 +298,18 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       // ownership of nodes that processor's analyzers should expand.
       if (processorKey === ReactorProjectServiceImpl.FALLBACK_PROCESSOR) continue;
       const processor = this.processors[processorKey];
-      if (processor.supportsProject(project)) {
+      // supportsProject must be cheap and side-effect free; a probe that throws
+      // (e.g. an fs probe against a repoPath-less registered source) is treated
+      // as "does not support".
+      let supported = false;
+      try {
+        supported = processor.supportsProject(project);
+      } catch (probeErr) {
+        this.context.warn(
+          `detectProjectProcessors: probe ${processorKey} threw for project ${project?.name}: ${(probeErr as Error).message}`
+        );
+      }
+      if (supported) {
         processors.push({
           id: processorKey,
           processor: `${processor.nameSpace}.${processor.name}@${processor.version}`,
@@ -365,6 +390,7 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       version: 1,
       repoPath: 1,
       repoUrl: 1,
+      source: 1,
       projectTypes: 1,
       lastSync: 1,
       indexingJobId: 1,
@@ -429,6 +455,7 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       version: 1,
       repoPath: 1,
       repoUrl: 1,
+      source: 1,
       projectTypes: 1,
       lastSync: 1,
       description: 1,
@@ -655,9 +682,9 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
   async catalogProject(
     projectSpec: Partial<IReactorProject>
   ): Promise<Partial<IReactorProject>> {
-    if (!projectSpec.repoPath && !projectSpec.repoUrl) {
+    if (!projectSpec.repoPath && !projectSpec.repoUrl && !projectSpec.source) {
       throw new Error(
-        "Project must have a repoPath or repoUrl to be cataloged"
+        "Project must have a repoPath, repoUrl or source to be cataloged"
       );
     }
 
@@ -822,8 +849,15 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
     };
 
     let project: Partial<IReactorProject> = null;
-    // Prefer repoPath for lookup, else repoUrl
-    const lookupKey = projectSpec.repoPath || projectSpec.repoUrl;
+    // Prefer repoPath for lookup, else repoUrl; registered (source-only)
+    // projects are looked up by fqn.
+    const lookupKey =
+      projectSpec.repoPath ||
+      projectSpec.repoUrl ||
+      projectSpec.fqn ||
+      (projectSpec.nameSpace && projectSpec.name
+        ? `${projectSpec.nameSpace}.${projectSpec.name}@${projectSpec.version || "1.0.0"}`
+        : undefined);
     project = await this.getProject(lookupKey);
 
     if (project) {
@@ -910,8 +944,8 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
     project: Partial<IReactorProject>,
     opts?: any
   ): Promise<Partial<IReactorProject>> {
-    if (!project || !project.repoPath) {
-      throw new Error("Project must have a repoPath to be processed");
+    if (!project || (!project.repoPath && !project.source)) {
+      throw new Error("Project must have a repoPath or source to be processed");
     }
 
     const { project: processedProject } = await runProcessorsForProject({
@@ -966,6 +1000,7 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       version: 1,
       repoPath: 1,
       repoUrl: 1,
+      source: 1,
       projectTypes: 1,
       lastSync: 1,
       description: 1,

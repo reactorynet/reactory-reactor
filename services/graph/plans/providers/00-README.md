@@ -53,7 +53,10 @@ The payoff of this program is the *joined* graph:
    config). → Sessions 01 & 07.
 4. **Vocabulary.** No TICKET/BOARD/SPRINT/TABLE/COLUMN node types, no BLOCKS/FOREIGN_KEY
    link types, and the client styling maps don't know them. → Session 02.
-5. **No cross-domain edges.** A doc that says `WR-1234`, a RESOURCE node holding a
+5. **No search-index discovery.** Nothing at any layer enumerates indexes
+   (`ISearchProvider` lacks `listIndexes`; the `searchContent` macro falls back to
+   hard-coded BookTutor indices), and graph GC never deletes searchables. → Session 08.
+6. **No cross-domain edges.** A doc that says `WR-1234`, a RESOURCE node holding a
    `…/browse/WR-1234` URL, and the ticket itself are three unconnected things. → Session 04.
 
 ---
@@ -82,12 +85,13 @@ All of I1–I9 from `../00-README.md` still apply. This program adds:
 04 cross-domain ticket linking ── after 03 ───────┤
 05 database provider ── after 01+02 (∥ with 03) ──┤
 06 code↔db linking ── after 05 (optional/P4) ─────┤
-07 orchestration + registration UX ── after 03/05 ┘
+07 orchestration + registration UX ── after 03/05 ─┤
+08 search index discovery ── independent ─────────┘
 ```
 
 | Wave | Sessions | Notes |
 |------|----------|-------|
-| A | **01**, **02** | 01 is the enabler; 02 is independent (touches types + client) |
+| A | **01**, **02**, **08** | 01 is the enabler; 02 and 08 are independent (08 spans reactory-core) |
 | B | **03**, **05** | parallel — different external domains, same SPI |
 | C | **04**, **07** | 04 needs ticket nodes; 07 needs at least one real provider |
 | D | **06** | optional, precision-sensitive |
@@ -96,13 +100,14 @@ All of I1–I9 from `../00-README.md` still apply. This program adds:
 
 | ID | File | Priority | Est. | Status | Owner |
 |----|------|----------|------|--------|-------|
-| 01 | `01-provider-spi-and-identity.md` | P0 | L | pending | |
-| 02 | `02-graph-vocabulary-and-client-parity.md` | P0 | S | pending | |
-| 03 | `03-jira-graph-provider.md` | P1 | L | pending | |
+| 01 | `01-provider-spi-and-identity.md` | P0 | L | done | |
+| 02 | `02-graph-vocabulary-and-client-parity.md` | P0 | S | done | |
+| 03 | `03-jira-graph-provider.md` | P1 | L | done | |
 | 04 | `04-cross-domain-ticket-linking.md` | P1 | M | pending | |
 | 05 | `05-database-graph-provider.md` | P1 | L | pending | |
 | 06 | `06-code-db-linking.md` | P4 | M | pending | |
 | 07 | `07-sync-orchestration-and-registration.md` | P2 | M | pending | |
+| 08 | `08-search-index-discovery.md` | P1 | M | pending | |
 
 Status values: `pending` | `in_progress` | `blocked` | `done` | `wontfix`
 
@@ -129,3 +134,4 @@ Same as `../00-README.md` (`NODE_OPTIONS=--max-old-space-size=6144 npx jest <pat
 - [ ] A registered database connection produces a DATASTORE subgraph (schemas → tables/views/procs → columns) with FOREIGN_KEY edges, no secrets persisted.
 - [ ] External syncs run through the existing async job/workflow rail with status, metrics and scheduled re-sync.
 - [ ] GraphExplorer renders every new node/link type with dedicated styling (client repo PR).
+- [ ] Agents can **discover** searchable indexes (`listSearchIndexes` → curated, tenant-filtered catalog) instead of guessing; `searchContent` has no hard-coded index fallback; graph GC removes stale searchables.
