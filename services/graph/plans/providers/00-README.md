@@ -103,11 +103,11 @@ All of I1–I9 from `../00-README.md` still apply. This program adds:
 | 01 | `01-provider-spi-and-identity.md` | P0 | L | done | |
 | 02 | `02-graph-vocabulary-and-client-parity.md` | P0 | S | done | |
 | 03 | `03-jira-graph-provider.md` | P1 | L | done | |
-| 04 | `04-cross-domain-ticket-linking.md` | P1 | M | pending | |
-| 05 | `05-database-graph-provider.md` | P1 | L | pending | |
+| 04 | `04-cross-domain-ticket-linking.md` | P1 | M | done | |
+| 05 | `05-database-graph-provider.md` | P1 | L | done | |
 | 06 | `06-code-db-linking.md` | P4 | M | pending | |
-| 07 | `07-sync-orchestration-and-registration.md` | P2 | M | pending | |
-| 08 | `08-search-index-discovery.md` | P1 | M | pending | |
+| 07 | `07-sync-orchestration-and-registration.md` | P2 | M | done | |
+| 08 | `08-search-index-discovery.md` | P1 | M | done | |
 
 Status values: `pending` | `in_progress` | `blocked` | `done` | `wontfix`
 

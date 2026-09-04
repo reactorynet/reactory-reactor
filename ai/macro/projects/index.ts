@@ -7,6 +7,7 @@ import CatalogProjectMacroDefinition from "./CatalogProject.macro";
 import GetProjectDocumentationMacroDefinition from "./GetProjectDocumentation.macro";
 import GetProjectMetricsMacroDefinition from "./GetProjectMetrics.macro";
 import SearchProjectMacroDefinition from "./SearchProject.macro";
+import ExternalSourcesMacroDefinitions from "./ExternalSources.macro";
 
 export default [
   ListProjectsMacroDefinition,
@@ -18,4 +19,5 @@ export default [
   GetProjectDocumentationMacroDefinition,
   GetProjectMetricsMacroDefinition,
   SearchProjectMacroDefinition,
+  ...ExternalSourcesMacroDefinitions,
 ]; 

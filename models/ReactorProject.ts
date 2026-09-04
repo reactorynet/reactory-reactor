@@ -126,6 +126,7 @@ const ReactorProjectSchema: Schema = new Schema({
     sourceKey: String,
     settingKey: String,
     options: Schema.Types.Mixed,
+    syncSchedule: String,
   }, { _id: false }),
   projectTypes: [String], 
   lastSync: Date,

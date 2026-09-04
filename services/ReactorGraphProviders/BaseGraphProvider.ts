@@ -340,6 +340,24 @@ export abstract class BaseGraphProvider {
   }
 
   /**
+   * Returns the subset of `ids` that exist as persisted nodes. Used by linkers
+   * to stamp `data.resolved` on cross-domain edges whose deterministic target
+   * may not have been synced yet (Providers Session 04).
+   */
+  protected async loadExistingNodeIds(ids: number[]): Promise<Set<number>> {
+    if (!ids.length || !isMongoAvailable(ReactorNodeModel.find)) return new Set();
+    try {
+      const rows = (await ReactorNodeModel.find({ id: { $in: ids } })
+        .select({ id: 1 })
+        .lean()) as unknown as { id: number }[];
+      return new Set((rows || []).map((r) => r.id));
+    } catch (err) {
+      this.context.warn(`loadExistingNodeIds failed: ${(err as Error).message}`);
+      return new Set();
+    }
+  }
+
+  /**
    * Bulk-updates runId and indexedAt for skipped unchanged nodes so GC does not delete them.
    */
   protected async touchNodes(
@@ -385,24 +403,105 @@ export abstract class BaseGraphProvider {
    */
   protected async gcStale(
     projectId: string,
-    runId: string
-  ): Promise<{ nodesGcDeleted: number; edgesGcDeleted: number; error?: boolean }> {
+    runId: string,
+    opts?: {
+      /**
+       * When set, search documents of GC'd nodes are removed from this index
+       * (capability-guarded, best-effort) so deleted artifacts stop surfacing
+       * as stale hits (Providers Session 08). Search doc ids are logical keys:
+       * reconstructed for FILE/DOCUMENT nodes from projectFqn + relativePath,
+       * or read from `data.searchId` where a provider stamped it.
+       */
+      searchIndexName?: string;
+    }
+  ): Promise<{ nodesGcDeleted: number; edgesGcDeleted: number; searchablesDeleted?: number; error?: boolean }> {
     if (!projectId || !isMongoAvailable(ReactorNodeModel.deleteMany)) {
       return { nodesGcDeleted: 0, edgesGcDeleted: 0 };
     }
     try {
       const pid = String(projectId);
+      const gcFilter = { projectId: pid, runId: { $nin: [runId, 'manual'] } };
+
+      // Collect the search-document ids of the doomed nodes BEFORE deleting.
+      let searchableIds: string[] = [];
+      if (opts?.searchIndexName && isMongoAvailable(ReactorNodeModel.find)) {
+        try {
+          const doomed = (await ReactorNodeModel.find(gcFilter)
+            .select({ id: 1, type: 1, projectFqn: 1, data: 1 })
+            .lean()) as unknown as Partial<ReactorNode>[];
+          searchableIds = (doomed || [])
+            .map((n) => this.searchableIdOf(n))
+            .filter((id): id is string => !!id);
+        } catch (collectErr) {
+          this.context.warn(
+            `gcStale: searchable collection failed: ${(collectErr as Error).message}`
+          );
+        }
+      }
+
       const [nodeDelRes, edgeDelRes] = await Promise.all([
-        ReactorNodeModel.deleteMany({ projectId: pid, runId: { $nin: [runId, 'manual'] } }),
-        ReactorNodeLinkModel.deleteMany({ projectId: pid, runId: { $nin: [runId, 'manual'] } }),
+        ReactorNodeModel.deleteMany(gcFilter),
+        ReactorNodeLinkModel.deleteMany(gcFilter),
       ]);
+
+      let searchablesDeleted = 0;
+      if (opts?.searchIndexName && searchableIds.length > 0) {
+        searchablesDeleted = await this.deleteSearchables(opts.searchIndexName, searchableIds);
+      }
+
       return {
         nodesGcDeleted: nodeDelRes?.deletedCount || 0,
         edgesGcDeleted: edgeDelRes?.deletedCount || 0,
+        searchablesDeleted,
       };
     } catch (gcErr) {
       this.context.warn(`gcStaleGraph failed: ${(gcErr as Error).message}`);
       return { nodesGcDeleted: 0, edgesGcDeleted: 0, error: true };
+    }
+  }
+
+  /**
+   * The search-document id (logical key) of a node, when reconstructible:
+   * providers stamp `data.searchId`; FILE/DOCUMENT nodes derive it from
+   * projectFqn + relativePath (the id `buildSearchable` writes).
+   */
+  protected searchableIdOf(node: Partial<ReactorNode>): string | null {
+    const stamped = node?.data?.searchId;
+    if (stamped) return String(stamped);
+    const fqn = (node as any)?.projectFqn || node?.data?.projectFqn;
+    const rel = node?.data?.relativePath;
+    if (
+      fqn &&
+      rel &&
+      (node.type === ReactorNodeType.FILE || node.type === ReactorNodeType.DOCUMENT)
+    ) {
+      return `${fqn}::${rel}`;
+    }
+    return null;
+  }
+
+  /** Capability-guarded, best-effort search-document deletion. */
+  protected async deleteSearchables(indexName: string, ids: string[]): Promise<number> {
+    if (!ids.length) return 0;
+    const search: any =
+      this.searchService ||
+      this.context.getService<Reactory.Service.ISearchService>(
+        "core.ReactorySearchService@1.0.0"
+      );
+    if (!search || typeof search.deleteDocuments !== "function") {
+      this.context.warn(
+        `deleteSearchables: search backend does not support document deletion — ${ids.length} stale searchable(s) remain in ${indexName}`
+      );
+      return 0;
+    }
+    try {
+      await search.deleteDocuments(indexName, ids);
+      return ids.length;
+    } catch (err) {
+      this.context.warn(
+        `deleteSearchables failed for ${indexName}: ${(err as Error).message}`
+      );
+      return 0;
     }
   }
 

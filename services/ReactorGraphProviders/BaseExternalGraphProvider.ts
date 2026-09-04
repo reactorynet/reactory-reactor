@@ -304,7 +304,9 @@ export abstract class BaseExternalGraphProvider
     const canGc =
       !options?.skipGc && !!meta.projectId && persistOk && !discoveryError;
     if (canGc) {
-      const gc = await this.gcStale(String(meta.projectId), runId);
+      const gc = await this.gcStale(String(meta.projectId), runId, {
+        searchIndexName: `reactor_graph_${next.nameSpace}_${next.name}`,
+      });
       nodesGcDeleted = gc.nodesGcDeleted;
       edgesGcDeleted = gc.edgesGcDeleted;
       if (gc.error) errorCount++;
@@ -336,6 +338,8 @@ export abstract class BaseExternalGraphProvider
       durationMs,
       errors: errorCount,
       byLanguage: {},
+      sourceScheme: this.sourceScheme(),
+      sourceKey: this.sourceKeyFor(next),
     };
     this.lastMetrics = metrics;
 

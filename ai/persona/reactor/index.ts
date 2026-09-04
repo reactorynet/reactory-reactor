@@ -46,6 +46,11 @@ const REACTOR_TOOL_INCLUDES = [
   'catalogProject',
   'deleteProject',
   'searchProject',
+  'listExternalSources',
+  'registerExternalSource',
+  'syncExternalSource',
+  'listSearchIndexes',
+  'getIndexStats',
 
   'deletePerspective',
   'searchGraph',

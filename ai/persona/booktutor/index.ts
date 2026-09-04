@@ -1,5 +1,6 @@
 import { ingest } from "@reactory/server-core/utils/io"
 import path from "path";
+import { registerModuleSearchIndexes } from '@reactory/server-modules/reactory-reactor/services/graph/searchIndexCatalog';
 import appearance from './appearance';
 import { IAIPersona, IAIPersonaResource } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { FeatureType } from "@reactorynet/reactory-core";
@@ -65,6 +66,8 @@ const BOOKTUTOR_TOOL_INCLUDES = [
   'exploreGraph',
   'graphLinks',
   'searchContent',
+  'listSearchIndexes',
+  'getIndexStats',
   // Domain Specific Macros
   ...BOOKTUTOR_MACRO_TOOLS,
   'get_book_page',
@@ -75,6 +78,14 @@ const BOOKTUTOR_TOOL_INCLUDES = [
 
 const APP_DATA_ROOT = process.env.APP_DATA_ROOT || process.env.REACTORY_DATA
 const BOOKTUTOR_DATA_ROOT = path.join(APP_DATA_ROOT, 'guideai/booktutor');
+
+// Make BookTutor's indexes discoverable in the tenant-safe search catalog
+// (Providers Session 08). Registration is idempotent by index name.
+registerModuleSearchIndexes([
+  { index: "book-catalog", title: "BookTutor catalog", description: "Book titles, authors and subjects available to the BookTutor agent" },
+  { index: "book-chapters", title: "BookTutor chapters", description: "Full chapter content of the BookTutor library" },
+  { index: "book-glossary", title: "BookTutor glossary", description: "Glossary terms and definitions from the BookTutor library" },
+]);
 
 const BOOKTUTOR_RESOURCES: IAIPersonaResource[] = [
   {
@@ -232,6 +243,9 @@ export const BookTutorPersona: IAIPersona = {
     apiKey: process.env.GOOGLE_AI_STUDIO_API_KEY,
     apiBaseURL: process.env.GOOGLE_AI_API_URL, 
     project: process.env.GOOGLE_AI_STUDIO_PROJECT_ID,
+    // BookTutor's well-known indexes — searchContent's default scope for this
+    // persona (the global book-* fallback was removed in Providers Session 08).
+    defaultSearchIndexes: ["book-catalog", "book-chapters", "book-glossary"],
   },
   tools: [...BOOKTUTOR_TOOLS],
   // @ts-ignore

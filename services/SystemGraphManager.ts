@@ -11,6 +11,16 @@ import { DefaultReactorNodeCategories, ReactorNodeModel } from '../models/Reacto
 import { ReactorNodeLinkModel } from '../models/ReactorNodeLink';
 import { ReactorProjectModel } from '../models/ReactorProject';
 import { linkId, nodeId, projectLogicalKey } from './graph/GraphIdentity';
+import {
+  SearchIndexCatalogEntry,
+  getModuleSearchIndexes,
+} from './graph/searchIndexCatalog';
+import {
+  buildTicketSourceIndex,
+  jiraProjectNodeIdFor,
+  parseJiraUrl,
+  ticketNodeIdFor,
+} from './graph/ticketLinking';
 import { runProcessorsForProject } from './graph/runProcessorsForProject';
 import { service } from "@reactory/server-core/application/decorators";
 
@@ -1070,6 +1080,238 @@ class SystemGraphManager implements ISystemGraphManager {
     }
 
     return { createdLinks, totalExternals: externalNodes.length };
+  }
+
+  /**
+   * The tenant-safe search-index catalog (Providers Session 08): everything the
+   * caller may search, with per-index descriptions an agent can choose by.
+   * Entries come from (a) ReactorProject records — optionally tenant-filtered by
+   * partnerId with safe fallback for records without a client — and (b) the
+   * module registry (`registerModuleSearchIndexes`). The raw backend listing
+   * only annotates counts/existence and NEVER adds entries (multi-tenant
+   * backends share the engine).
+   */
+  async getSearchIndexCatalog(
+    opts: { partnerId?: string } = {}
+  ): Promise<SearchIndexCatalogEntry[]> {
+    const entries: SearchIndexCatalogEntry[] = [];
+
+    if (isMongoAvailable(ReactorProjectModel.find)) {
+      try {
+        const projects = (await ReactorProjectModel.find({})
+          .select({ _id: 1, name: 1, nameSpace: 1, version: 1, fqn: 1, description: 1, lastSync: 1, client: 1, source: 1, projectStatus: 1 })
+          .lean()) as any[];
+        for (const p of projects || []) {
+          if (!p?.name || !p?.nameSpace) continue;
+          if (opts.partnerId && p.client && String(p.client) !== String(opts.partnerId)) continue;
+          const scheme = p?.source?.scheme;
+          entries.push({
+            index: `reactor_graph_${p.nameSpace}_${p.name}`,
+            kind: 'project',
+            title: p.fqn || `${p.nameSpace}.${p.name}@${p.version || '1.0.0'}`,
+            description:
+              p.description ||
+              (scheme
+                ? `Graphed content of the registered ${scheme} source ${p.name}`
+                : `Indexed file contents of project ${p.name}`),
+            lastSync: p.lastSync,
+          });
+        }
+      } catch (err) {
+        this.context.warn(`getSearchIndexCatalog: project query failed: ${(err as Error).message}`);
+      }
+    }
+
+    for (const moduleEntry of getModuleSearchIndexes()) {
+      if (!entries.some((e) => e.index === moduleEntry.index)) {
+        entries.push({ ...moduleEntry });
+      }
+    }
+
+    // Annotate (never extend) from the backend listing, when the capability exists.
+    try {
+      const anySearch: any = this.searchService;
+      if (anySearch && typeof anySearch.listIndexes === 'function') {
+        const listing = await anySearch.listIndexes();
+        const byName = new Map<string, any>((listing || []).map((i: any) => [i.name, i]));
+        for (const entry of entries) {
+          const info = byName.get(entry.index);
+          entry.exists = !!info;
+          if (info?.documentCount !== undefined) entry.documentCount = info.documentCount;
+        }
+      }
+    } catch (err) {
+      this.context.warn(`getSearchIndexCatalog: backend annotation skipped: ${(err as Error).message}`);
+    }
+
+    return entries.sort((a, b) => a.index.localeCompare(b.index));
+  }
+
+  /**
+   * Cross-domain ticket linking (Providers Session 04): connects the code +
+   * documentation graph to catalogued Jira ticket nodes without fetching
+   * anything from Jira (targets are computed from references — P1).
+   *
+   *  1. RESOURCE nodes whose URL is a Jira browse/issue URL on a **registered**
+   *     site gain a REFERENCE edge to the ticket (or Jira project) node.
+   *  2. Repo projects whose `tasksUrl` points at a registered Jira project gain
+   *     a REFERENCE edge from their graph root to the Jira project node.
+   *
+   * Ticket-key mentions inside documents are linked during `process()` (the
+   * mention pass in BaseProjectProcessor) — this method covers the persisted
+   * artifacts a catalog run does not re-analyse. Edges are idempotent upserts
+   * stamped `runId: 'manual'` on insert (GC-exempt, session 12 semantics) and
+   * carry `data.resolved` — false when the target ticket has not been synced
+   * yet; a later Jira sync heals them (deterministic ids).
+   */
+  async linkTicketMentions(
+    projectId?: string
+  ): Promise<{ createdLinks: number; resourcesScanned: number; projectsLinked: number }> {
+    const empty = { createdLinks: 0, resourcesScanned: 0, projectsLinked: 0 };
+    if (!isMongoAvailable(ReactorNodeModel.find)) return empty;
+
+    const index = await buildTicketSourceIndex();
+    if (index.size === 0) return empty;
+    const sitesByHost = new Map<string, true>();
+    for (const src of index.values()) sitesByHost.set(src.site.toLowerCase(), true);
+
+    const now = new Date();
+    const ops: any[] = [];
+    const pendingEdges: Array<{ id: number; edge: any }> = [];
+    const targetIds = new Set<number>();
+
+    const queueEdge = (
+      source: number,
+      target: number,
+      title: string,
+      description: string,
+      edgeProjectId: string | undefined,
+      data: Record<string, any>
+    ) => {
+      const id = linkId(source, target, ReactorLinkType.REFERENCE);
+      targetIds.add(target);
+      pendingEdges.push({
+        id,
+        edge: {
+          id,
+          source,
+          target,
+          type: ReactorLinkType.REFERENCE,
+          types: [ReactorLinkType.REFERENCE],
+          title,
+          description,
+          projectId: edgeProjectId,
+          updated: now,
+          data: { crossDomain: true, ...data },
+        },
+      });
+    };
+
+    // 1. RESOURCE nodes with Jira URLs on registered sites.
+    let resources: ReactorNode[] = [];
+    try {
+      const query: any = { type: ReactorNodeType.RESOURCE };
+      if (projectId) query.projectId = String(projectId);
+      resources = (await ReactorNodeModel.find(query).lean()) as unknown as ReactorNode[];
+    } catch (err) {
+      this.context.warn(`linkTicketMentions: resource query failed: ${(err as Error).message}`);
+      return empty;
+    }
+
+    for (const resource of resources) {
+      const url = resource?.data?.url;
+      if (!url) continue;
+      const parsed = parseJiraUrl(String(url));
+      if (!parsed || !sitesByHost.has(parsed.host.toLowerCase())) continue;
+      const source = parsed.projectKey ? index.get(parsed.projectKey) : undefined;
+      if (!source) continue; // registered site but unregistered project key — no edge (I4 gate)
+      if (parsed.ticketKey) {
+        queueEdge(
+          resource.id,
+          ticketNodeIdFor(source.site, parsed.ticketKey),
+          parsed.ticketKey,
+          `Resource URL references ${parsed.ticketKey}`,
+          resource.projectId ? String(resource.projectId) : undefined,
+          { ticketKey: parsed.ticketKey, via: 'resource-url' }
+        );
+      } else {
+        queueEdge(
+          resource.id,
+          jiraProjectNodeIdFor(source.site, parsed.projectKey!),
+          parsed.projectKey!,
+          `Resource URL references Jira project ${parsed.projectKey}`,
+          resource.projectId ? String(resource.projectId) : undefined,
+          { jiraProjectKey: parsed.projectKey, via: 'resource-url' }
+        );
+      }
+    }
+
+    // 2. Repo projects whose tasksUrl points at a registered Jira project.
+    let projectsLinked = 0;
+    try {
+      const query: any = { tasksUrl: { $exists: true, $nin: [null, ''] } };
+      if (projectId) {
+        query.$or = [{ _id: projectId }, { id: projectId }];
+      }
+      const projects = (await ReactorProjectModel.find(query)
+        .select({ _id: 1, name: 1, tasksUrl: 1, graphRootId: 1, nameSpace: 1, version: 1 })
+        .lean()) as any[];
+      for (const project of projects || []) {
+        const parsed = parseJiraUrl(String(project.tasksUrl || ''));
+        if (!parsed?.projectKey || !sitesByHost.has(parsed.host.toLowerCase())) continue;
+        const source = index.get(parsed.projectKey);
+        if (!source) continue;
+        const rootId = project.graphRootId || nodeId(projectLogicalKey(project));
+        queueEdge(
+          rootId,
+          jiraProjectNodeIdFor(source.site, parsed.projectKey),
+          parsed.projectKey,
+          `Project ${project.name} tracks work in Jira project ${parsed.projectKey}`,
+          String(project._id || project.id),
+          { jiraProjectKey: parsed.projectKey, via: 'tasksUrl' }
+        );
+        projectsLinked++;
+      }
+    } catch (err) {
+      this.context.warn(`linkTicketMentions: tasksUrl pass failed: ${(err as Error).message}`);
+    }
+
+    // Resolve which targets exist, stamp, and upsert.
+    let existing = new Set<number>();
+    if (targetIds.size > 0) {
+      try {
+        const rows = (await ReactorNodeModel.find({ id: { $in: Array.from(targetIds) } })
+          .select({ id: 1 })
+          .lean()) as unknown as { id: number }[];
+        existing = new Set((rows || []).map((r) => r.id));
+      } catch {
+        // resolved stamping is best-effort
+      }
+    }
+
+    const seenOps = new Set<number>();
+    for (const { id, edge } of pendingEdges) {
+      if (seenOps.has(id)) continue;
+      seenOps.add(id);
+      edge.data.resolved = existing.has(edge.target);
+      ops.push({
+        updateOne: {
+          filter: { id },
+          update: { $set: edge, $setOnInsert: { id, created: now, runId: 'manual' } },
+          upsert: true,
+        },
+      });
+    }
+
+    if (ops.length > 0) {
+      try {
+        await ReactorNodeLinkModel.bulkWrite(ops, { ordered: false });
+      } catch (err) {
+        this.context.warn(`linkTicketMentions bulkWrite failed: ${(err as Error).message}`);
+      }
+    }
+
+    return { createdLinks: ops.length, resourcesScanned: resources.length, projectsLinked };
   }
   
   async enqueueCatalog(

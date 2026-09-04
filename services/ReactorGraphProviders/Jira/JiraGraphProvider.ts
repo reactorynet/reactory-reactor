@@ -27,6 +27,12 @@ import BaseExternalGraphProvider, {
 
 /** The subset of atlassian.JiraReaderService@1.0.0 this provider consumes. */
 export interface IJiraReader {
+  /**
+   * Pins the reader to a source: host = the registered site, credentials from
+   * the partner setting when given (per-partner fallback, else env). Optional —
+   * older readers without it stay env-configured.
+   */
+  configureSource?(opts?: { settingKey?: string; host?: string } | null): void;
   searchIssues(
     jql: string,
     startAt?: number,
@@ -185,6 +191,7 @@ export class JiraGraphProvider extends BaseExternalGraphProvider {
       `${rootId}|${containerId}`,
       {
         kind: "ticket",
+        searchId: sourceLogicalKey(SCHEME, site, projectKey, issue.key),
         ticketKey: issue.key,
         projectKey,
         issueType: issue.issueType?.name,
@@ -260,6 +267,12 @@ export class JiraGraphProvider extends BaseExternalGraphProvider {
     }
 
     const site = this.siteOf(project);
+    // Pin the reader to this source's site + credentials (per-partner settingKey
+    // with env fallback). An unresolvable settingKey throws here — the template
+    // records the error and skips GC (fail-safe).
+    if (typeof reader.configureSource === "function") {
+      reader.configureSource({ settingKey: project.source?.settingKey, host: site });
+    }
     const rootId = nodeId(projectLogicalKey(project));
     const maxIssues = opts.maxIssuesPerProject ?? DEFAULT_MAX_ISSUES;
     const pageSize = Math.min(Math.max(opts.pageSize ?? 100, 1), 100);

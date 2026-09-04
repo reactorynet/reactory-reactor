@@ -35,9 +35,13 @@ import {
   FileProjectProcessor,
 } from "./SystemGraphProjectProviders";
 import JiraGraphProvider from "./ReactorGraphProviders/Jira/JiraGraphProvider";
+import DatabaseGraphProvider from "./ReactorGraphProviders/Database/DatabaseGraphProvider";
 import { nodeId, projectLogicalKey } from "./graph/GraphIdentity";
 import { runProcessorsForProject } from "./graph/runProcessorsForProject";
 import logger from "@reactory/server-core/logging";
+import { CronExpressionParser } from "cron-parser";
+import { ReactorNodeModel } from "../models/ReactorGraphNode";
+import { ReactorNodeLinkModel } from "../models/ReactorNodeLink";
 
 @service({
   id: "reactor.ReactorProjectService@1.0.0",
@@ -82,6 +86,7 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
     this.processors["markdown"] = new MarkdownProjectProcessor(props, context);
     // External source providers (registered, never fs-detected — invariant P3)
     this.processors["jira"] = new JiraGraphProvider(props, context);
+    this.processors["db"] = new DatabaseGraphProvider(props, context);
     this.processors["file"] = new FileProjectProcessor(props, context);
   }
 
@@ -683,9 +688,21 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
     projectSpec: Partial<IReactorProject>
   ): Promise<Partial<IReactorProject>> {
     if (!projectSpec.repoPath && !projectSpec.repoUrl && !projectSpec.source) {
-      throw new Error(
-        "Project must have a repoPath, repoUrl or source to be cataloged"
-      );
+      // The async catalog workflow addresses projects by id/name only — a
+      // registered external source resolves here and carries its own source
+      // spec; anything unresolvable (or resolvable but source-less) still throws.
+      const addressedBy =
+        (projectSpec.id && String(projectSpec.id)) ||
+        projectSpec.fqn ||
+        (projectSpec.nameSpace && projectSpec.name
+          ? `${projectSpec.nameSpace}.${projectSpec.name}@${projectSpec.version || "1.0.0"}`
+          : undefined);
+      const existing = addressedBy ? await this.getProject(addressedBy) : null;
+      if (!existing || (!existing.repoPath && !existing.repoUrl && !existing.source)) {
+        throw new Error(
+          "Project must have a repoPath, repoUrl or source to be cataloged"
+        );
+      }
     }
 
     // Helper to update an existing project
@@ -854,6 +871,7 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
     const lookupKey =
       projectSpec.repoPath ||
       projectSpec.repoUrl ||
+      (projectSpec.id ? String(projectSpec.id) : undefined) ||
       projectSpec.fqn ||
       (projectSpec.nameSpace && projectSpec.name
         ? `${projectSpec.nameSpace}.${projectSpec.name}@${projectSpec.version || "1.0.0"}`
@@ -972,6 +990,17 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
         const graph = this.context.getService<any>("reactor.SystemGraphManager@1.0.0");
         if (graph?.linkExternalProjects) {
           await graph.linkExternalProjects(pid);
+        }
+        // Cross-domain ticket linking (Providers Session 04): resource URLs +
+        // tasksUrl against registered Jira sources.
+        if (graph?.linkTicketMentions) {
+          try {
+            await graph.linkTicketMentions(pid);
+          } catch (linkErr) {
+            this.context.warn(
+              `linkTicketMentions failed for project ${pid}: ${(linkErr as Error).message}`
+            );
+          }
         }
       },
       log: this.context,
@@ -1231,6 +1260,234 @@ class ReactorProjectServiceImpl implements ReactorProjectService {
       jobId,
       message: 'Catalog job accepted',
     };
+  }
+
+  // ---- External source management (Providers Session 07) --------------------
+
+  /**
+   * Resolves the registered external provider owning an identity scheme
+   * ('jira' → JiraGraphProvider, 'db' → DatabaseGraphProvider, ...).
+   */
+  getExternalSourceProvider(scheme: string): IProjectProcessor | null {
+    for (const proc of Object.values(this.processors)) {
+      const anyProc = proc as any;
+      if (typeof anyProc.sourceScheme === "function" && anyProc.sourceScheme() === scheme) {
+        return proc;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Registers (creates or updates) an external source as a ReactorProject with
+   * a `source` spec and explicit processor config (invariant P3: registered,
+   * never detected). Validates that the scheme has a provider and that the
+   * settingKey (when given) resolves for the active partner — the setting's
+   * VALUE is never read into logs or the project record (invariant P2).
+   */
+  async registerExternalSource(input: {
+    nameSpace: string;
+    name: string;
+    version?: string;
+    scheme: string;
+    sourceKey: string;
+    settingKey?: string;
+    options?: any;
+    syncSchedule?: string;
+  }): Promise<Partial<IReactorProject>> {
+    const { nameSpace, name, scheme, sourceKey } = input;
+    if (!nameSpace || !name) throw new Error("registerExternalSource requires nameSpace and name");
+    if (!scheme || !sourceKey) throw new Error("registerExternalSource requires scheme and sourceKey");
+
+    const provider = this.getExternalSourceProvider(scheme);
+    if (!provider) {
+      throw new Error(
+        `No external graph provider is registered for scheme '${scheme}'. Available schemes: ${this.listExternalSchemes().join(", ") || "none"}`
+      );
+    }
+
+    if (input.settingKey) {
+      const setting = (this.context?.partner as any)?.getSetting?.(input.settingKey);
+      if (!setting) {
+        throw new Error(
+          `Setting '${input.settingKey}' does not resolve for partner '${this.context?.partner?.key || "unknown"}'. Configure the connection/credential setting before registering the source.`
+        );
+      }
+    }
+
+    if (input.syncSchedule) {
+      try {
+        CronExpressionParser.parse(input.syncSchedule);
+      } catch (cronErr) {
+        throw new Error(`Invalid syncSchedule cron expression '${input.syncSchedule}': ${(cronErr as Error).message}`);
+      }
+    }
+
+    const version = input.version || "1.0.0";
+    const source = {
+      scheme,
+      sourceKey,
+      settingKey: input.settingKey,
+      options: input.options,
+      syncSchedule: input.syncSchedule,
+    };
+    const processorFqn = `${(provider as any).nameSpace}.${(provider as any).name}@${(provider as any).version}`;
+    const spec: Partial<IReactorProject> = {
+      nameSpace,
+      name,
+      version,
+      fqn: `${nameSpace}.${name}@${version}`,
+      source: source as any,
+      processors: [{ id: scheme, processor: processorFqn }],
+      projectTypes: provider.getProjectTypes({ source } as any) || [],
+    };
+
+    const existing = await this.getProject(spec.fqn as string);
+    if (existing) {
+      const projectId = String(existing._id || existing.id);
+      const updated = await this.updateProject(projectId, spec);
+      this.context.info(
+        `registerExternalSource: updated ${scheme} source ${spec.fqn} (${projectId})`
+      );
+      return updated || { ...existing, ...spec };
+    }
+
+    spec.graphRootId = nodeId(projectLogicalKey(spec));
+    const created = await this.createProject(spec);
+    this.context.info(`registerExternalSource: registered ${scheme} source ${spec.fqn}`);
+    return created;
+  }
+
+  /** Schemes for which an external provider is registered. */
+  listExternalSchemes(): string[] {
+    const schemes: string[] = [];
+    for (const proc of Object.values(this.processors)) {
+      const anyProc = proc as any;
+      if (typeof anyProc.sourceScheme === "function") schemes.push(anyProc.sourceScheme());
+    }
+    return schemes;
+  }
+
+  /** Lists registered external sources with their sync state. */
+  async listExternalSources(): Promise<Array<Partial<IReactorProject>>> {
+    try {
+      return ((await ReactorProjectModel.find({
+        source: { $exists: true, $ne: null },
+        "source.scheme": { $exists: true, $ne: null },
+      })
+        .select({
+          _id: 1, name: 1, nameSpace: 1, version: 1, fqn: 1, source: 1,
+          lastSync: 1, indexingJobId: 1, projectStatus: 1, graphRootId: 1,
+        })
+        .lean()) as unknown as Partial<IReactorProject>[]) || [];
+    } catch (err) {
+      this.context.warn(`listExternalSources failed: ${(err as Error).message}`);
+      return [];
+    }
+  }
+
+  /**
+   * Removes a registered external source: the project record is **archived**
+   * (kept for audit), while its graph nodes/edges and search index are purged
+   * by default (`purgeGraph: false` keeps the last snapshot browsable).
+   */
+  async removeExternalSource(
+    idOrFqn: string,
+    opts: { purgeGraph?: boolean } = {}
+  ): Promise<{ archived: boolean; nodesDeleted: number; edgesDeleted: number }> {
+    const project = await this.getProject(idOrFqn);
+    if (!project || !project.source) {
+      throw new Error(`External source not found: ${idOrFqn}`);
+    }
+    const projectId = String(project._id || project.id);
+
+    await this.updateProject(projectId, { projectStatus: "ARCHIVED" } as any);
+
+    let nodesDeleted = 0;
+    let edgesDeleted = 0;
+    if (opts.purgeGraph !== false) {
+      try {
+        const [n, e] = await Promise.all([
+          ReactorNodeModel.deleteMany({ projectId }),
+          ReactorNodeLinkModel.deleteMany({ projectId }),
+        ]);
+        nodesDeleted = n?.deletedCount || 0;
+        edgesDeleted = e?.deletedCount || 0;
+      } catch (err) {
+        this.context.warn(`removeExternalSource: graph purge failed: ${(err as Error).message}`);
+      }
+      try {
+        const searchService = this.context.getService<Reactory.Service.ISearchService>(
+          "core.ReactorySearchService@1.0.0"
+        );
+        if (searchService) {
+          await searchService.deleteIndex(`reactor_graph_${project.nameSpace}_${project.name}`);
+        }
+      } catch {
+        // index may not exist
+      }
+    }
+    this.context.info(
+      `removeExternalSource: archived ${project.fqn} (purge=${opts.purgeGraph !== false}, nodes=${nodesDeleted}, edges=${edgesDeleted})`
+    );
+    return { archived: true, nodesDeleted, edgesDeleted };
+  }
+
+  /**
+   * External sources whose `syncSchedule` cron has an occurrence between their
+   * last sync and `now`. Sources without a schedule are never "due" (sync them
+   * explicitly or at registration).
+   */
+  async getDueExternalSources(now: Date = new Date()): Promise<Partial<IReactorProject>[]> {
+    const sources = await this.listExternalSources();
+    const due: Partial<IReactorProject>[] = [];
+    for (const src of sources) {
+      if ((src as any).projectStatus === "ARCHIVED") continue;
+      const schedule = src.source?.syncSchedule;
+      if (!schedule) continue;
+      try {
+        const anchor = src.lastSync ? new Date(src.lastSync) : new Date(0);
+        const next = CronExpressionParser.parse(schedule, { currentDate: anchor })
+          .next()
+          .toDate();
+        if (next.getTime() <= now.getTime()) due.push(src);
+      } catch (err) {
+        this.context.warn(
+          `getDueExternalSources: bad cron '${schedule}' on ${src.fqn}: ${(err as Error).message}`
+        );
+      }
+    }
+    return due;
+  }
+
+  /**
+   * Enqueues catalog jobs for every due external source (idempotent — an
+   * already-running job is returned, not duplicated; session 09 semantics).
+   * Invoke from the SyncExternalSources workflow, a scheduler, or the
+   * ReactorSyncExternalSources mutation.
+   */
+  async syncDueExternalSources(
+    now: Date = new Date()
+  ): Promise<{ enqueued: Array<{ projectId: string; fqn?: string; jobId: string }> }> {
+    const due = await this.getDueExternalSources(now);
+    const enqueued: Array<{ projectId: string; fqn?: string; jobId: string }> = [];
+    for (const src of due) {
+      const projectId = String(src._id || src.id);
+      try {
+        const { jobId } = await this.enqueueCatalog(projectId, {});
+        enqueued.push({ projectId, fqn: src.fqn, jobId });
+      } catch (err) {
+        this.context.warn(
+          `syncDueExternalSources: enqueue failed for ${src.fqn}: ${(err as Error).message}`
+        );
+      }
+    }
+    if (enqueued.length > 0) {
+      this.context.info(
+        `syncDueExternalSources: enqueued ${enqueued.length} source sync(s): ${enqueued.map((e) => e.fqn).join(", ")}`
+      );
+    }
+    return { enqueued };
   }
 
   async getCatalogJobStatus(jobId: string): Promise<ReactorCatalogJobStatus> {

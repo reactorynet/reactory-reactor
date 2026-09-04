@@ -141,6 +141,12 @@ labels (+ comments when opted in). Index name `reactor_graph_<ns>_<name>` as tod
 ## Agent Notes
 
 **Done 2026-09-03.** As designed, with these deviations/specifics:
+- **2026-09-04 follow-up:** per-partner credential fallback landed —
+  `AtlassianConfigurationService.resolveConfiguration({settingKey, host})`,
+  `JiraReaderService.configureSource(...)`, wired from the provider so
+  `source.settingKey` is honoured (host always pinned to `sourceKey`; declared
+  settingKey that fails to resolve aborts the run fail-safe). Multi-site
+  deployments supported. Setting shape: `data: { host?, email, apiToken }`.
 - **reactory-atlassian** (no local .git — gitignored by server root): `JiraIssue` gained
   `issueLinks` / `parent` / `sprints` (+ `JiraIssueLink`, `JiraSprintRef` types);
   `mapJiraIssue` maps them (sprint custom field detected defensively — any

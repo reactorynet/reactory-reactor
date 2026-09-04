@@ -128,4 +128,28 @@ never expose host/port — `data.connectionId` only (extend the path-redaction t
 
 ## Agent Notes
 
-_(fill in when done)_
+**Done 2026-09-04.** As designed, with these specifics/deviations:
+- Adapter contract deviation: `listColumns(schema)` / PKs are **per schema** (one
+  statement each), not per relation — a 2000-table schema costs a handful of queries.
+  Adapters: postgres/mssql/databricks via information_schema (+ `sys.*` for mssql FKs),
+  mysql via information_schema with upper/lower-case row-key tolerance. Databricks FKs
+  are Unity Catalog informational constraints (absent catalogs yield none, caught).
+- `SqlRunner` seam (`introspection/runner.ts`) built on core `getConnectionFactory`:
+  postgres `sql.unsafe`, mysql callback `pool.query` promisified, mssql
+  `pool.request().query().recordset`, databricks factory `executeQuery`.
+- Read-only guarantee is test-asserted (every generated statement matches
+  `^(SELECT|SHOW)` and contains no DML/DDL keyword); schema literals are
+  quote-escaped.
+- Incremental: relation hash = ordered column tuples; each COLUMN node also carries
+  its own tuple hash so unchanged structure skips at both levels.
+- Stub rule: FK target in a non-listed schema → stub TABLE parented to the root;
+  its column-level edge is **suppressed** (the referenced column is never
+  materialised — I4). Residual: an in-scope FK target dropped by
+  `maxTablesPerSchema` truncation can leave an optimistic edge — truncation warns
+  loudly; noted, not solved.
+- Registered as `processors["db"]` + `services/index.ts`. Lazy browse = persisted
+  children (deliberate — no live DB hit per tree expand; refresh via re-catalog).
+- Tests: `DatabaseGraphProvider.test.ts` (19) — fake adapter e2e + per-variant
+  read-only statement snapshots. Live-DB smoke testing requires a partner
+  connection setting; not run here.
+- `iconKey` not set (no dedicated svg; DATASTORE type styling covers the root).

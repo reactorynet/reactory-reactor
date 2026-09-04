@@ -26,8 +26,16 @@ import {
   normalizeRelative,
   pathLogicalKey,
   projectFqn,
+  symbolLogicalKey,
 } from "../graph/GraphIdentity";
-import BaseGraphProvider from "../ReactorGraphProviders/BaseGraphProvider";
+import BaseGraphProvider, { isMongoAvailable } from "../ReactorGraphProviders/BaseGraphProvider";
+import { ReactorProjectModel } from "@reactory/server-modules/reactory-reactor/models/ReactorProject";
+import {
+  TicketSourceIndex,
+  buildTicketSourceIndex,
+  scanTicketMentions,
+  ticketNodeIdFor,
+} from "../graph/ticketLinking";
 import {
   DOCUMENT_LANGUAGES,
   DocumentGraphOptions,
@@ -35,6 +43,7 @@ import {
   analyseDocumentFile,
   buildSymbolIndex,
   documentFormatFor,
+  parseDocument,
 } from "../graph/documents";
 
 /**
@@ -969,6 +978,15 @@ export abstract class BaseProjectProcessor
 
   /** Upserts nodes and edges by their deterministic ids (idempotent). */
   /**
+   * Loads the registered Jira ticket-source index (Providers Session 04).
+   * Overridable in tests; guarded so no-Mongo environments scan nothing.
+   */
+  protected async loadTicketSourceIndex(): Promise<TicketSourceIndex> {
+    if (!isMongoAvailable(ReactorProjectModel.find)) return new Map();
+    return buildTicketSourceIndex();
+  }
+
+  /**
    * Full pipeline for a project: discover files, build the project root + file
    * + symbol + external nodes, resolve edges, persist the graph, and index file
    * contents for search. Raw folder browsing remains lazy; only analysed
@@ -982,7 +1000,13 @@ export abstract class BaseProjectProcessor
    */
   async process(
     project: Partial<IReactorProject>,
-    options?: { runId?: string; skipGc?: boolean; forceFull?: boolean; linkDocMentions?: boolean }
+    options?: {
+      runId?: string;
+      skipGc?: boolean;
+      forceFull?: boolean;
+      linkDocMentions?: boolean;
+      linkTicketMentions?: boolean;
+    }
   ): Promise<Partial<IReactorProject>> {
     const startTime = Date.now();
     let errorCount = 0;
@@ -1187,6 +1211,76 @@ export abstract class BaseProjectProcessor
       }
     }
 
+    // Third pass: ticket-key mentions in documents (Providers Session 04).
+    // Gate: only keys whose project prefix belongs to a REGISTERED Jira source
+    // link (never creates ticket nodes); targets are computed from the
+    // reference alone (P1) and stamped data.resolved by an existence check —
+    // a later Jira sync "heals" unresolved edges (deterministic ids).
+    if (options?.linkTicketMentions !== false && documentNodes.length > 0) {
+      try {
+        const ticketIndex = await this.loadTicketSourceIndex();
+        if (ticketIndex.size > 0) {
+          const fqnForMentions = projectFqn(next);
+          const mentionEdges: ReactorNodeLink[] = [];
+          const mentionTargets = new Set<number>();
+          for (const docNode of documentNodes) {
+            const docPath = docNode.data?.path;
+            const rel = docNode.data?.relativePath;
+            if (!docPath || !rel) continue;
+            let content: string | null = null;
+            try {
+              content = fs.readFileSync(docPath, "utf-8");
+            } catch {
+              continue;
+            }
+            let outline = null;
+            try {
+              const format = documentFormatFor(docPath);
+              outline = format ? parseDocument(content, format) : null;
+            } catch {
+              outline = null; // prose-only scan still works
+            }
+            for (const mention of scanTicketMentions(content, outline, ticketIndex)) {
+              const src = mention.sectionSlug
+                ? nodeId(symbolLogicalKey(fqnForMentions, rel, mention.sectionSlug))
+                : docNode.id;
+              const ticketSource = ticketIndex.get(mention.projectKey);
+              if (!ticketSource) continue;
+              const target = ticketNodeIdFor(ticketSource.site, mention.ticketKey);
+              const id = linkId(src, target, ReactorLinkType.MENTIONS);
+              if (edges.some((e) => e.id === id) || mentionEdges.some((e) => e.id === id)) continue;
+              mentionTargets.add(target);
+              mentionEdges.push({
+                id,
+                source: src,
+                target,
+                types: [ReactorLinkType.MENTIONS],
+                title: mention.ticketKey,
+                description: `Mentions ${mention.ticketKey}`,
+                projectId: next.id as string | number,
+                data: {
+                  crossDomain: true,
+                  ticketKey: mention.ticketKey,
+                  confidence: mention.confidence,
+                  match: mention.match,
+                  line: mention.line,
+                },
+              } as ReactorNodeLink);
+            }
+          }
+          if (mentionEdges.length > 0) {
+            const existing = await this.loadExistingNodeIds(Array.from(mentionTargets));
+            for (const e of mentionEdges) {
+              (e as any).data = { ...(e as any).data, resolved: existing.has(e.target) };
+            }
+            edges.push(...mentionEdges);
+          }
+        }
+      } catch (err) {
+        this.context.warn(`Ticket mention linking failed: ${(err as Error).message}`);
+      }
+    }
+
     const runId = options?.runId || randomUUID();
     const indexedAt = new Date();
     const { partnerId, organizationId } = this.resolveTenancy(next);
@@ -1238,7 +1332,9 @@ export abstract class BaseProjectProcessor
     const canGc = !options?.skipGc && !!meta.projectId && persistResult.ok;
 
     if (canGc) {
-      const gc = await this.gcStale(String(meta.projectId), runId);
+      const gc = await this.gcStale(String(meta.projectId), runId, {
+        searchIndexName: `reactor_graph_${next.nameSpace}_${next.name}`,
+      });
       nodesGcDeleted = gc.nodesGcDeleted;
       edgesGcDeleted = gc.edgesGcDeleted;
       if (gc.error) errorCount++;

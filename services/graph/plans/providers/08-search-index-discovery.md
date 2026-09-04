@@ -134,4 +134,29 @@ strings, not numeric ids. Add the same parity to external providers' template
 
 ## Agent Notes
 
-_(fill in when done)_
+**Done 2026-09-04.** As designed, with these specifics/deviations:
+- Core (`reactory-core`, no local .git — gitignored by server root): `SearchIndexInfo`,
+  `ISearchProvider.listIndexes?()`, Meili impl (paged `getIndexes` + per-index stats,
+  best-effort), Elastic impl (`cat.indices` json, dot-prefixed system indexes
+  excluded), service delegation via the existing `requireCapability` guard, plus
+  `getIndexStats(index)` (existence + count). Core search suites green (55).
+- Catalog: `services/graph/searchIndexCatalog.ts` registry +
+  `SystemGraphManager.getSearchIndexCatalog({partnerId?})`. Tenant filter: projects
+  with a `client` not matching the partner are hidden; client-less records stay
+  visible (safe fallback, session-14 style). Raw-listing entries never surface.
+- Macros: `listSearchIndexes` (safeForAutoExecution, writes
+  `vars.searchIndexCatalog`) + `getIndexStats` (the dead params type is now
+  implemented; no index → whole-catalog stats). `searchContent` resolution:
+  explicit args → `persona.config.defaultSearchIndexes` → guidance result.
+  BookTutor declares its defaults in persona config, registers its book-* indexes
+  in the module catalog, and allows the two new tools.
+- **Persona-instruction deviation:** no shared persona-prompt snippet was added —
+  the affordance lives in the tool descriptions and the guidance result itself
+  (every index-less call teaches the recovery path). Revisit if agents still guess.
+- GC parity: `gcStale(projectId, runId, {searchIndexName})` pre-collects doomed
+  nodes' search ids (`data.searchId` stamped by Jira/DB providers; FILE/DOCUMENT
+  reconstructed from `projectFqn` + `data.relativePath`), deletes via
+  `deleteDocuments` (capability-guarded, warn-and-continue). Both pipelines pass
+  the index name.
+- Tests: `SearchIndexCatalog.test.ts` (6), search macro suite updated (37),
+  core provider/service suites (55).

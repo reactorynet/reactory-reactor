@@ -76,6 +76,11 @@ const makeFixture = () => ({
 class MockJiraReader implements IJiraReader {
   fixture = makeFixture();
   searchCalls: Array<{ jql: string; startAt: number; maxResults: number }> = [];
+  configureCalls: Array<{ settingKey?: string; host?: string } | null | undefined> = [];
+
+  configureSource(opts?: { settingKey?: string; host?: string } | null) {
+    this.configureCalls.push(opts);
+  }
 
   async searchIssues(jql: string, startAt = 0, maxResults = 50) {
     this.searchCalls.push({ jql, startAt, maxResults });
@@ -397,6 +402,27 @@ describe("JiraGraphProvider — snapshot", () => {
     context.getService = () => null;
     await provider.process(project);
     expect(provider.gcCalls).toBe(0);
+    expect(provider.lastMetrics?.errors).toBeGreaterThan(0);
+  });
+
+  it("pins the reader to the source's site + settingKey before discovery", async () => {
+    const { provider, project, reader } = setup();
+    (project.source as any).settingKey = "jira_site_b";
+    await provider.process(project);
+    expect(reader.configureCalls).toHaveLength(1);
+    expect(reader.configureCalls[0]).toEqual({ settingKey: "jira_site_b", host: SITE });
+  });
+
+  it("an unresolvable settingKey aborts the run fail-safe (no GC)", async () => {
+    const { provider, project, reader } = setup();
+    await provider.process(project);
+    expect(provider.gcCalls).toBe(1);
+    reader.configureSource = () => {
+      throw new Error("setting 'ghost' does not resolve");
+    };
+    (project.source as any).settingKey = "ghost";
+    await provider.process(project);
+    expect(provider.gcCalls).toBe(1); // unchanged — GC skipped on the failed run
     expect(provider.lastMetrics?.errors).toBeGreaterThan(0);
   });
 

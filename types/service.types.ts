@@ -436,6 +436,12 @@ export interface IAIPersona {
   },
   config? : {
     apiKey?: string;
+    /**
+     * Default search indexes for the generic `searchContent` macro when the
+     * model passes none (Providers Session 08). No global fallback exists —
+     * personas that rely on well-known indexes declare them here.
+     */
+    defaultSearchIndexes?: string[];
     apiOrg?: string;
     apiEndpoint?: string;
     apiVersion?: string;
@@ -1061,6 +1067,11 @@ export interface IReactorProjectSourceSpec {
   settingKey?: string;
   /** Provider-specific scope options (projectKeys, jql, schemas, ...). */
   options?: any;
+  /**
+   * Cron expression for scheduled re-sync (5/6 field, cron-parser syntax).
+   * Evaluated against `project.lastSync` by `syncDueExternalSources`.
+   */
+  syncSchedule?: string;
 }
 
 export interface IReactorProjectMetrics {
@@ -1299,7 +1310,9 @@ export interface ReactorProjectService extends Reactory.Service.IReactoryService
   /**
    * Links external dependency nodes to publisher project root nodes for matched package names.
    */
-  linkExternalProjects(projectId?: string): Promise<{ createdLinks: number; totalExternals: number }>;
+  linkExternalProjects(projectId?: string): Promise<{ createdLinks: number;
+  /** Cross-domain ticket linking: resource URLs + tasksUrl → Jira nodes (Providers Session 04). */
+  linkTicketMentions?(projectId?: string): Promise<{ createdLinks: number; resourcesScanned: number; projectsLinked: number }>; totalExternals: number }>;
 
   /**
    * Returns an index mapping published package names to project metadata.
@@ -1493,6 +1506,8 @@ export interface ProcessOptions {
   skipGc?: boolean;
   forceFull?: boolean;
   linkDocMentions?: boolean;
+  /** Link ticket-key mentions in documents to registered Jira ticket nodes (default true). */
+  linkTicketMentions?: boolean;
 }
 
 /**
@@ -1513,6 +1528,10 @@ export interface GraphProcessMetrics {
   durationMs: number;
   errors: number;
   byLanguage?: Record<string, number>;
+  /** External source identity, when the run came from an external provider. */
+  sourceScheme?: string;
+  /** External source instance key (site host, connectionId). */
+  sourceKey?: string;
 }
 
 export interface IProjectProcessor extends ProjectSynchronizer, AttributeProvider, IProjectNodeProvider { 

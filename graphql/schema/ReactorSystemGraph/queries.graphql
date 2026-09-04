@@ -47,4 +47,9 @@ extend type Query {
   ReactorProjectByName(name: String!): ReactorProject
   ReactorProjectMetrics(projectMetricsQuery: ReactorProjectMetricsQueryInput!): [ReactorProjectMetrics]      
   ReactorCatalogJobStatus(jobId: String!): ReactorCatalogJobStatus
+  """
+  Registered external graph sources (jira sites, database connections) with
+  their sync state.
+  """
+  ReactorExternalSources: [ReactorExternalSource!]!
 }

@@ -105,6 +105,80 @@ type ReactorLinkCrossProjectResult {
   message: String
 }
 
+"""
+A registered external graph source (Providers Session 07).
+"""
+type ReactorExternalSource {
+  id: String!
+  fqn: String
+  name: String!
+  nameSpace: String!
+  version: String
+  scheme: String!
+  sourceKey: String!
+  settingKey: String
+  options: Any
+  syncSchedule: String
+  lastSync: Date
+  indexingJobId: String
+  projectStatus: String
+  graphRootId: Int
+}
+
+input ReactorExternalSourceInput {
+  nameSpace: String!
+  name: String!
+  version: String
+  """ Identity scheme of the source kind: jira | db | ... """
+  scheme: String!
+  """ Stable source-instance key (site host, connectionId). """
+  sourceKey: String!
+  """ Partner setting holding credentials — validated to resolve, value never read into logs. """
+  settingKey: String
+  """ Provider-specific scope (projectKeys, jql, variant, schemas, ...). """
+  options: Any
+  """ Cron expression for scheduled re-sync. """
+  syncSchedule: String
+  """ Enqueue the first catalog job immediately (default true). """
+  sync: Boolean
+}
+
+type ReactorRegisterExternalSourceResult {
+  source: ReactorExternalSource
+  jobId: String
+  message: String
+}
+
+type ReactorRemoveExternalSourceResult {
+  archived: Boolean!
+  nodesDeleted: Int!
+  edgesDeleted: Int!
+  message: String
+}
+
+type ReactorSyncExternalSourcesResult {
+  enqueued: Int!
+  jobs: [ReactorCatalogJobRef!]
+  message: String
+}
+
+type ReactorCatalogJobRef {
+  projectId: String!
+  fqn: String
+  jobId: String!
+}
+
+"""
+Result of a cross-domain ticket-linking pass (resource URLs + tasksUrl against
+registered Jira sources).
+"""
+type ReactorLinkTicketMentionsResult {
+  createdLinks: Int!
+  resourcesScanned: Int!
+  projectsLinked: Int!
+  message: String
+}
+
 
 union ReactorProjectDocumentationUpdateResult = ReactorProjectDocumentationUpdateSuccess | ReactorProjectDocumentationUpdateFailure
 
@@ -123,4 +197,24 @@ type Mutation {
   ReactorUpdateProject(projectId: String!, updates: ReactorProjectInput!): ReactorProjectUpdateResult!
   ReactorUpdateNode(id: Int!, data: Any!): ReactorNode!
   ReactorLinkCrossProjectDeps(projectId: String): ReactorLinkCrossProjectResult!
+  """
+  Links RESOURCE nodes with Jira URLs and project tasksUrl values to catalogued
+  Jira ticket / project nodes (registered sources only). Idempotent.
+  """
+  ReactorLinkTicketMentions(projectId: String): ReactorLinkTicketMentionsResult!
+  """
+  Registers (or updates) an external graph source — a Jira site scope, a
+  database connection — as a project with a source spec, and by default
+  enqueues its first sync.
+  """
+  ReactorRegisterExternalSource(input: ReactorExternalSourceInput!): ReactorRegisterExternalSourceResult!
+  """
+  Archives a registered external source; purges its graph + search index
+  unless purgeGraph is false.
+  """
+  ReactorRemoveExternalSource(idOrFqn: String!, purgeGraph: Boolean): ReactorRemoveExternalSourceResult!
+  """
+  Enqueues catalog jobs for every external source whose syncSchedule is due.
+  """
+  ReactorSyncExternalSources: ReactorSyncExternalSourcesResult!
 }

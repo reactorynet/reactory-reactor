@@ -96,4 +96,22 @@ mutation.
 
 ## Agent Notes
 
-_(fill in when done)_
+**Done 2026-09-04.** As designed, with these specifics:
+- Shared helpers in `services/graph/ticketLinking.ts`: `TICKET_KEY_RE`, prefix denylist,
+  `buildTicketSourceIndex` (from `source.scheme: 'jira'` projects), `ticketNodeIdFor` /
+  `jiraProjectNodeIdFor` (computed ids, P1), `parseJiraUrl` (browse + software URLs),
+  `scanTicketMentions` (outline-aware: section attribution by innermost line range,
+  inline-code by backtick parity or fenced-block range, per-section dedupe).
+- Mention pass = a third pass in `BaseProjectProcessor.process` (after session 13's
+  symbol mentions), option `linkTicketMentions` default **true**; hooks
+  `loadTicketSourceIndex` / `loadExistingNodeIds` are protected and test-overridable.
+  Edges carry current runId → GC'd with the doc project naturally.
+- `resolved` stamping via one `$in` existence query per pass (both in-process and
+  manager passes) — emitted regardless, healed by later Jira syncs (deviation from a
+  strict per-edge check, as the plan recommended).
+- Manager pass covers RESOURCE URLs + tasksUrl only (doc text is not persisted, so
+  document scanning belongs to process()); runs in `processProject.onAfterAll` after
+  `linkExternalProjects`, and via `ReactorLinkTicketMentions` (schema parse verified).
+- Commit/branch/PR mention scanning remains future work (no git-history graph).
+- Tests: `services/graph/TicketLinking.test.ts` (14) — helper units, Markdown-processor
+  integration (real temp fixture), manager pass with mocked models.

@@ -64,4 +64,33 @@ schedule through the existing async job rail, and observe them.
 
 ## Agent Notes
 
-_(fill in when done)_
+**Done 2026-09-04.** As designed, with these specifics/deviations:
+- **2026-09-04 follow-up:** agent macros landed —
+  `ai/macro/projects/ExternalSources.macro.ts`: `listExternalSources` /
+  `registerExternalSource` (safeForAutoExecution: false, settingKey-only — the
+  tool schema is test-asserted to accept no credential parameters) /
+  `syncExternalSource` (targeted or all-due). Registered on the reactor persona
+  allowlist alongside listSearchIndexes/getIndexStats. Tests:
+  `ai/macro/projects/__tests__/ExternalSources.test.ts` (10).
+- **Bug found & fixed:** the async catalog workflow (`CatalogProjectGraph.yaml`) passes
+  only id/name — `catalogProject`'s guard threw for source-only projects before
+  lookup. The guard now resolves id/fqn-addressed projects first and accepts them
+  when the persisted record carries repoPath/repoUrl/source; lookup prefers
+  repoPath → repoUrl → id → fqn (repo-project behaviour unchanged).
+- Removal semantics chosen: **archive** the project record (audit trail) +
+  purge graph nodes/edges and the search index by default (`purgeGraph: false`
+  keeps the last snapshot browsable).
+- Scheduling: `syncSchedule` cron (cron-parser v5, validated at registration)
+  evaluated against `lastSync`; sources without a schedule are never auto-due.
+  `reactor.SyncExternalSources@1.0.0` workflow wraps `syncDueExternalSources` —
+  wire it to the engine's scheduler tick or call the mutation from any cron.
+- Partial-failure GC guard was already implemented + tested in providers/01
+  (`ExternalProvider.test.ts` "does NOT GC on a partial snapshot"); this session
+  added no further code for it.
+- Metrics: `GraphProcessMetrics.sourceScheme/sourceKey` stamped by
+  `BaseExternalGraphProvider` (`apiCalls`/`rateLimited` counters deferred —
+  the reader owns retries and exposes no counters yet).
+- Jira webhook stub: **not implemented** (no dead routes); recorded as future work.
+- Form `reactor.ExternalSources@1.0.0` registers via the mutation; a richer
+  list/manage panel is client work, out of module scope.
+- Tests: `services/graph/ExternalSourceRegistration.test.ts` (15).

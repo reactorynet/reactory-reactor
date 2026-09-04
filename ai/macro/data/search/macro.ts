@@ -224,8 +224,32 @@ const SearchContentMacro = async (
     
     const startTime = Date.now();
     
-    // Determine which indices to search
-    const searchIndices = indices || (index ? [index] : ['book-catalog', 'book-chapters', 'book-glossary']);
+    // Determine which indices to search: explicit args win; otherwise the
+    // persona's configured defaults. There is NO global fallback — guessing an
+    // index silently misroutes every non-book agent (Providers Session 08).
+    const personaDefaults = ((chatState as any)?.persona?.config?.defaultSearchIndexes ||
+      []) as string[];
+    const searchIndices =
+      indices || (index ? [index] : personaDefaults.length > 0 ? personaDefaults : null);
+    if (!searchIndices || searchIndices.length === 0) {
+      return {
+        success: false,
+        error:
+          "No search index specified and this persona defines no default indexes.",
+        tool: 'searchContent',
+        params,
+        instructions: `
+## No search index specified
+
+searchContent needs to know WHICH index to search. Do not guess index names.
+
+### How to proceed:
+1. Call \`listSearchIndexes\` to discover the indexes you may search (each entry carries a description and document count).
+2. Re-run \`searchContent(query, indices: [...])\` with the relevant index name(s).
+3. For project content, \`searchProject(projectName, query)\` resolves the index for you (project indexes follow the convention \`reactor_graph_<nameSpace>_<name>\`).
+        `,
+      };
+    }
     
     // Perform search across indices
     const searchPromises = searchIndices.map(async (indexName) => {
@@ -695,7 +719,8 @@ const SearchContentMacroDefinition: MacroComponentDefinition<typeof SearchConten
             },
             index: {
               type: "string",
-              description: "Specific index to search. If not provided, searches common indices.",
+              description:
+                "Specific index to search. Discover names with listSearchIndexes; project indexes follow reactor_graph_<nameSpace>_<name>. Without an index (and no persona default) the call returns guidance instead of results.",
             },
             indices: {
               type: "array",
@@ -838,9 +863,181 @@ const DeleteIndexMacroDefinition: MacroComponentDefinition<typeof DeleteIndexMac
   ],
 };
 
+// ==================== LIST SEARCH INDEXES MACRO ====================
+
+const SYSTEM_GRAPH_SERVICE = "reactor.SystemGraphManager@1.0.0";
+
+const ListSearchIndexesMacro = async (
+  params: { format?: OutputFormat },
+  chatState: ChatState,
+) => {
+  const { context } = chatState;
+  try {
+    const graphSvc: any = context.getService(SYSTEM_GRAPH_SERVICE);
+    if (!graphSvc?.getSearchIndexCatalog) {
+      return {
+        success: false,
+        error: `${SYSTEM_GRAPH_SERVICE} is not available or does not expose the search index catalog`,
+        tool: 'listSearchIndexes',
+        params,
+      };
+    }
+    const catalog = await graphSvc.getSearchIndexCatalog({});
+    const rows = catalog.map((entry: any) => ({
+      index: entry.index,
+      kind: entry.kind,
+      title: entry.title,
+      description: entry.description,
+      documentCount: entry.documentCount,
+      exists: entry.exists,
+      lastSync: entry.lastSync,
+    }));
+    chatState.vars = chatState.vars || {};
+    chatState.vars.searchIndexCatalog = rows;
+    return {
+      success: true,
+      data: rows,
+      tool: 'listSearchIndexes',
+      params,
+      instructions: `
+## Searchable Indexes (${rows.length})
+
+${rows
+  .slice(0, 50)
+  .map(
+    (r: any) =>
+      `- **${r.index}**${r.documentCount !== undefined ? ` (${r.documentCount} docs)` : ''}${r.exists === false ? ' — not yet built' : ''}: ${r.description || r.title}`
+  )
+  .join('\n')}
+
+### How to use:
+- Search one or more with \`searchContent(query, indices: ["<index>"])\`.
+- Project indexes follow \`reactor_graph_<nameSpace>_<name>\`; \`searchProject(projectName, query)\` resolves them for you.
+- Never guess index names — this catalog is the source of truth.
+      `,
+    };
+  } catch (error) {
+    context.error("listSearchIndexes failed", { error }, "SearchMacro");
+    return {
+      success: false,
+      error: `listSearchIndexes failed: ${error?.message || 'Unknown error'}`,
+      tool: 'listSearchIndexes',
+      params,
+    };
+  }
+};
+
+const ListSearchIndexesMacroDefinition: MacroComponentDefinition<typeof ListSearchIndexesMacro> = {
+  name: "ListSearchIndexes",
+  nameSpace: "reactor-macros",
+  alias: "listSearchIndexes",
+  description:
+    "Lists the search indexes the caller may query — curated, tenant-safe catalog with per-index descriptions and document counts. Use before searchContent when the index is unknown.",
+  component: ListSearchIndexesMacro,
+  version: "1.0.0",
+  roles: ["USER"],
+  icon: "manage_search",
+  runat: "server",
+  tools: [
+    {
+      type: "function",
+      roles: ["USER"],
+      safeForAutoExecution: true,
+      function: {
+        icon: "manage_search",
+        name: "listSearchIndexes",
+        description:
+          "Discover which search indexes exist and what they contain. Call this before searchContent when you do not know the index name.",
+        parameters: {
+          type: "object",
+          properties: {
+            format: {
+              type: "string",
+              enum: ["json", "markdown", "summary"],
+              description: "Output format.",
+              default: "json",
+            },
+          },
+        },
+      },
+    },
+  ],
+};
+
+// ==================== GET INDEX STATS MACRO ====================
+
+const GetIndexStatsMacro = async (
+  params: GetIndexStatsParams,
+  chatState: ChatState,
+) => {
+  const { context } = chatState;
+  const { service: searchService, error } = validateSearchService(context, 'getIndexStats', params);
+  if (error) return error;
+  try {
+    if (params.index) {
+      const anySearch: any = searchService;
+      const stats =
+        typeof anySearch.getIndexStats === 'function'
+          ? await anySearch.getIndexStats(params.index)
+          : { name: params.index, exists: true, documentCount: await anySearch.count?.(params.index) };
+      return { success: true, data: stats, tool: 'getIndexStats', params };
+    }
+    // No index → stats for the whole catalog.
+    const graphSvc: any = context.getService(SYSTEM_GRAPH_SERVICE);
+    const catalog = (await graphSvc?.getSearchIndexCatalog?.({})) || [];
+    return {
+      success: true,
+      data: catalog,
+      tool: 'getIndexStats',
+      params,
+      instructions: `Returned stats for ${catalog.length} catalogued index(es). Pass \`index\` for a single index.`,
+    };
+  } catch (err) {
+    return {
+      success: false,
+      error: `getIndexStats failed: ${(err as Error)?.message || 'Unknown error'}`,
+      tool: 'getIndexStats',
+      params,
+    };
+  }
+};
+
+const GetIndexStatsMacroDefinition: MacroComponentDefinition<typeof GetIndexStatsMacro> = {
+  name: "GetIndexStats",
+  nameSpace: "reactor-macros",
+  alias: "getIndexStats",
+  description: "Returns existence and document-count statistics for one search index, or for the whole catalog.",
+  component: GetIndexStatsMacro,
+  version: "1.0.0",
+  roles: ["USER"],
+  icon: "query_stats",
+  runat: "server",
+  tools: [
+    {
+      type: "function",
+      roles: ["USER"],
+      safeForAutoExecution: true,
+      function: {
+        icon: "query_stats",
+        name: "getIndexStats",
+        description: "Get document count / existence stats for a search index (or all catalogued indexes when omitted).",
+        parameters: {
+          type: "object",
+          properties: {
+            index: { type: "string", description: "Index name (optional)." },
+            format: { type: "string", enum: ["json", "markdown", "summary"], default: "json" },
+          },
+        },
+      },
+    },
+  ],
+};
+
 // Export all macro definitions
 export default [
   SearchContentMacroDefinition,
   IndexContentMacroDefinition,
-  DeleteIndexMacroDefinition
+  DeleteIndexMacroDefinition,
+  ListSearchIndexesMacroDefinition,
+  GetIndexStatsMacroDefinition,
 ];
