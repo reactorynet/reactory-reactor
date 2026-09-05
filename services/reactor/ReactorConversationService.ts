@@ -4687,8 +4687,8 @@ export default class ReactorConversationService
             totalTokens,
             use_case: conversation.use_case || 'standalone',
             status: 'success',
-            toolCallsCount: aiMessage.tool_calls?.length || 0,
-            toolsUsed: aiMessage.tool_calls?.map((tc: any) => tc.function?.name || tc.name).filter(Boolean) || [],
+            toolCallsCount: aiMessage?.tool_calls?.length || 0,
+            toolsUsed: aiMessage?.tool_calls?.map((tc: any) => tc.function?.name || tc.name).filter(Boolean) || [],
           });
         }
       } catch (usageErr: any) {
