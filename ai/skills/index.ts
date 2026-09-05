@@ -78,6 +78,33 @@ export const ReactorSkills: ISkillDefinition[] = [
     ],
   },
   {
+    id: 'reactory.temporalWorkflowBridge@1.0.0',
+    name: 'temporalWorkflowBridge',
+    nameSpace: 'reactory',
+    version: '1.0.0',
+    description:
+      'Decides when durable execution on Temporal is warranted versus the Reactory workflow engine, and shows how to bridge them: the temporal_* step inventory, await modes (durable event suspend vs polling), the settled-event contract and its lost-wakeup/tenancy hazards, human approval gates via user_activity tasks, and a diagnostic order for a workflow stuck waiting.',
+    filePath: require.resolve('./temporal-integration/durable-workflow-bridge.md'),
+    tags: [
+      'temporal',
+      'workflow',
+      'durable-execution',
+      'yaml-workflow',
+      'saga',
+      'approval',
+      'human-in-the-loop',
+      'signals',
+      'orchestration',
+      'troubleshooting',
+    ],
+    roles: ['USER', 'DEVELOPER', 'ADMIN'],
+    examples: [
+      '@searchSkills(query: "temporal")',
+      '@searchSkills(query: "durable workflow")',
+      '@readSkill(id: "reactory.temporalWorkflowBridge@1.0.0")',
+    ],
+  },
+  {
     id: 'reactory.maestroMobileTesting@1.0.0',
     name: 'maestroMobileTesting',
     nameSpace: 'reactory',
