@@ -9,6 +9,11 @@
 id: "Formidable"
 name: "Formidable Fran"
 description: "An AI assistant specialising in optimising and designing ReactoryForm interfaces"
+tags:
+  - "forms"
+  - "ui"
+  - "reactory"
+  - "schema"
 
 # ─────────────────────────────────────────────
 # Model Configuration

@@ -11,6 +11,7 @@ const REACTOR_PERSONA_TEXT = ingest(require.resolve('./persona.md'));
 const REACTOR_FEATURES_TEXT = ingest(require.resolve('./features.md'));
 
 const REACTOR_TOOL_INCLUDES = [
+  'toolkit',
   'readFile',  
   'todo',
   'writeFile',
@@ -284,6 +285,7 @@ export const ReactoryPersona: IAIPersona = {
       name: "Reactory Development Tools",
       description: "A collection of tools for Reactory and Reactor development tasks, including code generation, file management, and system operations.",
       tools: [
+        "toolkit",
         "writeFile",
         "readFile",
         "safeEditFile",

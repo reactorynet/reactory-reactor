@@ -469,7 +469,8 @@ export interface IAIPersona {
     url?: string;
     content?: string;
     created: Date;
-  }[]
+  }[];
+  tags?: string[];
 }
 
 /**
