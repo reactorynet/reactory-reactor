@@ -16,6 +16,17 @@ import { IWorkflowStepDesignerDefinition } from '@reactory/server-modules/reacto
 import { AgentConversationStep } from './AgentConversationStep';
 import { GraphQueryStep } from './GraphQueryStep';
 import { ProcessConversationStep } from './ProcessConversationStep';
+import {
+  playwrightWorkflowStepProviders,
+  PlaywrightSessionStep,
+  PlaywrightNavigateStep,
+  PlaywrightActionStep,
+  PlaywrightEvaluateStep,
+  PlaywrightInspectStep,
+  PlaywrightScreenshotStep,
+  PlaywrightStep,
+  BasePlaywrightStep,
+} from './playwright';
 
 /**
  * Local provider shape extending the published IWorkflowStepProvider with the
@@ -197,10 +208,23 @@ const providers: ReactorStepProvider[] = [
       version: '1.0.0',
     },
   },
+  ...playwrightWorkflowStepProviders,
 ];
 
 export const workflowSteps: Reactory.Workflow.IWorkflowStepProvider[] = providers;
 
-export { AgentConversationStep, GraphQueryStep, ProcessConversationStep };
+export {
+  AgentConversationStep,
+  GraphQueryStep,
+  ProcessConversationStep,
+  BasePlaywrightStep,
+  PlaywrightSessionStep,
+  PlaywrightNavigateStep,
+  PlaywrightActionStep,
+  PlaywrightEvaluateStep,
+  PlaywrightInspectStep,
+  PlaywrightScreenshotStep,
+  PlaywrightStep,
+};
 
 export default workflowSteps;

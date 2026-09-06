@@ -22,7 +22,14 @@ export const listWorkflowSteps: Macro<unknown, ListWorkflowStepsProps> = async (
       return { success: false, error: "core.ReactoryWorkflowService@1.0.0 is not available in the context." };
     }
 
-    const runner = (workflowService as any).workflowRunner;
+    let runner = (workflowService as any).workflowRunner;
+    if (!runner && typeof (workflowService as any).getWorkflowRunner === 'function') {
+      try {
+        runner = await (workflowService as any).getWorkflowRunner();
+      } catch (err: any) {
+        ctx?.log(`listWorkflowSteps: Could not getWorkflowRunner: ${err.message}`, 'warn');
+      }
+    }
     let stepRegistry = runner?.getStepRegistry();
 
     if (!stepRegistry) {
