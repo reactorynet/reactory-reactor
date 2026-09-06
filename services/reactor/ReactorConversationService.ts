@@ -3407,36 +3407,48 @@ export default class ReactorConversationService
     // Provider IDs from the registry (e.g. providers.yaml) may be cased
     // arbitrarily (e.g. "Ollama"). Normalize so routing is case-insensitive;
     // otherwise a mismatch silently falls through to the OpenAI-compatible default.
-    switch (provider?.toLowerCase()) {
-      case "ollama":
-        // Ollama uses the native Ollama Node SDK via OllamaAIService
-        await this.ollamaService.initialize(chatSessionId, persona);
-        return await this.ollamaService.chat({
-          ...chatArgs,
-          persistState: false, // Don't persist here since we handle it in ReactorConversationService
-        });
+    const llmStartTime = Date.now();
+    try {
+      switch (provider?.toLowerCase()) {
+        case "ollama":
+          // Ollama uses the native Ollama Node SDK via OllamaAIService
+          await this.ollamaService.initialize(chatSessionId, persona);
+          return await this.ollamaService.chat({
+            ...chatArgs,
+            persistState: false, // Don't persist here since we handle it in ReactorConversationService
+          });
 
-      case "google":
-        // Google AI service implementation
-        await this.googleAIService.initialize(chatSessionId, persona);
-        return await this.googleAIService.chat({
-          ...chatArgs,
-          persistState: false, // Don't persist here since we handle it in ReactorConversationService
+        case "google":
+          // Google AI service implementation
+          await this.googleAIService.initialize(chatSessionId, persona);
+          return await this.googleAIService.chat({
+            ...chatArgs,
+            persistState: false, // Don't persist here since we handle it in ReactorConversationService
+          });
+        case "anthropic":
+          // Anthropic service implementation
+          await this.anthropicService.initialize(chatSessionId, persona);
+          return await this.anthropicService.chat({
+            ...chatArgs,
+            persistState: false, // Don't persist here since we handle it in ReactorConversationService
+          });
+        default:
+          // x-ai, openai, copilot, and azure-openai use the same OpenAI-compatible service
+          await this.openaiService.initialize(chatSessionId, persona);
+          return await this.openaiService.chat({
+            ...chatArgs,
+            persistState: false, // Don't persist here since we handle it in ReactorConversationService
+          });
+      }
+    } finally {
+      if (this.context?.telemetry) {
+        const durationSec = (Date.now() - llmStartTime) / 1000;
+        this.context.telemetry.recordHistogram("reactor_llm_request_duration_seconds", durationSec, {
+          provider: provider?.toLowerCase() || "unknown",
+          model: persona?.modelId || "unknown",
+          personaId: persona?.id || chatArgs.personaId || "unknown",
         });
-      case "anthropic":
-        // Anthropic service implementation
-        await this.anthropicService.initialize(chatSessionId, persona);
-        return await this.anthropicService.chat({
-          ...chatArgs,
-          persistState: false, // Don't persist here since we handle it in ReactorConversationService
-        });
-      default:
-        // x-ai, openai, copilot, and azure-openai use the same OpenAI-compatible service
-        await this.openaiService.initialize(chatSessionId, persona);
-        return await this.openaiService.chat({
-          ...chatArgs,
-          persistState: false, // Don't persist here since we handle it in ReactorConversationService
-        });
+      }
     }
   }
 
@@ -3679,6 +3691,8 @@ export default class ReactorConversationService
       this.validateChatSessionId(chatSessionId, "sendMessage");
       this.cancelGraphingSchedule(chatSessionId);
     }
+
+    const turnStartTime = Date.now();
 
     this.sessionLog("debug", "Sending message", {
       personaId,
@@ -4092,7 +4106,7 @@ export default class ReactorConversationService
           responseToolCalls.length > 0
         ) {
           const MAX_TOOL_ITERATIONS = (conversation as any).maxToolIterations
-            || parseInt(process.env.REACTOR_MAX_TOOL_ITERATIONS || '100', 10);
+            || parseInt(process.env.REACTOR_MAX_TOOL_ITERATIONS || '200', 10);
           let iteration = 0;
           let hasClientToolsPending = false;
 
@@ -4743,12 +4757,34 @@ export default class ReactorConversationService
 
       // Record AI usage telemetry event
       try {
+        const promptTokens = response?.usage?.promptTokens || (response?.usage as any)?.prompt_tokens || 0;
+        const completionTokens = response?.usage?.completionTokens || (response?.usage as any)?.completion_tokens || 0;
+        const totalTokens = response?.usage?.totalTokens || (response?.usage as any)?.total_tokens || (promptTokens + completionTokens);
+
+        // Emit real-time Prometheus conversation metrics via context.telemetry
+        if (this.context?.telemetry) {
+          const telemetryAttr = {
+            personaId: conversation.personaId || personaId || 'default',
+            provider: conversation.providerId || (conversation as any).provider || 'default',
+            model: conversation.modelId || 'default',
+            use_case: conversation.use_case || 'standalone',
+          };
+          this.context.telemetry.increment('reactor_conversation_turns_total', 1, { ...telemetryAttr, status: 'success' });
+          if (promptTokens > 0) {
+            this.context.telemetry.increment('reactor_tokens_total', promptTokens, { ...telemetryAttr, type: 'prompt' });
+          }
+          if (completionTokens > 0) {
+            this.context.telemetry.increment('reactor_tokens_total', completionTokens, { ...telemetryAttr, type: 'completion' });
+          }
+          const turnDurationSec = (Date.now() - turnStartTime) / 1000;
+          this.context.telemetry.recordHistogram('reactor_conversation_turn_duration_seconds', turnDurationSec, telemetryAttr);
+          if (aiMessage?.tool_calls?.length) {
+            this.context.telemetry.recordHistogram('reactor_tool_calls_per_turn', aiMessage.tool_calls.length, telemetryAttr);
+          }
+        }
+
         const usageService = this.context.getService<any>('reactor.ReactorAIUsageService@1.0.0');
         if (usageService && typeof usageService.recordUsage === 'function') {
-          const promptTokens = response?.usage?.promptTokens || (response?.usage as any)?.prompt_tokens || 0;
-          const completionTokens = response?.usage?.completionTokens || (response?.usage as any)?.completion_tokens || 0;
-          const totalTokens = response?.usage?.totalTokens || (response?.usage as any)?.total_tokens || (promptTokens + completionTokens);
-
           await usageService.recordUsage({
             userId: (conversation.user as any)?._id || conversation.user,
             organizationId: (this.context.user as any)?.organization?._id,
@@ -4936,6 +4972,8 @@ export default class ReactorConversationService
     // Validate chatSessionId
     this.validateChatSessionId(chatSessionId, "executeMacro");
 
+    const toolStart = Date.now();
+
     try {
       // Get the persona's provider
       const persona = await this.context
@@ -5115,11 +5153,38 @@ export default class ReactorConversationService
         await this.updateToolCallStatus(chatSessionId, callId, 'success');
       }
 
+      if (this.context?.telemetry) {
+        const durationSec = (Date.now() - toolStart) / 1000;
+        const attr = {
+          tool_name: macro,
+          personaId: personaId || "unknown",
+          runat: "server",
+          status: "success",
+        };
+        this.context.telemetry.increment("reactor_tool_execution_total", 1, attr);
+        this.context.telemetry.recordHistogram("reactor_tool_execution_duration_seconds", durationSec, attr);
+      }
+
       return adapter.adaptResponse(toolResult);
     } catch (error: any) {
       if (callId) {
         await this.updateToolCallStatus(chatSessionId, callId, 'error');
       }
+
+      if (this.context?.telemetry) {
+        const durationSec = (Date.now() - toolStart) / 1000;
+        const attr = {
+          tool_name: macro,
+          personaId: personaId || "unknown",
+          runat: "server",
+          status: "error",
+          error_type: error.name || "Error",
+        };
+        this.context.telemetry.increment("reactor_tool_execution_total", 1, attr);
+        this.context.telemetry.recordHistogram("reactor_tool_execution_duration_seconds", durationSec, attr);
+        this.context.telemetry.increment("reactor_tool_execution_errors_total", 1, attr);
+      }
+
       const correlationId = v4();
       this.sessionLog("error", `Error executing macro: ${error.message}`, {
         error: error.message,
@@ -5272,6 +5337,23 @@ export default class ReactorConversationService
     // PROMPT/SAFE_AUTO paths where no placeholder was created).
     // Also backfill into the assistant message's tool_results array.
     for (const toolResult of results) {
+      if (this.context?.telemetry) {
+        const clientStatus = toolResult.isError ? 'error' : (toolResult.decision || 'success');
+        this.context.telemetry.increment('reactor_tool_execution_total', 1, {
+          tool_name: toolResult.toolName,
+          personaId: personaId || 'unknown',
+          runat: 'client',
+          status: clientStatus,
+        });
+        if (toolResult.isError) {
+          this.context.telemetry.increment('reactor_tool_execution_errors_total', 1, {
+            tool_name: toolResult.toolName,
+            personaId: personaId || 'unknown',
+            error_type: 'ClientToolError',
+          });
+        }
+      }
+
       let content: string;
 
       // Handle user approval decisions (declined/instructed) differently from errors
@@ -6294,6 +6376,12 @@ export default class ReactorConversationService
         user: this.context.user,
       }).exec();
 
+      if (result.deletedCount > 0 && this.context?.telemetry) {
+        this.context.telemetry.increment("reactor_chat_sessions_deleted_total", 1, {
+          personaId: "unknown",
+        });
+      }
+
       this.sessionLog(result.deletedCount > 0 ? "info" : "warn",
         result.deletedCount > 0 ? "Chat session deleted" : "Chat session not found for deletion",
         { chatSessionId: id, deletedCount: result.deletedCount }, id);
@@ -6815,6 +6903,12 @@ export default class ReactorConversationService
         tokenCount: conversation.tokenCount,
         maxTokens: conversation.maxTokens,
       }, conversation._id?.toString(), conversation.personaId);
+
+      if (this.context?.telemetry) {
+        this.context.telemetry.increment("reactor_chat_sessions_created_total", 1, {
+          personaId: args.personaId,
+        });
+      }
 
       // Fix: StreamingMode is a type, not a value. Use the string literal instead.
       if (args.streamingMode === StreamingMode.SSE) {
