@@ -6,7 +6,7 @@ import os from 'os';
 import { createHash } from 'crypto';
 import { promises as fs } from 'fs';
 import logger from '@reactory/server-core/logging';
-import { StreamingMode } from "modules/reactory-reactor/services/reactor/types/streaming.types";
+import { StreamingMode } from "@reactory/server-modules/reactory-reactor/services/reactor/types/streaming.types";
 import { IReactorConversationsService } from '../../../types/service.types';
 import {
   HttpMacroProps,

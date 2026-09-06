@@ -30,7 +30,7 @@ import ReactorMacroService from "./ReactorMacroService";
 import {
   MacroComponentDefinition,
   MacroToolDefinition,
-} from "modules/reactory-reactor/ai/openai/types/chat";
+} from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import {
   ChatHistoryItem,
   ReactorConversationHistory,

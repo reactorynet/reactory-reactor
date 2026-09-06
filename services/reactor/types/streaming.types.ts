@@ -232,6 +232,8 @@ export interface ToolIterationLimitStreamingEvent extends StreamingEventBase {
     iterationsCompleted: number;
     maxIterations: number;
     partialContent: string;
+    componentFqn?: string;
+    componentProps?: any;
   };
 }
 

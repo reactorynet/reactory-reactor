@@ -6,8 +6,6 @@ import {
   IOpenAIService,
   IReactorProviderService,
   IAIPersona,
-  IAIProviderService,
-  KnownAIProviders,
   ReactorInitChatResponse,
   ReactorInitiateSSEResponse,
   ReactorChatState,
@@ -16,8 +14,6 @@ import {
 import ReactorConversationModel, {
   ReactorConversationDocument,
   TReactorConversationDocument,
-  TReactorConversationModel,
-  ValidProviderResponseTypes,
 } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import AIPersonaProvider from "./AIPersonaProvider";
 import { ReactorProviderConfig } from "../../types/model.types";
@@ -31,16 +27,15 @@ import { ObjectId } from "mongodb";
 import safeUrl from "@reactory/server-core/utils/url/safeUrl";
 import { sseUriRoot } from "./streaming/sseOrigin";
 import resolveImageUrls from "@reactory/server-modules/reactory-reactor/utils/resolveImageUrls";
-import { ChatCompletion, ChatCompletionMessage } from "openai/resources";
 import ReactorMacroService from "./providers/ReactorMacroService";
 import DocumentChunkingService from "./DocumentChunkingService";
 import { ReactorConversationHistoryItem } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import ReactoryFile, {
   ReactoryFileDocument,
 } from "@reactory/server-modules/reactory-core/models/CoreFile";
-import { id } from "schema/reflection";
+import TaskModel from "@reactory/server-modules/reactory-core/models/Task";
 import { CompletionStreamingEvent, ToolCallStreamingEvent, ToolIterationLimitStreamingEvent, InterruptedStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
-import Helpers from "authentication/strategies/helpers";
+import Helpers from "@reactory/server-core/authentication/strategies/helpers";
 import { StreamingSessionManager } from "./StreamingSessionManager";
 import { StreamingTransportManager } from "./StreamingTransportManager";
 import { StreamingEventFactory } from "./streaming/StreamingEventFactory";
@@ -2362,8 +2357,20 @@ export default class ReactorConversationService
     if (maxToolIterations != null && maxToolIterations >= 1) {
       await ReactorConversationModel.findOneAndUpdate(
         { _id: chatSessionId, user: this.context.user },
-        { maxToolIterations, updated: new Date() },
+        { maxToolIterations, updated: new Date(), processing: false },
       ).exec();
+    }
+
+    // Dismiss any pending approval tasks in user queue since tool execution is resuming
+    try {
+      await TaskModel.updateMany(
+        { instanceId: chatSessionId, status: 'pending', componentFqn: 'core.WorkflowTaskApproval@1.0.0' },
+        { $set: { status: 'completed', completionDate: new Date(), percentComplete: 100 } }
+      ).exec();
+    } catch (taskCleanupErr: any) {
+      this.sessionLog("warn", `Failed to resolve pending approval tasks on resume: ${taskCleanupErr.message}`, {
+        chatSessionId,
+      }, chatSessionId, personaId);
     }
 
     // Re-send an empty continuation message. sendMessage already handles
@@ -2458,6 +2465,18 @@ export default class ReactorConversationService
       { _id: chatSessionId },
       { $set: { processing: false, updated: new Date() } }
     ).exec();
+
+    // Cancel any pending approval tasks in user queue
+    try {
+      await TaskModel.updateMany(
+        { instanceId: chatSessionId, status: 'pending', componentFqn: 'core.WorkflowTaskApproval@1.0.0' },
+        { $set: { status: 'cancelled', completionDate: new Date(), percentComplete: 100 } }
+      ).exec();
+    } catch (taskCancelErr: any) {
+      this.sessionLog("warn", `Failed to cancel pending approval tasks on interrupt: ${taskCancelErr.message}`, {
+        chatSessionId,
+      }, chatSessionId, personaId);
+    }
 
     // Send an SSE event to the client immediately
     if (await this.streamingTransportManager.hasTransport(chatSessionId)) {
@@ -4363,32 +4382,53 @@ export default class ReactorConversationService
                     timestamp: new Date(),
                   },
                 },
-                $set: { updated: new Date() },
+                $set: { updated: new Date(), processing: false },
               }
             ).exec();
 
-            // Signal the client via SSE or flag the response for GraphQL mode
-            if (streamingMode === StreamingMode.SSE) {
+            const componentFqn = 'core.WorkflowTaskApproval@1.0.0';
+            const componentProps = {
+              sessionId: effectiveConversationId,
+              chatSessionId: effectiveConversationId,
+              personaId,
+              persona: {
+                id: effectivePersona?.id,
+                name: effectivePersona?.name,
+                avatar: effectivePersona?.avatar,
+              },
+              iterationsCompleted: iteration,
+              maxIterations: MAX_TOOL_ITERATIONS,
+              title: 'Tool Execution Limit Reached',
+              description: `The agent completed ${iteration} of ${MAX_TOOL_ITERATIONS} allowed tool calls and paused. You can approve additional iterations to continue.`,
+              pendingTools: (response?.tool_calls || response?.choices?.[0]?.message?.tool_calls || []).map((tc: any) => tc.function?.name || tc.name).filter(Boolean),
+            };
+
+            // Check if SSH / SSE connection is active
+            const isConnectionActive = await this.streamingTransportManager.isChatSessionActive(effectiveConversationId);
+
+            if (isConnectionActive && streamingMode === StreamingMode.SSE) {
               try {
-                const sseSessionId = this.streamingSessionManager.getSessionId(effectiveConversationId);
-                if (sseSessionId) {
-                  const limitEvent: ToolIterationLimitStreamingEvent = {
-                    type: StreamingEventType.TOOL_ITERATION_LIMIT,
-                    sessionId: effectiveConversationId,
-                    conversationId: effectiveConversationId,
-                    messageId: new ObjectId().toString(),
-                    timestamp: new Date(),
-                    data: {
-                      iterationsCompleted: iteration,
-                      maxIterations: MAX_TOOL_ITERATIONS,
-                      partialContent,
-                    },
-                  };
-                  await this.streamingTransportManager.sendEventToSession(
-                    effectiveConversationId,
-                    limitEvent
-                  );
-                }
+                const limitEvent: ToolIterationLimitStreamingEvent = {
+                  type: StreamingEventType.TOOL_ITERATION_LIMIT,
+                  sessionId: effectiveConversationId,
+                  conversationId: effectiveConversationId,
+                  messageId: new ObjectId().toString(),
+                  timestamp: new Date(),
+                  data: {
+                    iterationsCompleted: iteration,
+                    maxIterations: MAX_TOOL_ITERATIONS,
+                    partialContent,
+                    componentFqn,
+                    componentProps,
+                  },
+                };
+                await this.streamingTransportManager.sendEventToSession(
+                  effectiveConversationId,
+                  limitEvent
+                );
+                this.sessionLog("info", `[sendMessage] AUTO mode: sent tool iteration limit approval event via SSE`, {
+                  conversationId: effectiveConversationId,
+                }, effectiveConversationId, personaId);
               } catch (sseError: any) {
                 this.sessionLog("warn", `[sendMessage] Failed to send tool iteration limit SSE event: ${sseError.message}`, {
                   conversationId: effectiveConversationId,
@@ -4398,11 +4438,47 @@ export default class ReactorConversationService
               return this.attachStructuredContent(adapter.adaptResponse(response), providerConfig);
             }
 
+            // If no SSH session is active (or user not on chat page), create a task in the user's task queue
+            try {
+              const pendingTask = await TaskModel.findOne({
+                instanceId: effectiveConversationId,
+                status: 'pending',
+                componentFqn,
+              }).exec();
+
+              if (!pendingTask && this.context.user?._id) {
+                const taskDoc = new TaskModel({
+                  title: `Tool Execution Approval: ${effectivePersona?.name || 'Reactor Agent'}`,
+                  description: `Agent reached tool execution limit (${iteration}/${MAX_TOOL_ITERATIONS}) in chat session. Approval required to resume.`,
+                  category: 'workflow',
+                  workflowStatus: 'awaiting_input',
+                  status: 'pending',
+                  instanceId: effectiveConversationId,
+                  componentFqn,
+                  componentProps,
+                  user: this.context.user._id,
+                  createdAt: new Date(),
+                  updatedAt: new Date(),
+                });
+                await taskDoc.save();
+                this.sessionLog("info", `[sendMessage] No active SSH session — created task queue item ${taskDoc._id} for user ${this.context.user._id}`, {
+                  conversationId: effectiveConversationId,
+                  taskId: taskDoc._id.toString(),
+                }, effectiveConversationId, personaId);
+              }
+            } catch (taskErr: any) {
+              this.sessionLog("error", `[sendMessage] Failed to create task queue item for limit approval: ${taskErr.message}`, {
+                conversationId: effectiveConversationId,
+              }, effectiveConversationId, personaId);
+            }
+
             // For non-streaming mode, flag the response so the client can detect it
             if (response?.choices?.[0]?.message) {
               (response.choices[0].message as any).toolIterationLimitReached = true;
               (response.choices[0].message as any).iterationsCompleted = iteration;
               (response.choices[0].message as any).maxToolIterations = MAX_TOOL_ITERATIONS;
+              (response.choices[0].message as any).componentFqn = componentFqn;
+              (response.choices[0].message as any).componentProps = componentProps;
             }
           }
 
