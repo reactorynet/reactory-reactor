@@ -403,10 +403,9 @@ const BaseUISchema: Reactory.Schema.IFormUISchema = {
   },
 };
 
-// export const ProjectListUiSchema: Reactory.Schema.IUISchema = {
-//   ...BaseUISchema,  
-//   projects: projectsListUISchema,
-// };
+export const ProjectListUiSchema: Reactory.Schema.IUISchema = {
+  ...BaseUISchema,
+};
 
 export const ProjectTableUIOptions: Reactory.Client.Components.IMaterialTableWidgetOptions = {
   showLabel: false,

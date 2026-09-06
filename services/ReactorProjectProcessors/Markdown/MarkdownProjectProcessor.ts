@@ -1,6 +1,6 @@
 import fs from "fs";
 import path from "path";
-import { service } from "application/decorators";
+import { service } from '@reactory/server-core/application/decorators';
 import BaseProjectProcessor from "../BaseProjectProcessor";
 import {
   IReactorProject,

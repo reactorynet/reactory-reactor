@@ -8,7 +8,7 @@ import { ShellSessionManager } from './ShellSessionManager';
 import passport from 'passport';
 import safeUrl from '@reactory/server-core/utils/url/safeUrl';
 import { sseUriRoot } from './streaming/sseOrigin';
-import Helpers from 'authentication/strategies/helpers';
+import Helpers from '@reactory/server-core/authentication/strategies/helpers';
 
 /**
  * Helper: log to both context and the chat session file logger.

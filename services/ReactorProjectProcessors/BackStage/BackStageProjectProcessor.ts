@@ -21,7 +21,7 @@ import {
 
 import SVGS from "@reactory/server-modules/reactory-reactor/data/reactor-svgs";
 import { PagingRequest } from "@reactory/server-core/database/types";
-import { service } from "application/decorators";
+import { service } from '@reactory/server-core/application/decorators';
 import yaml from "js-yaml";
 import { ObjectId } from "mongodb";
 import BaseProjectProcessor from "../BaseProjectProcessor";

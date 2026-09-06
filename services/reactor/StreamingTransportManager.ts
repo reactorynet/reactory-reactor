@@ -662,6 +662,29 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
   }
 
   /**
+   * Check if any active transport exists for this chat session across
+   * local process transports or Redis pubsub subscribers in a cluster.
+   */
+  async isChatSessionActive(chatSessionId: string): Promise<boolean> {
+    if (this.hasActiveTransportForChat(chatSessionId)) {
+      return true;
+    }
+    if (this.fanoutEnabled && this.redisService?.getClient) {
+      try {
+        const channel = eventChannel(chatSessionId);
+        const res: any = await this.redisService.getClient().pubsub('NUMSUB', channel);
+        if (Array.isArray(res) && res.length >= 2) {
+          const count = parseInt(res[1], 10);
+          if (count > 0) return true;
+        }
+      } catch (err: any) {
+        this.slog("warn", `isChatSessionActive pubsub check failed for ${chatSessionId}: ${err.message}`, undefined, chatSessionId);
+      }
+    }
+    return false;
+  }
+
+  /**
    * Send a keepalive heartbeat to prevent proxy/browser timeouts during
    * long-running server-side operations (e.g. AUTO tool execution loops).
    * Best-effort — failures are silently ignored.

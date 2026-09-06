@@ -180,10 +180,12 @@ export class StreamingEventFactory {
     maxIterations: number,
     partialContent: string,
     opts: StreamingEventIds = {},
+    componentFqn?: string,
+    componentProps?: any,
   ): ToolIterationLimitStreamingEvent {
     return StreamingEventFactory.base(
       StreamingEventType.TOOL_ITERATION_LIMIT,
-      { iterationsCompleted, maxIterations, partialContent },
+      { iterationsCompleted, maxIterations, partialContent, componentFqn, componentProps },
       opts,
     ) as ToolIterationLimitStreamingEvent;
   }

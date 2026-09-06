@@ -1,5 +1,5 @@
 import Reactory, { React } from '@reactorynet/reactory-core';
-import { ReactorProjectDocumentation } from 'modules/reactory-reactor/types/service.types';
+import { ReactorProjectDocumentation } from '@reactory/server-modules/reactory-reactor/types/service.types';
 
 interface ReactorProjectDocumentationWidgetProps { 
  reactory: Reactory.Client.ReactorySDK,
