@@ -1,3 +1,5 @@
 + /forms/widgets/*.tsx
 + /forms/widgets/*.ts
++ /ai/persona/*/agent.yaml
++ /ai/persona/*/avatar.png
 - *.*
