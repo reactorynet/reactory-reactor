@@ -91,12 +91,54 @@ class AIPersonaProvider
     }
   }
 
+    /**
+     * Resolves the on-disk path for a module's root folder (containing `ai/persona`).
+     *
+     * The authoritative source of truth for the application root is `APPLICATION_ROOT`
+     * (`app` for compiled builds, `src` for the development/source tree) - the same env
+     * var the rest of the server uses to locate modules. Historically this method guessed
+     * the root from `NODE_ENV` alone (`NODE_ENV === "production" ? "app" : "src"`). That
+     * silently broke the compiled builds: the YAML personas live under `app/modules`, but
+     * depending on which env file was loaded `NODE_ENV` could be anything other than exactly
+     * "production" (e.g. "local" or unset), so resolution pointed at a `src/modules` folder
+     * that does not exist in the build output and every lookup hit `if (!modulePath) continue`.
+     *
+     * We now honour `APPLICATION_ROOT`, fall back to the `NODE_ENV` heuristic, and finally
+     * self-heal by probing candidate roots for the actual module folder so a mismatched env
+     * can no longer cause a silent skip.
+     */
   private resolveModulePath(moduleId: string): string | null {
-    try {
-      return path.join(process.env.REACTORY_SERVER as string, process.env.NODE_ENV === "production" ? "app" : "src", "modules", moduleId);
-    } catch {
-      return null;
+    const serverRoot = process.env.REACTORY_SERVER || process.cwd();
+
+    const candidateRoots = [
+      // 1. Canonical, explicitly-configured application root.
+      process.env.APPLICATION_ROOT,
+      // 2. Legacy heuristic, preserved for envs that don't set APPLICATION_ROOT.
+      process.env.NODE_ENV === "production" ? "app" : "src",
+      // 3. Both common roots - lets us self-heal when the above guess is wrong.
+      "app",
+      "src",
+    ];
+
+    // Prefer the first candidate whose module folder actually exists on disk so a
+    // wrong env setting can't silently resolve to a missing path.
+    for (const root of candidateRoots) {
+      if (!root) continue;
+      try {
+        const modulesDir = path.join(serverRoot, root, "modules", moduleId);
+        if (fs.existsSync(modulesDir)) {
+          return modulesDir;
+        }
+      } catch {
+        // Ignore stat errors and keep probing.
+      }
     }
+
+    // Nothing matched on disk - return the primary candidate so callers still get a
+    // deterministic path (and a useful warning) even when the module is genuinely absent.
+    const primaryRoot = process.env.APPLICATION_ROOT ||
+      (process.env.NODE_ENV === "production" ? "app" : "src");
+    return path.join(serverRoot, primaryRoot, "modules", moduleId);
   }
 
   setModelRegistry(modelRegistry: Reactory.Service.TReactoryModelRegistryService): void {
