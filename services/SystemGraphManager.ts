@@ -501,14 +501,50 @@ class SystemGraphManager implements ISystemGraphManager {
     const discoveredBy = new Map<number, ReactorNodeLink>();
     let frontier: number[] = [sourceId];
 
+    // Containment (parentId) edges are synthesized, never persisted (I8) —
+    // without them two nodes "connected through" a folder have no path at
+    // all. Include them unless the caller's linkTypes filter excludes them.
+    const useContainment =
+      !opts.linkTypes || opts.linkTypes.length === 0 || opts.linkTypes.includes(ReactorLinkType.CONTAINS);
+    const containsEdge = (parentId: number, childId: number): ReactorNodeLink =>
+      ({
+        id: linkId(parentId, childId, ReactorLinkType.CONTAINS),
+        source: parentId,
+        target: childId,
+        types: [ReactorLinkType.CONTAINS],
+        title: 'contains',
+      } as ReactorNodeLink);
+
     for (let level = 0; level < maxDepth && frontier.length > 0; level++) {
       if (visited.size > MAX_VISITED) break;
 
-      const edges = await this.getNodeLinks(frontier, {
-        direction: direction === 'both' ? 'both' : 'out',
-        types: opts.linkTypes,
-        limit: 2000,
-      });
+      const [edges, frontierNodes, children] = await Promise.all([
+        this.getNodeLinks(frontier, {
+          direction: direction === 'both' ? 'both' : 'out',
+          types: opts.linkTypes,
+          limit: 2000,
+        }),
+        useContainment && direction === 'both' ? this.getNodes(frontier) : Promise.resolve([]),
+        useContainment
+          ? (ReactorNodeModel.find({ parentId: { $in: frontier } })
+              .select('id parentId')
+              .limit(2000)
+              .lean() as unknown as Promise<Array<{ id: number; parentId: number }>>)
+          : Promise.resolve([] as Array<{ id: number; parentId: number }>),
+      ]);
+
+      // Upward hops (child -> parent) only make sense undirected; downward
+      // (parent contains child) is the natural 'out' direction.
+      for (const node of frontierNodes) {
+        if (node?.parentId !== undefined && node.parentId !== null && node.id !== undefined) {
+          edges.push(containsEdge(node.parentId, node.id));
+        }
+      }
+      for (const child of children) {
+        if (child?.parentId !== undefined && child.parentId !== null && child.id !== undefined) {
+          edges.push(containsEdge(child.parentId, child.id));
+        }
+      }
 
       const nextFrontier: number[] = [];
       for (const edge of edges) {

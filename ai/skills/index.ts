@@ -46,6 +46,37 @@ export const ReactorSkills: ISkillDefinition[] = [
       '@readSkill(id: "reactory.graphCatalogWalkAndLink@1.0.0")',
     ],
   },
+  {
+    id: 'reactory.remoteDeployment@1.0.0',
+    name: 'remoteDeployment',
+    nameSpace: 'reactory',
+    version: '1.0.0',
+    description:
+      'Guides agents through remote host SSH configuration, keypair generation, podman deployment automation, i18n & form widget asset packaging, and container diagnostic workflows.',
+    filePath: require.resolve('./reactory-deployment/remote-deployment.md'),
+    tags: ['deployment', 'ssh', 'podman', 'containers', 'remote-host', 'debugging', 'i18n', 'plugins', 'devops'],
+    roles: ['USER', 'DEVELOPER', 'ADMIN'],
+    examples: [
+      '@searchSkills(query: "deployment")',
+      '@readSkill(id: "reactory.remoteDeployment@1.0.0")',
+    ],
+  },
+  {
+    id: 'reactory.kubernetesDeployment@1.0.0',
+    name: 'kubernetesDeployment',
+    nameSpace: 'reactory',
+    version: '1.0.0',
+    description:
+      'Comprehensive methodology, toolchain, and operational workflows for deploying, diagnosing, hot-patching, and managing Reactory workloads on Kubernetes and GitOps engines (ArgoCD).',
+    filePath: require.resolve('./reactory-deployment/k8s-deployment.md'),
+    tags: ['kubernetes', 'k8s', 'terraform', 'gitops', 'argocd', 'deployment', 'ingress', 'containermgmt', 'devops'],
+    roles: ['USER', 'DEVELOPER', 'ADMIN'],
+    examples: [
+      '@searchSkills(query: "kubernetes")',
+      '@searchSkills(query: "k8s")',
+      '@readSkill(id: "reactory.kubernetesDeployment@1.0.0")',
+    ],
+  },
 ];
 
 export default ReactorSkills;

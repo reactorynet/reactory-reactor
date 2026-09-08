@@ -57,9 +57,18 @@ const REACTOR_TOOL_INCLUDES = [
   // Atlassian macros
   'jiraSearchIssues',
   'jiraGetIssue',
+  'jiraGetBoards',
+  'jiraGetSprints',
+  'jiraGetAttachments',
   'jiraCreateIssue',
+  'jiraUpdateIssue',
   'jiraAddComment',
+  'jiraUpdateComment',
+  'jiraDeleteComment',
   'jiraTransitionIssue',
+  'jiraLinkIssues',
+  'jiraAddWorklog',
+  'jiraMoveToSprint',
 ];
 
 const REACTOR_RESOURCES: IAIPersonaResource[] = [  
@@ -236,7 +245,8 @@ const buildSystemPrompt = (userRoles: string[] = ['USER'], availableTools: any[]
     date: new Date().toISOString(),
     resourceDescription,
     userRole: userRoles.join(', '),
-    roleSpecificCapabilities: roleCapabilities
+    roleSpecificCapabilities: roleCapabilities,
+    process: process
   });
 };
 
@@ -309,9 +319,18 @@ export const ReactoryPersona: IAIPersona = {
       tools: [
         "jiraSearchIssues",
         "jiraGetIssue",
+        "jiraGetBoards",
+        "jiraGetSprints",
+        "jiraGetAttachments",
         "jiraCreateIssue",
+        "jiraUpdateIssue",
         "jiraAddComment",
-        "jiraTransitionIssue"
+        "jiraUpdateComment",
+        "jiraDeleteComment",
+        "jiraTransitionIssue",
+        "jiraLinkIssues",
+        "jiraAddWorklog",
+        "jiraMoveToSprint",
       ],
     }
   ],
