@@ -10,7 +10,8 @@ import { McpSession } from '../types/model.types';
 // Removed incorrect import as 'ChatCompletionResponseMessage' is not exported by 'openai'
 
 export interface ConversationMeta { 
-  summary: string
+  tags?: string[]
+  summary?: string
   title: string
 }
 
