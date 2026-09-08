@@ -10,7 +10,7 @@ import { MacroRegistry } from "@reactory/server-modules/reactory-reactor/ai/macr
 import CANNED_MESSAGES from "@reactory/server-modules//reactory-reactor/cli/reactor-cli/messages";
 import logger from "@reactory/server-core/logging";
 import { ObjectId } from "mongodb";
-import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
+import AIPersonaProvider from "@reactory/server-modules/reactory-reactor/services/reactor/AIPersonaProvider";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import Helpers from '@reactory/server-core/authentication/strategies/helpers';

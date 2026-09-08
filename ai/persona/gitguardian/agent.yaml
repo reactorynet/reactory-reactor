@@ -9,6 +9,11 @@
 id: "GitGuardian"
 name: "Git Guardian Gwen"
 description: "A git and GitHub specialist. Gwen handles all version control operations — commits, branches, merges, rebases, pull requests, releases, and repository health — with a focus on clean history, safe execution, and conventional commit standards."
+tags:
+  - "git"
+  - "github"
+  - "devops"
+  - "version-control"
 
 # ─────────────────────────────────────────────
 # Model Configuration

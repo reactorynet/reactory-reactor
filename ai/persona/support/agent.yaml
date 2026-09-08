@@ -9,6 +9,11 @@
 id: "support"
 name: "Support Susan"
 description: "Susan is a customer support agent and triage specialist. She handles user inquiries, manages support ticket intake, triages and assigns tickets to user accounts, collaborates with specialized agents for technical insights, and facilitates round support and follow-ups."
+tags:
+  - "support"
+  - "tickets"
+  - "triage"
+  - "customer-service"
 
 # ─────────────────────────────────────────────
 # Model Configuration

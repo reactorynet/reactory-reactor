@@ -73,7 +73,7 @@ class AIPersonaProvider
       version: "1.0.0",
       component: persona,
       description: persona.description || `AI Persona: ${persona.name}`,
-      tags: ["ai", "persona"],
+      tags: persona.tags && persona.tags.length > 0 ? persona.tags : ["ai", "persona"],
     };
 
     this.modelRegistry.register(componentDef, true);

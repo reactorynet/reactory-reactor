@@ -5,11 +5,11 @@ import { StateMacroRegistry } from './stateMacro.macro';
 import { AddMacroRegistry } from './addMacro.macro';
 import { DateTimeMacroRegistry } from './datetimeMacro.macro';
 import { TodoMacroRegistry } from './todoMacro.macro';
-import { AddToolsToSessionMacroRegistry, RemoveToolsFromSessionMacroRegistry } from './sessionTools.macro';
+import { AddToolsToSessionMacroRegistry, RemoveToolsFromSessionMacroRegistry, ToolkitMacroRegistry } from './sessionTools.macro';
 import { ReloadPersonasMacroRegistry } from './reloadPersonas.macro';
 import ToolResultProcessor from './ToolResultProcessor';
 
-export { ToolResultProcessor };
+export { ToolResultProcessor, ToolkitMacroRegistry };
 
 export default [
   VariableMacroRegistry,
@@ -20,6 +20,7 @@ export default [
   AddMacroRegistry,
   DateTimeMacroRegistry,
   TodoMacroRegistry,
+  ToolkitMacroRegistry,
   AddToolsToSessionMacroRegistry,
   RemoveToolsFromSessionMacroRegistry,
   ReloadPersonasMacroRegistry

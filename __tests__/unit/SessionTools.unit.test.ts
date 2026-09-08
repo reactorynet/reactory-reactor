@@ -1,5 +1,5 @@
 import { describe, it, expect, jest, beforeEach } from '@jest/globals';
-import { AddToolsToSessionMacro, RemoveToolsFromSessionMacro } from '../../ai/macro/runtime/sessionTools.macro';
+import { AddToolsToSessionMacro, RemoveToolsFromSessionMacro, ToolkitMacro, ToolkitMacroRegistry } from '../../ai/macro/runtime/sessionTools.macro';
 import type { ChatState } from '../../ai/openai/types/chat';
 import AIProviderBase from '../../services/reactor/providers/AIProviderBase';
 import { MacroToolDefinition, MacroComponentDefinition } from '../../ai/openai/types/chat';
@@ -237,6 +237,112 @@ describe('Session Tools and Fallback Fix Unit Tests', () => {
       expect(result.removedTools).toContain('readFile');
       expect(state.tools).toHaveLength(1);
       expect(state.tools[0].function.name).toBe('writeFile');
+    });
+  });
+
+  // ── 2. ToolkitMacro Tests ─────────────────────────────────────────────────
+
+  describe('ToolkitMacro', () => {
+    it('should inspect available tools and tool profiles with action=available', async () => {
+      const state = makeState();
+      state.tools = [{ type: 'function', function: { name: 'readFile' } }] as any;
+      (state.persona as any).tools = [
+        { type: 'function', category: 'FS', function: { name: 'readFile', description: 'Read' } },
+        { type: 'function', category: 'FS', function: { name: 'writeFile', description: 'Write' } },
+        { type: 'function', category: 'Shell', function: { name: 'shell', description: 'Shell' } }
+      ];
+
+      const result: any = await ToolkitMacro(
+        { action: 'available' },
+        state,
+        state.context
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe('available');
+      expect(result.availableTools).toHaveLength(3);
+      expect(result.toolProfiles).toHaveLength(1);
+      expect(result.toolProfiles[0].name).toBe('DeveloperProfile');
+      expect(result.activeTools).toContain('readFile');
+    });
+
+    it('should inspect current active tools with action=current', async () => {
+      const state = makeState();
+      state.tools = [
+        { type: 'function', function: { name: 'readFile' } },
+        { type: 'function', function: { name: 'writeFile' } },
+        { type: 'function', function: { name: 'shell' } }
+      ] as any;
+
+      const result: any = await ToolkitMacro(
+        { action: 'current' },
+        state,
+        state.context
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.activeTools).toEqual(['readFile', 'writeFile', 'shell']);
+      expect(result.activeProfile).toBe('DeveloperProfile');
+    });
+
+    it('should replace active tools with specified tools using action=replace', async () => {
+      const state = makeState();
+      state.tools = [
+        { type: 'function', function: { name: 'readFile' } },
+        { type: 'function', function: { name: 'writeFile' } }
+      ] as any;
+
+      const result: any = await ToolkitMacro(
+        { action: 'replace', tools: ['shell'] },
+        state,
+        state.context
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.action).toBe('replace');
+      expect(result.activeTools).toEqual(['shell']);
+      expect(state.tools).toHaveLength(1);
+      expect(state.tools[0].function.name).toBe('shell');
+      expect(mockSave).toHaveBeenCalled();
+    });
+
+    it('should replace active tools with a profile using action=replace and profileName', async () => {
+      const state = makeState();
+      state.tools = [{ type: 'function', function: { name: 'customTool' } }] as any;
+
+      const result: any = await ToolkitMacro(
+        { action: 'replace', profileName: 'DeveloperProfile' },
+        state,
+        state.context
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.activeTools).toContain('readFile');
+      expect(result.activeTools).toContain('writeFile');
+      expect(result.activeTools).toContain('shell');
+      expect(state.tools).toHaveLength(3);
+    });
+
+    it('should create and save a custom toolkit definition with action=save', async () => {
+      const state = makeState();
+      (mockConversation as any).markModified = jest.fn();
+
+      const result: any = await ToolkitMacro(
+        {
+          action: 'save',
+          name: 'TaskToolkit',
+          description: 'Special toolkit for reviewing code',
+          tools: ['readFile', 'safeEditFile']
+        },
+        state,
+        state.context
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.toolkit.name).toBe('TaskToolkit');
+      expect(result.toolkit.tools).toEqual(['readFile', 'safeEditFile']);
+      expect(state.persona?.toolProfiles?.some(p => p.name === 'TaskToolkit')).toBe(true);
+      expect(mockSave).toHaveBeenCalled();
     });
   });
 

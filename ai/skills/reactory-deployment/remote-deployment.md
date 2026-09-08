@@ -1,6 +1,6 @@
 # Remote Host Deployment & Container Debugging
 
-This skill provides step-by-step instructions, operational patterns, and troubleshooting procedures for deploying and debugging Reactory applications across remote target hosts via SSH and rootless Podman.
+This skill provides step-by-step instructions, operational patterns, and troubleshooting procedures for deploying and debugging Reactory applications across remote target hosts via SSH, rootless Podman, and Nginx reverse proxy gateways.
 
 ---
 
@@ -88,70 +88,146 @@ flowchart TD
 ssh reactor@192.168.0.17 "cd ~/reactory/reactory-express-server && bin/deploy-podman.sh reactory podman"
 ```
 
-### 3.2 Client Deployment Command
+### 3.2 Client Deployment Command (Multi-Client)
 ```bash
+# Deploy Reactory Management Client
 ssh reactor@192.168.0.17 "cd ~/reactory/reactory-pwa-client && bin/deploy-podman.sh reactory podman 9000"
+
+# Deploy BookTutor Client
+ssh reactor@192.168.0.17 "cd ~/reactory/reactory-pwa-client && bin/deploy-podman.sh booktutor podman 9001"
 ```
 
 ---
 
-## 4. Translation Packaging (`I18N_NS`)
+## 4. Multi-Client Reverse Proxy Gateway & Dynamic DNS Resolution
 
-The build pipeline parses `I18N_NS` from the configuration environment file (`config/<config-id>/.env.<env-id>`).
+In multi-client environments, an Nginx Gateway container serves as the ingress point dispatching by `Host` header.
 
-- **Namespaces Packaged**:
-  - Core defaults: `common`, `forms`, `models`, `services`, `workflow`, `schemas`, `cli`.
-  - Configured namespaces: e.g. `reactory,reactor,booktutor,zepz-engineer`.
-  - Fallback: If `I18N_NS` is missing or empty, `reactory` is always packaged.
-- **Locales Processed**: Scans all subfolders in `$REACTORY_DATA/i18n` (`en-US`, `en`, `af`).
-- **Output Destination**: `$BUILD_PATH/data/i18n/<locale>/<ns>.json`, synchronized automatically to `${REACTORY_DATA}/i18n/`.
+### 4.1 Resolving Stale Upstream IPs (502 Bad Gateway Fix)
+In Docker/Podman container networks, restarting containers dynamically reallocates bridge IPs. Standard Nginx `upstream { server ...; }` blocks resolve DNS only once at startup and cache the IP permanently, causing `502 Bad Gateway (113: Host is unreachable)` upon container restarts.
+
+**Fix**: Set a dynamic `resolver` with short TTL and use variable-backed `proxy_pass`:
+```nginx
+events {
+    worker_connections 1024;
+}
+
+http {
+    include       /etc/nginx/mime.types;
+    default_type  application/octet-stream;
+    sendfile        on;
+    keepalive_timeout  65;
+    client_max_body_size 100M;
+    
+    # Internal Podman DNS resolver
+    resolver 10.89.0.1 valid=5s ipv6=off;
+
+    # 1. API Server (api.reactory.local)
+    server {
+        listen 80;
+        server_name api.reactory.local;
+
+        location / {
+            set $backend "http://reactory-express-server:4000";
+            proxy_pass $backend;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+            proxy_read_timeout 300s;
+            proxy_send_timeout 300s;
+        }
+    }
+
+    # 2. BookTutor Client (booktutor.reactory.local)
+    server {
+        listen 80;
+        server_name booktutor.reactory.local;
+
+        location / {
+            set $booktutor_client "http://booktutor-pwa-client:80";
+            proxy_pass $booktutor_client;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+
+    # 3. Reactory Management Client (reactory.local, default)
+    server {
+        listen 80 default_server;
+        server_name reactory.local www.reactory.local app.reactory.local _;
+
+        location / {
+            set $reactory_client "http://reactory-pwa-client:80";
+            proxy_pass $reactory_client;
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+}
+```
 
 ---
 
-## 5. Form Widget Pre-compilation (`plugins/__runtime__`)
+## 5. Domain Conventions & HSTS Considerations
 
-Dynamic form widgets are compiled into standalone UMD bundles via Rollup using `bin/utils/build/compile-form-modules.ts`.
-
-- Evaluates code-defined and YAML forms.
-- Compiles TSX widgets with external React/ReactDOM bindings.
-- Generates `bin/build.runtime-plugins.rsync` filter.
-- Outputs bundles to `$BUILD_PATH/data/plugins/__runtime__/lib/` and synchronizes to `${REACTORY_DATA}/plugins/__runtime__/lib/`.
-- Served via Express CDN endpoint `/cdn/plugins/__runtime__/lib/<module-id>.min.js`.
+- **`.dev` TLD HSTS Restriction**: `.dev` is hardcoded in the Chromium/Firefox global HSTS Preload list. Browsers strictly require HTTPS and reject plain HTTP, resulting in `ERR_SSL_PROTOCOL_ERROR`.
+- **Local Development TLDs**: Use `.local`, `.test`, or `.lan` (e.g. `reactory.local`, `booktutor.reactory.local`, `api.reactory.local`) for HTTP development and test nodes without SSL certificate requirements.
+- **Local Hosts Entry**:
+  ```text
+  192.168.0.17  reactory.local www.reactory.local app.reactory.local api.reactory.local booktutor.reactory.local
+  ```
 
 ---
 
-## 6. Remote Container Debugging & Diagnostics
+## 6. Client Password & Authentication Verification
+
+- **`x-client-pwd` Header Validation**: `ReactoryClientAuthenticationMiddleware` hashes `x-client-pwd` with the client's salt in MongoDB. The client's compile-time `REACT_APP_CLIENT_PASSWORD` must strictly match the server secret (`REACTORY_APPLICATION_PASSWORD` / client configuration password), otherwise all GraphQL and API calls will fail with `401 Credentials Invalid`.
+- **Mongoose Themes Schema**: In `ReactoryClientMongooseSchema`, `themes` must be defined as `[mongoose.Schema.Types.Mixed]` rather than empty subdocument schemas `[{ _id: false }]` to avoid property stripping on startup upsert.
+
+---
+
+## 7. Remote Container Debugging & Diagnostics
 
 When debugging container startup or runtime issues on the remote node:
 
-### 6.1 Inspect Running Containers & Status
+### 7.1 Inspect Running Containers & Status
 ```bash
 ssh reactor@192.168.0.17 "podman ps -a"
 ```
 
-### 6.2 Tail Real-time Logs
+### 7.2 Tail Real-time Logs
 ```bash
 # Server backend logs
 ssh reactor@192.168.0.17 "podman logs -f --tail 50 reactory-express-server"
 
 # Client Nginx logs
 ssh reactor@192.168.0.17 "podman logs -f --tail 50 reactory-pwa-client"
+
+# Gateway logs
+ssh reactor@192.168.0.17 "podman logs -f --tail 50 reactory-gateway"
 ```
 
-### 6.3 Execute Commands Inside Running Pods
-```bash
-# Check environment inside container
-ssh reactor@192.168.0.17 "podman exec reactory-express-server env"
-
-# Verify volume mount accessibility
-ssh reactor@192.168.0.17 "podman exec reactory-express-server ls -la /reactory/reactory-data/plugins/__runtime__/lib"
-```
-
-### 6.4 Common Issues & Resolutions
+### 7.3 Common Issues & Resolutions
 
 | Issue | Cause | Fix |
 | :--- | :--- | :--- |
+| **502 Bad Gateway (Nginx)** | Stale upstream container IP cached by Nginx | Add `resolver 10.89.0.1 valid=5s;` and use `set $upstream ...; proxy_pass $upstream;`. |
+| **ERR_SSL_PROTOCOL_ERROR** | `.dev` domain accessed over HTTP (HSTS Preload) | Switch to `.local` domain suffix (e.g. `reactory.local`). |
+| **401 Credentials Invalid on /graphql** | `REACT_APP_CLIENT_PASSWORD` mismatch | Synchronize `REACT_APP_CLIENT_PASSWORD` with MongoDB password hash. |
 | **SELinux Permission Denied (`EACCES`)** | Container volume mount missing label flag | Ensure `-v "${REACTORY_DATA}":/reactory/reactory-data:z` includes `:z` or `:Z`. |
 | **401 Unauthorized on CDN Assets** | CDN path not in `bypassUri` whitelist | Verify `ReactoryClient.ts` includes `/cdn/plugins/`, `/cdn/content/`, etc. |
-| **Module Not Found during Build** | `APPLICATION_ROOT=app` set before build output is present | Use `getDataRoot()` helper and check `src/modules/__index.ts` fallbacks. |
-| **Yarn Native Build Failure (sharp, canvas)** | Missing C++ / system dev packages in Dockerfile | Add `libvips-dev`, `pkg-config`, `python3`, `build-essential` to container Dockerfile. |
+| **Themes Stripped to `[{}]`** | Empty subdocument schema in Mongoose | Define `themes: [Mixed]` in `ReactoryClient/schema.ts`. |

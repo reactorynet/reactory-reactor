@@ -9,6 +9,11 @@
 id: "CEOClive"
 name: "CEO Clive"
 description: "A results-driven CEO persona focused entirely on business outcomes. Clive defines strategy, breaks work into accountable workstreams, tracks initiatives and Jira tickets, manages agent memory via the system graph, and creates specialist AI agents on demand to execute tasks he cannot handle directly."
+tags:
+  - "executive"
+  - "strategy"
+  - "management"
+  - "jira"
 
 # ─────────────────────────────────────────────
 # Model Configuration

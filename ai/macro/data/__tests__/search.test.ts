@@ -30,10 +30,19 @@ function mockSearchService(overrides: Record<string, any> = {}) {
   };
 }
 
-function stateWithSearch(serviceOverrides: Record<string, any> = {}) {
+function stateWithSearch(
+  serviceOverrides: Record<string, any> = {},
+  stateExtras: Record<string, any> = {}
+) {
   const svc = mockSearchService(serviceOverrides);
   return {
-    state: createMockState({ services: { 'core.ReactorySearchService@1.0.0': svc } }),
+    state: createMockState({
+      services: { 'core.ReactorySearchService@1.0.0': svc },
+      // Most tests search via the persona's default indexes — the global
+      // book-* fallback was removed (Providers Session 08).
+      persona: { config: { defaultSearchIndexes: ['book-catalog', 'book-chapters', 'book-glossary'] } },
+      ...stateExtras,
+    }),
     service: svc,
   };
 }
@@ -67,6 +76,26 @@ describe('SearchContentMacro', () => {
     expect(result.data).toBeDefined();
     expect(result.instructions).toContain('algebra');
     expect(service.search).toHaveBeenCalled();
+  });
+
+  it('returns guidance (not book defaults) when no index is given and the persona has none', async () => {
+    const svc = mockSearchService();
+    const state = createMockState({
+      services: { 'core.ReactorySearchService@1.0.0': svc },
+      persona: { config: {} },
+    });
+    const result: any = await SearchContentMacro({ query: 'algebra' }, state as any);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('No search index specified');
+    expect(result.instructions).toContain('listSearchIndexes');
+    expect(svc.search).not.toHaveBeenCalled();
+  });
+
+  it('uses the persona default indexes when none are passed', async () => {
+    const { state, service } = stateWithSearch();
+    await SearchContentMacro({ query: 'algebra' }, state as any);
+    const searched = (service.search as jest.Mock).mock.calls.map((c: any[]) => c[0]);
+    expect(searched.sort()).toEqual(['book-catalog', 'book-chapters', 'book-glossary']);
   });
 
   it('should search across specified indices', async () => {
@@ -297,8 +326,8 @@ describe('DeleteIndexMacro', () => {
 // ==================== Registry Definitions ====================
 
 describe('Search Macro Registries', () => {
-  it('should export exactly 3 macro definitions', () => {
-    expect(SearchMacroRegistries).toHaveLength(3);
+  it('should export exactly 5 macro definitions (search, index, delete, list, stats)', () => {
+    expect(SearchMacroRegistries).toHaveLength(5);
   });
 
   it('SearchContent should have one tool named searchContent', () => {
@@ -317,5 +346,72 @@ describe('Search Macro Registries', () => {
     expect(DeleteIndexDef.tools).toHaveLength(1);
     expect(DeleteIndexDef.tools[0].function.name).toBe('deleteIndex');
     expect(DeleteIndexDef.tools[0].function.parameters.required).toEqual(['index', 'confirm']);
+  });
+});
+
+
+// ==================== ListSearchIndexesMacro / GetIndexStatsMacro ====================
+
+const ListSearchIndexesDef = SearchMacroRegistries.find((d: any) => d.alias === 'listSearchIndexes');
+const GetIndexStatsDef = SearchMacroRegistries.find((d: any) => d.alias === 'getIndexStats');
+
+describe('ListSearchIndexesMacro', () => {
+  const catalog = [
+    { index: 'reactor_graph_test_app', kind: 'project', title: 'test.app@1.0.0', description: 'Indexed file contents', documentCount: 12, exists: true },
+    { index: 'book-catalog', kind: 'module', title: 'BookTutor catalog', description: 'Books', exists: false },
+  ];
+
+  it('is registered with a safe auto-executable tool', () => {
+    expect(ListSearchIndexesDef).toBeTruthy();
+    expect(ListSearchIndexesDef!.tools![0].safeForAutoExecution).toBe(true);
+    expect(ListSearchIndexesDef!.tools![0].function.name).toBe('listSearchIndexes');
+  });
+
+  it('returns the curated catalog from SystemGraphManager', async () => {
+    const state = createMockState({
+      services: {
+        'reactor.SystemGraphManager@1.0.0': { getSearchIndexCatalog: jest.fn().mockResolvedValue(catalog) },
+      },
+    });
+    const result: any = await (ListSearchIndexesDef!.component as any)({}, state);
+    expect(result.success).toBe(true);
+    expect(result.data).toHaveLength(2);
+    expect(result.instructions).toContain('reactor_graph_test_app');
+    expect(result.instructions).toContain('not yet built');
+    expect((state.vars as any).searchIndexCatalog).toHaveLength(2);
+  });
+
+  it('fails gracefully when the graph manager is unavailable', async () => {
+    const state = createMockState({ services: {} });
+    const result: any = await (ListSearchIndexesDef!.component as any)({}, state);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('SystemGraphManager');
+  });
+});
+
+describe('GetIndexStatsMacro', () => {
+  it('returns stats for one index via the search service', async () => {
+    const getIndexStats = jest.fn().mockResolvedValue({ name: 'idx', exists: true, documentCount: 7 });
+    const state = createMockState({
+      services: { 'core.ReactorySearchService@1.0.0': { getIndexStats } },
+    });
+    const result: any = await (GetIndexStatsDef!.component as any)({ index: 'idx' }, state);
+    expect(result.success).toBe(true);
+    expect(result.data).toEqual({ name: 'idx', exists: true, documentCount: 7 });
+    expect(getIndexStats).toHaveBeenCalledWith('idx');
+  });
+
+  it('falls back to the catalog when no index is given', async () => {
+    const state = createMockState({
+      services: {
+        'core.ReactorySearchService@1.0.0': {},
+        'reactor.SystemGraphManager@1.0.0': {
+          getSearchIndexCatalog: jest.fn().mockResolvedValue([{ index: 'a' }, { index: 'b' }]),
+        },
+      },
+    });
+    const result: any = await (GetIndexStatsDef!.component as any)({}, state);
+    expect(result.success).toBe(true);
+    expect(result.data).toHaveLength(2);
   });
 });

@@ -77,6 +77,49 @@ export const ReactorSkills: ISkillDefinition[] = [
       '@readSkill(id: "reactory.kubernetesDeployment@1.0.0")',
     ],
   },
+  {
+    id: 'reactory.temporalWorkflowBridge@1.0.0',
+    name: 'temporalWorkflowBridge',
+    nameSpace: 'reactory',
+    version: '1.0.0',
+    description:
+      'Decides when durable execution on Temporal is warranted versus the Reactory workflow engine, and shows how to bridge them: the temporal_* step inventory, await modes (durable event suspend vs polling), the settled-event contract and its lost-wakeup/tenancy hazards, human approval gates via user_activity tasks, and a diagnostic order for a workflow stuck waiting.',
+    filePath: require.resolve('./temporal-integration/durable-workflow-bridge.md'),
+    tags: [
+      'temporal',
+      'workflow',
+      'durable-execution',
+      'yaml-workflow',
+      'saga',
+      'approval',
+      'human-in-the-loop',
+      'signals',
+      'orchestration',
+      'troubleshooting',
+    ],
+    roles: ['USER', 'DEVELOPER', 'ADMIN'],
+    examples: [
+      '@searchSkills(query: "temporal")',
+      '@searchSkills(query: "durable workflow")',
+      '@readSkill(id: "reactory.temporalWorkflowBridge@1.0.0")',
+    ],
+  },
+  {
+    id: 'reactory.maestroMobileTesting@1.0.0',
+    name: 'maestroMobileTesting',
+    nameSpace: 'reactory',
+    version: '1.0.0',
+    description:
+      'Comprehensive guide and operational workflows for driving declarative, cross-platform mobile UI automation and end-to-end regression testing on Android emulators and iOS simulators using Maestro.',
+    filePath: require.resolve('./mobile-automation/maestro-testing.md'),
+    tags: ['mobile', 'android', 'ios', 'maestro', 'testing', 'automation', 'e2e', 'playwright-mobile', 'emulator', 'simulator'],
+    roles: ['USER', 'DEVELOPER', 'ADMIN'],
+    examples: [
+      '@searchSkills(query: "maestro")',
+      '@searchSkills(query: "mobile testing")',
+      '@readSkill(id: "reactory.maestroMobileTesting@1.0.0")',
+    ],
+  },
 ];
 
 export default ReactorSkills;

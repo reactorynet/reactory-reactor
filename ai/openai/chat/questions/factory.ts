@@ -9,7 +9,7 @@ import {
   MacroComponentDefinition,
   RatedChatCompletionResponseMessage,
   ToolApprovalMode,
-} from "modules/reactory-reactor/ai/openai/types/chat";
+} from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import {
   handleUserResponse,
   handleChatCompletionResponse,
@@ -19,7 +19,7 @@ import {
 import { colors } from "../../../../helpers";
 import ReactorConversationModel from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import ToolResultProcessor from "../../../macro/runtime/ToolResultProcessor";
-import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
+import AIPersonaProvider from "@reactory/server-modules/reactory-reactor/services/reactor/AIPersonaProvider";
 import { get, template } from "lodash";
 import { RecordNotFoundError } from "@reactory/server-core/exceptions";
 import { ChatCompletionMessage } from "openai/resources/chat/completions/completions";

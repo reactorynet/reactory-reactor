@@ -227,3 +227,13 @@ Program is **done** when:
 - Plans maintained under: `services/graph/plans/`
 
 _End of master index._
+
+---
+
+## Next program: External Graph Providers
+
+This program (sessions 01–15) is **done**. The follow-on program — graph providers for
+**Jira tickets/boards**, **database systems** and other non-filesystem sources, plus
+cross-domain linking (docs/code ↔ tickets ↔ tables) — lives in
+[`providers/00-README.md`](./providers/00-README.md) with its own session pack and
+invariants (P1–P6). All I1–I9 invariants above continue to apply there.

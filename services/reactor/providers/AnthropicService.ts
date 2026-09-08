@@ -37,7 +37,7 @@ import { ObjectId } from "mongodb";
 import ReactorMacroService from "./ReactorMacroService";
 import {
   MacroToolDefinition,
-} from "modules/reactory-reactor/ai/openai/types/chat";
+} from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import ReactorConversationModel, {
   ReactorConversationHistory,
   ReactorConversationHistoryItem,

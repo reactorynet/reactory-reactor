@@ -1045,6 +1045,127 @@ class ReactorSystemGraph {
       message: `Created ${result.createdLinks} cross-project link(s) across ${result.totalExternals} external dependency node(s)`,
     };
   }
+
+  @query("ReactorExternalSources")
+  async ReactorExternalSources(
+    _: any,
+    __: any,
+    context: Reactory.Server.IReactoryContext
+  ): Promise<any[]> {
+    const projectSvc = context.getService<any>("reactor.ReactorProjectService@1.0.0");
+    const sources = (await projectSvc?.listExternalSources?.()) || [];
+    return sources.map((p: any) => externalSourceShape(p));
+  }
+
+  @mutation("ReactorRegisterExternalSource")
+  async ReactorRegisterExternalSource(
+    _: any,
+    args: {
+      input: {
+        nameSpace: string;
+        name: string;
+        version?: string;
+        scheme: string;
+        sourceKey: string;
+        settingKey?: string;
+        options?: any;
+        syncSchedule?: string;
+        sync?: boolean;
+      };
+    },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<{ source: any; jobId?: string; message: string }> {
+    const projectSvc = context.getService<any>("reactor.ReactorProjectService@1.0.0");
+    if (!projectSvc?.registerExternalSource) {
+      throw new Error("ReactorProjectService does not support external source registration");
+    }
+    const { sync = true, ...input } = args.input;
+    const project = await projectSvc.registerExternalSource(input);
+    let jobId: string | undefined;
+    if (sync) {
+      try {
+        const res = await projectSvc.enqueueCatalog(String(project._id || project.id), {});
+        jobId = res?.jobId;
+      } catch (err) {
+        context.warn(
+          `ReactorRegisterExternalSource: initial sync enqueue failed: ${(err as Error).message}`
+        );
+      }
+    }
+    return {
+      source: externalSourceShape(project),
+      jobId,
+      message: `Registered ${input.scheme} source ${project.fqn}${jobId ? `; sync job ${jobId} enqueued` : ""}`,
+    };
+  }
+
+  @mutation("ReactorRemoveExternalSource")
+  async ReactorRemoveExternalSource(
+    _: any,
+    args: { idOrFqn: string; purgeGraph?: boolean },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<{ archived: boolean; nodesDeleted: number; edgesDeleted: number; message: string }> {
+    const projectSvc = context.getService<any>("reactor.ReactorProjectService@1.0.0");
+    const result = await projectSvc.removeExternalSource(args.idOrFqn, {
+      purgeGraph: args.purgeGraph,
+    });
+    return {
+      ...result,
+      message: `Archived ${args.idOrFqn} (${result.nodesDeleted} node(s), ${result.edgesDeleted} edge(s) purged)`,
+    };
+  }
+
+  @mutation("ReactorSyncExternalSources")
+  async ReactorSyncExternalSources(
+    _: any,
+    __: any,
+    context: Reactory.Server.IReactoryContext
+  ): Promise<{ enqueued: number; jobs: any[]; message: string }> {
+    const projectSvc = context.getService<any>("reactor.ReactorProjectService@1.0.0");
+    const { enqueued } = await projectSvc.syncDueExternalSources();
+    return {
+      enqueued: enqueued.length,
+      jobs: enqueued,
+      message: `Enqueued ${enqueued.length} due external source sync(s)`,
+    };
+  }
+
+  @mutation("ReactorLinkTicketMentions")
+  async ReactorLinkTicketMentions(
+    _: any,
+    args: { projectId?: string },
+    context: Reactory.Server.IReactoryContext
+  ): Promise<{
+    createdLinks: number;
+    resourcesScanned: number;
+    projectsLinked: number;
+    message: string;
+  }> {
+    const graphSvc = graphService(context) as any;
+    const result = await graphSvc.linkTicketMentions(args.projectId);
+    return {
+      ...result,
+      message: `Created ${result.createdLinks} cross-domain link(s) — ${result.resourcesScanned} resource(s) scanned, ${result.projectsLinked} project tasksUrl link(s)`,
+    };
+  }
 }
+
+/** Projects a ReactorProject with a source spec into the GraphQL shape. */
+const externalSourceShape = (p: any) => ({
+  id: String(p?._id || p?.id || ""),
+  fqn: p?.fqn,
+  name: p?.name,
+  nameSpace: p?.nameSpace,
+  version: p?.version,
+  scheme: p?.source?.scheme,
+  sourceKey: p?.source?.sourceKey,
+  settingKey: p?.source?.settingKey,
+  options: p?.source?.options,
+  syncSchedule: p?.source?.syncSchedule,
+  lastSync: p?.lastSync,
+  indexingJobId: p?.indexingJobId,
+  projectStatus: p?.projectStatus !== undefined ? String(p.projectStatus) : undefined,
+  graphRootId: p?.graphRootId,
+});
 
 export default ReactorSystemGraph;

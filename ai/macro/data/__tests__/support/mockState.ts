@@ -19,6 +19,8 @@ interface MockStateOptions {
   connections?: ConnectionConfig[];
   userId?: string;
   services?: Record<string, any>;
+  /** Persona carried on the state (e.g. { config: { defaultSearchIndexes } }). */
+  persona?: any;
 }
 
 /**
@@ -33,10 +35,12 @@ export function createMockState(options: MockStateOptions = {}): ChatState {
     connections = [],
     userId = 'test-user-123',
     services = {},
+    persona,
   } = options;
 
   return {
     personaId: 'test-persona',
+    persona,
     modelId: 'gpt-4',
     started: new Date(),
     history: [],

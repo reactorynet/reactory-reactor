@@ -1,0 +1,41 @@
+nameSpace: reactor
+name: SyncExternalSources
+version: 1.0.0
+description: "Enqueues catalog jobs for every registered external source (jira, db) whose syncSchedule cron is due. Idempotent — already-running jobs are returned, not duplicated. Run on a scheduler tick or via the ReactorSyncExternalSources mutation."
+author: "Reactor"
+tags: ["external-sources", "sync", "scheduled", "graph"]
+metadata:
+  timeout: 120000
+
+inputs: {}
+
+outputs:
+  enqueued:
+    type: object
+    source: "step.syncDue.outputs.result"
+    description: "Jobs enqueued for due sources"
+
+steps:
+  - id: logStart
+    name: "Log Start"
+    type: log
+    config:
+      level: info
+      message: "Checking registered external sources for due syncSchedules"
+
+  - id: syncDue
+    name: "Enqueue Due External Source Syncs"
+    type: service_invoke
+    dependsOn: logStart
+    config:
+      service: "reactor.ReactorProjectService@1.0.0"
+      method: "syncDueExternalSources"
+      params: {}
+
+  - id: logCompletion
+    name: "Log Completion"
+    type: log
+    dependsOn: syncDue
+    config:
+      level: info
+      message: "SyncExternalSources workflow completed."

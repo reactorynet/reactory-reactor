@@ -39,6 +39,23 @@ class ReactorPersonaResolver {
     return null;
   }
 
+  @property("ReactorPersona", "tags")
+  async ReactorAIPersonaTags(persona: IAIPersona): Promise<string[]> {
+    if (Array.isArray(persona.tags) && persona.tags.length > 0) return persona.tags;
+    if (Array.isArray((persona as any).metadata?.tags) && (persona as any).metadata.tags.length > 0) {
+      return (persona as any).metadata.tags;
+    }
+    return [];
+  }
+
+  @property("ReactorPersona", "toolProfiles")
+  async ReactorAIPersonaToolProfiles(persona: IAIPersona): Promise<any[]> {
+    if (Array.isArray(persona.toolProfiles) && persona.toolProfiles.length > 0) {
+      return persona.toolProfiles;
+    }
+    return [];
+  }
+
 }
 
 export default ReactorPersonaResolver;

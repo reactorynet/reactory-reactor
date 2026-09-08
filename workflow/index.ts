@@ -11,6 +11,7 @@ const YAML_WORKFLOWS = [
   'CatalogAgentMemory',
   'CatalogProjectFolder',
   'CatalogProjectGraph',
+  'SyncExternalSources',
   'GraphExplore',
   'ProcessConversationWorkflow',
 ];

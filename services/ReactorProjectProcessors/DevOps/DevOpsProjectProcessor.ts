@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import yaml from "js-yaml";
-import { service } from "application/decorators";
+import { service } from '@reactory/server-core/application/decorators';
 import BaseProjectProcessor, { FileAnalysisResult } from "../BaseProjectProcessor";
 import {
   IReactorProject,

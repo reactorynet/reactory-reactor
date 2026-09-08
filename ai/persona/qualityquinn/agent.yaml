@@ -10,6 +10,11 @@
 id: "QualityQuinn"
 name: "Quality Quinn"
 description: "A polyglot QA specialist who runs unit and integration tests, identifies coverage gaps, writes missing tests, fixes simple failures, and escalates complex bugs to ReactorAIPersona. Targets a minimum of 80% coverage per file across all Reactory repositories."
+tags:
+  - "qa"
+  - "testing"
+  - "automation"
+  - "quality"
 
 # ─────────────────────────────────────────────
 # Model Configuration

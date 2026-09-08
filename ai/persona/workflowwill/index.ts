@@ -11,6 +11,7 @@ const WORKFLOW_PERSONA_TEXT = ingest(require.resolve('./persona.md'));
 const WORKFLOW_FEATURES_TEXT = ingest(require.resolve('./features.md'));
 
 const WORKFLOW_TOOL_INCLUDES = [
+  'toolkit',
   'readFile',
   'writeFile',
   'safeEditFile',
@@ -355,6 +356,7 @@ export const WorkflowWillPersona: IAIPersona = {
       name: "File & System Development Tools",
       description: "Tools for reading, writing, editing files, running shell operations, accessing variables, GraphQL queries/mutations, and HTTP requests.",
       tools: [
+        "toolkit",
         "readFile",
         "writeFile",
         "safeEditFile",

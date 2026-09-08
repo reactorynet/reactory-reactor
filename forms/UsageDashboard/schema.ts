@@ -16,7 +16,7 @@ const schema: Reactory.Schema.ISchema = {
     provider: {
       type: "string",
       title: "Provider",
-      enum: ["all", "openai", "anthropic", "google", "ollama", "mistral", "openrouter"],
+      enum: ["all", "google", "anthropic", "openai", "llamacpp", "ollama", "mistral", "openrouter"],
       default: "all",
     },
     model: {
@@ -37,27 +37,27 @@ const schema: Reactory.Schema.ISchema = {
     },
     totalTokens: {
       type: "number",
-      title: "Total Tokens Used",
+      title: "Total Tokens",
       readOnly: true,
     },
     totalPromptTokens: {
       type: "number",
-      title: "Prompt Tokens",
+      title: "Input (Prompt)",
       readOnly: true,
     },
     totalCompletionTokens: {
       type: "number",
-      title: "Completion Tokens",
+      title: "Output (Completion)",
       readOnly: true,
     },
     totalCostUsd: {
       type: "number",
-      title: "Estimated Cost (USD)",
+      title: "Est. Cost ($ USD)",
       readOnly: true,
     },
     totalRequests: {
       type: "number",
-      title: "Total AI Turns",
+      title: "AI Turns",
       readOnly: true,
     },
     avgDurationMs: {
@@ -68,6 +68,7 @@ const schema: Reactory.Schema.ISchema = {
     timeSeries: {
       type: "array",
       title: "Daily Token Consumption Trend",
+      description: "Prompt, Completion, and Total tokens over time",
       readOnly: true,
       items: {
         type: "object",
@@ -84,6 +85,7 @@ const schema: Reactory.Schema.ISchema = {
     modelBreakdown: {
       type: "array",
       title: "Token Usage by Model",
+      description: "Usage, cost and turn breakdown per model",
       readOnly: true,
       items: {
         type: "object",
@@ -92,13 +94,14 @@ const schema: Reactory.Schema.ISchema = {
           provider: { type: "string", title: "Provider" },
           totalTokens: { type: "number", title: "Tokens" },
           costUsd: { type: "number", title: "Cost ($)" },
-          requests: { type: "number", title: "Requests" },
+          requests: { type: "number", title: "Turns" },
         },
       },
     },
     providerBreakdown: {
       type: "array",
       title: "Usage by Provider",
+      description: "Aggregate usage and spend per AI provider",
       readOnly: true,
       items: {
         type: "object",
@@ -106,13 +109,14 @@ const schema: Reactory.Schema.ISchema = {
           provider: { type: "string", title: "Provider" },
           totalTokens: { type: "number", title: "Tokens" },
           costUsd: { type: "number", title: "Cost ($)" },
-          requests: { type: "number", title: "Requests" },
+          requests: { type: "number", title: "Turns" },
         },
       },
     },
     records: {
       type: "array",
       title: "Recent AI Activity Ledger",
+      description: "Chronological event logs of recent AI model interactions",
       readOnly: true,
       items: {
         type: "object",

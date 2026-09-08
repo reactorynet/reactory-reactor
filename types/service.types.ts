@@ -436,6 +436,12 @@ export interface IAIPersona {
   },
   config? : {
     apiKey?: string;
+    /**
+     * Default search indexes for the generic `searchContent` macro when the
+     * model passes none (Providers Session 08). No global fallback exists —
+     * personas that rely on well-known indexes declare them here.
+     */
+    defaultSearchIndexes?: string[];
     apiOrg?: string;
     apiEndpoint?: string;
     apiVersion?: string;
@@ -463,7 +469,8 @@ export interface IAIPersona {
     url?: string;
     content?: string;
     created: Date;
-  }[]
+  }[];
+  tags?: string[];
 }
 
 /**
@@ -1045,6 +1052,29 @@ export interface IProjectProcessorConfig {
   options?: any; // Options for the processor
 }
 
+/**
+ * Describes an **external source** a project graphs instead of (or alongside)
+ * a repository on disk - a Jira site, a database connection, etc. External
+ * sources are registered (never auto-detected, invariant P3), and providers
+ * resolve credentials at runtime from partner settings via `settingKey`
+ * (invariant P2: no credentials are ever stored on the project or its nodes).
+ */
+export interface IReactorProjectSourceSpec {
+  /** Identity scheme of the source kind: 'jira' | 'db' | ... */
+  scheme: string;
+  /** Stable source-instance identifier (site host, connectionId). */
+  sourceKey: string;
+  /** Partner setting key holding credentials/connection config. */
+  settingKey?: string;
+  /** Provider-specific scope options (projectKeys, jql, schemas, ...). */
+  options?: any;
+  /**
+   * Cron expression for scheduled re-sync (5/6 field, cron-parser syntax).
+   * Evaluated against `project.lastSync` by `syncDueExternalSources`.
+   */
+  syncSchedule?: string;
+}
+
 export interface IReactorProjectMetrics {
   date: Date; // The date for the metrics
   incidents: number; // Number of incidents reported on that date
@@ -1075,6 +1105,8 @@ export interface IReactorProject extends Reactory.IComponentFqnDefinition {
   version: string;
   repoPath?: string;
   repoUrl?: string;
+  /** External source spec for registered (non-filesystem) sources. */
+  source?: IReactorProjectSourceSpec;
   projectTypes: KnownReactorProjectTypes[];  
   lastSync?: Date;
   indexingJobId?: string;
@@ -1279,7 +1311,9 @@ export interface ReactorProjectService extends Reactory.Service.IReactoryService
   /**
    * Links external dependency nodes to publisher project root nodes for matched package names.
    */
-  linkExternalProjects(projectId?: string): Promise<{ createdLinks: number; totalExternals: number }>;
+  linkExternalProjects(projectId?: string): Promise<{ createdLinks: number;
+  /** Cross-domain ticket linking: resource URLs + tasksUrl → Jira nodes (Providers Session 04). */
+  linkTicketMentions?(projectId?: string): Promise<{ createdLinks: number; resourcesScanned: number; projectsLinked: number }>; totalExternals: number }>;
 
   /**
    * Returns an index mapping published package names to project metadata.
@@ -1473,6 +1507,8 @@ export interface ProcessOptions {
   skipGc?: boolean;
   forceFull?: boolean;
   linkDocMentions?: boolean;
+  /** Link ticket-key mentions in documents to registered Jira ticket nodes (default true). */
+  linkTicketMentions?: boolean;
 }
 
 /**
@@ -1493,6 +1529,10 @@ export interface GraphProcessMetrics {
   durationMs: number;
   errors: number;
   byLanguage?: Record<string, number>;
+  /** External source identity, when the run came from an external provider. */
+  sourceScheme?: string;
+  /** External source instance key (site host, connectionId). */
+  sourceKey?: string;
 }
 
 export interface IProjectProcessor extends ProjectSynchronizer, AttributeProvider, IProjectNodeProvider { 

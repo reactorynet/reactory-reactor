@@ -103,6 +103,41 @@ export const canonicalProjectId = (
 };
 
 /**
+ * Logical key for an entity in an **external source** (a source that is not a
+ * folder on disk): a Jira site, a database connection, etc.
+ *
+ * Shape: `scheme:<sourceKey>[/<entityPath>][#<fragment>]`
+ *
+ *  - `scheme`      short registry name of the source kind ('jira', 'db', ...)
+ *  - `sourceKey`   stable identifier of the source instance
+ *                  (site host, connectionId) - never a URL with credentials
+ *  - `entityPath`  slash path locating the entity inside the source
+ *                  ('WR', 'sales/dbo/orders')
+ *  - `fragment`    leaf entity inside the path ('WR-123', a column name)
+ *
+ * Examples:
+ *  - `jira:worldremit.atlassian.net/WR#WR-123`
+ *  - `db:sales-dwh/dbo/orders#customer_id`
+ *
+ * The id of an external entity is `nodeId(sourceLogicalKey(...))` - a pure
+ * function of the *reference*, so cross-domain linkers (a doc mentioning
+ * `WR-123`) can compute the target node id without fetching anything. This is
+ * the same property that makes document anchors resolvable without parsing the
+ * target document (invariant P1).
+ */
+export const sourceLogicalKey = (
+  scheme: string,
+  sourceKey: string,
+  entityPath?: string,
+  fragment?: string
+): string => {
+  let key = `${scheme}:${sourceKey}`;
+  if (entityPath) key += `/${normalizeRelative(entityPath)}`;
+  if (fragment) key += `${SYMBOL_SEP}${fragment}`;
+  return key;
+};
+
+/**
  * Deterministic edge id from its endpoints and primary type. Making the id a
  * function of (source, target, type) means the same relationship discovered on
  * two runs collapses to one edge rather than duplicating.

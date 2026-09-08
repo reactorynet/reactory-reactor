@@ -4,7 +4,6 @@ import {
   resolver,
   property,
 } from "@reactory/server-core/models/graphql/decorators/resolver";
-import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
 import { IReactorConversationsService } from "@reactory/server-modules/reactory-reactor/types/service.types";
 import { ReactorProviderConfig } from "@reactory/server-modules/reactory-reactor/types/model.types";
 import { ObjectId } from "mongodb";
@@ -15,11 +14,11 @@ import {
   MacroToolDefinition,
   ToolApprovalMode,
 } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
-import ApiError from "exceptions";
+import ApiError from "@reactory/server-core/exceptions";
 import Reactory from "@reactorynet/reactory-core";
 import logger from "@reactory/server-core/logging";
 import ReactorConversationModel, { ReactorConversation, ReactorConversationDocument } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
-import { PromptMergeStrategy, StreamingMode } from "modules/reactory-reactor/services/reactor/types/streaming.types";
+import { PromptMergeStrategy, StreamingMode } from "@reactory/server-modules/reactory-reactor/services/reactor/types/streaming.types";
 import ReactorConversationService from "@reactory/server-modules/reactory-reactor/services/reactor/ReactorConversationService";
 import resolveImageUrls from "@reactory/server-modules/reactory-reactor/utils/resolveImageUrls";
 

@@ -5,9 +5,9 @@ import {
 } from '@reactory/server-modules/reactory-reactor/ai/openai/chat/questions/factory';
 import ReactorConversationModel from '@reactory/server-modules/reactory-reactor/models/ReactorChatState';
 import { ObjectId } from "mongodb";
-import AIPersonaProvider from "modules/reactory-reactor/services/reactor/AIPersonaProvider";
+import AIPersonaProvider from "@reactory/server-modules/reactory-reactor/services/reactor/AIPersonaProvider";
 import { IReactorConversationsService } from "../../../types/service.types";
-import { StreamingMode } from "modules/reactory-reactor/services/reactor/types/streaming.types";
+import { StreamingMode } from "@reactory/server-modules/reactory-reactor/services/reactor/types/streaming.types";
 import { ChatsMacroProps } from './types';
 import { v4 } from "uuid";
 import logger from "@reactory/server-core/logging";

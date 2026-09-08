@@ -1,4 +1,5 @@
 import GraphExplorerForm from "./graph/GraphExplorer";
+import ExternalSourcesForm from "./externalSources";
 import ProjectIndexForm from "./graph/ProjectIndexForm";
 import ServiceCatalogForm from "./serviceCatalogue";
 import ProjectsHomeForm from "./projects";
@@ -36,4 +37,5 @@ export default [
   ProviderConfigForm,
   UsageDashboardForm,
   UserBudgetAdminForm,
+  ExternalSourcesForm,
 ];

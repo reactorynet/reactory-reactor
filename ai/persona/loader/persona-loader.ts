@@ -24,6 +24,7 @@ export interface IAIPersonaConfig {
   id: string;
   name: string;
   description?: string;
+  tags?: string[];
   persona?: string;
   features?: string;
   modelId?: string;
@@ -427,7 +428,8 @@ class PersonaLoaderService implements Reactory.Service.IReactoryService {
       macros: this.resolveMacros(config.tools, config.macros),
       toolProfiles: config.toolProfiles || [],
       resources,
-      prompts
+      prompts,
+      tags: config.tags || config.metadata?.tags || [],
     };
 
     return persona;

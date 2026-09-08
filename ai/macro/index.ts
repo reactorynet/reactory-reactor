@@ -45,7 +45,9 @@ import {
 } from './develop/review/macro';
 
 import { PlaywrightNavigate, PlaywrightOpenSession } from './playwright/macro';
-import { AddToolsToSessionMacro, RemoveToolsFromSessionMacro } from './runtime/sessionTools.macro';
+import { AddToolsToSessionMacro, RemoveToolsFromSessionMacro, ToolkitMacro } from './runtime/sessionTools.macro';
+
+export { ToolkitMacro, AddToolsToSessionMacro, RemoveToolsFromSessionMacro };
 
 import OpenAI from 'openai';
 import Hash from '@reactory/server-core/utils/hash';

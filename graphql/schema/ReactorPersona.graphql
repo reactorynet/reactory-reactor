@@ -194,6 +194,15 @@ type ReactorPersonaResource {
 }
 
 """
+A pre-defined collection of tools (toolbelt) for a persona.
+"""
+type ReactorToolProfile {
+  name: String!
+  description: String
+  tools: [String]!
+}
+
+"""
 Represents an AI personality with specific characteristics, capabilities,
 and behavior patterns that can engage in conversations.
 """
@@ -267,6 +276,16 @@ type ReactorPersona {
   The maximum number of tokens allowed for the persona.
   """
   maxTokens: Int
+
+  """
+  Tags associated with the persona for categorisation and filtering.
+  """
+  tags: [String]
+
+  """
+  Pre-defined collections of tools (toolbelts) for this persona.
+  """
+  toolProfiles: [ReactorToolProfile]
 }
 
 input ReactorMacroInput {
