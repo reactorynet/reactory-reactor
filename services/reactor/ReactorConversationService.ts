@@ -4088,7 +4088,8 @@ export default class ReactorConversationService
           response,
           conversation,
           message,
-          streamingMode
+          streamingMode,
+          turnStartTime
         );
 
         // Server-side auto tool execution loop for AUTO mode.
@@ -4373,7 +4374,8 @@ export default class ReactorConversationService
               response,
               conversation,
               '',
-              streamingMode
+              streamingMode,
+              turnStartTime
             );
           }
 
@@ -4691,7 +4693,8 @@ export default class ReactorConversationService
     response: any,
     conversation: any,
     message: string | any,
-    streamingMode: StreamingMode = StreamingMode.NONE
+    streamingMode: StreamingMode = StreamingMode.NONE,
+    turnStartTime: number = Date.now()
   ): Promise<any> {
     // Add AI response if available
     if (response?.choices && response?.choices?.length > 0) {
@@ -5332,6 +5335,10 @@ export default class ReactorConversationService
       conversationId: chatSessionId,
     }, chatSessionId, personaId);
 
+    // Tracks the duration of this continuation turn (from receipt of client
+    // tool results through to the AI's follow-up response) for telemetry.
+    const turnStartTime = Date.now();
+
     // Persist each tool result: replace the placeholder history entry (if one
     // exists from the AUTO+SSE path) or insert a new tool message (for
     // PROMPT/SAFE_AUTO paths where no placeholder was created).
@@ -5501,6 +5508,7 @@ export default class ReactorConversationService
             updatedConversation,
             '',
             streamingMode,
+            turnStartTime,
           );
         } catch (err: any) {
           this.sessionLog("error", `[completeClientToolCalls] SSE continuation failed: ${err.message}`, {
@@ -5538,6 +5546,7 @@ export default class ReactorConversationService
       updatedConversation,
       '',
       StreamingMode.NONE,
+      turnStartTime,
     );
 
     return adapter.adaptResponse(response);
