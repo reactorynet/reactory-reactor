@@ -50,7 +50,14 @@ export const QueryGQL: Macro<QueryGQLResult, QueryGQLProps> = async (
     };
   }
 
-  const toObject = (input: string[] | object) => { 
+  const toObject = (input: string | string[] | object) => { 
+    if (typeof input === 'string') {
+      try {
+        return JSON.parse(input);
+      } catch (err) {
+        return {};
+      }
+    }
     if (Array.isArray(input)) {
       try {
         return JSON.parse(input.join(' '));

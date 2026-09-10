@@ -120,6 +120,22 @@ export const ReactorSkills: ISkillDefinition[] = [
       '@readSkill(id: "reactory.maestroMobileTesting@1.0.0")',
     ],
   },
+  {
+    id: 'reactory.managingPhonetics@1.0.0',
+    name: 'managingPhonetics',
+    nameSpace: 'reactory',
+    version: '1.0.0',
+    description:
+      'Guides agents through configuring, customizing, and managing phonetic pronunciations, persistent lexicons, CRUD APIs, and IPA markup in the Reactory Speech Service.',
+    filePath: require.resolve('./managing-phonetics/managing-phonetics.md'),
+    tags: ['tts', 'speech', 'phonetics', 'pronunciation', 'lexicon', 'ipa', 'speech-service', 'audio'],
+    roles: ['USER', 'DEVELOPER', 'ADMIN'],
+    examples: [
+      '@searchSkills(query: "phonetics")',
+      '@searchSkills(query: "pronunciation")',
+      '@readSkill(id: "reactory.managingPhonetics@1.0.0")',
+    ],
+  },
 ];
 
 export default ReactorSkills;
