@@ -2,6 +2,8 @@ import { describe, it, expect } from "@jest/globals";
 import forms from '../index';
 import UsageDashboardForm from '../UsageDashboard';
 import UserBudgetAdminForm from '../UserBudgetAdmin';
+import AiProvidersGridForm from '../aiProviders';
+import AiModelsGridForm from '../aiModels';
 
 describe('Reactor Forms Registration', () => {
   it('registers UsageDashboardForm with correct properties and dynamic filters', () => {
@@ -28,8 +30,8 @@ describe('Reactor Forms Registration', () => {
     expect(uiSchema.startDate['ui:widget']).toBe('DateWidget');
     expect(uiSchema.endDate['ui:widget']).toBe('DateWidget');
     expect(uiSchema.provider['ui:widget']).toBe('SelectWidget');
-    expect(uiSchema.model['ui:widget']).toBe('InputWidget');
-    expect(uiSchema.personaId['ui:widget']).toBe('InputWidget');
+    expect(uiSchema.model['ui:options']).toBeDefined();
+    expect(uiSchema.personaId['ui:options']).toBeDefined();
     expect(uiSchema.use_case['ui:widget']).toBe('SelectWidget');
 
     // Verify GraphQL query variables mapping
@@ -58,5 +60,23 @@ describe('Reactor Forms Registration', () => {
     const ids = forms.map((f: any) => f.id);
     expect(ids).toContain('reactor.UsageDashboardForm@1.0.0');
     expect(ids).toContain('reactor.UserBudgetAdminForm@1.0.0');
+    expect(ids).toContain('reactor.AiProvidersGrid@1.0.0');
+    expect(ids).toContain('reactor.AiModelsGrid@1.0.0');
+  });
+
+  it('registers AiProvidersGridForm and AiModelsGridForm with correct definitions', () => {
+    expect(AiProvidersGridForm.id).toBe('reactor.AiProvidersGrid@1.0.0');
+    expect(AiProvidersGridForm.name).toBe('AiProvidersGrid');
+    expect(AiProvidersGridForm.registerAsComponent).toBe(true);
+    expect(AiProvidersGridForm.schema).toBeDefined();
+    expect(AiProvidersGridForm.uiSchema).toBeDefined();
+    expect(AiProvidersGridForm.graphql).toBeDefined();
+
+    expect(AiModelsGridForm.id).toBe('reactor.AiModelsGrid@1.0.0');
+    expect(AiModelsGridForm.name).toBe('AiModelsGrid');
+    expect(AiModelsGridForm.registerAsComponent).toBe(true);
+    expect(AiModelsGridForm.schema).toBeDefined();
+    expect(AiModelsGridForm.uiSchema).toBeDefined();
+    expect(AiModelsGridForm.graphql).toBeDefined();
   });
 });

@@ -1646,6 +1646,49 @@ export interface IReactorProviderService extends Reactory.Service.IReactoryServi
     personaConfig?: Record<string, any>,
     sessionOverride?: Record<string, any>
   ): Promise<{ apiKey?: string; endpoint?: string; organization?: string; deploymentName?: string; apiVersion?: string; source: string; [key: string]: any }>;
+
+  /**
+   * Create a new AI provider entity
+   */
+  createProvider(input: any): Promise<any>;
+
+  /**
+   * Update an existing AI provider entity
+   */
+  updateProvider(providerId: string, input: any): Promise<any>;
+
+  /**
+   * Delete an AI provider entity and its models
+   */
+  deleteProvider(providerId: string): Promise<boolean>;
+
+  /**
+   * Create a new AI model entity
+   */
+  createModel(input: any): Promise<any>;
+
+  /**
+   * Update an existing AI model entity
+   */
+  updateModel(modelId: string, input: any): Promise<any>;
+
+  /**
+   * Delete an AI model entity
+   */
+  deleteModel(modelId: string): Promise<boolean>;
+
+  /**
+   * Test connection and credentials for an AI provider
+   */
+  testProviderConnection(
+    providerId: string,
+    testModelId?: string
+  ): Promise<{ success: boolean; latencyMs: number; message: string; details?: any }>;
+
+  /**
+   * Re-sync baseline providers from providers.yaml into PostgreSQL
+   */
+  syncFromYaml(overwrite?: boolean): Promise<{ providersCount: number; modelsCount: number }>;
 }
 
 /**
