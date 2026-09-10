@@ -86,6 +86,61 @@ describe('ToolResultProcessor', () => {
     expect(processed.result.instructions).toContain('Tool \'listItems\' produced large output');
   });
 
+  it('curates an oversized array field nested under data.results instead of passing it through untouched', () => {
+    // Mirrors the searchContent/searchGraph shape: { success, data: { results: [...] } }
+    const largeResults = Array.from({ length: 200 }, (_, i) => ({
+      id: `doc-${i}`,
+      score: 1,
+      source: { title: `Document ${i}`, content: 'X'.repeat(200) },
+    }));
+    const rawResult = {
+      success: true,
+      data: { results: largeResults, metadata: { totalHits: 200 } },
+    };
+
+    const processed = ToolResultProcessor.process('searchContent', { query: 'x' }, rawResult, undefined, undefined, { maxOutputSize: 500, fieldBudget: 500 });
+
+    expect(processed.outputTruncated).toBe(true);
+    expect(processed.outputFile).toBeDefined();
+    createdFiles.push(processed.outputFile!);
+
+    // Full payload must still be recoverable from disk
+    const saved = JSON.parse(fs.readFileSync(processed.outputFile!, 'utf8'));
+    expect(saved.data.results.length).toBe(200);
+
+    // But the in-context result must NOT contain the full array anymore
+    const result = processed.result;
+    expect(Array.isArray(result.data.results)).toBe(false);
+    expect(result.data.results.truncated).toBe(true);
+    expect(result.data.results.itemCount).toBe(200);
+    expect(JSON.stringify(result).length).toBeLessThan(JSON.stringify(rawResult).length);
+
+    // Small sibling fields under the budget should pass through untouched
+    expect(result.data.metadata).toEqual({ totalHits: 200 });
+  });
+
+  it('curates an oversized nodes array (searchGraph shape) the same way', () => {
+    const nodes = Array.from({ length: 100 }, (_, i) => ({
+      id: i,
+      name: `node_${i}`,
+      type: 'FILE',
+      path: `/very/long/nested/path/for/testing/purposes/node_${i}.ts`,
+    }));
+    const rawResult = { success: true, data: { nodes, count: nodes.length } };
+
+    const processed = ToolResultProcessor.process('searchGraph', { term: 'node' }, rawResult, undefined, undefined, { maxOutputSize: 500, fieldBudget: 500 });
+
+    expect(processed.outputTruncated).toBe(true);
+    createdFiles.push(processed.outputFile!);
+
+    const result = processed.result;
+    expect(Array.isArray(result.data.nodes)).toBe(false);
+    expect(result.data.nodes.truncated).toBe(true);
+    expect(result.data.nodes.itemCount).toBe(100);
+    // count is a small number, should pass through
+    expect(result.data.count).toBe(100);
+  });
+
   it('respects REACTORY_TOOL_MAX_OUTPUT_SIZE environment variable', () => {
     const prevEnv = process.env.REACTORY_TOOL_MAX_OUTPUT_SIZE;
     process.env.REACTORY_TOOL_MAX_OUTPUT_SIZE = '50';

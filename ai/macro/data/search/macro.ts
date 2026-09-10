@@ -1,4 +1,5 @@
 import { MacroComponentDefinition, ChatState } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
+import { extractSearchTerms, analyzeSearchResults, createSearchSummaryMarkdown } from "./utils";
 
 // ==================== TYPE DEFINITIONS ====================
 
@@ -13,6 +14,13 @@ export interface SearchContentParams {
   offset?: number;
   highlight?: boolean;
   format?: OutputFormat;
+  /**
+   * When true, returns each result's full indexed `source` document instead of a
+   * truncated preview. Off by default — full documents (e.g. entire book chapters)
+   * are a major context-bloat risk and should be an explicit, deliberate opt-in
+   * combined with a small `limit`.
+   */
+  includeFullContent?: boolean;
 }
 
 export interface IndexContentParams {
@@ -111,31 +119,55 @@ function validateSearchService(context: Reactory.Server.IReactoryContext, tool: 
   return { service: searchService, error: null };
 }
 
+/**
+ * Character budget applied to any long string field on a result's `source`
+ * document (e.g. `content`, `description`, `summary`) when `includeFullContent`
+ * is not explicitly requested. Keeps searchContent's default payload small
+ * regardless of output format, instead of relying solely on the downstream
+ * ToolResultProcessor guard to catch it after the fact.
+ */
+const SOURCE_FIELD_PREVIEW_LENGTH = 400;
+
+/**
+ * Returns a shallow copy of a result's `source` document with any long string
+ * field truncated to a preview. Short fields (titles, ids, tags, etc.) pass
+ * through untouched. Never mutates the original document.
+ */
+function curateSourceDocument(source: Record<string, any>): Record<string, any> {
+  if (!source || typeof source !== 'object') return source;
+  const curated: Record<string, any> = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (typeof value === 'string' && value.length > SOURCE_FIELD_PREVIEW_LENGTH) {
+      curated[key] = `${value.substring(0, SOURCE_FIELD_PREVIEW_LENGTH)}...`;
+      curated[`${key}FullLength`] = value.length;
+    } else {
+      curated[key] = value;
+    }
+  }
+  return curated;
+}
+
+/**
+ * Applies content curation to a full result set. When `includeFullContent` is
+ * true the results are returned unmodified (explicit caller opt-in); otherwise
+ * every result's `source` is passed through `curateSourceDocument`.
+ */
+function curateResults(results: SearchResult[], includeFullContent: boolean): SearchResult[] {
+  if (includeFullContent) return results;
+  return results.map(r => ({ ...r, source: curateSourceDocument(r.source) }));
+}
+
 function formatSearchResults(results: any[], metadata: any, format: OutputFormat): any {
   switch (format) {
     case "markdown":
-      return `
-# Search Results
+      // Delegates to the richer, previously-unused createSearchSummaryMarkdown /
+      // analyzeSearchResults helpers in ./utils instead of the ad-hoc inline
+      // template that used to live here. Adds score-distribution, content-type,
+      // subject and difficulty breakdowns on top of the original per-result
+      // preview list, with no extra bloat risk since `results` at this point
+      // has already been curated (curateResults) upstream in SearchContentMacro.
+      return createSearchSummaryMarkdown(metadata.query, results, metadata, analyzeSearchResults(results));
 
-**Query**: ${metadata.query}
-**Total Results**: ${metadata.totalHits}
-**Execution Time**: ${metadata.executionTime}ms
-
-## Results
-
-${results.map((result, index) => `
-### ${index + 1}. ${result.source.title || result.id}
-**Score**: ${result.score}
-**Index**: ${result.index}
-
-${result.source.content ? result.source.content.substring(0, 200) + '...' : 'No content preview available'}
-
-${result.highlights ? Object.entries(result.highlights).map(([field, highlights]) => 
-  `**${field}**: ${Array.isArray(highlights) ? highlights.join(', ') : highlights}`
-).join('\n') : ''}
-`).join('\n')}
-      `;
-      
     case "summary":
       return {
         summary: {
@@ -155,17 +187,30 @@ ${result.highlights ? Object.entries(result.highlights).map(([field, highlights]
         }))
       };
       
-    case "detailed":
+    case "detailed": {
+      // Extends the original analysis shape with the richer breakdown from
+      // analyzeSearchResults (score distribution, subjects, difficulty levels).
+      // Original fields (averageScore, indicesUsed, hasHighlights, contentTypes)
+      // are preserved as-is for back-compat — analyzeSearchResults' own
+      // `contentTypes` (a count map, not a string array) is exposed separately
+      // as `contentTypeCounts` to avoid silently changing an existing field's
+      // shape under callers that already parse `contentTypes` as a string[].
+      const richAnalysis = analyzeSearchResults(results);
       return {
         metadata,
         results: results,
         analysis: {
-          averageScore: results.reduce((sum, r) => sum + r.score, 0) / results.length,
+          averageScore: richAnalysis.averageScore,
           indicesUsed: [...new Set(results.map(r => r.index))],
           hasHighlights: results.some(r => r.highlights),
-          contentTypes: [...new Set(results.map(r => r.source.type || 'unknown'))]
+          contentTypes: [...new Set(results.map(r => r.source.type || 'unknown'))],
+          scoreDistribution: richAnalysis.scoreDistribution,
+          contentTypeCounts: richAnalysis.contentTypes,
+          subjects: richAnalysis.subjects,
+          difficultyLevels: richAnalysis.difficultyLevels
         }
       };
+    }
       
     default: // json
       return {
@@ -180,12 +225,10 @@ ${result.highlights ? Object.entries(result.highlights).map(([field, highlights]
   }
 }
 
-function extractSearchTerms(query: string): string[] {
-  return query.toLowerCase()
-    .replace(/[^\w\s]/g, ' ')
-    .split(/\s+/)
-    .filter(term => term.length > 2);
-}
+// Note: extractSearchTerms now imported from ./utils (was previously duplicated
+// here with an identical, weaker implementation — see also analyzeSearchResults /
+// createSearchSummaryMarkdown in ./utils for additional curation helpers available
+// to this macro but not yet wired in).
 
 // ==================== SEARCH CONTENT MACRO ====================
 
@@ -203,6 +246,7 @@ const SearchContentMacro = async (
     offset = 0,
     highlight = true,
     format = "json",
+    includeFullContent = false,
   } = params;
 
   if (!query || query.trim().length === 0) {
@@ -299,7 +343,11 @@ searchContent needs to know WHICH index to search. Do not guess index names.
 
     // Sort by score and apply limit
     allResults.sort((a, b) => b.score - a.score);
-    const limitedResults = allResults.slice(0, limit);
+    const limitedResultsRaw = allResults.slice(0, limit);
+    // Curate full documents down to previews by default — raw indexed documents
+    // (e.g. full book chapters) are a major context-bloat risk regardless of
+    // output `format`; callers must explicitly opt in via includeFullContent.
+    const limitedResults = curateResults(limitedResultsRaw, includeFullContent);
 
     const metadata: SearchMetadata = {
       query,
@@ -397,6 +445,20 @@ ${limitedResults.length === 0 ?
 
 // ==================== INDEX CONTENT MACRO ====================
 
+/**
+ * Input-side sanity caps for indexContent. ToolResultProcessor guards the
+ * *response* side of every macro, but indexContent's bloat risk is on the
+ * *request* side — a caller can hand it an arbitrarily large `documents`
+ * array and there is nothing downstream to catch that before it's stringified
+ * into the tool-call payload and, separately, forwarded to the search engine.
+ * These are hard validation errors (not silent truncation) so callers always
+ * know to split into smaller batches rather than unknowingly indexing a
+ * partial/inconsistent set of documents.
+ */
+const MAX_INDEX_DOCUMENTS_PER_CALL = 500;
+/** Combined character budget for `JSON.stringify(documents)` in a single call (~5MB of text). */
+const MAX_INDEX_INPUT_CHARACTERS = 5_000_000;
+
 const IndexContentMacro = async (
   params: IndexContentParams,
   chatState: ChatState,
@@ -425,6 +487,34 @@ const IndexContentMacro = async (
       error: "Documents array is required and cannot be empty.",
       tool: 'indexContent',
       params: params
+    };
+  }
+
+  if (documents.length > MAX_INDEX_DOCUMENTS_PER_CALL) {
+    return {
+      success: false,
+      error: `Too many documents in a single indexContent call (${documents.length} > ${MAX_INDEX_DOCUMENTS_PER_CALL}).`,
+      tool: 'indexContent',
+      params: params,
+      instructions: `## Index Content — Batch Too Large\n\nSplit **${documents.length}** documents into multiple calls of ${MAX_INDEX_DOCUMENTS_PER_CALL} or fewer.\n\n### Recovery Options:\n- Chunk the documents array client-side and call `+'`indexContent`'+` once per chunk.\n- Use \`getIndexStats\` afterwards to confirm the running document count.`
+    };
+  }
+
+  let totalInputCharacters = 0;
+  try {
+    totalInputCharacters = JSON.stringify(documents).length;
+  } catch {
+    // Unserializable input (e.g. circular references) — let the downstream
+    // search service surface the real error rather than guessing a size here.
+    totalInputCharacters = 0;
+  }
+  if (totalInputCharacters > MAX_INDEX_INPUT_CHARACTERS) {
+    return {
+      success: false,
+      error: `Combined document payload is too large (${totalInputCharacters} characters > ${MAX_INDEX_INPUT_CHARACTERS}).`,
+      tool: 'indexContent',
+      params: params,
+      instructions: `## Index Content — Payload Too Large\n\nThe combined size of **${documents.length}** documents is ${totalInputCharacters} characters, exceeding the ${MAX_INDEX_INPUT_CHARACTERS}-character limit for a single call.\n\n### Recovery Options:\n- Split into smaller batches (fewer documents per call).\n- Reduce individual document size (e.g. store large fields in a supporting index and reference them by id rather than inlining full text).`
     };
   }
 
@@ -734,10 +824,15 @@ const SearchContentMacroDefinition: MacroComponentDefinition<typeof SearchConten
             },
             limit: {
               type: "number",
-              description: "Maximum number of results to return.",
+              description: "Maximum number of results to return. Kept small by design — large limits combined with full document content risk severe context bloat; use includeFullContent sparingly and only with a low limit.",
               default: 10,
               minimum: 1,
-              maximum: 1000
+              maximum: 100
+            },
+            includeFullContent: {
+              type: "boolean",
+              description: "Return each result's full indexed source document instead of a ~400-character preview. Off by default. Only enable this for a small number of results (low limit) when the full document content is genuinely required — otherwise responses can become extremely large.",
+              default: false
             },
             offset: {
               type: "number",
@@ -753,7 +848,7 @@ const SearchContentMacroDefinition: MacroComponentDefinition<typeof SearchConten
             format: {
               type: "string",
               enum: ["json", "markdown", "summary", "detailed"],
-              description: "Output format for search results.",
+              description: "Output format for search results. 'markdown' and 'detailed' include a richer analysis (score distribution, content types, subjects, difficulty levels) via the shared search-results analyzer.",
               default: "json"
             }
           },
@@ -793,7 +888,7 @@ const IndexContentMacroDefinition: MacroComponentDefinition<typeof IndexContentM
             documents: {
               type: "array",
               items: { type: "object" },
-              description: "Array of documents to index. Each must have an ID field.",
+              description: "Array of documents to index. Each must have an ID field. Capped at 500 documents and ~5,000,000 combined characters per call — split larger batches into multiple calls.",
             },
             idField: {
               type: "string",
