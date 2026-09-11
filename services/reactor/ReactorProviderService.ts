@@ -6,6 +6,7 @@ import {
   decryptCredentials,
   encryptCredentials,
 } from "../../utils/credential-encryption";
+import { ReactorPostgresDataSource, ReactoryAiProvider, ReactoryAiModel, seedAiProviders } from "../../models";
 
 const AUTH_KEY_PREFIX = "ai-provider:";
 
@@ -17,6 +18,55 @@ export interface ResolvedCredentials {
   apiVersion?: string;
   source: "session" | "user" | "app" | "persona" | "environment" | "none";
   [key: string]: any;
+}
+
+/**
+ * Converts a database ReactoryAiProvider entity into a typed ProviderConfig.
+ */
+function entityToProviderConfig(entity: ReactoryAiProvider): ProviderConfig {
+  const models: ProviderModelConfig[] = (entity.models || []).map((m) => ({
+    id: m.modelKey,
+    providerId: entity.id,
+    name: m.name,
+    version: m.version,
+    capabilities: m.capabilities || [],
+    contextLength: m.contextLength,
+    costPerToken: m.costPerToken ? Number(m.costPerToken) : undefined,
+    inputCostPerTokenUsdCents: m.inputCostPerTokenUsdCents ? Number(m.inputCostPerTokenUsdCents) : null,
+    outputCostPerTokenUsdCents: m.outputCostPerTokenUsdCents ? Number(m.outputCostPerTokenUsdCents) : null,
+    rpm: m.rpm,
+    itpm: m.itpm,
+    otpm: m.otpm,
+    maxParallelRequests: m.maxParallelRequests,
+    supportsStreaming: m.supportsStreaming,
+    supportedTools: m.supportedTools,
+    supportedMediaTypes: m.supportedMediaTypes,
+    sampling: m.samplingConfig,
+    thinking: m.thinkingConfig,
+  }));
+
+  return {
+    id: entity.id,
+    name: entity.name,
+    endpointUrl: entity.endpointUrl,
+    apiVersion: entity.apiVersion,
+    models,
+    defaultModel: entity.defaultModelId,
+    capabilities: entity.capabilities || [],
+    credentialRequirements: entity.credentialRequirements || [],
+    credentialEnvVars: entity.credentialEnvVars,
+    authComponentFqn: entity.authComponentFqn,
+    roles: entity.roles || ['USER'],
+    rateLimits: entity.rateLimits,
+    status: {
+      available: entity.status?.available ?? false,
+      lastChecked: entity.status?.lastChecked ? new Date(entity.status.lastChecked) : new Date(),
+      uptime: entity.status?.uptime ?? 99.9,
+      responseTime: entity.status?.responseTime ?? 350,
+      errorRate: entity.status?.errorRate ?? 0.1,
+      quotaRemaining: entity.status?.quotaRemaining,
+    },
+  };
 }
 
 /**
@@ -57,6 +107,8 @@ class ReactorProviderService implements IReactorProviderService {
   context: Reactory.Server.IReactoryContext;
   private providers: Map<string, ProviderConfig> = new Map();
   private adapters: Map<string, any> = new Map();
+  private dbLoaded: boolean = false;
+  private loadPromise: Promise<void> | null = null;
 
   constructor(props: Reactory.Service.IReactoryServiceProps, 
     context: Reactory.Server.IReactoryContext) {
@@ -65,18 +117,74 @@ class ReactorProviderService implements IReactorProviderService {
   }
 
   private initialize() {
-    // Load providers from YAML (synchronous — loadProviders uses fs.readFileSync)
+    // Initial bootstrap from YAML (synchronous fallback)
     try {
       const providerConfigs = loadProviders();
       for (const config of providerConfigs) {
         this.providers.set(config.id, config);
       }
     } catch (err) {
-      // Log but don't crash — adapters still register and providers can be added dynamically
       console.error('[ReactorProviderService] Failed to load providers.yaml:', (err as Error)?.message || err);
     }
     // Register response adapters for each provider type
     this.registerAdapters();
+
+    // Async hydration from PostgreSQL if database is online
+    this.ensureLoaded().catch((err) => {
+      console.warn('[ReactorProviderService] Background DB hydration error:', err?.message || err);
+    });
+  }
+
+  /**
+   * Ensures provider definitions are hydrated from PostgreSQL when available.
+   */
+  private async ensureLoaded(force: boolean = false): Promise<void> {
+    if (this.dbLoaded && !force) return;
+    if (this.loadPromise && !force) return this.loadPromise;
+
+    this.loadPromise = (async () => {
+      try {
+        if (ReactorPostgresDataSource.isInitialized) {
+          const providerRepo = ReactorPostgresDataSource.getRepository(ReactoryAiProvider);
+          const count = await providerRepo.count();
+          if (count === 0) {
+            await seedAiProviders(ReactorPostgresDataSource, false);
+          }
+          const entities = await providerRepo.find({
+            relations: ['models'],
+            order: { name: 'ASC' },
+          });
+          if (entities && entities.length > 0) {
+            const newMap = new Map<string, ProviderConfig>();
+            for (const entity of entities) {
+              newMap.set(entity.id, entityToProviderConfig(entity));
+            }
+            this.providers = newMap;
+            this.dbLoaded = true;
+            return;
+          }
+        }
+      } catch (err) {
+        this.context?.warn?.(
+          `[ReactorProviderService] Could not load from PostgreSQL, maintaining in-memory cache: ${(err as Error)?.message}`
+        );
+      }
+
+      // Fallback: if not loaded from DB, ensure YAML providers exist in memory
+      if (this.providers.size === 0) {
+        try {
+          const yamlConfigs = loadProviders();
+          for (const config of yamlConfigs) {
+            this.providers.set(config.id, config);
+          }
+        } catch (yamlErr) {
+          console.error('[ReactorProviderService] Failed to load providers.yaml:', yamlErr);
+        }
+      }
+    })();
+
+    await this.loadPromise;
+    this.loadPromise = null;
   }
 
   /**
@@ -402,20 +510,47 @@ class ReactorProviderService implements IReactorProviderService {
   }
 
   async getProviders(): Promise<ProviderConfig[]> {
+    await this.ensureLoaded();
     return Array.from(this.providers.values());
   }
 
   async getProvider(providerId: string): Promise<ProviderConfig | undefined> {
-    return this.providers.get(providerId);
+    await this.ensureLoaded();
+    const normalized = providerId?.toLowerCase();
+    return this.providers.get(providerId) ?? this.providers.get(normalized);
   }
 
   async registerProvider(providerConfig: ProviderConfig): Promise<ProviderConfig> {
     this.providers.set(providerConfig.id, providerConfig);
+    if (ReactorPostgresDataSource.isInitialized) {
+      try {
+        const repo = ReactorPostgresDataSource.getRepository(ReactoryAiProvider);
+        let entity = await repo.findOne({ where: { id: providerConfig.id } });
+        if (!entity) {
+          entity = new ReactoryAiProvider();
+          entity.id = providerConfig.id;
+        }
+        entity.name = providerConfig.name;
+        entity.endpointUrl = providerConfig.endpointUrl;
+        entity.apiVersion = providerConfig.apiVersion;
+        entity.authComponentFqn = providerConfig.authComponentFqn;
+        entity.defaultModelId = providerConfig.defaultModel;
+        entity.capabilities = providerConfig.capabilities || [];
+        entity.credentialRequirements = providerConfig.credentialRequirements || [];
+        entity.credentialEnvVars = providerConfig.credentialEnvVars || {};
+        entity.roles = providerConfig.roles || ['USER'];
+        entity.rateLimits = providerConfig.rateLimits;
+        entity.status = providerConfig.status;
+        await repo.save(entity);
+      } catch (err) {
+        this.context?.warn?.(`[ReactorProviderService] registerProvider DB sync failed: ${(err as Error)?.message}`);
+      }
+    }
     return providerConfig;
   }
 
   async updateProviderStatus(providerId: string, status: Partial<ProviderConfig["status"]>): Promise<ProviderConfig> {
-    const provider = this.providers.get(providerId);
+    const provider = await this.getProvider(providerId);
     if (!provider) {
       throw new Error(`Provider ${providerId} not found`);
     }
@@ -427,7 +562,394 @@ class ReactorProviderService implements IReactorProviderService {
     };
 
     this.providers.set(providerId, provider);
+
+    if (ReactorPostgresDataSource.isInitialized) {
+      try {
+        const repo = ReactorPostgresDataSource.getRepository(ReactoryAiProvider);
+        const entity = await repo.findOne({ where: { id: providerId } });
+        if (entity) {
+          entity.status = provider.status;
+          await repo.save(entity);
+        }
+      } catch (err) {
+        this.context?.warn?.(`[ReactorProviderService] updateProviderStatus DB sync failed: ${(err as Error)?.message}`);
+      }
+    }
+
     return provider;
+  }
+
+  /**
+   * Create a new AI provider entity
+   */
+  async createProvider(input: any): Promise<ProviderConfig> {
+    if (!input.id || !input.name) {
+      throw new Error("Provider id and name are required");
+    }
+    const id = input.id.trim();
+    if (ReactorPostgresDataSource.isInitialized) {
+      const repo = ReactorPostgresDataSource.getRepository(ReactoryAiProvider);
+      const existing = await repo.findOne({ where: { id } });
+      if (existing) {
+        throw new Error(`Provider with id '${id}' already exists`);
+      }
+      const entity = new ReactoryAiProvider();
+      entity.id = id;
+      entity.name = input.name;
+      entity.description = input.description;
+      entity.providerType = input.providerType || id.toLowerCase();
+      entity.endpointUrl = input.endpointUrl;
+      entity.apiVersion = input.apiVersion;
+      entity.authComponentFqn = input.authComponentFqn;
+      entity.defaultModelId = input.defaultModelId;
+      entity.credentialRequirements = input.credentialRequirements || [];
+      entity.credentialEnvVars = input.credentialEnvVars || {};
+      entity.capabilities = input.capabilities || [];
+      entity.roles = input.roles || ['USER'];
+      entity.rateLimits = input.rateLimits;
+      entity.status = input.status || {
+        available: false,
+        lastChecked: new Date(),
+        uptime: 99.9,
+        responseTime: 350,
+        errorRate: 0.1,
+      };
+      entity.isEnabled = input.isEnabled !== false;
+      entity.isSystem = false;
+      entity.organizationId = input.organizationId;
+      entity.createdBy = (this.context?.user as any)?._id?.toString?.();
+      await repo.save(entity);
+      await this.ensureLoaded(true);
+      return (await this.getProvider(id)) as ProviderConfig;
+    }
+
+    const config: ProviderConfig = {
+      id,
+      name: input.name,
+      endpointUrl: input.endpointUrl,
+      apiVersion: input.apiVersion,
+      authComponentFqn: input.authComponentFqn,
+      defaultModel: input.defaultModelId,
+      capabilities: input.capabilities || [],
+      credentialRequirements: input.credentialRequirements || [],
+      credentialEnvVars: input.credentialEnvVars || {},
+      roles: input.roles || ['USER'],
+      rateLimits: input.rateLimits,
+      models: [],
+      status: {
+        available: false,
+        lastChecked: new Date(),
+        uptime: 99.9,
+        responseTime: 350,
+        errorRate: 0.1,
+      },
+    };
+    this.providers.set(id, config);
+    return config;
+  }
+
+  /**
+   * Update an existing AI provider entity
+   */
+  async updateProvider(id: string, input: any): Promise<ProviderConfig> {
+    if (ReactorPostgresDataSource.isInitialized) {
+      const repo = ReactorPostgresDataSource.getRepository(ReactoryAiProvider);
+      const entity = await repo.findOne({ where: { id }, relations: ['models'] });
+      if (!entity) {
+        throw new Error(`Provider '${id}' not found`);
+      }
+      if (input.name !== undefined) entity.name = input.name;
+      if (input.description !== undefined) entity.description = input.description;
+      if (input.providerType !== undefined) entity.providerType = input.providerType;
+      if (input.endpointUrl !== undefined) entity.endpointUrl = input.endpointUrl;
+      if (input.apiVersion !== undefined) entity.apiVersion = input.apiVersion;
+      if (input.authComponentFqn !== undefined) entity.authComponentFqn = input.authComponentFqn;
+      if (input.defaultModelId !== undefined) entity.defaultModelId = input.defaultModelId;
+      if (input.credentialRequirements !== undefined) entity.credentialRequirements = input.credentialRequirements;
+      if (input.credentialEnvVars !== undefined) entity.credentialEnvVars = input.credentialEnvVars;
+      if (input.capabilities !== undefined) entity.capabilities = input.capabilities;
+      if (input.roles !== undefined) entity.roles = input.roles;
+      if (input.rateLimits !== undefined) entity.rateLimits = input.rateLimits;
+      if (input.status !== undefined) entity.status = { ...entity.status, ...input.status };
+      if (input.isEnabled !== undefined) entity.isEnabled = input.isEnabled;
+      await repo.save(entity);
+      await this.ensureLoaded(true);
+      return (await this.getProvider(id)) as ProviderConfig;
+    }
+
+    const provider = this.providers.get(id);
+    if (!provider) throw new Error(`Provider '${id}' not found`);
+    if (input.name !== undefined) provider.name = input.name;
+    if (input.endpointUrl !== undefined) provider.endpointUrl = input.endpointUrl;
+    if (input.apiVersion !== undefined) provider.apiVersion = input.apiVersion;
+    if (input.authComponentFqn !== undefined) provider.authComponentFqn = input.authComponentFqn;
+    if (input.defaultModelId !== undefined) provider.defaultModel = input.defaultModelId;
+    if (input.capabilities !== undefined) provider.capabilities = input.capabilities;
+    if (input.roles !== undefined) provider.roles = input.roles;
+    if (input.rateLimits !== undefined) provider.rateLimits = input.rateLimits;
+    return provider;
+  }
+
+  /**
+   * Delete an AI provider entity and its models
+   */
+  async deleteProvider(id: string): Promise<boolean> {
+    if (ReactorPostgresDataSource.isInitialized) {
+      const repo = ReactorPostgresDataSource.getRepository(ReactoryAiProvider);
+      const entity = await repo.findOne({ where: { id } });
+      if (!entity) return false;
+      await repo.remove(entity);
+      await this.ensureLoaded(true);
+      return true;
+    }
+    const existed = this.providers.delete(id);
+    return existed;
+  }
+
+  /**
+   * Create a new AI model entity
+   */
+  async createModel(input: any): Promise<ProviderModelConfig> {
+    if (!input.providerId || !input.modelKey || !input.name) {
+      throw new Error("providerId, modelKey, and name are required");
+    }
+    if (ReactorPostgresDataSource.isInitialized) {
+      const modelRepo = ReactorPostgresDataSource.getRepository(ReactoryAiModel);
+      const existing = await modelRepo.findOne({
+        where: { providerId: input.providerId, modelKey: input.modelKey },
+      });
+      if (existing) {
+        throw new Error(`Model '${input.modelKey}' already exists under provider '${input.providerId}'`);
+      }
+      const model = new ReactoryAiModel();
+      model.providerId = input.providerId;
+      model.modelKey = input.modelKey;
+      model.name = input.name;
+      model.version = input.version;
+      model.contextLength = input.contextLength;
+      model.maxOutputTokens = input.maxOutputTokens;
+      model.capabilities = input.capabilities || [];
+      model.supportsStreaming = input.supportsStreaming !== false;
+      model.supportedTools = input.supportedTools || ['function-calling'];
+      model.supportedMediaTypes = input.supportedMediaTypes || ['text'];
+      model.inputCostPerTokenUsdCents = input.inputCostPerTokenUsdCents;
+      model.outputCostPerTokenUsdCents = input.outputCostPerTokenUsdCents;
+      model.costPerToken = input.costPerToken;
+      model.rpm = input.rpm;
+      model.itpm = input.itpm;
+      model.otpm = input.otpm;
+      model.maxParallelRequests = input.maxParallelRequests;
+      model.samplingConfig = input.sampling;
+      model.thinkingConfig = input.thinking;
+      model.isEnabled = input.isEnabled !== false;
+      model.sortOrder = input.sortOrder || 0;
+      await modelRepo.save(model);
+      await this.ensureLoaded(true);
+      const provider = await this.getProvider(input.providerId);
+      const found = provider?.models.find((m) => m.id === input.modelKey);
+      if (found) return found;
+    }
+
+    const provider = this.providers.get(input.providerId);
+    if (!provider) throw new Error(`Provider '${input.providerId}' not found`);
+    const modelConfig: ProviderModelConfig = {
+      id: input.modelKey,
+      providerId: input.providerId,
+      name: input.name,
+      version: input.version,
+      capabilities: input.capabilities || [],
+      contextLength: input.contextLength,
+      supportsStreaming: input.supportsStreaming !== false,
+      supportedTools: input.supportedTools || ['function-calling'],
+      supportedMediaTypes: input.supportedMediaTypes || ['text'],
+      inputCostPerTokenUsdCents: input.inputCostPerTokenUsdCents,
+      outputCostPerTokenUsdCents: input.outputCostPerTokenUsdCents,
+      costPerToken: input.costPerToken,
+      rpm: input.rpm,
+      itpm: input.itpm,
+      otpm: input.otpm,
+      sampling: input.sampling,
+      thinking: input.thinking,
+    };
+    provider.models.push(modelConfig);
+    return modelConfig;
+  }
+
+  /**
+   * Update an existing AI model entity
+   */
+  async updateModel(modelId: string, input: any): Promise<ProviderModelConfig> {
+    if (ReactorPostgresDataSource.isInitialized) {
+      const modelRepo = ReactorPostgresDataSource.getRepository(ReactoryAiModel);
+      let model = await modelRepo.findOne({ where: { id: modelId } });
+      if (!model && input.providerId) {
+        model = await modelRepo.findOne({ where: { providerId: input.providerId, modelKey: modelId } });
+      }
+      if (!model) throw new Error(`Model '${modelId}' not found`);
+      if (input.name !== undefined) model.name = input.name;
+      if (input.version !== undefined) model.version = input.version;
+      if (input.contextLength !== undefined) model.contextLength = input.contextLength;
+      if (input.maxOutputTokens !== undefined) model.maxOutputTokens = input.maxOutputTokens;
+      if (input.capabilities !== undefined) model.capabilities = input.capabilities;
+      if (input.supportsStreaming !== undefined) model.supportsStreaming = input.supportsStreaming;
+      if (input.supportedTools !== undefined) model.supportedTools = input.supportedTools;
+      if (input.supportedMediaTypes !== undefined) model.supportedMediaTypes = input.supportedMediaTypes;
+      if (input.inputCostPerTokenUsdCents !== undefined) model.inputCostPerTokenUsdCents = input.inputCostPerTokenUsdCents;
+      if (input.outputCostPerTokenUsdCents !== undefined) model.outputCostPerTokenUsdCents = input.outputCostPerTokenUsdCents;
+      if (input.costPerToken !== undefined) model.costPerToken = input.costPerToken;
+      if (input.rpm !== undefined) model.rpm = input.rpm;
+      if (input.itpm !== undefined) model.itpm = input.itpm;
+      if (input.otpm !== undefined) model.otpm = input.otpm;
+      if (input.sampling !== undefined) model.samplingConfig = input.sampling;
+      if (input.thinking !== undefined) model.thinkingConfig = input.thinking;
+      if (input.isEnabled !== undefined) model.isEnabled = input.isEnabled;
+      if (input.sortOrder !== undefined) model.sortOrder = input.sortOrder;
+      await modelRepo.save(model);
+      await this.ensureLoaded(true);
+      const provider = await this.getProvider(model.providerId);
+      const found = provider?.models.find((m) => m.id === model?.modelKey);
+      if (found) return found;
+    }
+
+    for (const provider of this.providers.values()) {
+      const m = provider.models.find((mod) => mod.id === modelId);
+      if (m) {
+        if (input.name !== undefined) m.name = input.name;
+        if (input.version !== undefined) m.version = input.version;
+        if (input.contextLength !== undefined) m.contextLength = input.contextLength;
+        if (input.capabilities !== undefined) m.capabilities = input.capabilities;
+        if (input.supportsStreaming !== undefined) m.supportsStreaming = input.supportsStreaming;
+        return m;
+      }
+    }
+    throw new Error(`Model '${modelId}' not found`);
+  }
+
+  /**
+   * Delete an AI model entity
+   */
+  async deleteModel(modelId: string): Promise<boolean> {
+    if (ReactorPostgresDataSource.isInitialized) {
+      const modelRepo = ReactorPostgresDataSource.getRepository(ReactoryAiModel);
+      let model = await modelRepo.findOne({ where: { id: modelId } });
+      if (!model) {
+        model = await modelRepo.findOne({ where: { modelKey: modelId } });
+      }
+      if (!model) return false;
+      await modelRepo.remove(model);
+      await this.ensureLoaded(true);
+      return true;
+    }
+
+    for (const provider of this.providers.values()) {
+      const idx = provider.models.findIndex((m) => m.id === modelId);
+      if (idx >= 0) {
+        provider.models.splice(idx, 1);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Test connection and credentials for an AI provider
+   */
+  async testProviderConnection(
+    providerId: string,
+    testModelId?: string
+  ): Promise<{ success: boolean; latencyMs: number; message: string; details?: any }> {
+    const start = Date.now();
+    try {
+      const provider = await this.getProvider(providerId);
+      if (!provider) {
+        return {
+          success: false,
+          latencyMs: 0,
+          message: `Provider '${providerId}' not found`,
+        };
+      }
+
+      const creds = await this.resolveProviderCredentials(providerId);
+      if (creds.source === 'none' && !['ollama'].includes(providerId.toLowerCase())) {
+        return {
+          success: false,
+          latencyMs: 0,
+          message: `No credentials configured for provider '${providerId}' (source: none)`,
+        };
+      }
+
+      const endpoint = creds.endpoint || provider.endpointUrl;
+      if (!endpoint) {
+        return {
+          success: false,
+          latencyMs: 0,
+          message: `No endpoint URL configured for provider '${providerId}'`,
+        };
+      }
+
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      try {
+        const response = await fetch(endpoint, {
+          method: 'GET',
+          headers: creds.apiKey ? { Authorization: `Bearer ${creds.apiKey}` } : {},
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+        const latencyMs = Date.now() - start;
+        const isReachable = response.status < 500;
+        const msg = isReachable
+          ? `Provider '${providerId}' reached in ${latencyMs}ms (HTTP ${response.status})`
+          : `Provider '${providerId}' returned HTTP ${response.status}`;
+
+        await this.updateProviderStatus(providerId, {
+          available: isReachable,
+          responseTime: latencyMs,
+          lastChecked: new Date(),
+        });
+
+        return {
+          success: isReachable,
+          latencyMs,
+          message: msg,
+          details: { status: response.status, statusText: response.statusText, source: creds.source },
+        };
+      } catch (fetchErr) {
+        clearTimeout(timeoutId);
+        const latencyMs = Date.now() - start;
+        return {
+          success: false,
+          latencyMs,
+          message: `Connection failed: ${(fetchErr as Error)?.message}`,
+        };
+      }
+    } catch (err) {
+      return {
+        success: false,
+        latencyMs: Date.now() - start,
+        message: `Error testing provider: ${(err as Error)?.message}`,
+      };
+    }
+  }
+
+  /**
+   * Re-sync baseline providers from providers.yaml into PostgreSQL
+   */
+  async syncFromYaml(overwrite: boolean = false): Promise<{ providersCount: number; modelsCount: number }> {
+    if (ReactorPostgresDataSource.isInitialized) {
+      const stats = await seedAiProviders(ReactorPostgresDataSource, overwrite);
+      await this.ensureLoaded(true);
+      return stats;
+    }
+    const yamlProviders = loadProviders();
+    this.providers.clear();
+    for (const p of yamlProviders) {
+      this.providers.set(p.id, p);
+    }
+    return {
+      providersCount: yamlProviders.length,
+      modelsCount: yamlProviders.reduce((acc, p) => acc + p.models.length, 0),
+    };
   }
 
   async getAdapter(providerId: string): Promise<any> {

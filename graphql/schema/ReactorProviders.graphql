@@ -181,6 +181,124 @@ extend type Query {
   providers the user has configured.
   """
   ReactorUserProviderAuth: [ReactorProviderAuthConfig!]!
+
+  """
+  Get all providers for administrative management with optional filtering.
+  """
+  ReactorAiProvidersAdmin(filter: ReactorAiProviderFilterInput): [ReactorProviderConfig!]!
+
+  """
+  Get specific provider details for administration.
+  """
+  ReactorAiProviderAdmin(id: String!): ReactorProviderConfig
+}
+
+input ReactorModelSamplingSupportInput {
+  temperature: Boolean
+  topP: Boolean
+  topK: Boolean
+}
+
+input ReactorModelThinkingSupportInput {
+  mode: String
+  effort: String
+  display: String
+}
+
+input ReactorProviderRateLimitsInput {
+  requestsPerMinute: Int
+  tokensPerMinute: Int
+  concurrentRequests: Int
+}
+
+input ReactorAiProviderFilterInput {
+  isEnabled: Boolean
+  searchString: String
+  providerType: String
+}
+
+input ReactorCreateAiProviderInput {
+  id: String!
+  name: String!
+  description: String
+  providerType: String
+  endpointUrl: String
+  apiVersion: String
+  defaultModelId: String
+  authComponentFqn: String
+  credentialRequirements: [String!]
+  capabilities: [String!]
+  roles: [String!]
+  rateLimits: ReactorProviderRateLimitsInput
+  isEnabled: Boolean
+}
+
+input ReactorUpdateAiProviderInput {
+  name: String
+  description: String
+  providerType: String
+  endpointUrl: String
+  apiVersion: String
+  defaultModelId: String
+  authComponentFqn: String
+  credentialRequirements: [String!]
+  capabilities: [String!]
+  roles: [String!]
+  rateLimits: ReactorProviderRateLimitsInput
+  isEnabled: Boolean
+}
+
+input ReactorCreateAiModelInput {
+  providerId: String!
+  modelKey: String!
+  name: String!
+  version: String
+  contextLength: Int
+  maxOutputTokens: Int
+  capabilities: [String!]
+  supportsStreaming: Boolean
+  supportedTools: [String!]
+  supportedMediaTypes: [String!]
+  inputCostPerTokenUsdCents: Float
+  outputCostPerTokenUsdCents: Float
+  costPerToken: Float
+  rpm: Int
+  itpm: Int
+  otpm: Int
+  maxParallelRequests: Int
+  sampling: ReactorModelSamplingSupportInput
+  thinking: ReactorModelThinkingSupportInput
+  isEnabled: Boolean
+  sortOrder: Int
+}
+
+input ReactorUpdateAiModelInput {
+  name: String
+  version: String
+  contextLength: Int
+  maxOutputTokens: Int
+  capabilities: [String!]
+  supportsStreaming: Boolean
+  supportedTools: [String!]
+  supportedMediaTypes: [String!]
+  inputCostPerTokenUsdCents: Float
+  outputCostPerTokenUsdCents: Float
+  costPerToken: Float
+  rpm: Int
+  itpm: Int
+  otpm: Int
+  maxParallelRequests: Int
+  sampling: ReactorModelSamplingSupportInput
+  thinking: ReactorModelThinkingSupportInput
+  isEnabled: Boolean
+  sortOrder: Int
+}
+
+type ReactorProviderTestResult {
+  success: Boolean!
+  latencyMs: Float!
+  message: String!
+  details: Any
 }
 
 extend type Mutation {
@@ -196,4 +314,44 @@ extend type Mutation {
   clears any local default flag for that provider.
   """
   ReactorRemoveProviderAuth(input: ReactorRemoveProviderAuthInput!): Boolean!
+
+  """
+  Create a new AI provider
+  """
+  ReactorCreateAiProvider(input: ReactorCreateAiProviderInput!): ReactorProviderConfig!
+
+  """
+  Update an existing AI provider
+  """
+  ReactorUpdateAiProvider(id: String!, input: ReactorUpdateAiProviderInput!): ReactorProviderConfig!
+
+  """
+  Delete an AI provider
+  """
+  ReactorDeleteAiProvider(id: String!): Boolean!
+
+  """
+  Create a new AI model under a provider
+  """
+  ReactorCreateAiModel(input: ReactorCreateAiModelInput!): ReactorModelDefinition!
+
+  """
+  Update an existing AI model
+  """
+  ReactorUpdateAiModel(id: String!, input: ReactorUpdateAiModelInput!, providerId: String): ReactorModelDefinition!
+
+  """
+  Delete an AI model
+  """
+  ReactorDeleteAiModel(id: String!, providerId: String): Boolean!
+
+  """
+  Test connectivity to an AI provider endpoint
+  """
+  ReactorTestAiProvider(id: String!, testModelId: String): ReactorProviderTestResult!
+
+  """
+  Synchronize baseline AI providers from YAML into PostgreSQL database
+  """
+  ReactorSyncAiProvidersFromYaml(overwrite: Boolean): Any!
 }
