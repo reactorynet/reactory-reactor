@@ -1,3 +1,4 @@
 node_modules/
 ai/openai/chat/macro/develop/samples/review.md
 ai/persona/.DS_Store
+.DS_Store
