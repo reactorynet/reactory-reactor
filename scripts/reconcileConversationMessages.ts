@@ -1,0 +1,538 @@
+/**
+ * Reconcile the Postgres conversation message log against Mongo, then repair it.
+ *
+ * The one tool that brings the two stores into exact agreement and leaves the
+ * table correctly indexed.
+ *
+ * TWO KINDS OF REPAIR
+ *
+ * A) CONTENT DIFFERS — Postgres holds rows Mongo does not (orphans), or is
+ *    missing rows Mongo has. The transcript content must change, so `seq` is
+ *    re-derived from the authoritative Mongo order. That order is the Mongo
+ *    history array, which for an append-only transcript equals `mongo_id`
+ *    ascending. This is NOT assumed: the array order is verified against
+ *    `mongo_id` order first and the conversation is SKIPPED if they differ.
+ *
+ * B) NUMBERING ONLY — content already matches, but `seq` is wrong: duplicated,
+ *    negative, or left in a temporary offset range by an interrupted run.
+ *    Nothing must move, so the existing relative order is preserved and simply
+ *    compacted to 1..N. This needs no order guarantee, which matters because many
+ *    backfilled conversations legitimately do not have `mongo_id`-sorted arrays.
+ *
+ * SAFETY
+ *   - Dry run by default. Pass `--apply` to write.
+ *   - Idempotent: a reconciled conversation is left untouched on re-run.
+ *   - Re-sequencing shifts by the current maximum rather than a constant, so it
+ *     is safe even when rows already occupy a temporary range.
+ *
+ * Usage:
+ *   npx ts-node -r tsconfig-paths/register src/modules/reactory-reactor/scripts/reconcileConversationMessages.ts
+ *   npx ts-node -r tsconfig-paths/register src/modules/reactory-reactor/scripts/reconcileConversationMessages.ts --apply
+ *   npx ts-node -r tsconfig-paths/register src/modules/reactory-reactor/scripts/reconcileConversationMessages.ts --apply --conversation=<id>
+ */
+import "reflect-metadata";
+import mongoose from "mongoose";
+import { Client } from "pg";
+
+const MONGODB_URI =
+  process.env.MONGOOSE ||
+  "mongodb://reactory:reactorycore@localhost:27017/reactory-reactory?authSource=admin";
+
+/** At or above this, a `seq` value is a temporary placeholder, not a real position. */
+const PLACEHOLDER_SEQ_BASE = 1000000000;
+
+const args = process.argv.slice(2);
+const APPLY = args.includes("--apply");
+const INCLUDE_ACTIVE = args.includes("--include-active");
+
+/**
+ * A conversation written within this window is treated as live and skipped.
+ *
+ * Re-sequencing a conversation that is being appended to cannot be made safe by
+ * retrying: the writer computes `MAX(seq)+1` while this script renumbers 1..N, so
+ * the two can collide on the unique guard. The collision is harmless (the
+ * statement fails, nothing corrupts) but it makes the run unreliable. Skipping
+ * active conversations gives a deterministic result for every settled one, and
+ * the live conversation can be reconciled once idle.
+ */
+const ACTIVE_WRITER_WINDOW_MS = 120000;
+const ONLY_CONVERSATION = args.find((a) => a.startsWith("--conversation="))?.split("=")[1];
+
+const pgConfig = {
+  host: process.env.REACTORY_POSTGRES_HOST || process.env.POSTGRES_DB_HOST || "localhost",
+  port: parseInt(
+    process.env.REACTORY_POSTGRES_PORT || process.env.POSTGRES_DB_PORT || "5432",
+    10
+  ),
+  user: process.env.REACTORY_POSTGRES_USER || process.env.POSTGRES_USER || "reactory",
+  password:
+    process.env.REACTORY_POSTGRES_PASSWORD || process.env.POSTGRES_PASSWORD || "reactory",
+  database: process.env.REACTORY_POSTGRES_DB || process.env.POSTGRES_DB || "reactory",
+};
+
+/** Postgres rejects NUL bytes in text/jsonb; Mongo stores them happily. */
+const stripNul = (value: string) => value.replace(/\u0000/g, "");
+
+const toJson = (value: unknown): string | null => {
+  if (value === null || value === undefined) return null;
+  try {
+    return stripNul(JSON.stringify(value));
+  } catch {
+    return null;
+  }
+};
+
+const toText = (value: unknown): string | null => {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") return stripNul(value);
+  return stripNul(JSON.stringify(value));
+};
+
+const buildSearchText = (message: any): string | null => {
+  const parts: string[] = [];
+  const push = (value: unknown) => {
+    if (typeof value === "string") parts.push(value);
+    else if (value && typeof value === "object") {
+      const text = (value as any).text;
+      if (typeof text === "string") parts.push(text);
+    }
+  };
+  const content = message?.content;
+  if (Array.isArray(content)) content.forEach(push);
+  else push(content);
+  push(message?.thinking);
+  const joined = stripNul(parts.join("\n")).trim();
+  return joined.length > 0 ? joined : null;
+};
+
+const readMongoId = (item: any): string | null => {
+  const raw = item?._id ?? item?.id;
+  if (!raw) return null;
+  const value = String(raw);
+  return value || null;
+};
+
+const mongoIdOf = (row: any): string =>
+  String(row?.mongoId ?? row?.mongo_id ?? "").trim();
+
+const arrayOrderMatchesIdOrder = (ids: string[]): boolean => {
+  for (let i = 1; i < ids.length; i += 1) {
+    if (ids[i - 1] > ids[i]) return false;
+  }
+  return true;
+};
+
+/**
+ * Shift that moves every row clear of the current range, so the follow-up update
+ * cannot transiently collide with a not-yet-moved row.
+ *
+ * Renumbering writes values 1..n, so every shifted row must land ABOVE n. The
+ * shift therefore has to be `n - min + 1`: derived from the row count, not `max`.
+ *
+ * Two wrong answers this replaced, both of which tripped the unique guard:
+ *   `max + 1`       — maps a negative value into the unmoved positive range.
+ *   `max - min + 1` — for an all-negative range ({-3,-2,-1}, n=3) it yields
+ *                     {0,1,2}, which overlaps the target 1..3.
+ */
+const safeSeqShift = async (client: Client, conversationId: string): Promise<number> => {
+  const { rows } = await client.query(
+    `SELECT COALESCE(MIN(seq), 0) AS min, count(*) AS n
+       FROM reactor_conversation_messages WHERE conversation_id = $1`,
+    [conversationId]
+  );
+  const min = Number(rows[0]?.min ?? 0);
+  const n = Number(rows[0]?.n ?? 0);
+  return n - min + 1;
+};
+
+/**
+ * Compact `seq` to 1..N, preserving the CURRENT relative order.
+ * Used when content is already correct and only the numbering is wrong.
+ */
+const compactSeq = async (client: Client, conversationId: string): Promise<void> => {
+  const shift = await safeSeqShift(client, conversationId);
+
+  await client.query(
+    `UPDATE reactor_conversation_messages
+        SET seq = seq + $2, updated_at = now()
+      WHERE conversation_id = $1`,
+    [conversationId, shift]
+  );
+
+  await client.query(
+    `WITH ordered AS (
+       SELECT id, row_number() OVER (ORDER BY seq ASC, mongo_id ASC) AS rn
+         FROM reactor_conversation_messages
+        WHERE conversation_id = $1
+     )
+     UPDATE reactor_conversation_messages m
+        SET seq = o.rn, updated_at = now()
+       FROM ordered o
+      WHERE m.id = o.id`,
+    [conversationId]
+  );
+};
+
+/**
+ * Re-derive `seq` from `mongo_id` order. Only called after that order has been
+ * verified to match Mongo's array order.
+ */
+const resequenceFromMongoIdOrder = async (
+  client: Client,
+  conversationId: string
+): Promise<void> => {
+  const shift = await safeSeqShift(client, conversationId);
+
+  await client.query(
+    `UPDATE reactor_conversation_messages
+        SET seq = seq + $2, updated_at = now()
+      WHERE conversation_id = $1`,
+    [conversationId, shift]
+  );
+
+  await client.query(
+    `WITH ordered AS (
+       SELECT id, row_number() OVER (ORDER BY mongo_id ASC) AS rn
+         FROM reactor_conversation_messages
+        WHERE conversation_id = $1
+     )
+     UPDATE reactor_conversation_messages m
+        SET seq = o.rn, updated_at = now()
+       FROM ordered o
+      WHERE m.id = o.id`,
+    [conversationId]
+  );
+};
+
+const insertMessage = async (
+  client: Client,
+  conversationId: string,
+  message: any,
+  seq: number
+): Promise<void> => {
+  await client.query(
+    `INSERT INTO reactor_conversation_messages
+       (mongo_id, conversation_id, seq, role, content, thinking, thinking_blocks, images,
+        refusal, tool_call_id, tool_name, tool_args, tool_calls, tool_results, tool_errors,
+        provider_response, component, rating, annotations, audio, search_text, archived,
+        archived_at, archived_reason, message_ts)
+     VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8::jsonb,
+             $9,$10,$11,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,
+             $16::jsonb,$17,$18,$19::jsonb,$20::jsonb,$21,$22,
+             $23,$24,$25)`,
+    [
+      readMongoId(message),
+      conversationId,
+      seq,
+      String(message?.role ?? "assistant"),
+      toJson(message?.content ?? null),
+      toText(message?.thinking ?? null),
+      toJson(message?.thinking_blocks ?? null),
+      toJson(message?.images ?? null),
+      toText(message?.refusal ?? null),
+      message?.tool_call_id ?? null,
+      toText(message?.tool_name ?? null),
+      toJson(message?.tool_args ?? null),
+      toJson(message?.tool_calls ?? null),
+      toJson(message?.tool_results ?? null),
+      toJson(message?.tool_errors ?? null),
+      toJson(message?.response ?? null),
+      toText(message?.component ?? null),
+      typeof message?.rating === "number" ? message.rating : null,
+      toJson(message?.annotations ?? null),
+      toJson(message?.audio ?? null),
+      buildSearchText(message),
+      Boolean(message?.archived),
+      message?.archivedAt ? new Date(message.archivedAt) : null,
+      message?.archivedReason ?? null,
+      message?.timestamp ? new Date(message.timestamp) : null,
+    ]
+  );
+};
+
+const ensureIndexes = async (client: Client): Promise<void> => {
+  // Quoted so the names match the entity and migrations exactly. Unquoted
+  // identifiers fold to lower case in Postgres and would sit alongside as
+  // duplicate indexes.
+  await client.query(
+    `CREATE INDEX IF NOT EXISTS "IDX_rcm_conv_archived_seq"
+       ON reactor_conversation_messages (conversation_id, archived, seq)`
+  );
+  await client.query(
+    `CREATE INDEX IF NOT EXISTS "IDX_rcm_conv_role_seq"
+       ON reactor_conversation_messages (conversation_id, role, seq)`
+  );
+  await client.query(
+    `CREATE UNIQUE INDEX IF NOT EXISTS "IDX_rcm_conv_seq"
+       ON reactor_conversation_messages (conversation_id, seq)`
+  );
+  await client.query(
+    `CREATE INDEX IF NOT EXISTS "IDX_rcm_search_text_trgm"
+       ON reactor_conversation_messages USING gin (search_text gin_trgm_ops)`
+  );
+
+  for (const legacy of [
+    "idx_rcm_conv_archived_seq",
+    "idx_rcm_conv_role_seq",
+    "idx_rcm_conv_seq",
+    "idx_rcm_search_text_trgm",
+  ]) {
+    await client.query("DROP INDEX IF EXISTS " + legacy);
+  }
+};
+
+const run = async () => {
+  console.log("──────────────────────────────────────────────────────────");
+  console.log(" Conversation message reconciliation");
+  console.log(` Mode : ${APPLY ? "APPLY (writing)" : "DRY RUN (no writes)"}`);
+  console.log("──────────────────────────────────────────────────────────");
+
+  const client = new Client(pgConfig);
+  await client.connect();
+  await mongoose.connect(MONGODB_URI as string);
+
+  const filter: Record<string, any> = ONLY_CONVERSATION
+    ? { _id: new mongoose.Types.ObjectId(ONLY_CONVERSATION) }
+    : { history: { $exists: true, $ne: [] } };
+
+  const cursor = mongoose.connection
+    .collection("reactor_conversations")
+    .find(filter, { projection: { history: 1, updated: 1 } });
+
+  let scanned = 0;
+  let compacted = 0;
+  let resequenced = 0;
+  let prunedTotal = 0;
+  let insertedTotal = 0;
+  const skipped: string[] = [];
+  const touched: string[] = [];
+  const failures: string[] = [];
+
+  for await (const doc of cursor as any) {
+    const conversationId = String(doc._id);
+    const history: any[] = Array.isArray(doc.history) ? doc.history : [];
+    if (history.length === 0) continue;
+    scanned += 1;
+
+    // One malformed conversation must not abort the run. A conversation that is
+    // being written to can fail on the unique guard when it races the live
+    // writer; that is recorded and skipped, not fatal.
+    try {
+
+    const mongoItems = history.filter((item) => readMongoId(item));
+    const mongoOrder = mongoItems.map((item) => readMongoId(item) as string);
+    const mongoSet = new Set(mongoOrder);
+
+    const { rows } = await client.query(
+      `SELECT mongo_id AS "mongoId", seq FROM reactor_conversation_messages WHERE conversation_id = $1`,
+      [conversationId]
+    );
+    const pgIds = new Set(rows.map((row) => mongoIdOf(row)).filter(Boolean));
+
+    const orphans = [...pgIds].filter((id) => !mongoSet.has(id));
+    const missing = mongoItems.filter((item) => !pgIds.has(readMongoId(item) as string));
+
+    const { rows: dupRows } = await client.query(
+      `SELECT count(*) AS n FROM (
+         SELECT seq FROM reactor_conversation_messages
+          WHERE conversation_id = $1 GROUP BY seq HAVING count(*) > 1
+       ) d`,
+      [conversationId]
+    );
+    const duplicateSeq = Number(dupRows[0]?.n ?? 0);
+
+    const hasPlaceholderSeq = rows.some((row) => {
+      const value = Number(row.seq);
+      // Positions are 1..n; 0 was never a valid value. This also catches the
+      // case where rows exist with the WRONG ORDER but no duplicates: values
+      // {0,1,2} look plausible yet are neither contiguous from 1 nor correctly
+      // ordered, so they must be normalised.
+      return Number.isFinite(value) &&
+        (value < 1 || value >= PLACEHOLDER_SEQ_BASE);
+    });
+
+    // Whether ORDER can be judged at all: only when Mongo's array order equals
+    // `mongo_id` order, since that is the only order derivable from the table.
+    const mongoOrderDerivable = arrayOrderMatchesIdOrder(mongoOrder);
+    const pgIdsBySeq = [...rows]
+      .sort((a, b) => Number(a.seq) - Number(b.seq))
+      .map((row) => mongoIdOf(row));
+    const orderMatches =
+      !mongoOrderDerivable ||
+      (pgIdsBySeq.length === mongoOrder.length &&
+        pgIdsBySeq.every((id, index) => id === mongoOrder[index]));
+
+    if (
+      orphans.length === 0 &&
+      missing.length === 0 &&
+      duplicateSeq === 0 &&
+      !hasPlaceholderSeq &&
+      orderMatches
+    ) {
+      continue;
+    }
+    // Skip a conversation that is being written to right now: renumbering it
+    // races the writer's `MAX(seq)+1` and trips the unique guard. Deterministic
+    // results for settled conversations are worth more than a flaky run.
+    const updatedAt = doc.updated ? new Date(doc.updated).getTime() : 0;
+    const ageMs = Date.now() - updatedAt;
+    if (!INCLUDE_ACTIVE && updatedAt > 0 && ageMs < ACTIVE_WRITER_WINDOW_MS) {
+      skipped.push(
+        `${conversationId}: written ${Math.round(ageMs / 1000)}s ago; ` +
+          `skipped as active (re-run when idle, or pass --include-active)`
+      );
+      continue;
+    }
+
+    touched.push(conversationId);
+
+    // Case B: content already agrees; only numbering and/or order are wrong.
+    if (orphans.length === 0 && missing.length === 0) {
+      // Compacting preserves the EXISTING relative order, so it fixes duplicates
+      // and placeholder values but cannot repair a mis-ordered transcript. When
+      // the order is derivable and does not match, resequence instead.
+      const needsOrderFix = mongoOrderDerivable && !orderMatches;
+
+      if (!APPLY) {
+        console.log(
+          `   ↳ would ${needsOrderFix ? "resequence (order)" : "compact seq"} for ` +
+            `${conversationId} (dupSeq=${duplicateSeq}, placeholder=${hasPlaceholderSeq}, rows=${rows.length})`
+        );
+        continue;
+      }
+
+      if (needsOrderFix) {
+        await resequenceFromMongoIdOrder(client, conversationId);
+        resequenced += 1;
+        console.log(`   ↳ resequenced ${conversationId} (order corrected)`);
+      } else {
+        await compactSeq(client, conversationId);
+        compacted += 1;
+        console.log(`   ↳ compacted seq for ${conversationId} (${rows.length} rows)`);
+      }
+      continue;
+    }
+
+    // Case A: content differs, so order must come from Mongo. Verify first.
+    if (!arrayOrderMatchesIdOrder(mongoOrder)) {
+      skipped.push(
+        `${conversationId}: Mongo array order differs from mongo_id order; ` +
+          `needs manual review (orphans=${orphans.length} missing=${missing.length})`
+      );
+      continue;
+    }
+
+    if (!APPLY) {
+      console.log(
+        `   ↳ would reconcile ${conversationId}: ` +
+          `orphans=${orphans.length} missing=${missing.length}`
+      );
+      continue;
+    }
+
+    // Atomic content repair. A half-applied repair leaves placeholder rows
+    // sorting before the transcript, which is worse than no repair, and the
+    // live writer makes that failure mode reachable. All or nothing.
+    await client.query("BEGIN");
+    try {
+    if (orphans.length > 0) {
+      const { rowCount } = await client.query(
+        `DELETE FROM reactor_conversation_messages
+          WHERE conversation_id = $1 AND mongo_id <> ALL($2::char(24)[])`,
+        [conversationId, orphans]
+      );
+      prunedTotal += rowCount ?? 0;
+    }
+
+    // Placeholder base is derived from the CURRENT minimum so it is always below
+    // every existing row, including any placeholder left by an interrupted run.
+    // A fixed base would collide with those.
+    const { rows: minRows } = await client.query(
+      `SELECT COALESCE(MIN(seq), 0) AS min FROM reactor_conversation_messages WHERE conversation_id = $1`,
+      [conversationId]
+    );
+    let placeholder = Number(minRows[0]?.min ?? 0) - 1;
+
+    for (const message of missing) {
+      await insertMessage(client, conversationId, message, placeholder);
+      placeholder -= 1;
+      insertedTotal += 1;
+    }
+
+    await resequenceFromMongoIdOrder(client, conversationId);
+      await client.query("COMMIT");
+      resequenced += 1;
+    } catch (txError) {
+      await client.query("ROLLBACK");
+      throw txError;
+    }
+
+    console.log(
+      `   ↳ reconciled ${conversationId}: pruned=${orphans.length} inserted=${missing.length}`
+    );
+    } catch (error: any) {
+      // A conversation that races the live writer fails on the unique guard;
+      // record it and carry on rather than aborting the whole run.
+      failures.push(`${conversationId}: ${error?.message ?? error}`);
+    }
+  }
+
+  let indexNote = "skipped (dry run)";
+  if (APPLY) {
+    const { rows } = await client.query(`
+      SELECT count(*) AS n FROM (
+        SELECT conversation_id, seq FROM reactor_conversation_messages
+         GROUP BY conversation_id, seq HAVING count(*) > 1
+      ) d
+    `);
+    if (Number(rows[0]?.n ?? 0) === 0) {
+      await ensureIndexes(client);
+      indexNote = "all 4 ensured";
+    } else {
+      indexNote = `blocked: ${rows[0].n} duplicate seq values remain`;
+    }
+  }
+
+  console.log("\n──────────────────────────────────────────────────────────");
+  console.log(" Summary");
+  console.log("──────────────────────────────────────────────────────────");
+  console.log(`Conversations scanned         : ${scanned}`);
+  console.log(`Conversations needing repair  : ${touched.length}`);
+  console.log(`  compacted (numbering only)  : ${compacted}`);
+  console.log(`  resequenced (content fixed) : ${resequenced}`);
+  console.log(`Orphan rows deleted           : ${prunedTotal}`);
+  console.log(`Messages inserted             : ${insertedTotal}`);
+  console.log(`Skipped                       : ${skipped.length}`);
+  console.log(`Failed                        : ${failures.length}`);
+  if (failures.length > 0) {
+    console.log("\n⚠️  First failures:");
+    failures.slice(0, 5).forEach((line) => console.log(`   - ${line}`));
+  }
+  console.log(`Indexes                       : ${indexNote}`);
+
+  if (skipped.length > 0) {
+    console.log("\n⚠️  Skipped:");
+    skipped.slice(0, 10).forEach((line) => console.log(`   - ${line}`));
+  }
+
+  if (!APPLY) {
+    console.log("\nDry run complete. Re-run with --apply to write.");
+  } else if (skipped.length === 0) {
+    console.log("\n✅ Reconcile complete: Mongo and Postgres agree, indexes in place.");
+  } else {
+    console.log("\n⚠️  Reconcile finished with skipped conversations; see above.");
+  }
+
+  await mongoose.disconnect();
+  await client.end();
+};
+
+run().catch(async (error) => {
+  console.error("Reconcile error:", error);
+  try {
+    await mongoose.disconnect();
+  } catch {
+    /* ignore */
+  }
+  process.exit(1);
+});

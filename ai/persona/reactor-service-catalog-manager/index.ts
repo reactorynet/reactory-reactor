@@ -21,7 +21,8 @@ const CATALOG_TOOL_INCLUDES = [
   'httpGet',
   'gql',
   'queryGQL',
-  'mutationGQL'
+  'mutationGQL',
+  'updateChatData',
 ];
 
 // Extract tools from project macros

@@ -74,6 +74,7 @@ tools:
     - search_book_content
     - get_book_chapter
     - create_learning_path
+    - updateChatData
 
 resources:
   - id: "classroom-module"

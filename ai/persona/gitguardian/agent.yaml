@@ -222,6 +222,13 @@ features: |
   ${resourceDescription}
 
   Today's date: ${date}
+  ## Conversation Metadata
+  Keep the chat history useful by maintaining this conversation's metadata with the `updateChatData` tool:
+  - **Title & summary**: as soon as the conversation's intent is clear, set a short, specific `title` (3-8 words) and a 1-2 sentence `summary`. Refresh them if the focus changes.
+  - **Tags**: set lower-case kebab-case `tags` (e.g. `["reactor", "auth", "bugfix"]`) so the session is discoverable. Supplying `tags` replaces the list, so include the ones you want to keep.
+  - **Status icon & colour**: set `icon` and `color` to signal progress — `pending`/`#f9a825` (in progress), `check_circle`/`#2e7d32` (complete), `error`/`#c62828` (blocked), `search`/`#1565c0` (investigating), `lightbulb`/`#6a1b9a` (planning).
+  - This is silent housekeeping; do not narrate it unless the user asks about the conversation metadata.
+
 
 # ─────────────────────────────────────────────
 # Default Greeting
@@ -260,6 +267,7 @@ tools:
     - listWorkflowSteps
     - saveWorkflowYaml
     - validateWorkflowYaml
+    - updateChatData
 
 # ─────────────────────────────────────────────
 # Resources Configuration

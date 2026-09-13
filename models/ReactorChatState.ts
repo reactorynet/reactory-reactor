@@ -9,10 +9,22 @@ import { MacroComponentDefinition, MacroToolDefinition, ToolApprovalMode } from 
 import { McpSession } from '../types/model.types';
 // Removed incorrect import as 'ChatCompletionResponseMessage' is not exported by 'openai'
 
+/**
+ * Descriptive metadata for a conversation, surfaced in the chat history.
+ *
+ * The AI agent maintains these via the `updateChatData` tool so a session can
+ * be recognised at a glance: a human readable title, a short summary of what
+ * the conversation is about, discovery tags, and a status icon with a colour
+ * code (e.g. green = done, amber = in progress, red = blocked).
+ */
 export interface ConversationMeta { 
   tags?: string[]
   summary?: string
   title: string
+  /** Material icon name describing the conversation status (e.g. "check_circle"). */
+  icon?: string
+  /** Hex colour code used to tint the status icon (e.g. "#2e7d32"). */
+  color?: string
 }
 
 export type ChatHistoryItem = OpenAI.Chat.Completions.ChatCompletionMessage |
@@ -103,6 +115,20 @@ export interface ReactorConversationDocument {
   user: Reactory.Models.IUser
   // The meta data for the conversation
   meta: Reactory.Models.IRecordMeta<ConversationMeta>
+  /**
+   * A short, human readable title for the conversation. Auto-generated from
+   * the user's first message, but the agent may override it (and the fields
+   * below) at any point via the `updateChatData` tool.
+   */
+  title?: string
+  /** A short summary (1-2 sentences) of what the conversation is about. */
+  summary?: string
+  /** Free-form tags for grouping and discovery in the chat history. */
+  tags?: string[]
+  /** Material icon name describing the conversation status. */
+  icon?: string
+  /** Hex colour code used to tint the status icon. */
+  color?: string
   // The history of the conversation
   history: ReactorConversationHistory
   // The variables for the conversation
@@ -326,6 +352,26 @@ const ReactorConversationSchema = new Schema({
   },
   // A short title for the conversation, generated from the user's first message
   title: {
+    type: String,
+    default: null,
+  },
+  // A short summary (1-2 sentences) of what the conversation is about.
+  summary: {
+    type: String,
+    default: null,
+  },
+  // Free-form tags for grouping and discovery in the chat history.
+  tags: {
+    type: [String],
+    default: [],
+  },
+  // Material icon name describing the conversation status.
+  icon: {
+    type: String,
+    default: null,
+  },
+  // Hex colour code used to tint the status icon.
+  color: {
     type: String,
     default: null,
   },

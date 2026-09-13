@@ -184,6 +184,11 @@ class OpenAIService extends AIProviderBase {
         openAIArgs.apiKey = apiKey || process.env.VLLM_API_KEY || "vllm-no-key";
         delete openAIArgs.organization;
         break;
+      case "deepseek":
+        openAIArgs.baseURL = apiBaseURL || process.env.DEEPSEEK_API_BASE_URL || "https://api.deepseek.com/v1";
+        openAIArgs.apiKey = apiKey || process.env.DEEPSEEK_API_KEY || "deepseek-no-key";
+        delete openAIArgs.organization;
+        break;
       default:
         // Default to OpenAI-compatible endpoint
         openAIArgs.baseURL = apiBaseURL || process.env.OPENAI_API_BASE_URL || "https://api.openai.com/v1";

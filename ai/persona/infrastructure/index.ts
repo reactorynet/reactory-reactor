@@ -34,6 +34,7 @@ const INFRATOOL_INCLUDES = [
   'httpPatch',
   'listDirectory',
   'shell',
+  'updateChatData',
 ]
 
 const INFRASTRUCTURE_RESOURCES: IAIPersonaResource[] = [

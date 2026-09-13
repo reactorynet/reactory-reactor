@@ -43,7 +43,8 @@ const SECURITY_TOOL_INCLUDES = [
   'securityMonitoring',
   'forensicAnalysis',
   'penetrationTesting',
-  'securityPolicyValidation'
+  'securityPolicyValidation',
+  'updateChatData',
 ]
 
 const SECURITY_RESOURCES: IAIPersonaResource[] = [

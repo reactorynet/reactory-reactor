@@ -54,7 +54,16 @@ class ReactorChatResolver {
   @query("ReactorConversation")
   async ReactorConversation(
     _: any,
-    args: { id: string },
+    args: {
+      id: string;
+      loadOptions?: {
+        showAllFiles?: boolean;
+        historyLimit?: number;
+        before?: string;
+        includeToolMessages?: boolean;
+        includeArchived?: boolean;
+      };
+    },
     context: Reactory.Server.IReactoryContext
   ) {
     if (!args || !args.id) {
@@ -71,7 +80,12 @@ class ReactorChatResolver {
         context.getService<IReactorConversationsService>(
           "reactor.ReactorConversationService@1.0.0"
         );
-      const conversation = await conversationService.getChatSession({ id: args.id });
+      const conversation = await conversationService.getChatSession({
+        id: args.id,
+        // Always supply load options so the read is windowed; the service
+        // applies the default limit (100) when historyLimit is omitted.
+        loadOptions: args.loadOptions ?? {},
+      });
 
       if (!conversation) {
         throw new ApiError("NotFoundError", {
@@ -83,12 +97,21 @@ class ReactorChatResolver {
             "Check if the conversation ID is correct or if you have access to it",
         });
       }
-      let chatState: Partial<ChatState> & { __typename: "ReactorChatState" } = {
+      let chatState: Partial<ChatState> & {
+        __typename: "ReactorChatState";
+        historyWindow?: any;
+        __includeToolMessages?: boolean;
+      } = {
         __typename: "ReactorChatState",
         id: args.id,
         personaId: conversation.personaId,
         modelId: conversation.modelId,
         providerId: conversation.providerId,
+        title: (conversation as any).title ?? null,
+        summary: (conversation as any).summary ?? null,
+        tags: (conversation as any).tags ?? [],
+        icon: (conversation as any).icon ?? null,
+        color: (conversation as any).color ?? null,
         user: {
           __typename: "User",
           _id: conversation.user?._id?.toString(),
@@ -101,6 +124,12 @@ class ReactorChatResolver {
           return {
             ...plain,
             images: resolveImageUrls(plain.images),
+            // Mongo history items never carried an archived flag; the embedded
+            // array *is* the active transcript. Default it so the field is
+            // coherent whichever source answered, and so the client can rely on
+            // it being a boolean rather than null.
+            archived: !!plain.archived,
+            archivedReason: plain.archivedReason ?? null,
           };
         }),
         vars: conversation.vars || {},
@@ -116,6 +145,12 @@ class ReactorChatResolver {
         files: conversation.files || [],
         pinnedFolders: (conversation as any).pinnedFolders || [],
         sidePanelState: conversation.sidePanelState || null,
+        // Window metadata describing the slice of history returned above.
+        historyWindow: (conversation as any).historyWindow ?? null,
+        // Internal (non-schema) flag consumed by the history property resolver:
+        // tool-role messages are correlated onto their assistant message and
+        // then dropped unless the caller explicitly asks for them.
+        __includeToolMessages: !!args.loadOptions?.includeToolMessages,
       };
 
       return chatState;
@@ -132,6 +167,99 @@ class ReactorChatResolver {
     }
   }
 
+
+  @query("ReactorConversationHistory")
+  async ReactorConversationHistory(
+    _: any,
+    args: {
+      id: string;
+      before?: string;
+      limit?: number;
+      includeArchived?: boolean;
+    },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!args || !args.id) {
+      throw new ApiError("InvalidInputError", {
+        message: "Conversation ID is required",
+        code: "INVALID_INPUT",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion: "Ensure you provide a valid conversation ID",
+      });
+    }
+
+    const conversationService =
+      context.getService<IReactorConversationsService>(
+        "reactor.ReactorConversationService@1.0.0"
+      );
+
+    const page = await conversationService.getConversationHistoryPage({
+      id: args.id,
+      before: args.before,
+      limit: args.limit,
+      includeArchived: args.includeArchived === true,
+    });
+
+    return {
+      id: page.id,
+      items: (page.items || []).map((entry: any) => {
+        const plain = typeof entry.toObject === 'function' ? entry.toObject() : entry;
+        return {
+          ...plain,
+          images: resolveImageUrls(plain.images),
+          archived: !!plain.archived,
+          archivedReason: plain.archivedReason ?? null,
+        };
+      }),
+      window: page.window,
+    };
+  }
+
+  /**
+   * Archived (displaced) messages for the "earlier, compacted" expander.
+   * Returns only archived items, oldest first, unanchored.
+   */
+  @query("ReactorConversationArchivedHistory")
+  async ReactorConversationArchivedHistory(
+    _: any,
+    args: { id: string; limit?: number },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!args || !args.id) {
+      throw new ApiError("InvalidInputError", {
+        message: "Conversation ID is required",
+        code: "INVALID_INPUT",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion: "Ensure you provide a valid conversation ID",
+      });
+    }
+
+    const conversationService =
+      context.getService<IReactorConversationsService>(
+        "reactor.ReactorConversationService@1.0.0"
+      );
+
+    const page = await conversationService.getArchivedHistoryPage({
+      id: args.id,
+      limit: args.limit,
+    });
+
+    return {
+      id: page.id,
+      items: (page.items || []).map((entry: any) => {
+        const plain = typeof entry.toObject === 'function' ? entry.toObject() : entry;
+        return {
+          ...plain,
+          images: resolveImageUrls(plain.images),
+          archived: plain.archived !== false,
+          archivedReason: plain.archivedReason ?? null,
+        };
+      }),
+      window: page.window,
+    };
+  }
 
   @mutation("ReactorRateMessage")
   async ReactorRateMessage(
@@ -347,6 +475,72 @@ class ReactorChatResolver {
     }
   }
 
+  @mutation("ReactorUpdateChatData")
+  async ReactorUpdateChatData(
+    _: any,
+    args: {
+      chatSessionId: string;
+      input: {
+        title?: string;
+        summary?: string;
+        tags?: string[];
+        icon?: string;
+        color?: string;
+      };
+    },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!args || !args.chatSessionId || !args.input) {
+      throw new ApiError("InvalidInputError", {
+        message: "chatSessionId and input are required",
+        code: "INVALID_INPUT",
+        timestamp: new Date(),
+        recoverable: true,
+      });
+    }
+
+    const conversationService =
+      context.getService<IReactorConversationsService>(
+        "reactor.ReactorConversationService@1.0.0"
+      );
+
+    try {
+      const chatState: any = await conversationService.updateChatData(
+        args.chatSessionId,
+        args.input
+      );
+
+      // Build the payload explicitly. `updateChatData` may return a Mongoose
+      // document, and spreading one yields only its internals — the client
+      // would then read every field as undefined and show a stale value until
+      // it refetched.
+      const source: any =
+        chatState && typeof chatState.toObject === 'function'
+          ? chatState.toObject()
+          : chatState || {};
+
+      return {
+        __typename: "ReactorChatState",
+        id: source.id ?? source._id?.toString?.() ?? args.chatSessionId,
+        title: source.title ?? null,
+        summary: source.summary ?? null,
+        tags: source.tags ?? [],
+        icon: source.icon ?? null,
+        color: source.color ?? null,
+      };
+    } catch (error) {
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "UPDATE_CHAT_DATA_ERROR",
+        message: error.message || "Error updating chat data",
+        timestamp: new Date(),
+        recoverable: true,
+        suggestion:
+          "Check if the chat session exists and you have permission to modify it",
+      };
+    }
+  }
+
   @mutation("ReactorSetChatMaxToolIterations")
   async ReactorSetChatMaxToolIterations(
     _: any,
@@ -555,7 +749,7 @@ class ReactorChatResolver {
     }
 
     // Enrich assistant messages that have tool_calls
-    return history.map((msg: any) => {
+    const enriched = history.map((msg: any) => {
       // Convert Mongoose subdocuments to plain JS objects so that
       // spread and GraphQL field resolution work correctly.
       const plainMsg = typeof msg.toObject === 'function' ? msg.toObject() : msg;
@@ -634,6 +828,16 @@ class ReactorChatResolver {
         ],
       };
     });
+
+    // Tool-role messages exist only to carry a result for correlation. Once the
+    // result is folded onto the issuing assistant message they are dead weight
+    // over the wire, and the UI filters them out anyway, so drop them unless
+    // the caller explicitly opted in.
+    if ((chatState as any)?.__includeToolMessages) {
+      return enriched;
+    }
+
+    return enriched.filter((msg: any) => msg?.role !== "tool");
   }
 
   @property("ReactorChatState", "tools")

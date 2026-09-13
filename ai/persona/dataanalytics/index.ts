@@ -43,7 +43,8 @@ const DATAANALYTICS_TOOL_INCLUDES = [
   'reportGeneration',
   'dashboardUpdate',
   'mlModelValidation',
-  'dataLineageTracking'
+  'dataLineageTracking',
+  'updateChatData',
 ]
 
 const DATAANALYTICS_RESOURCES: IAIPersonaResource[] = [

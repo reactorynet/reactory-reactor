@@ -549,7 +549,25 @@ export type ReactorChatState = ChatState & {
 }
 
 export type ReactorInitChatResponse = ReactorChatState | ReactorErrorResponse | ReactorInitiateSSEResponse;
-  
+
+/**
+ * The descriptive metadata that can be set on a conversation and surfaced in
+ * the chat history. Every field is optional: only the fields supplied are
+ * updated, leaving the rest of the conversation metadata untouched.
+ */
+export interface UpdateChatDataInput {
+  /** A short, human readable title for the conversation (max ~80 chars). */
+  title?: string;
+  /** A 1-2 sentence summary of what the conversation is about. */
+  summary?: string;
+  /** Free-form tags for grouping and discovery. Replaces the existing tag list when supplied. */
+  tags?: string[];
+  /** Material icon name describing the conversation status (e.g. "check_circle"). */
+  icon?: string;
+  /** Hex colour code used to tint the status icon (e.g. "#2e7d32"). */
+  color?: string;
+}
+
 /**
  * Service interface for managing AI-powered chat conversations within the Reactor system.
  * 
@@ -587,8 +605,69 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
    * Gets a chat session by its ID without user authentication.
    * This method is designed for external access like GraphQL resolvers.
    */
-  getChatSession(args: { id: string }): Promise<TReactorConversationDocument & {
+  getChatSession(args: {
+    id: string;
+    loadOptions?: {
+      showAllFiles?: boolean;
+      /** Maximum history items to return. Defaults to 100, capped at 500. */
+      historyLimit?: number;
+      /** Cursor: return items strictly older than the history item with this id. */
+      before?: string;
+      /** Include raw role:"tool" messages. Defaults to false. */
+      includeToolMessages?: boolean;
+      /** Include archived (displaced) messages. Defaults to false. */
+      includeArchived?: boolean;
+    };
+  }): Promise<TReactorConversationDocument & {
     context?: Reactory.Server.IReactoryContext;
+    historyWindow?: {
+      total: number;
+      returned: number;
+      hasMoreBefore: boolean;
+      oldestId?: string | null;
+      newestId?: string | null;
+    };
+  }>;
+
+  /**
+   * Retrieves a page of older history items for a conversation, for a
+   * "load earlier messages" affordance. Pages are system-free and anchored so
+   * the oldest item is a `user` message.
+   */
+  getConversationHistoryPage(args: {
+    id: string;
+    before?: string;
+    limit?: number;
+    /** Include archived (displaced) messages. Defaults to false. */
+    includeArchived?: boolean;
+  }): Promise<{
+    id: string;
+    items: any[];
+    window: {
+      total: number;
+      returned: number;
+      hasMoreBefore: boolean;
+      oldestId?: string | null;
+      newestId?: string | null;
+    };
+  }>;
+
+  /**
+   * Retrieves the messages displaced from a conversation by truncation or
+   * compaction (archived rows), oldest first, for an "earlier, compacted"
+   * expander. Unlike getConversationHistoryPage this is not anchored to a
+   * `user` message and returns only archived items.
+   */
+  getArchivedHistoryPage(args: { id: string; limit?: number }): Promise<{
+    id: string;
+    items: any[];
+    window: {
+      total: number;
+      returned: number;
+      hasMoreBefore: boolean;
+      oldestId?: string | null;
+      newestId?: string | null;
+    };
   }>;
 
   /**
@@ -610,6 +689,16 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
    * Persist the side panel state for a chat session.
    */
   setSidePanelState(chatSessionId: string, sidePanelState: any): Promise<any>;
+
+  /**
+   * Update the descriptive metadata (title, summary, tags, icon, colour) for a
+   * chat session. Only the fields supplied in `data` are written; omitted
+   * fields are left as-is. Used by the `updateChatData` tool so the agent can
+   * maintain quality titles and status signalling during the chat flow.
+   * @param chatSessionId - The conversation to update
+   * @param data - The subset of metadata fields to change
+   */
+  updateChatData(chatSessionId: string, data: UpdateChatDataInput): Promise<any>;
 
   /**
    * Sets the maximum number of auto tool call iterations before pausing for user confirmation.

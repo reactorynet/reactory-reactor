@@ -83,6 +83,7 @@ const WORKFLOW_TOOL_INCLUDES = [
   'logout',
   // Chat & agent delegation
   'chats',
+  'updateChatData',
 ];
 
 const REACTORY_HOME = process.env.REACTORY_HOME || process.cwd();
