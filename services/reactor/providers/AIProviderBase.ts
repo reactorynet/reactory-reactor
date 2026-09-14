@@ -19,6 +19,9 @@ import { IAIPersona, IAIPersonaPromptTemplate, IAIProviderService } from "../../
 import { AIProviderError } from "./AIProviderError";
 import { resolvePromptDirectives } from "../../../ai/persona/loader/system-prompt";
 
+import { loadHistoryForContext } from "../conversationHistoryLoader";
+import { resolveMessagesSource } from "../ReactorConversationMessageService";
+
 abstract class AIProviderBase implements IAIProviderService {
   context: Reactory.Server.IReactoryContext;
   props: any;
@@ -48,7 +51,6 @@ abstract class AIProviderBase implements IAIProviderService {
       const updateData: any = {
         personaId,
         modelId,
-        history,
         sseSessionId: sseSession,
         user,
         vars,
@@ -57,6 +59,15 @@ abstract class AIProviderBase implements IAIProviderService {
         updated: new Date(),
         meta
       };
+
+      // Phase 3: only the Mongo source keeps the embedded `history` array
+      // authoritative. Under `postgres` the message store is the source of truth,
+      // so writing the whole array here would (a) re-create the field 3c removes
+      // and (b) race the `$push` + mirror writes the conversation service already
+      // performs for the same turn. Metadata is still persisted either way.
+      if (resolveMessagesSource() === "mongo") {
+        updateData.history = history;
+      }
 
       // Only set started and created if this is a new conversation
       if (!this.chatStateModel || !this.chatStateModel._id) {
@@ -98,8 +109,12 @@ abstract class AIProviderBase implements IAIProviderService {
         }).exec();
         
         if (existingConversation) {
-          // Update the existing conversation instead
-          existingConversation.history = history;
+          // Update the existing conversation instead. Same Phase 3 rule as the
+          // upsert above: the embedded array is written only under the Mongo
+          // source, so `postgres` cannot re-create the removed field.
+          if (resolveMessagesSource() === "mongo") {
+            existingConversation.history = history;
+          }
           existingConversation.updated = new Date();
           existingConversation.sseSessionId = sseSession;
           existingConversation.vars = vars;
@@ -169,7 +184,15 @@ abstract class AIProviderBase implements IAIProviderService {
         context,
         modelId: chatSession.modelId,
         started: chatSession.started,
-        history: chatSession.history,        
+        // Phase 3: model context comes from the message store when it is
+        // authoritative. `loadHistoryForContext` fails open to the embedded
+        // array, so this is behaviour-preserving under the `mongo` source.
+        history:
+          (await loadHistoryForContext(
+            chatSession._id.toString(),
+            chatSession.history,
+            this.context as any
+          )) ?? chatSession.history,        
         personaId: chatSession.personaId,
         persona,
         vars: chatSession.vars || {},

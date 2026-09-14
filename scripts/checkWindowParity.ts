@@ -39,10 +39,9 @@ import { DataSource } from "typeorm";
 import ReactorConversationMessage from "../models/ReactorConversationMessage";
 import ReactorConversationMessageService from "../services/reactor/ReactorConversationMessageService";
 import ReactorConversationService from "../services/reactor/ReactorConversationService";
+import { resolveMongoUri, resolvePgConfig } from "./lib/instanceProbe";
 
-const MONGODB_URI =
-  process.env.MONGOOSE ||
-  "mongodb://reactory:reactorycore@localhost:27017/reactory-reactory?authSource=admin";
+const MONGODB_URI = resolveMongoUri();
 
 const args = process.argv.slice(2);
 const VERBOSE = args.includes("--verbose");
@@ -58,32 +57,19 @@ const EXPLICIT = args
 /** The live session is written to continuously; skip it like `reconcile` does. */
 const ACTIVE_WINDOW_MS = 120_000;
 
-const createDataSource = (): DataSource =>
-  new DataSource({
+const createDataSource = (): DataSource => {
+  const pg = resolvePgConfig();
+  return new DataSource({
     type: "postgres",
-    host:
-      process.env.REACTORY_POSTGRES_HOST ||
-      process.env.POSTGRES_DB_HOST ||
-      "localhost",
-    port: parseInt(
-      process.env.REACTORY_POSTGRES_PORT ||
-        process.env.POSTGRES_DB_PORT ||
-        "5432",
-      10
-    ),
-    username:
-      process.env.REACTORY_POSTGRES_USER ||
-      process.env.POSTGRES_USER ||
-      "reactory",
-    password:
-      process.env.REACTORY_POSTGRES_PASSWORD ||
-      process.env.POSTGRES_PASSWORD ||
-      "reactory",
-    database:
-      process.env.REACTORY_POSTGRES_DB || process.env.POSTGRES_DB || "reactory",
+    host: pg.host,
+    port: pg.port,
+    username: pg.user,
+    password: pg.password,
+    database: pg.database,
     synchronize: false,
     entities: [ReactorConversationMessage],
   });
+};
 
 const proto: any = (ReactorConversationService as any).prototype;
 

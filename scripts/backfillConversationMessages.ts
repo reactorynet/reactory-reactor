@@ -29,10 +29,9 @@ import mongoose from "mongoose";
 import { DataSource } from "typeorm";
 import ReactorConversationMessage from "../models/ReactorConversationMessage";
 import ReactorConversationMessageService from "../services/reactor/ReactorConversationMessageService";
+import { resolveMongoUri, resolvePgConfig, STORE_TABLE } from "./lib/instanceProbe";
 
-const MONGODB_URI =
-  process.env.MONGOOSE ||
-  "mongodb://reactory:reactorycore@localhost:27017/reactory-reactory?authSource=admin";
+const MONGODB_URI = resolveMongoUri();
 
 const BATCH_SIZE = Number(process.env.BACKFILL_BATCH_SIZE || 25);
 
@@ -44,20 +43,19 @@ const ONLY_CONVERSATION = args
   .find((arg) => arg.startsWith("--conversation="))
   ?.split("=")[1];
 
-const createDataSource = (): DataSource =>
-  new DataSource({
+const createDataSource = (): DataSource => {
+  const pg = resolvePgConfig();
+  return new DataSource({
     type: "postgres",
-    host: process.env.REACTORY_POSTGRES_HOST || process.env.POSTGRES_DB_HOST || "localhost",
-    port: parseInt(
-      process.env.REACTORY_POSTGRES_PORT || process.env.POSTGRES_DB_PORT || "5432",
-      10
-    ),
-    username: process.env.REACTORY_POSTGRES_USER || process.env.POSTGRES_USER || "reactory",
-    password: process.env.REACTORY_POSTGRES_PASSWORD || process.env.POSTGRES_PASSWORD || "reactory",
-    database: process.env.REACTORY_POSTGRES_DB || process.env.POSTGRES_DB || "reactory",
+    host: pg.host,
+    port: pg.port,
+    username: pg.user,
+    password: pg.password,
+    database: pg.database,
     synchronize: false,
     entities: [ReactorConversationMessage],
   });
+};
 
 /**
  * Ordered fingerprint of a conversation's message identity.
@@ -88,7 +86,17 @@ const run = async () => {
 
   const dataSource = createDataSource();
   try {
-    await dataSource.initialize();
+    try {
+      await dataSource.initialize();
+    } catch (error: any) {
+      console.log("");
+      console.log(`NOT APPLICABLE — cannot reach the message store: ${error?.message ?? error}`);
+      if (APPLY) {
+        console.log("  REFUSING TO WRITE: this run was asked to apply changes to a store it cannot reach.");
+        process.exit(2);
+      }
+      process.exit(0);
+    }
   } catch (error: any) {
     console.error(`\n❌ Could not connect to Postgres: ${error?.message}`);
     console.error("   Check REACTORY_POSTGRES_* / POSTGRES_* environment values.");
@@ -116,6 +124,26 @@ const run = async () => {
   console.log("Connected.\n");
 
   const ReactorConversationModel = mongoose.connection.collection("reactor_conversations");
+
+  // ── Environment preflight, BEFORE any work ─────────────────────────────────────────────────
+  //
+  // This script writes into `reactor_conversation_messages`, and it is part of the migration
+  // toolkit for arbitrary instances. Proving the table exists first means an `--apply` run
+  // refuses cleanly instead of writing nothing (or failing part-way) against a database that has
+  // no message store.
+  {
+    const reg = await dataSource.query("SELECT to_regclass($1) AS t", [`public.${STORE_TABLE}`]);
+    if (!reg?.[0]?.t) {
+      console.log("");
+      console.log(`NOT APPLICABLE — ${STORE_TABLE} does not exist in this database.`);
+      console.log("  Nothing to backfill.");
+      if (APPLY) {
+        console.log("  REFUSING TO WRITE: this run was asked to apply changes to a store that is not there.");
+        process.exit(2);
+      }
+      process.exit(0);
+    }
+  }
   const query: Record<string, any> = { history: { $exists: true, $ne: [] } };
   if (ONLY_CONVERSATION) {
     query._id = new mongoose.Types.ObjectId(ONLY_CONVERSATION);

@@ -1,4 +1,5 @@
 import { DataSource, Repository } from 'typeorm';
+import { ObjectId } from 'mongodb';
 import ReactorConversationMessage from '../../models/ReactorConversationMessage';
 
 /**
@@ -737,6 +738,108 @@ export default class ReactorConversationMessageService {
       .execute();
 
     return result.affected ?? 0;
+  }
+
+  /**
+   * Insert a message immediately ahead of a conversation's first *kept* message.
+   *
+   * Compaction replaces the displaced prefix of a transcript with a summary that sits **in front
+   * of** the messages it kept — `[system…, summary, …kept]`. Mongo expressed that by rewriting the
+   * array. With rows, the summary needs a `seq` smaller than the first kept message while every
+   * such value is already taken, so the trailing range has to move up by one first.
+   *
+   * The shift is deliberately two-phase. A single `UPDATE … SET seq = seq + 1` is **not safe**
+   * against `IDX_rcm_conv_seq`: Postgres checks the unique index row by row, so if it moves the
+   * lower row first the two collide, and it does not promise an order. Moving the range clear of
+   * the table's maximum first (every target exceeding it) and then bringing it back down by one
+   * makes each phase collision-free whatever order the planner picks. This is the same reasoning
+   * that took three attempts to get right in the reconcile tool's `safeSeqShift` — §39.2 records
+   * why `max + 1` and `n - min + 1` were both wrong — so the note is repeated here rather than
+   * rediscovered.
+   *
+   * Runs in a transaction: a half-applied shift would leave the transcript with a hole or a
+   * collision, and the archive that precedes it (in the caller) is a separate statement.
+   *
+   * Returns the assigned `seq` and `mongo_id`, or null when the store is unavailable.
+   */
+  async insertCompactionSummary(
+    conversationId: string,
+    message: any
+  ): Promise<{ seq: number; id: string | null } | null> {
+    if (!conversationId) return null;
+
+    const dataSource = (() => {
+      try {
+        return this.dataSource;
+      } catch {
+        return null;
+      }
+    })();
+    if (!dataSource?.isInitialized) return null;
+
+    return await dataSource.transaction(async (manager) => {
+      const bounds = await manager.query(
+        `SELECT COALESCE(MAX(seq), 0) AS max
+           FROM reactor_conversation_messages
+          WHERE conversation_id = $1`,
+        [conversationId]
+      );
+      const max = Number(bounds?.[0]?.max ?? 0);
+
+      // The first active non-system row is the first message compaction kept, because the
+      // displaced ones were archived immediately before this call.
+      const firstKept = await manager.query(
+        `SELECT MIN(seq) AS seq
+           FROM reactor_conversation_messages
+          WHERE conversation_id = $1 AND archived = false AND role <> 'system'`,
+        [conversationId]
+      );
+
+      let targetSeq: number | null =
+        firstKept?.[0]?.seq === null || firstKept?.[0]?.seq === undefined
+          ? null
+          : Number(firstKept[0].seq);
+
+      if (targetSeq === null) {
+        // Nothing was kept: the summary still belongs after the system messages.
+        const lastSystem = await manager.query(
+          `SELECT MAX(seq) AS seq
+             FROM reactor_conversation_messages
+            WHERE conversation_id = $1 AND archived = false AND role = 'system'`,
+          [conversationId]
+        );
+        targetSeq = (lastSystem?.[0]?.seq === null || lastSystem?.[0]?.seq === undefined
+          ? 0
+          : Number(lastSystem[0].seq)) + 1;
+      }
+
+      const offset = max + 1;
+
+      await manager.query(
+        `UPDATE reactor_conversation_messages
+            SET seq = seq + $1
+          WHERE conversation_id = $2 AND seq >= $3`,
+        [offset, conversationId, targetSeq]
+      );
+
+      await manager.query(
+        `UPDATE reactor_conversation_messages
+            SET seq = seq - $1 + 1
+          WHERE conversation_id = $2 AND seq > $3`,
+        [offset, conversationId, max]
+      );
+
+      const row = this.toRow(conversationId, message, targetSeq);
+      if (!row.mongoId) {
+        // Time-ordered, like every other minted id, so a later re-derivation of chronology has
+        // something to work with.
+        row.mongoId = new ObjectId().toString();
+      }
+
+      await manager.insert(ReactorConversationMessage, row as ReactorConversationMessage);
+
+      return { seq: targetSeq, id: row.mongoId ?? null };
+    });
   }
 
   /** Delete a single message row by its Mongo id. */

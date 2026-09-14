@@ -23,24 +23,15 @@
 
 import mongoose from "mongoose";
 import { Client } from "pg";
+import { resolveMongoUri, resolvePgConfig } from "./lib/instanceProbe";
 
 const args = process.argv.slice(2);
 const VERBOSE = args.includes("--verbose");
 const ONLY = args.find((a) => a.startsWith("--conversation="))?.split("=")[1];
 
-const MONGODB_URI =
-  process.env.MONGODB_URI ||
-  process.env.MONGO_URI ||
-  process.env.MONGOOSE ||
-  "mongodb://localhost:27017/reactory";
+const MONGODB_URI = resolveMongoUri();
 
-const pgConfig = {
-  host: process.env.REACTORY_POSTGRES_HOST || process.env.POSTGRES_DB_HOST || "localhost",
-  port: parseInt(process.env.REACTORY_POSTGRES_PORT || process.env.POSTGRES_DB_PORT || "5432", 10),
-  user: process.env.REACTORY_POSTGRES_USER || process.env.POSTGRES_USER || "reactory",
-  password: process.env.REACTORY_POSTGRES_PASSWORD || process.env.POSTGRES_PASSWORD || "reactory",
-  database: process.env.REACTORY_POSTGRES_DB || process.env.POSTGRES_DB || "reactory",
-};
+const pgConfig = resolvePgConfig();
 
 const readId = (item: any): string | null => {
   const raw = item?._id ?? item?.id;

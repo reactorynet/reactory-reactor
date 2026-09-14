@@ -33,10 +33,9 @@
 import "reflect-metadata";
 import mongoose from "mongoose";
 import { Client } from "pg";
+import { resolveMongoUri, resolvePgConfig, STORE_TABLE } from "./lib/instanceProbe";
 
-const MONGODB_URI =
-  process.env.MONGOOSE ||
-  "mongodb://reactory:reactorycore@localhost:27017/reactory-reactory?authSource=admin";
+const MONGODB_URI = resolveMongoUri();
 
 /** At or above this, a `seq` value is a temporary placeholder, not a real position. */
 const PLACEHOLDER_SEQ_BASE = 1000000000;
@@ -58,17 +57,7 @@ const INCLUDE_ACTIVE = args.includes("--include-active");
 const ACTIVE_WRITER_WINDOW_MS = 120000;
 const ONLY_CONVERSATION = args.find((a) => a.startsWith("--conversation="))?.split("=")[1];
 
-const pgConfig = {
-  host: process.env.REACTORY_POSTGRES_HOST || process.env.POSTGRES_DB_HOST || "localhost",
-  port: parseInt(
-    process.env.REACTORY_POSTGRES_PORT || process.env.POSTGRES_DB_PORT || "5432",
-    10
-  ),
-  user: process.env.REACTORY_POSTGRES_USER || process.env.POSTGRES_USER || "reactory",
-  password:
-    process.env.REACTORY_POSTGRES_PASSWORD || process.env.POSTGRES_PASSWORD || "reactory",
-  database: process.env.REACTORY_POSTGRES_DB || process.env.POSTGRES_DB || "reactory",
-};
+const pgConfig = resolvePgConfig();
 
 /** Postgres rejects NUL bytes in text/jsonb; Mongo stores them happily. */
 const stripNul = (value: string) => value.replace(/\u0000/g, "");
@@ -334,8 +323,44 @@ const run = async () => {
   console.log("──────────────────────────────────────────────────────────");
 
   const client = new Client(pgConfig);
-  await client.connect();
+  try {
+    await client.connect();
+  } catch (error: any) {
+    console.log("");
+    console.log(`NOT APPLICABLE — cannot reach the message store: ${error?.message ?? error}`);
+    if (APPLY) {
+      console.log("  REFUSING TO WRITE: this run was asked to apply changes to a store it cannot reach.");
+      process.exit(2);
+    }
+    process.exit(0);
+  }
   await mongoose.connect(MONGODB_URI as string);
+
+  // ── Environment preflight, BEFORE any work ──────────────────────────────────────────────────
+  //
+  // This script is part of the migration toolkit and is expected to run against instances in
+  // different states. The one thing it must never do is write into a database that has no message
+  // store — so the table is proved to exist before anything else happens, and a write run refuses
+  // outright rather than failing part-way through with partial results.
+  {
+    const reg = await client.query<{ t: string | null }>(
+      "SELECT to_regclass($1) AS t",
+      [`public.${STORE_TABLE}`]
+    );
+    if (!reg.rows[0]?.t) {
+      console.log("");
+      console.log(`NOT APPLICABLE — ${STORE_TABLE} does not exist in this database.`);
+      console.log("  Nothing to " + "reconcile" + ".");
+      if (APPLY) {
+        console.log("  REFUSING TO WRITE: this run was asked to apply changes to a store that is not there.");
+        await client.end();
+        process.exit(2);
+      }
+      await client.end();
+      process.exit(0);
+    }
+  }
+
 
   const filter: Record<string, any> = ONLY_CONVERSATION
     ? { _id: new mongoose.Types.ObjectId(ONLY_CONVERSATION) }
@@ -352,6 +377,14 @@ const run = async () => {
   let insertedTotal = 0;
   let insertedArchivedTotal = 0;
   let archiveSyncedTotal = 0;
+  // Conversations with no Mongo `history` are skipped below. That is correct — there is nothing
+  // to reconcile against — but it must be COUNTED, or a post-`$unset` corpus reports
+  // "0 needing repair" having examined nothing. A vacuous pass is not a clean bill of health.
+  let noArraySkipped = 0;
+  // Rows newer than every known id: real post-cutover messages, never pruned. Counted so the
+  // summary EXPLAINS a Postgres row count larger than the Mongo arrays rather than leaving it
+  // looking like drift.
+  let postCutoverTotal = 0;
   const skipped: string[] = [];
   const touched: string[] = [];
   const failures: string[] = [];
@@ -362,7 +395,10 @@ const run = async () => {
     const truncated: any[] = Array.isArray(doc.truncatedHistory)
       ? doc.truncatedHistory
       : [];
-    if (history.length === 0) continue;
+    if (history.length === 0) {
+      noArraySkipped += 1;
+      continue;
+    }
     scanned += 1;
 
     // One malformed conversation must not abort the run. A conversation that is
@@ -395,7 +431,7 @@ const run = async () => {
     // `history` nor `truncatedHistory`. Archived rows are never orphans: they
     // may be the only surviving copy of compacted history, and auto-deleting one
     // would lose data Mongo no longer carries.
-    const orphans = Array.from(
+    const allCandidates = Array.from(
       new Set(
         rows
           .filter((row) => !row.archived)
@@ -403,6 +439,26 @@ const run = async () => {
           .filter((id) => id && !knownIds.has(id))
       )
     );
+
+    // ── Post-cutover messages are NOT orphans ─────────────────────────────────────────────────
+    //
+    // The write-path cutover stopped persisting the embedded array, so a conversation that has
+    // received messages since is FROZEN at its pre-cutover contents while the store keeps growing.
+    // Those rows carry `mongo_id`s Mongo never held — which is exactly what the test above looks
+    // for — so without this split every post-cutover message reads as an orphan and the prune
+    // deletes the newest messages the migration exists to preserve.
+    //
+    // `mongo_id` is an ObjectId and therefore time-ordered: a candidate sorting strictly ABOVE
+    // every known id is newer than anything the array ever carried. A genuine dual-write-era
+    // orphan interleaves within the known range, so this discriminates rather than permits.
+    const maxKnownId = Array.from(knownIds).reduce<string>((max, id) => (id > max ? id : max), "");
+    const isPostCutover = (id: string): boolean => maxKnownId !== "" && id > maxKnownId;
+    const postCutover = allCandidates.filter(isPostCutover);
+    postCutoverTotal += postCutover.length;
+
+    // PRUNABLE orphans only. Everything downstream uses this name, so the prune, the skip
+    // conditions and the idempotency comparison are all safe by construction.
+    const orphans = allCandidates.filter((id) => !isPostCutover(id));
 
     // "Missing" is judged against `history` for the ACTIVE set and against
     // `truncatedHistory` for the ARCHIVED set. They are inserted differently — a
@@ -541,6 +597,15 @@ const run = async () => {
       continue;
     }
 
+    if (postCutover.length > 0) {
+      // Informational, and deliberately loud: these are real messages that simply post-date the
+      // array. They are never pruned, and their presence explains a row count larger than Mongo.
+      console.log(
+        `   ↳ ${conversationId}: ${postCutover.length} row(s) post-date the newest known id — ` +
+          `post-cutover messages, NOT orphans; never pruned.`
+      );
+    }
+
     if (!APPLY) {
       console.log(
         `   ↳ would reconcile ${conversationId}: ` +
@@ -642,6 +707,36 @@ const run = async () => {
   console.log(" Summary");
   console.log("──────────────────────────────────────────────────────────");
   console.log(`Conversations scanned         : ${scanned}`);
+  // A corpus whose arrays have all been retired matches the filter in ZERO documents, so the
+  // loop never runs and every counter above is trivially 0. That is a vacuous pass, not a
+  // clean result, and the operator must be able to tell the two apart.
+  if (!ONLY_CONVERSATION && scanned === 0) {
+    const corpusDocs = await mongoose.connection
+      .collection("reactor_conversations")
+      .countDocuments();
+    if (corpusDocs > 0) {
+      console.log(
+        `  ⚠ NOTHING WAS EXAMINED: none of the ${corpusDocs} conversation document(s) holds a ` +
+          `Mongo history array, so there is nothing to reconcile against.`
+      );
+      console.log(
+        "    This is expected once the array has been retired. This run is NOT evidence that " +
+          "the message store is correct."
+      );
+    }
+  }
+  if (noArraySkipped > 0) {
+    console.log(
+      `  (not examined, no Mongo array): ${noArraySkipped}` +
+        `  — nothing to reconcile against; expected once \`history\` has been retired`
+    );
+  }
+  if (postCutoverTotal > 0) {
+    console.log(
+      `  (post-cutover rows, never pruned): ${postCutoverTotal}` +
+        `  — written after their array was frozen; these explain a Postgres count above Mongo`
+    );
+  }
   console.log(`Conversations needing repair  : ${touched.length}`);
   console.log(`  compacted (numbering only)  : ${compacted}`);
   console.log(`  resequenced (content fixed) : ${resequenced}`);

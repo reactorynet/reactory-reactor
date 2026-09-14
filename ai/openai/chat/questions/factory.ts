@@ -18,6 +18,7 @@ import {
 } from "@reactory/server-modules/reactory-reactor/ai/macro";
 import { colors } from "../../../../helpers";
 import ReactorConversationModel from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
+import { loadHistoryForContext } from "@reactory/server-modules/reactory-reactor/services/reactor/conversationHistoryLoader";
 import ToolResultProcessor from "../../../macro/runtime/ToolResultProcessor";
 import AIPersonaProvider from "@reactory/server-modules/reactory-reactor/services/reactor/AIPersonaProvider";
 import { get, template } from "lodash";
@@ -645,9 +646,17 @@ export const askQuestion = async (
     apiKey: process.env.OPENAI_API_KEY || "",
     apiOrg: process.env.OPENAI_ORG || "",
     personaId: conversationModel.botId,
-    history: conversationModel.history,
+    // Phase 3: the transcript lives in the message store; the embedded array is
+    // the fallback, not the source of truth (fails open inside the helper).
+    history:
+      (await loadHistoryForContext(
+        conversationModel._id?.toString(),
+        conversationModel.history,
+        context as any
+      )) ?? conversationModel.history,
     id: conversationModel.id,
     macros: MacroRegistry,
+    tools: [],
     modelId: conversationModel.modelId,
     persona: await context
       .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0")

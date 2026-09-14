@@ -34,10 +34,9 @@ import mongoose from "mongoose";
 import { DataSource } from "typeorm";
 import ReactorConversationMessage from "../models/ReactorConversationMessage";
 import ReactorConversationMessageService from "../services/reactor/ReactorConversationMessageService";
+import { resolveMongoUri, resolvePgConfig, STORE_TABLE } from "./lib/instanceProbe";
 
-const MONGODB_URI =
-  process.env.MONGOOSE ||
-  "mongodb://reactory:reactorycore@localhost:27017/reactory-reactory?authSource=admin";
+const MONGODB_URI = resolveMongoUri();
 
 const args = process.argv.slice(2);
 const APPLY = args.includes("--apply");
@@ -56,17 +55,19 @@ const arrayOrderMatchesIdOrder = (ids: string[]): boolean => {
   return ids.every((id, i) => id === sorted[i]);
 };
 
-const createDataSource = (): DataSource =>
-  new DataSource({
+const createDataSource = (): DataSource => {
+  const pg = resolvePgConfig();
+  return new DataSource({
     type: "postgres",
-    host: process.env.REACTORY_POSTGRES_HOST || process.env.POSTGRES_DB_HOST || "localhost",
-    port: parseInt(process.env.REACTORY_POSTGRES_PORT || process.env.POSTGRES_DB_PORT || "5432", 10),
-    username: process.env.REACTORY_POSTGRES_USER || process.env.POSTGRES_USER || "reactory",
-    password: process.env.REACTORY_POSTGRES_PASSWORD || process.env.POSTGRES_PASSWORD || "reactory",
-    database: process.env.REACTORY_POSTGRES_DB || process.env.POSTGRES_DB || "reactory",
+    host: pg.host,
+    port: pg.port,
+    username: pg.user,
+    password: pg.password,
+    database: pg.database,
     synchronize: false,
     entities: [ReactorConversationMessage],
   });
+};
 
 const run = async () => {
   console.log("──────────────────────────────────────────────────────────");
@@ -80,7 +81,35 @@ const run = async () => {
   const collection = mongoose.connection.db.collection("reactor_conversations");
 
   const dataSource = createDataSource();
-  await dataSource.initialize();
+  try {
+    await dataSource.initialize();
+  } catch (error: any) {
+    console.log("");
+    console.log(`NOT APPLICABLE — cannot reach the message store: ${error?.message ?? error}`);
+    if (APPLY) {
+      console.log("  REFUSING TO WRITE: this run was asked to apply changes to a store it cannot reach.");
+      process.exit(2);
+    }
+    process.exit(0);
+  }
+
+  // ── Environment preflight, BEFORE any work ─────────────────────────────────────────────────
+  //
+  // Same reasoning as `reconcile`: this repairs the message store, so it must establish that the
+  // store exists before it begins, and refuse a write run if it does not.
+  {
+    const reg = await dataSource.query("SELECT to_regclass($1) AS t", [`public.${STORE_TABLE}`]);
+    if (!reg?.[0]?.t) {
+      console.log("");
+      console.log(`NOT APPLICABLE — ${STORE_TABLE} does not exist in this database.`);
+      console.log("  Nothing to repair.");
+      if (APPLY) {
+        console.log("  REFUSING TO WRITE: this run was asked to apply changes to a store that is not there.");
+        process.exit(2);
+      }
+      process.exit(0);
+    }
+  }
   const service = new ReactorConversationMessageService(dataSource);
 
   if (!service.isAvailable()) {
@@ -97,17 +126,38 @@ const run = async () => {
     .project({ history: 1, updated: 1 })
     .toArray();
   console.log(`Conversations to consider: ${docs.length}\n`);
+  // Same reasoning as in reconcile: the filter selects documents BY their history array, so a
+  // fully-retired corpus yields zero candidates and a summary that looks like success.
+  if (!ONLY && docs.length === 0) {
+    const corpusDocs = await collection.countDocuments();
+    if (corpusDocs > 0) {
+      console.log(
+        `  ⚠ NOTHING WAS EXAMINED: none of the ${corpusDocs} document(s) has a history array, ` +
+          `so there is nothing to derive the expected set from.`
+      );
+      console.log(
+        "    This is expected once the array has been retired. This run is NOT evidence that " +
+          "the mirror is complete."
+      );
+    }
+  }
 
   let repaired = 0;
   let insertedTotal = 0;
   let skippedActive = 0;
+  // Counted for the same reason as in `reconcile`: an absent array is a legitimate skip, but a
+  // silent one turns "0 rows inserted" into apparent evidence that the mirror is complete.
+  let noArraySkipped = 0;
   const skippedOrder: string[] = [];
   const failures: string[] = [];
 
   for (const doc of docs) {
     const conversationId = String(doc._id);
     const history = (Array.isArray(doc.history) ? doc.history : []).filter((h: any) => idOf(h));
-    if (history.length === 0) continue;
+    if (history.length === 0) {
+      noArraySkipped += 1;
+      continue;
+    }
 
     try {
       const rows: Array<{ mongo_id: string | null }> = await dataSource.query(
@@ -199,6 +249,12 @@ const run = async () => {
   console.log(`Rows inserted              : ${insertedTotal}`);
   console.log(`Skipped (active)           : ${skippedActive}`);
   console.log(`Skipped (order not derivable): ${skippedOrder.length}${skippedOrder.length ? " — " + skippedOrder.join(", ") : ""}`);
+  if (noArraySkipped > 0) {
+    console.log(
+      `Skipped (no Mongo array)    : ${noArraySkipped}` +
+        `  — nothing to derive the expected set from; expected once \`history\` has been retired`
+    );
+  }
   console.log(`Failures                   : ${failures.length}`);
   for (const f of failures.slice(0, 10)) console.log(`   - ${f}`);
   console.log("──────────────────────────────────────────────────────────");

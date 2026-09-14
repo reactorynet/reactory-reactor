@@ -9,6 +9,7 @@ import AIPersonaProvider from "@reactory/server-modules/reactory-reactor/service
 import { IReactorConversationsService } from "../../../types/service.types";
 import { StreamingMode } from "@reactory/server-modules/reactory-reactor/services/reactor/types/streaming.types";
 import { ChatsMacroProps } from './types';
+import { loadHistoryForContext } from '@reactory/server-modules/reactory-reactor/services/reactor/conversationHistoryLoader';
 import { v4 } from "uuid";
 import logger from "@reactory/server-core/logging";
 
@@ -133,15 +134,21 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
           parentSessionId: { $in: [null, undefined] },
         }).then();
         if (chats && chats.length > 0) {
-          const chatSummaries = chats.map((chat) => {
-            let summary = "";
-            chat.history.forEach((message) => {
-              if (message.role === "user" && !summary) {
-                summary = message?.content && message.content.length > ToolApprovalMode.SAFE_AUTO0 ? message.content.substring(0, ToolApprovalMode.SAFE_AUTO0) : message.content;
-              }
-            });
-            return { id: chat.id, summary };
-          });
+          const chatSummaries = await Promise.all(
+            chats.map(async (chat) => {
+              // Phase 3: summarise from the message store when authoritative.
+              const chatHistory =
+                (await loadHistoryForContext(chat._id?.toString(), chat.history, state.context)) ??
+                (chat.history || []);
+              let summary = "";
+              chatHistory.forEach((message) => {
+                if (message.role === "user" && !summary) {
+                  summary = message?.content && message.content.length > ToolApprovalMode.SAFE_AUTO0 ? message.content.substring(0, ToolApprovalMode.SAFE_AUTO0) : message.content;
+                }
+              });
+              return { id: chat.id, summary };
+            })
+          );
           const listText = chatSummaries.map(c => `- **${c.id}**: ${c.summary || '(no user messages)'}`).join('\n');
           return {
             success: true,
@@ -164,12 +171,16 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
             .sort({ started: -1 })
             .then();
           if (chat) {
-            state.history = chat.history;
+            // Phase 3: resume from the message store when authoritative.
+            const chatHistory =
+              (await loadHistoryForContext(chat._id?.toString(), chat.history, state.context)) ??
+              (chat.history || []);
+            state.history = chatHistory;
             state.id = chat.id;
             return {
               success: true,
-              data: { sessionId: chat.id, messageCount: chat.history.length },
-              instructions: `## Resumed Most Recent Chat\n\n**Session ID**: ${chat.id} (${chat.history.length} messages)\n\n### Suggested Next Steps:\n- Continue the conversation\n- Use \`chats\` with action="size" to check token usage`
+              data: { sessionId: chat.id, messageCount: chatHistory.length },
+              instructions: `## Resumed Most Recent Chat\n\n**Session ID**: ${chat.id} (${chatHistory.length} messages)\n\n### Suggested Next Steps:\n- Continue the conversation\n- Use \`chats\` with action="size" to check token usage`
             };
           } else {
             return {
@@ -181,12 +192,16 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
         } else {
           const chat = await ReactorConversationModel.findById(id);
           if (chat) {
-            state.history = chat.history;
+            // Phase 3: resume from the message store when authoritative.
+            const chatHistory =
+              (await loadHistoryForContext(chat._id?.toString(), chat.history, state.context)) ??
+              (chat.history || []);
+            state.history = chatHistory;
             state.id = chat.id;
             return {
               success: true,
-              data: { sessionId: id, messageCount: chat.history.length },
-              instructions: `## Resumed Chat\n\n**Session ID**: ${id} (${chat.history.length} messages)\n\n### Suggested Next Steps:\n- Continue the conversation\n- Use \`chats\` with action="size" to check token usage`
+              data: { sessionId: id, messageCount: chatHistory.length },
+              instructions: `## Resumed Chat\n\n**Session ID**: ${id} (${chatHistory.length} messages)\n\n### Suggested Next Steps:\n- Continue the conversation\n- Use \`chats\` with action="size" to check token usage`
             };
           } else {
             return {

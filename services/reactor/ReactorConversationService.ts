@@ -1526,7 +1526,14 @@ export default class ReactorConversationService
       "before_truncation"
     );
 
-    const history = [...conversation.history];
+    // Source-aware working set. Under `postgres` the embedded array is no longer written — the
+    // write-path policy froze it — so the transcript this algorithm reasons about has to come from
+    // the message store. The algorithm itself is unchanged; only its input moved. `null` means the
+    // store could not answer, and then the array is used exactly as before.
+    const fromStore = await this.loadActiveHistory(conversationId, conversation.history);
+    const history: any[] = fromStore ?? [...conversation.history];
+    // Only ever written back to Mongo (below). Under `postgres` the displacement is expressed as
+    // `archived` rows instead, so this value is simply not consulted.
     const existingTruncatedHistory = conversation.truncatedHistory || [];
     let currentTokens = conversation.tokenCount || 0;
     let removedMessages = 0;
@@ -1604,17 +1611,31 @@ export default class ReactorConversationService
       ...messagesToMove,
     ];
 
-    // Update the conversation with truncated history and moved messages
+    // Persist. Under `mongo` this is the array rewrite, unchanged. Under `postgres` the arrays are
+    // NOT written — they are retired — and the displacement is expressed in the message store
+    // instead: the displaced messages become `archived`, which is exactly what `truncatedHistory`
+    // meant for them. The set is addressed by id rather than by a seq boundary on purpose — a
+    // boundary would also archive the system prompt, and truncation keeps system messages.
+    const useMongoArrays = this.messagesSource() === "mongo";
+
+    const truncationUpdate: any = {
+      tokenCount: tokensUsed,
+      updated: new Date(),
+    };
+    if (useMongoArrays) {
+      truncationUpdate.history = messagesToKeep;
+      truncationUpdate.truncatedHistory = updatedTruncatedHistory;
+    }
+
     await ReactorConversationModel.findOneAndUpdate(
       { _id: conversationId },
-      {
-        history: messagesToKeep,
-        truncatedHistory: updatedTruncatedHistory,
-        tokenCount: tokensUsed,
-        updated: new Date(),
-      },
+      truncationUpdate,
       { new: true }
     ).exec();
+
+    if (!useMongoArrays) {
+      await this.mirrorArchivedMessages(conversationId, messagesToMove, "truncated");
+    }
 
     this.sessionLog("info", `Truncated conversation ${conversationId}`, {
       originalTokens: currentTokens,
@@ -1744,6 +1765,10 @@ export default class ReactorConversationService
     } finally {
       // Always clean up the temporary conversation
       await ReactorConversationModel.deleteOne({ _id: tempConversationId }).exec();
+      // The temporary summary conversation is exempt from the strip policy (it persists its own
+      // history array so that array can be read back), so rows CAN exist for it. Remove them with
+      // the document.
+      await this.mirrorDeletedConversation(tempConversationId.toString());
     }
   }
 
@@ -1792,7 +1817,10 @@ export default class ReactorConversationService
       throw new Error(`Conversation ${conversationId} not found for compaction`);
     }
 
-    const history = [...conversation.history];
+    // Source-aware working set — see the note in truncateConversationHistory. Compaction decides
+    // what to displace from this, so reading a frozen array here would archive the wrong set.
+    const fromStore = await this.loadActiveHistory(conversationId, conversation.history);
+    const history: any[] = fromStore ?? [...conversation.history];
     const existingTruncatedHistory = conversation.truncatedHistory || [];
     const targetTokens = maxTokens * TOKEN_LIMITS.COMPACTION_TARGET_MULTIPLIER;
 
@@ -1913,16 +1941,29 @@ export default class ReactorConversationService
       tool_results: [],
     };
 
-    // Atomic update: replace history and append to truncatedHistory
+    // Persist. Under `mongo`: the array rewrite, unchanged. Under `postgres`: archive the
+    // displaced messages, then place the summary immediately ahead of the kept ones, so the model's
+    // context reads `[system…, summary, …kept]` — the same transcript the array would have produced.
+    const useMongoArrays = this.messagesSource() === "mongo";
+
+    const compactionUpdate: any = { updated: new Date() };
+    if (useMongoArrays) {
+      compactionUpdate.history = [...systemMessages, summaryMessage, ...messagesToKeep];
+      compactionUpdate.truncatedHistory = [...existingTruncatedHistory, ...messagesToArchive];
+    }
+
     const updatedConversation = await ReactorConversationModel.findOneAndUpdate(
       { _id: conversationId },
-      {
-        history: [...systemMessages, summaryMessage, ...messagesToKeep],
-        truncatedHistory: [...existingTruncatedHistory, ...messagesToArchive],
-        updated: new Date(),
-      },
+      compactionUpdate,
       { new: true },
     ).exec();
+
+    if (!useMongoArrays) {
+      // Order matters: archive first, so that the store's first active non-system row is the first
+      // message compaction kept — which is exactly where the summary has to be placed.
+      await this.mirrorArchivedMessages(conversationId, messagesToArchive, "compacted");
+      await this.mirrorCompactionSummary(conversationId, summaryMessage);
+    }
 
     // Recalculate token count with forceReset=true so the reduced history is reflected
     const tokensAfter = await this.updateConversationTokenCount(conversationId, undefined, true);
@@ -3511,13 +3552,193 @@ export default class ReactorConversationService
         ? history[history.length - 1]
         : null;
 
-    await this.mirrorAppendedMessage(conversationId, persisted ?? fallback);
+    // Under `mongo` nothing changes: the array write is authoritative and Mongo assigned the
+    // `_id` the row must be keyed on.
+    if (this.messagesSource() === "mongo") {
+      await this.mirrorAppendedMessage(conversationId, persisted ?? fallback);
+      return;
+    }
+
+    // Under `postgres` the write-path policy (models/ReactorChatState.ts) removes `$push.history`
+    // from the update, so Mongo assigned no `_id` and there is no persisted item to read.
+    //
+    // The two cases must be kept apart, because getting them wrong is silent in opposite
+    // directions:
+    //
+    //  - the append was stripped (every append site after the cutover): mirror the provisional
+    //    item and mint its identity here. §44.2 asked only for the mint; the *selection* is what
+    //    matters, because reading `updated.history[last]` after a stripped push returns the
+    //    **previous** message — the mirror would re-mirror that (a unique-key warning, since the
+    //    row already exists) and the new message would never be written at all. Reads come from
+    //    the store, so the transcript would silently lose every turn's newest messages.
+    //  - the array was still persisted — a brand-new document, which the policy exempts — in which
+    //    case the persisted item is ours and must win: Mongo holds a *different* `_id` from any id
+    //    we would mint, and the row would then be unreconcilable with Mongo.
+    const candidate =
+      persisted && this.isSameHistoryItem(persisted, fallback) ? persisted : fallback;
+
+    if (!candidate) {
+      this.sessionLog(
+        "warn",
+        "Phase3 write-path: nothing to mirror for append",
+        { conversationId },
+        conversationId
+      );
+      return;
+    }
+
+    if (!candidate._id) {
+      // Minted identity, assigned onto the in-memory item as well so that a later in-place
+      // mutation (deleteToolCall / updateToolCallStatus) keys on the value this row was written
+      // with, instead of a provisional id no row carries.
+      const minted = (candidate.id as any) || new ObjectId();
+      candidate._id = minted;
+      if (!candidate.id) candidate.id = minted;
+
+      this.sessionLog(
+        "debug",
+        "Phase3 write-path: minted mongo_id for a stripped append",
+        { conversationId, mongoId: String(minted) },
+        conversationId
+      );
+    }
+
+    await this.mirrorAppendedMessage(conversationId, candidate);
+  }
+
+  /**
+   * Whether a persisted history item is the one an append just pushed.
+   *
+   * The `$push` payload carries a provisional `id` that Mongo preserves verbatim, so comparing it
+   * identifies our item without depending on array position — which is exactly the dependency that
+   * made the pre-3c mirror select the previous message once the push was stripped.
+   */
+  private isSameHistoryItem(persisted: any, candidate: any): boolean {
+    if (!persisted || !candidate) return false;
+    if (persisted === candidate) return true;
+    const left = persisted.id ?? persisted._id;
+    const right = candidate.id ?? candidate._id;
+    return Boolean(left && right && String(left) === String(right));
   }
 
   private historyItemId(item: any): string {
     if (!item) return "";
     const raw = item._id ?? item.id;
     return raw ? String(raw) : "";
+  }
+
+  /**
+   * Mirror a displacement of messages into the store by archiving them.
+   *
+   * Truncation and compaction used to express a displacement by rewriting the Mongo arrays. Under
+   * `postgres` those arrays are retired, so the displacement is written where it now belongs: the
+   * displaced rows become `archived`, which is exactly what `truncatedHistory` meant for them.
+   *
+   * Addressed **by id**, not by a `seq` boundary, and that is the load-bearing choice:
+   * `archiveBefore(conversationId, boundary)` archives everything below the boundary, which would
+   * also archive the **system prompt** — and truncation keeps system messages. The displaced set is
+   * known exactly (it is what the algorithm just removed from its working copy), so saying so
+   * directly avoids a boundary that has to special-case roles.
+   *
+   * Fail-open, like every other mirror: the decision to shrink the transcript has been made and a
+   * store problem must not fail the turn. It does NOT fail silently — it reports, because a
+   * compaction whose displacement was not recorded leaves the model reading a transcript that was
+   * supposed to have been replaced.
+   */
+  private async mirrorArchivedMessages(
+    conversationId: string,
+    messages: any[],
+    reason: "truncated" | "compacted"
+  ): Promise<number> {
+    const ids = (Array.isArray(messages) ? messages : [])
+      .map((item) => this.historyItemId(item))
+      .filter((id) => Boolean(id));
+
+    if (ids.length === 0) return 0;
+
+    const store = this.getMessageStore();
+    if (!store) {
+      this.sessionLog(
+        "warn",
+        "Phase3 write-path: message store unavailable; displaced messages not archived",
+        { conversationId, reason, attempted: ids.length },
+        conversationId
+      );
+      return 0;
+    }
+
+    try {
+      const archived = await store.archiveByMongoIds(ids, reason);
+      this.sessionLog(
+        "info",
+        `Phase3 write-path: archived ${archived} displaced message(s)`,
+        { conversationId, reason, attempted: ids.length },
+        conversationId
+      );
+      return archived;
+    } catch (error: any) {
+      this.sessionLog(
+        "warn",
+        `Phase3 write-path failed to archive displaced messages: ${error?.message}`,
+        { conversationId, reason },
+        conversationId
+      );
+      return 0;
+    }
+  }
+
+  /**
+   * Place the compaction summary immediately before the messages compaction kept.
+   *
+   * Without this the summary would either be lost or land at the end of the transcript, where it
+   * would "summarise" history the model can already see — worse than not compacting, because it
+   * spends tokens to say nothing. Fail-open, but loud: a compaction whose summary went missing
+   * silently rewrites the model's context, which is the class of failure this migration keeps
+   * finding.
+   */
+  private async mirrorCompactionSummary(
+    conversationId: string,
+    summaryMessage: any
+  ): Promise<void> {
+    if (!conversationId || !summaryMessage) return;
+
+    const store = this.getMessageStore();
+    if (!store) {
+      this.sessionLog(
+        "warn",
+        "Phase3 write-path: message store unavailable; compaction summary not written",
+        { conversationId },
+        conversationId
+      );
+      return;
+    }
+
+    try {
+      if (!summaryMessage._id) summaryMessage._id = summaryMessage.id;
+      const inserted = await store.insertCompactionSummary(conversationId, summaryMessage);
+      if (!inserted) {
+        this.sessionLog(
+          "warn",
+          "Phase3 write-path: compaction summary was not written to the store",
+          { conversationId },
+          conversationId
+        );
+        return;
+      }
+      this.sessionLog(
+        "info",
+        "Phase3 write-path: compaction summary inserted ahead of the kept messages",
+        { conversationId, seq: inserted.seq, mongoId: inserted.id },
+        conversationId
+      );
+    } catch (error: any) {
+      this.sessionLog(
+        "warn",
+        `Phase3 write-path failed to write the compaction summary: ${error?.message}`,
+        { conversationId },
+        conversationId
+      );
+    }
   }
 
   /**
@@ -3579,6 +3800,46 @@ export default class ReactorConversationService
     }
   }
 
+  /**
+   * Remove every message row for a conversation whose document has been deleted.
+   *
+   * The counterpart to the two Mongo delete paths. Without it, a deleted conversation leaves its
+   * transcript behind in the store — rows with no owning document, invisible to every harness that
+   * iterates Mongo documents. Four such conversations existed in this corpus (the 200-vs-196
+   * discrepancy). The dedicated gate is scripts/checkOrphanConversations.ts.
+   *
+   * Fail-open, like the other mirrors: the caller already performed its delete, and a store problem
+   * must not turn that into an error.
+   */
+  private async mirrorDeletedConversation(conversationId: string): Promise<number> {
+    if (!conversationId) return 0;
+
+    try {
+      if (!this.messageMirror) {
+        this.messageMirror = new ReactorConversationMessageService();
+      }
+      if (!this.messageMirror.isAvailable()) return 0;
+      const deleted = await this.messageMirror.deleteForConversation(conversationId);
+      if (deleted > 0) {
+        this.sessionLog(
+          "info",
+          "Phase3 dual-write removed " + deleted + " message row(s) for a deleted conversation",
+          { conversationId, deleted },
+          conversationId
+        );
+      }
+      return deleted;
+    } catch (error: any) {
+      this.sessionLog(
+        "warn",
+        "Phase3 dual-write failed to remove rows for a deleted conversation: " +
+          (error?.message ?? error),
+        { conversationId },
+        conversationId
+      );
+      return 0;
+    }
+  }
   /** Mirror a tool-call status change into the Postgres message log. */
   private async mirrorToolCallStatus(
     conversationId: string,
@@ -7522,6 +7783,13 @@ export default class ReactorConversationService
         this.context.telemetry.increment("reactor_chat_sessions_deleted_total", 1, {
           personaId: "unknown",
         });
+      }
+
+      // Rows are removed ONLY when the document delete actually happened. Pruning rows for a
+      // conversation we did not delete (wrong owner, already gone) would destroy a transcript that
+      // still belongs to someone.
+      if (result.deletedCount > 0) {
+        await this.mirrorDeletedConversation(String(id));
       }
 
       this.sessionLog(result.deletedCount > 0 ? "info" : "warn",

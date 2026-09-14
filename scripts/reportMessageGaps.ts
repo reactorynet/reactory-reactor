@@ -21,26 +21,15 @@
 import "reflect-metadata";
 import mongoose from "mongoose";
 import { Client } from "pg";
+import { resolveMongoUri, resolvePgConfig } from "./lib/instanceProbe";
 
-const MONGODB_URI =
-  process.env.MONGOOSE ||
-  "mongodb://reactory:reactorycore@localhost:27017/reactory-reactory?authSource=admin";
+const MONGODB_URI = resolveMongoUri();
 
 const args = process.argv.slice(2);
 const CONVERSATION = args.find((a) => a.startsWith("--conversation="))?.split("=")[1];
 const LIMIT = Number(args.find((a) => a.startsWith("--limit="))?.split("=")[1] || 25);
 
-const pgConfig = {
-  host: process.env.REACTORY_POSTGRES_HOST || process.env.POSTGRES_DB_HOST || "localhost",
-  port: parseInt(
-    process.env.REACTORY_POSTGRES_PORT || process.env.POSTGRES_DB_PORT || "5432",
-    10
-  ),
-  user: process.env.REACTORY_POSTGRES_USER || process.env.POSTGRES_USER || "reactory",
-  password:
-    process.env.REACTORY_POSTGRES_PASSWORD || process.env.POSTGRES_PASSWORD || "reactory",
-  database: process.env.REACTORY_POSTGRES_DB || process.env.POSTGRES_DB || "reactory",
-};
+const pgConfig = resolvePgConfig();
 
 interface GapReport {
   conversationId: string;
