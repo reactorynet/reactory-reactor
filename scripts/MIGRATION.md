@@ -99,6 +99,7 @@ runs the schema migration.
 | `checkProviderContextParity.ts` | the model receives the same transcript from either source |
 | `checkWritePathLive.ts` | on real traffic: rows appear and the array does **not** grow |
 | `checkOrphanConversations.ts` | every store conversation still has an owning Mongo document |
+| `checkNewChatReuse.ts` | a conversation that looks blank but holds messages is never handed back as a new chat |
 
 ### Pilots (write a throwaway, then delete it)
 
@@ -171,6 +172,34 @@ Both were found by running the tools rather than by reading them, and both have 
    temporary conversation both remove the document; both now also remove the rows, but **only when the
    document delete actually happened**, so a mis-targeted delete cannot destroy a transcript that still
    has an owner. `checkOrphanConversations` is the gate.
+
+## Reading the embedded array as a QUERY PREDICATE
+
+Once the array stops being written it is not just stale data — it is a stale **predicate**. Any
+query that filters on `history` (rather than reading `history` as a property) silently changes
+meaning, and a grep for `.history` property access will not find it.
+
+Two were found this way:
+
+| site | status |
+|---|---|
+| `getConversations` search, `{ history.content: { $regex } }` | correctly branched to the store |
+| `getNewConversation` reuse filter, `{ history: { $size: 0 } }` | **was not** — see below |
+
+### The `new chat` defect
+
+`getNewConversation` re-uses an existing **blank** conversation so that opening and abandoning a chat
+does not leave empty conversations behind. It decided blankness from the array. After the cutover the
+array is never written, so a conversation with hundreds of messages still reads as `history: []` —
+the predicate is permanently true, and `new chat` returned the same conversation forever, dropping the
+user into an existing transcript.
+
+The fix asks the store (`conversationsWithContent`) which candidates actually hold a transcript, and
+excludes them. Failure direction is deliberate: if the store cannot answer, every candidate is treated
+as used, so the outcome is one extra blank conversation rather than a silently re-used transcript.
+
+`checkNewChatReuse.ts` guards it, and was shown to *fail* against the pre-fix code — a guard that
+cannot fail is not evidence.
 
 ## Context
 

@@ -487,6 +487,49 @@ export default class ReactorConversationMessageService {
       .getCount();
   }
 
+  /**
+   * Of the given conversations, which hold a real transcript?
+   *
+   * A conversation has content when it has at least one non-system row, active or archived. This is
+   * the store-side answer to "is this conversation blank?", which the embedded Mongo array used to
+   * answer. After the write-path cutover that array is no longer written, so `history` is empty even
+   * on a conversation holding hundreds of messages — anything that decides blankness from it is now
+   * wrong. `getNewConversation` uses this to avoid handing back a conversation that has been used.
+   *
+   * Archived rows count as content on purpose: a compacted conversation has real history, reachable
+   * through the "earlier, compacted" expander.
+   *
+   * On failure this returns **every** requested id rather than none. The direction is deliberate: the
+   * caller excludes what is returned, so "cannot tell" must mean "do not reuse", whose cost is one
+   * extra blank conversation. Returning an empty set would mean "everything is blank" and would
+   * silently re-use a transcript — the bug this exists to prevent.
+   */
+  async conversationsWithContent(conversationIds: string[]): Promise<Set<string>> {
+    const ids = (conversationIds ?? [])
+      .map((value) => String(value ?? '').trim())
+      .filter((value) => value.length > 0);
+
+    if (ids.length === 0) return new Set();
+
+    try {
+      const repo = this.getRepository();
+      if (!repo) return new Set(ids);
+
+      const rows = await repo
+        .createQueryBuilder('m')
+        .select('m.conversationId', 'conversationId')
+        .where('m.conversationId IN (:...ids)', { ids })
+        .andWhere('m.role <> :systemRole', { systemRole: 'system' })
+        .distinct(true)
+        .getRawMany<{ conversationId: string }>();
+
+      // The column is CHAR(24), so Postgres pads on read; trim so callers can compare directly.
+      return new Set((rows ?? []).map((row) => String(row?.conversationId ?? '').trim()));
+    } catch {
+      return new Set(ids);
+    }
+  }
+
   /** Total number of rows for a conversation, optionally including archived. */
   async countForConversation(
     conversationId: string,

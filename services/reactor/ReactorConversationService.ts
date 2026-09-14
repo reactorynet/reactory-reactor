@@ -4417,25 +4417,55 @@ export default class ReactorConversationService
 
     // Check if there's an existing empty conversation for this persona and user
     // Use findOneAndUpdate with atomic operation to prevent race conditions
+    const reuseFilter: Record<string, any> = {
+      _id: { $ne: null },
+      personaId: persona.id,
+      user: this.context.user._id,
+      // Only reuse a blank conversation of the same kind. Without this a
+      // content session could silently continue in an empty standalone one,
+      // inheriting the wrong scope and edges.
+      use_case: useCase === 'standalone'
+        ? { $in: ['standalone', null, undefined] }
+        : useCase,
+      $or: [
+        { history: { $size: 0 } }, // Empty history
+        {
+          history: { $size: 1 },
+          "history.0.role": "system", // Only system message
+        },
+      ],
+    };
+
+    // The array above used to be the record of usage: a conversation that had been used grew a
+    // non-empty `history` and stopped matching. After the write-path cutover it is never written, so
+    // a conversation with hundreds of messages still reads as blank and every subsequent "new chat"
+    // would re-use it — the user never gets a new conversation, and is dropped into an old one.
+    //
+    // When the message store is authoritative, ask it which candidates actually hold a transcript
+    // and exclude those. Bounded: the most recent candidates are the sensible ones to reuse anyway,
+    // and the cap keeps this to one extra round trip.
+    const reuseStore = this.messagesSource() === "postgres" ? this.getMessageStore() : null;
+    if (reuseStore) {
+      const reuseCandidateLimit = 25;
+      const candidates: any[] = await ReactorConversationModel.find(reuseFilter)
+        .sort({ started: -1 })
+        .limit(reuseCandidateLimit)
+        .select("_id")
+        .lean()
+        .exec();
+
+      const withContent = await reuseStore.conversationsWithContent(
+        (candidates ?? []).map((candidate: any) => String(candidate._id))
+      );
+
+      if (withContent.size > 0) {
+        // `$nin: [null, ...]` keeps the original null-id guard while excluding used conversations.
+        reuseFilter._id = { $nin: [null, ...Array.from(withContent)] };
+      }
+    }
+
     const lastConversation = await ReactorConversationModel.findOneAndUpdate(
-      {
-        _id: { $ne: null },
-        personaId: persona.id,
-        user: this.context.user._id,
-        // Only reuse a blank conversation of the same kind. Without this a
-        // content session could silently continue in an empty standalone one,
-        // inheriting the wrong scope and edges.
-        use_case: useCase === 'standalone'
-          ? { $in: ['standalone', null, undefined] }
-          : useCase,
-        $or: [
-          { history: { $size: 0 } }, // Empty history
-          {
-            history: { $size: 1 },
-            "history.0.role": "system", // Only system message
-          },
-        ],
-      },
+      reuseFilter,
       {
         $set: {
           started: new Date(),
