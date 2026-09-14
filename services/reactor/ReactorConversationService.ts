@@ -2235,7 +2235,14 @@ export default class ReactorConversationService
 
 
   async rateMessage(chatSessionId: string, messageId: string, rating: string): Promise<any> {
-    const session = await this.storage.loadSession(chatSessionId);
+    // NOTE (Phase 3): this method previously delegated to an undeclared
+    // `this.storage` (loadSession/saveSession), which does not exist on this
+    // class — so it threw unconditionally, under mongo *and* postgres. It is
+    // rewritten against the conversation model (as every other method in this
+    // class is) and paired with a mirror so a rating is visible under both
+    // message sources.
+    const session = await ReactorConversationModel.findOne({ _id: chatSessionId }).exec();
+    let ratedItem: any = null;
     if (!session) {
       throw new Error(`Session ${chatSessionId} not found`);
     }
@@ -2244,7 +2251,11 @@ export default class ReactorConversationService
     if (session.history && session.history.length > 0) {
       const messageIndex = session.history.findIndex((msg: any) => msg.id?.toString() === messageId || msg.id === messageId);
       if (messageIndex >= 0) {
-        session.history[messageIndex].rating = rating;
+        // `rating` arrives as a GraphQL String; the history schema field is a
+        // Number, and Mongoose casts on save. Cast here to preserve that runtime
+        // behaviour now that `session` is typed rather than `any`.
+        session.history[messageIndex].rating = rating as any;
+        ratedItem = session.history[messageIndex];
         messageFound = true;
       }
     }
@@ -2253,21 +2264,35 @@ export default class ReactorConversationService
       throw new Error(`Message ${messageId} not found in session ${chatSessionId}`);
     }
     
-    await this.storage.saveSession(session);
+    session.markModified('history');
+    await session.save();
+
+    // Mirror so the rating is visible under the Postgres read source too.
+    await this.mirrorUpdatedMessage(chatSessionId, ratedItem);
+
     return session;
   }
 
   async patchSystemPrompt(chatSessionId: string, systemPrompt: string): Promise<any> {
-    const session = await this.storage.loadSession(chatSessionId);
+    // NOTE (Phase 3): like `rateMessage`, this previously used an undeclared
+    // `this.storage` and threw unconditionally. Rewritten against the model, and
+    // mirrored so an edited system prompt is visible under both sources.
+    const session = await ReactorConversationModel.findById(chatSessionId).exec();
     if (!session) {
       throw new Error(`Session ${chatSessionId} not found`);
     }
+
+    let updatedSystemItem: any = null;
+    let appendedSystemItem: any = null;
     
-    // Update the persona in the session state
-    if (!session.persona) {
-      session.persona = {} as any;
+    // Update the persona in the session state. `persona` is not declared on the
+    // conversation schema (only `personaId` is), so this is cast; the effective
+    // part of a system-prompt edit is the history message updated below.
+    const sessionAsAny = session as any;
+    if (!sessionAsAny.persona) {
+      sessionAsAny.persona = {};
     }
-    session.persona.persona = systemPrompt;
+    sessionAsAny.persona.persona = systemPrompt;
 
     // Update the system message in the history if it exists
     if (session.history && session.history.length > 0) {
@@ -2276,17 +2301,29 @@ export default class ReactorConversationService
         session.history[systemMessageIndex].content = systemPrompt;
       } else {
         // If no system message exists, unshift it to the beginning
-        session.history.unshift({
+        const newSystemItem: any = {
           id: new ObjectId(),
           role: 'system',
           content: systemPrompt,
           timestamp: new Date(),
           tool_results: [],
-        } as any);
+        };
+        session.history.unshift(newSystemItem);
+        appendedSystemItem = newSystemItem;
       }
     }
     
-    await this.storage.saveSession(session);
+    session.markModified('history');
+    await session.save();
+
+    // Mirror so the edit is visible under the Postgres read source too. An edit
+    // of the existing system message is an update; a newly created one is an append.
+    if (updatedSystemItem) {
+      await this.mirrorUpdatedMessage(chatSessionId, updatedSystemItem);
+    }
+    if (appendedSystemItem) {
+      await this.mirrorAppendedMessage(chatSessionId, appendedSystemItem);
+    }
     
     return session;
   }
@@ -2627,6 +2664,11 @@ export default class ReactorConversationService
           ],
         }
       ).exec();
+
+      // Mirror the status change: the arrayFilters update above touches Mongo
+      // only, so under the Postgres read source the tool call would keep its
+      // previous status indefinitely.
+      await this.mirrorToolCallStatus(chatSessionId, toolCallId, status);
     } catch (e: any) {
       this.context.error(`Failed to update tool call status for ${toolCallId} in session ${chatSessionId}: ${e.message}`);
     }
@@ -3476,6 +3518,89 @@ export default class ReactorConversationService
     if (!item) return "";
     const raw = item._id ?? item.id;
     return raw ? String(raw) : "";
+  }
+
+  /**
+   * Mirror an in-place mutation of an existing history item into the Postgres
+   * message log.
+   *
+   * Companion to `mirrorPersistedAppend`, which only covers inserts. Without it
+   * the mutating paths (`deleteToolCall`, `updateToolCallStatus`, `rateMessage`,
+   * `patchSystemPrompt`) change Mongo while reads are served from Postgres, so
+   * the change is invisible. Fail-open for the same reason as the append mirror:
+   * the Mongo write is what the caller asked for, and a message-store problem
+   * must not fail it.
+   */
+  private async mirrorUpdatedMessage(conversationId: string, message: any): Promise<void> {
+    const mongoId = this.historyItemId(message);
+    if (!conversationId || !mongoId) {
+      this.sessionLog(
+        "warn",
+        "Phase3 dual-write skipped: mutated item has no identifiable id",
+        { conversationId, role: message?.role },
+        conversationId
+      );
+      return;
+    }
+
+    try {
+      if (!this.messageMirror) {
+        this.messageMirror = new ReactorConversationMessageService();
+      }
+      if (!this.messageMirror.isAvailable()) return;
+      await this.messageMirror.updateMessageByMongoId(mongoId, message);
+    } catch (error: any) {
+      this.sessionLog(
+        "warn",
+        `Phase3 dual-write failed to mirror mutation: ${error?.message}`,
+        { conversationId, mongoId },
+        conversationId
+      );
+    }
+  }
+
+  /** Mirror the removal of a history item from the Postgres message log. */
+  private async mirrorDeletedMessage(conversationId: string, messageId: string): Promise<void> {
+    if (!conversationId || !messageId) return;
+
+    try {
+      if (!this.messageMirror) {
+        this.messageMirror = new ReactorConversationMessageService();
+      }
+      if (!this.messageMirror.isAvailable()) return;
+      await this.messageMirror.deleteByMongoId(messageId);
+    } catch (error: any) {
+      this.sessionLog(
+        "warn",
+        `Phase3 dual-write failed to mirror delete: ${error?.message}`,
+        { conversationId, messageId },
+        conversationId
+      );
+    }
+  }
+
+  /** Mirror a tool-call status change into the Postgres message log. */
+  private async mirrorToolCallStatus(
+    conversationId: string,
+    toolCallId: string,
+    status: string
+  ): Promise<void> {
+    if (!conversationId || !toolCallId) return;
+
+    try {
+      if (!this.messageMirror) {
+        this.messageMirror = new ReactorConversationMessageService();
+      }
+      if (!this.messageMirror.isAvailable()) return;
+      await this.messageMirror.updateToolCallStatusByToolCallId(conversationId, toolCallId, status);
+    } catch (error: any) {
+      this.sessionLog(
+        "warn",
+        `Phase3 dual-write failed to mirror tool-call status: ${error?.message}`,
+        { conversationId, toolCallId },
+        conversationId
+      );
+    }
   }
 
   /**
@@ -7432,6 +7557,12 @@ export default class ReactorConversationService
       }
 
       let modified = false;
+      // Phase 3 step 3b: the loop below mutates the Mongo document only, but
+      // reads may be served from Postgres. Record exactly what changed so the
+      // same change can be mirrored onto the message rows — otherwise the
+      // deletion lands in Mongo and the tool call still appears in the UI.
+      const removedMessageIds: string[] = [];
+      const updatedMessages: any[] = [];
 
       if (conversation.history && Array.isArray(conversation.history)) {
         for (let i = conversation.history.length - 1; i >= 0; i--) {
@@ -7457,10 +7588,16 @@ export default class ReactorConversationService
             const hasImages = Array.isArray(msg.images) && msg.images.length > 0;
 
             if (!hasContent && !hasOtherCalls && !hasThinking && !hasImages) {
+              const removedId = this.historyItemId(msg);
+              if (removedId) removedMessageIds.push(removedId);
               conversation.history.splice(i, 1);
+            } else {
+              updatedMessages.push(msg);
             }
           } else if (msg.role === 'tool' && (msg.tool_call_id === toolCallId || msg.id === toolCallId)) {
             // Remove standalone tool message for this tool call
+            const removedId = this.historyItemId(msg);
+            if (removedId) removedMessageIds.push(removedId);
             conversation.history.splice(i, 1);
             modified = true;
           }
@@ -7470,6 +7607,16 @@ export default class ReactorConversationService
       if (modified) {
         conversation.markModified('history');
         await conversation.save();
+
+        // Mirror the mutation so the deleted tool call disappears under both
+        // read sources, not just Mongo.
+        for (const removedId of removedMessageIds) {
+          await this.mirrorDeletedMessage(chatSessionId, removedId);
+        }
+        for (const updated of updatedMessages) {
+          await this.mirrorUpdatedMessage(chatSessionId, updated);
+        }
+
         this.sessionLog("info", `Tool call ${toolCallId} deleted successfully`, { chatSessionId, toolCallId }, chatSessionId);
         return true;
       }
@@ -7807,6 +7954,14 @@ export default class ReactorConversationService
         (msg: any) => msg.role === "system"
       );
 
+      // Phase 3 step 3b: capture the history length *before* the system message(s)
+      // are pushed below. This creation path persists with `conversation.save()`
+      // rather than an inline `$push`, so it bypassed every `$push` mirror site;
+      // the delta from this index is mirrored after the save, once Mongoose has
+      // assigned each pushed subdocument its persisted `_id` (which the mirror
+      // requires as the row key).
+      const historyLengthBeforeSystemPush = conversation.history.length;
+
       if (systemPromptTemplate && !hasSystemMessage) {
         // The prompt content may already be fully compiled (e.g. from buildSystemPrompt()).
         // Interpolate for user/persona context using ONLY the classic <%= ... %> delimiter.
@@ -7902,6 +8057,25 @@ export default class ReactorConversationService
 
       // @ts-ignore
       await conversation.save();
+
+      // Mirror the system message(s) pushed above (persona prompt, and optionally a
+      // `contextFromSessionId` summary). Must run after the save: the mirror is
+      // keyed on Mongo's persisted `_id`, which only exists once the document has
+      // been written. Fail-open — `mirrorAppendedMessage` logs and swallows any
+      // Postgres error so a chat session is never failed by the message store.
+      if (conversation.history.length > historyLengthBeforeSystemPush) {
+        const mirrorConversationId = conversation._id?.toString();
+        for (
+          let mirrorIndex = historyLengthBeforeSystemPush;
+          mirrorIndex < conversation.history.length;
+          mirrorIndex += 1
+        ) {
+          await this.mirrorAppendedMessage(
+            mirrorConversationId,
+            conversation.history[mirrorIndex]
+          );
+        }
+      }
 
       // Validate the final conversation after all modifications
       this.validateConversationDocument(

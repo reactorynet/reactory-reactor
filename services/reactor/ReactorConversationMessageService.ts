@@ -344,6 +344,25 @@ export default class ReactorConversationMessageService {
   }
 
   /**
+   * Map a history item onto the columns an in-place mutation may change.
+   *
+   * Excludes the identity columns (`mongo_id`, `conversation_id`, `seq`) because
+   * an update must not reassign them, and excludes the archival lifecycle
+   * columns (`archived*`) because a Mongo history item does not carry them —
+   * writing them from such an item would silently un-archive a displaced row.
+   */
+  private toMutableRow(message: any): Partial<ReactorConversationMessage> {
+    const row = this.toRow("", message, 0);
+    delete row.mongoId;
+    delete row.conversationId;
+    delete row.seq;
+    delete row.archived;
+    delete row.archivedAt;
+    delete row.archivedReason;
+    return row;
+  }
+
+  /**
    * Map a row back into the message shape the conversation code expects.
    * The exposed `id` is the `mongoId`, so paging cursors stay stable.
    */
@@ -727,6 +746,71 @@ export default class ReactorConversationMessageService {
 
     const result = await repo.delete({ mongoId });
     return (result.affected ?? 0) > 0;
+  }
+
+  /**
+   * Apply an in-place mutation of a history item to the row keyed by `mongoId`.
+   *
+   * The mutating paths in `ReactorConversationService` (`deleteToolCall`,
+   * `updateToolCallStatus`, `rateMessage`, `patchSystemPrompt`) historically
+   * wrote the Mongo document only. Under `REACTOR_MESSAGES_SOURCE=postgres`
+   * reads are served from this table, so such a write was invisible — the change
+   * landed in Mongo while the transcript came from Postgres. This applies the
+   * same item state to the row so both sources agree.
+   */
+  async updateMessageByMongoId(mongoId: string, message: any): Promise<boolean> {
+    const repo = this.getRepository();
+    if (!repo || !mongoId) return false;
+
+    const result = await repo.update({ mongoId }, this.toMutableRow(message));
+    return (result.affected ?? 0) > 0;
+  }
+
+  /**
+   * Apply a tool-call status change to whichever row carries that tool call.
+   *
+   * `updateToolCallStatus` targets a tool call by id across the whole history
+   * array, so the owning message is not known to the caller and the tool call
+   * id is not a row key. Rows are therefore matched by JSONB containment
+   * (`tool_calls @> [{"id": …}]`) rather than by scanning the conversation.
+   */
+  async updateToolCallStatusByToolCallId(
+    conversationId: string,
+    toolCallId: string,
+    status: string
+  ): Promise<number> {
+    const repo = this.getRepository();
+    if (!repo || !conversationId || !toolCallId) return 0;
+
+    // `@>` is array containment: the needle array is contained when any element
+    // of `tool_calls` is a superset of `{ id: toolCallId }`.
+    const needle = JSON.stringify([{ id: toolCallId }]);
+    const matches: Array<{ id: string; tool_calls: any }> = await repo.query(
+      `SELECT id, tool_calls FROM reactor_conversation_messages
+        WHERE conversation_id = $1 AND tool_calls @> $2::jsonb`,
+      [conversationId, needle]
+    );
+
+    let affected = 0;
+    for (const match of matches ?? []) {
+      const calls = Array.isArray(match?.tool_calls) ? match.tool_calls : null;
+      if (!calls) continue;
+
+      let changed = false;
+      const next = calls.map((tc: any) => {
+        if (tc && tc.id === toolCallId && tc.status !== status) {
+          changed = true;
+          return { ...tc, status };
+        }
+        return tc;
+      });
+      if (!changed) continue;
+
+      await repo.update({ id: match.id }, { toolCalls: next });
+      affected += 1;
+    }
+
+    return affected;
   }
 
   /**

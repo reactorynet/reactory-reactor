@@ -129,20 +129,28 @@ const arrayOrderMatchesIdOrder = (ids: string[]): boolean => {
  * Renumbering writes values 1..n, so every shifted row must land ABOVE n. The
  * shift therefore has to be `n - min + 1`: derived from the row count, not `max`.
  *
- * Two wrong answers this replaced, both of which tripped the unique guard:
+ * Three wrong answers this replaced, all of which tripped the unique guard:
  *   `max + 1`       — maps a negative value into the unmoved positive range.
  *   `max - min + 1` — for an all-negative range ({-3,-2,-1}, n=3) it yields
  *                     {0,1,2}, which overlaps the target 1..3.
+ *   `n - min + 1`   — clears the target 1..n but NOT the rows' own range once the
+ *                     seq set is non-contiguous. Pruning one row from {1..26}
+ *                     leaves n=25 with max=26, and shifting by 25 lands a row on
+ *                     the surviving seq=26.
+ *
+ * The shifted block must clear BOTH the target range (1..n) and the current
+ * range (min..max), so the shift is `max(n, max) - min + 1`.
  */
 const safeSeqShift = async (client: Client, conversationId: string): Promise<number> => {
   const { rows } = await client.query(
-    `SELECT COALESCE(MIN(seq), 0) AS min, count(*) AS n
+    `SELECT COALESCE(MIN(seq), 0) AS min, COALESCE(MAX(seq), 0) AS max, count(*) AS n
        FROM reactor_conversation_messages WHERE conversation_id = $1`,
     [conversationId]
   );
   const min = Number(rows[0]?.min ?? 0);
+  const max = Number(rows[0]?.max ?? 0);
   const n = Number(rows[0]?.n ?? 0);
-  return n - min + 1;
+  return Math.max(n, max) - min + 1;
 };
 
 /**
@@ -202,6 +210,44 @@ const resequenceFromMongoIdOrder = async (
       WHERE m.id = o.id`,
     [conversationId]
   );
+};
+
+/**
+ * Align the `archived` flag with which Mongo list owns each message.
+ *
+ * `history` maps to active rows and `truncatedHistory` to `archived = true` rows.
+ * Compaction moves a message from the former to the latter; if the mirror write
+ * that accompanies it is missed, Postgres keeps serving a displaced message as
+ * part of the active transcript, so the window returns messages Mongo considers
+ * archived. That is a flag defect, not a missing row, and it shows up as a window
+ * divergence rather than a gap.
+ */
+const archiveParitySync = async (
+  client: Client,
+  conversationId: string,
+  toArchive: string[],
+  toActivate: string[]
+): Promise<void> => {
+  if (toArchive.length > 0) {
+    await client.query(
+      `UPDATE reactor_conversation_messages
+          SET archived = true,
+              archived_at = COALESCE(archived_at, now()),
+              archived_reason = COALESCE(archived_reason, 'truncated'),
+              updated_at = now()
+        WHERE conversation_id = $1 AND mongo_id = ANY($2::char(24)[])`,
+      [conversationId, toArchive]
+    );
+  }
+
+  if (toActivate.length > 0) {
+    await client.query(
+      `UPDATE reactor_conversation_messages
+          SET archived = false, archived_at = NULL, archived_reason = NULL, updated_at = now()
+        WHERE conversation_id = $1 AND mongo_id = ANY($2::char(24)[])`,
+      [conversationId, toActivate]
+    );
+  }
 };
 
 const insertMessage = async (
@@ -297,13 +343,15 @@ const run = async () => {
 
   const cursor = mongoose.connection
     .collection("reactor_conversations")
-    .find(filter, { projection: { history: 1, updated: 1 } });
+    .find(filter, { projection: { history: 1, truncatedHistory: 1, updated: 1 } });
 
   let scanned = 0;
   let compacted = 0;
   let resequenced = 0;
   let prunedTotal = 0;
   let insertedTotal = 0;
+  let insertedArchivedTotal = 0;
+  let archiveSyncedTotal = 0;
   const skipped: string[] = [];
   const touched: string[] = [];
   const failures: string[] = [];
@@ -311,6 +359,9 @@ const run = async () => {
   for await (const doc of cursor as any) {
     const conversationId = String(doc._id);
     const history: any[] = Array.isArray(doc.history) ? doc.history : [];
+    const truncated: any[] = Array.isArray(doc.truncatedHistory)
+      ? doc.truncatedHistory
+      : [];
     if (history.length === 0) continue;
     scanned += 1;
 
@@ -321,16 +372,47 @@ const run = async () => {
 
     const mongoItems = history.filter((item) => readMongoId(item));
     const mongoOrder = mongoItems.map((item) => readMongoId(item) as string);
-    const mongoSet = new Set(mongoOrder);
+
+    // `truncatedHistory` holds the messages displaced from `history` by
+    // truncation/compaction. They are legitimately present in Postgres as
+    // `archived = true` rows, so their ids must join the authoritative set.
+    // Omitting them made EVERY archived row read as an orphan, which forced any
+    // conversation with compacted history down the content-repair path.
+    const archivedItems = truncated.filter((item) => readMongoId(item));
+    const archivedIds = new Set(
+      archivedItems.map((item) => readMongoId(item) as string)
+    );
+    const knownIds = new Set([...mongoOrder, ...archivedIds]);
 
     const { rows } = await client.query(
-      `SELECT mongo_id AS "mongoId", seq FROM reactor_conversation_messages WHERE conversation_id = $1`,
+      `SELECT mongo_id AS "mongoId", seq, archived
+         FROM reactor_conversation_messages WHERE conversation_id = $1`,
       [conversationId]
     );
     const pgIds = new Set(rows.map((row) => mongoIdOf(row)).filter(Boolean));
 
-    const orphans = [...pgIds].filter((id) => !mongoSet.has(id));
+    // An orphan is an ACTIVE row Postgres holds that Mongo owns in neither
+    // `history` nor `truncatedHistory`. Archived rows are never orphans: they
+    // may be the only surviving copy of compacted history, and auto-deleting one
+    // would lose data Mongo no longer carries.
+    const orphans = Array.from(
+      new Set(
+        rows
+          .filter((row) => !row.archived)
+          .map((row) => mongoIdOf(row))
+          .filter((id) => id && !knownIds.has(id))
+      )
+    );
+
+    // "Missing" is judged against `history` for the ACTIVE set and against
+    // `truncatedHistory` for the ARCHIVED set. They are inserted differently — a
+    // history item is written active, a truncated item archived — so they are
+    // tracked separately. Treating a truncated item as an ordinary missing row
+    // would re-insert displaced history as an ACTIVE message.
     const missing = mongoItems.filter((item) => !pgIds.has(readMongoId(item) as string));
+    const missingArchived = archivedItems.filter(
+      (item) => !pgIds.has(readMongoId(item) as string)
+    );
 
     const { rows: dupRows } = await client.query(
       `SELECT count(*) AS n FROM (
@@ -354,20 +436,42 @@ const run = async () => {
     // Whether ORDER can be judged at all: only when Mongo's array order equals
     // `mongo_id` order, since that is the only order derivable from the table.
     const mongoOrderDerivable = arrayOrderMatchesIdOrder(mongoOrder);
-    const pgIdsBySeq = [...rows]
+    // Order is compared over the rows that correspond to `history` items only:
+    // `mongoOrder` is derived from `history`, so neither an archived row nor a
+    // row Mongo has since moved to `truncatedHistory` can appear in it. Comparing
+    // against the full active set would see a length mismatch — not a mis-order —
+    // for any conversation whose compacted messages are still flagged active in
+    // Postgres, and re-issue the resequence forever, so the tool would never be
+    // idempotent.
+    const historyIdSet = new Set(mongoOrder);
+    const activeHistoryIdsBySeq = rows
+      .filter((row) => !row.archived && historyIdSet.has(mongoIdOf(row)))
       .sort((a, b) => Number(a.seq) - Number(b.seq))
       .map((row) => mongoIdOf(row));
     const orderMatches =
       !mongoOrderDerivable ||
-      (pgIdsBySeq.length === mongoOrder.length &&
-        pgIdsBySeq.every((id, index) => id === mongoOrder[index]));
+      (activeHistoryIdsBySeq.length === mongoOrder.length &&
+        activeHistoryIdsBySeq.every((id, index) => id === mongoOrder[index]));
+
+    // Archive-flag drift: rows whose `archived` flag disagrees with which Mongo
+    // list owns them. Computed before the skip test so a conversation that is
+    // correct in every other respect is still repaired.
+    const rowsToArchive = rows
+      .filter((row) => !row.archived && archivedIds.has(mongoIdOf(row)))
+      .map((row) => mongoIdOf(row));
+    const rowsToActivate = rows
+      .filter((row) => row.archived && historyIdSet.has(mongoIdOf(row)))
+      .map((row) => mongoIdOf(row));
 
     if (
       orphans.length === 0 &&
       missing.length === 0 &&
       duplicateSeq === 0 &&
       !hasPlaceholderSeq &&
-      orderMatches
+      orderMatches &&
+      rowsToArchive.length === 0 &&
+      rowsToActivate.length === 0 &&
+      missingArchived.length === 0
     ) {
       continue;
     }
@@ -386,17 +490,23 @@ const run = async () => {
 
     touched.push(conversationId);
 
-    // Case B: content already agrees; only numbering and/or order are wrong.
-    if (orphans.length === 0 && missing.length === 0) {
+    // Case B: content already agrees; only numbering, order and/or archive flags
+    // are wrong.
+    if (orphans.length === 0 && missing.length === 0 && missingArchived.length === 0) {
       // Compacting preserves the EXISTING relative order, so it fixes duplicates
       // and placeholder values but cannot repair a mis-ordered transcript. When
       // the order is derivable and does not match, resequence instead.
       const needsOrderFix = mongoOrderDerivable && !orderMatches;
+      const needsSeqFix = duplicateSeq > 0 || hasPlaceholderSeq;
+      const needsArchiveSync = rowsToArchive.length > 0 || rowsToActivate.length > 0;
 
       if (!APPLY) {
         console.log(
-          `   ↳ would ${needsOrderFix ? "resequence (order)" : "compact seq"} for ` +
-            `${conversationId} (dupSeq=${duplicateSeq}, placeholder=${hasPlaceholderSeq}, rows=${rows.length})`
+          `   ↳ would reconcile ${conversationId}: ` +
+            `order=${needsOrderFix ? "resequence" : "ok"} ` +
+            `seq=${needsSeqFix ? "fix" : "ok"} ` +
+            `archive=${rowsToArchive.length}->archived/${rowsToActivate.length}->active ` +
+            `(rows=${rows.length})`
         );
         continue;
       }
@@ -405,10 +515,19 @@ const run = async () => {
         await resequenceFromMongoIdOrder(client, conversationId);
         resequenced += 1;
         console.log(`   ↳ resequenced ${conversationId} (order corrected)`);
-      } else {
+      } else if (needsSeqFix) {
         await compactSeq(client, conversationId);
         compacted += 1;
         console.log(`   ↳ compacted seq for ${conversationId} (${rows.length} rows)`);
+      }
+
+      if (needsArchiveSync) {
+        await archiveParitySync(client, conversationId, rowsToArchive, rowsToActivate);
+        archiveSyncedTotal += rowsToArchive.length + rowsToActivate.length;
+        console.log(
+          `   ↳ archive flags synced for ${conversationId}: ` +
+            `${rowsToArchive.length} archived, ${rowsToActivate.length} activated`
+        );
       }
       continue;
     }
@@ -425,7 +544,8 @@ const run = async () => {
     if (!APPLY) {
       console.log(
         `   ↳ would reconcile ${conversationId}: ` +
-          `orphans=${orphans.length} missing=${missing.length}`
+          `orphans=${orphans.length} missing=${missing.length} ` +
+          `missingArchived=${missingArchived.length}`
       );
       continue;
     }
@@ -433,15 +553,26 @@ const run = async () => {
     // Atomic content repair. A half-applied repair leaves placeholder rows
     // sorting before the transcript, which is worse than no repair, and the
     // live writer makes that failure mode reachable. All or nothing.
+    // Declared outside the transaction so the summary line below can report the
+    // real deletion count rather than the orphan candidate count.
+    let prunedHere = 0;
+
     await client.query("BEGIN");
     try {
     if (orphans.length > 0) {
+      // `= ANY(...)` deletes exactly the orphan rows. The previous
+      // `mongo_id <> ALL(...)` selected everything OUTSIDE the orphan set —
+      // i.e. the valid transcript — and would have destroyed it had a
+      // conversation with orphans ever reached this path.
       const { rowCount } = await client.query(
         `DELETE FROM reactor_conversation_messages
-          WHERE conversation_id = $1 AND mongo_id <> ALL($2::char(24)[])`,
+          WHERE conversation_id = $1
+            AND archived = false
+            AND mongo_id = ANY($2::char(24)[])`,
         [conversationId, orphans]
       );
-      prunedTotal += rowCount ?? 0;
+      prunedHere = rowCount ?? 0;
+      prunedTotal += prunedHere;
     }
 
     // Placeholder base is derived from the CURRENT minimum so it is always below
@@ -459,6 +590,20 @@ const run = async () => {
       insertedTotal += 1;
     }
 
+    // Displaced history mirrors as `archived = true`. The Mongo item carries no
+    // such field, so it is forced here: without it a compacted message would be
+    // inserted as ACTIVE and would re-enter the live window.
+    for (const message of missingArchived) {
+      await insertMessage(
+        client,
+        conversationId,
+        { ...message, archived: true, archivedAt: new Date(), archivedReason: "truncated" },
+        placeholder
+      );
+      placeholder -= 1;
+      insertedArchivedTotal += 1;
+    }
+
     await resequenceFromMongoIdOrder(client, conversationId);
       await client.query("COMMIT");
       resequenced += 1;
@@ -468,7 +613,7 @@ const run = async () => {
     }
 
     console.log(
-      `   ↳ reconciled ${conversationId}: pruned=${orphans.length} inserted=${missing.length}`
+      `   ↳ reconciled ${conversationId}: pruned=${prunedHere} inserted=${missing.length}`
     );
     } catch (error: any) {
       // A conversation that races the live writer fails on the unique guard;
@@ -501,7 +646,9 @@ const run = async () => {
   console.log(`  compacted (numbering only)  : ${compacted}`);
   console.log(`  resequenced (content fixed) : ${resequenced}`);
   console.log(`Orphan rows deleted           : ${prunedTotal}`);
+  console.log(`Archive flags synced          : ${archiveSyncedTotal}`);
   console.log(`Messages inserted             : ${insertedTotal}`);
+  console.log(`Archived messages inserted    : ${insertedArchivedTotal}`);
   console.log(`Skipped                       : ${skipped.length}`);
   console.log(`Failed                        : ${failures.length}`);
   if (failures.length > 0) {
