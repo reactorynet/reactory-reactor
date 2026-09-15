@@ -50,7 +50,7 @@ REACTOR_MESSAGES_SOURCE=postgres   # or the accepted alias REACTOR_MESSAGE_SOURC
 | **3b** | cut reads over behind the flag | **done** |
 | **3c-step1** | stop writing the array; model context reads the store | **done** |
 | **3c-step2** | `$unset history` + `truncatedHistory` across `reactor_conversations` | **DONE** (2026-09-15) — 545.54 MB → 36.93 MB; 199/199 documents carry no array |
-| **3c-step3** | retire the flag and the Mongo fallback | after step 2 |
+| **3c-step3** | retire the flag and the Mongo fallback | **DONE** (2026-09-15) — flag retired (`745f81c`), branches deleted and reuse predicate fixed (`127dc4d`). The `history` / `truncatedHistory` **schema fields and the write-path choke point are deliberately retained** — the arrays are still used *in memory* on the chat-entry path; see the design log §61.3 before removing them. |
 
 ### Step 2 preconditions — all met
 
@@ -102,7 +102,9 @@ runs the schema migration.
 
 **Superseded by step 2** — the five parity harnesses below are array-based, so with the arrays
 retired they have nothing to compare. Each now reports **NOT APPLICABLE** rather than PASS, so they
-cannot report an unearned green. They are removed in step 3.
+cannot report an unearned green. **They were retained, not removed** (step 3 part 2, `127dc4d`): they
+remain correct and portable for *other* instances going through 3a/3b, and they report
+`NOT APPLICABLE` here rather than an unearned green.
 
 | harness | why it is now vacuous |
 |---|---|
