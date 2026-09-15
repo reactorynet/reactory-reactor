@@ -46,10 +46,10 @@ import {
 const args = process.argv.slice(2);
 const KEEP = args.includes("--keep");
 
-const setSource = (value: "mongo" | "postgres") => {
-  process.env.REACTOR_MESSAGES_SOURCE = value;
-  process.env.REACTOR_MESSAGE_SOURCE = value;
-};
+// NOTE: this script used to select the message source per mode by setting REACTOR_MESSAGE*_SOURCE.
+// Phase 3c step 3 retired that flag (`resolveMessagesSource()` is now a constant), so doing it would
+// be inert while still *looking* like a choice — the §22 trap, in the tooling. The mode below is
+// derived from the instance's own state instead, so nothing here needs (or claims) a source switch.
 
 const FILLER =
   "The quick brown fox jumps over the lazy dog while the reactor core is being migrated to " +
@@ -154,10 +154,9 @@ const run = async () => {
   // ══ Exercise 1 — truncation ══════════════════════════════════════════════════════════════════
   reporter.section(
     mode === "store"
-      ? "Exercise 1 — truncateConversationHistory, array absent, source=postgres"
-      : "Exercise 1 — truncateConversationHistory, array authoritative, source=mongo"
+      ? "Exercise 1 — truncateConversationHistory, array absent, store authoritative"
+      : "Exercise 1 — truncateConversationHistory, array authoritative"
   );
-  setSource(mode === "store" ? "postgres" : "mongo");
 
   const truncId = await newConversationId(mode === "store" ? undefined : []);
   const systemItem: any = {
@@ -257,7 +256,7 @@ const run = async () => {
     const beforeHistory: any[] = beforeDoc?.history ?? [];
 
     reporter.check(
-      "the armed array DISPLACED messages into truncatedHistory (source=mongo writes the arrays)",
+      "the armed array DISPLACED messages into truncatedHistory (truncation rewrites the array)",
       truncatedAfter.length === result.removedMessages && truncatedAfter.length > 0,
       `truncatedHistory=${truncatedAfter.length}, removed=${result.removedMessages}`
     );

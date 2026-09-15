@@ -46,9 +46,15 @@ const args = process.argv.slice(2);
 const KEEP = args.includes("--keep");
 
 /** Set the source for BOTH accepted keys, so a conflicting-config warning cannot muddy the run. */
-const setSource = (value: "mongo" | "postgres") => {
-  process.env.REACTOR_MESSAGES_SOURCE = value;
-  process.env.REACTOR_MESSAGE_SOURCE = value;
+/**
+ * Force the retired source flag to `mongo`, so Phase 2 can prove the value is IGNORED.
+ *
+ * Deliberately sets both spellings: the point of the phase is that no value of either key can turn
+ * the strip policy off, and setting only one would leave the other's inertness untested.
+ */
+const forceRetiredSourceFlag = () => {
+  process.env.REACTOR_MESSAGES_SOURCE = "mongo";
+  process.env.REACTOR_MESSAGE_SOURCE = "mongo";
 };
 
 /**
@@ -114,7 +120,6 @@ const run = async () => {
 
   // ══ Phase 1 — create the throwaway ═══════════════════════════════════════════════════════════
   reporter.section("Phase 1 — create throwaway (a new document; the policy exempts new documents)");
-  setSource("postgres");
 
   const systemItem: Record<string, unknown> = {
     id: new mongoose.Types.ObjectId(),
@@ -159,14 +164,18 @@ const run = async () => {
     !("history" in (cleared ?? {})) && !("truncatedHistory" in (cleared ?? {}))
   );
 
-  // ══ Phase 2 — CONTROL: the instrument must be able to detect growth ══════════════════════════
-  reporter.section("Phase 2 — CONTROL: source=mongo, the same append MUST grow the array");
-  setSource("mongo");
+  // ══ Phase 2 — the retired source flag is IGNORED ═════════════════════════════════════════════
+  // Pins the retirement (§60.3's inverted-test pattern): forcing the flag to `mongo` must NOT turn
+  // the strip policy off, because turning it off would re-create the field the migration removed.
+  reporter.section(
+    "Phase 2 — the retired source flag is IGNORED: env forced to mongo, the append is STILL stripped"
+  );
+  forceRetiredSourceFlag();
 
   const controlItem: Record<string, unknown> = {
     id: new mongoose.Types.ObjectId(),
     role: "user",
-    content: "control turn — source is mongo",
+    content: "control turn — the source flag is forced to mongo and must have no effect",
     timestamp: new Date(),
     tool_results: [],
   };
@@ -174,19 +183,24 @@ const run = async () => {
   const afterControl: any = await rawDoc(conversationId);
 
   reporter.check(
-    "control append grew the array (the instrument can detect growth)",
-    Array.isArray(afterControl?.history) && afterControl.history.length === 1,
-    `history=${afterControl?.history?.length ?? "absent"}`
+    "the hook STILL stripped the append while REACTOR_MESSAGE*_SOURCE=mongo (no value can turn it off)",
+    Array.isArray(control.query.__embeddedHistoryAppendsStripped) &&
+      control.query.__embeddedHistoryAppendsStripped.includes("$push.history"),
+    `stripped=${JSON.stringify(control.query.__embeddedHistoryAppendsStripped ?? null)}`
   );
   reporter.check(
-    "control append was NOT stripped (the policy is inactive under mongo)",
-    !control.query.__embeddedHistoryAppendsStripped
+    "the array did NOT come back even with the flag set (the retirement holds)",
+    !("history" in (afterControl ?? {})),
+    `history=${afterControl?.history?.length ?? "absent"}`
   );
 
-  // ══ Phase 3 — TEST: the array must not come back ═════════════════════════════════════════════
+  // ══ Phase 3 — TEST: the array must not come back (default configuration) ═════════════════════
   await unsetArrays();
-  reporter.section("Phase 3 — TEST: source=postgres, the same append must NOT re-create the array");
-  setSource("postgres");
+  reporter.section("Phase 3 — TEST: the same append must NOT re-create the array");
+  // Phase 2 forced the retired flag to `mongo`. Clear it so Phase 3 runs in the deployment's own
+  // configuration rather than behind a stale value — inert, but it should not be left set.
+  delete process.env.REACTOR_MESSAGES_SOURCE;
+  delete process.env.REACTOR_MESSAGE_SOURCE;
 
   const userItem: Record<string, unknown> = {
     id: new mongoose.Types.ObjectId(),

@@ -132,7 +132,7 @@ same reason (they were given that guard earlier).
 
 | script | what it proves |
 |---|---|
-| `pilotWritePath.ts` | an append writes the store and does not re-create the array — with a `source=mongo` control that *must* grow the array, so the instrument can be shown to detect growth |
+| `pilotWritePath.ts` | an append writes the store and does not re-create the array — with Phase 1 proving the reader can see a persisted array, and a phase that forces the retired flag to `mongo` to show no value can turn the strip off |
 | `pilotCompaction.ts` | truncation archives the right rows (system prompt stays active) and the compaction summary lands immediately before the kept messages |
 
 `scripts/lib/instanceProbe.ts` is shared by all of them: connection resolution, store/Mongo probes that
