@@ -212,14 +212,21 @@ describe("write-path policy — save() strips the arrays from the modified set",
   });
 });
 
-describe("write-path policy — source resolution", () => {
-  it("is inactive when no flag is set (the pre-cutover default)", () => {
-    expect(isMessageStoreAuthoritative()).toBe(false);
+describe("write-path policy — the source is not configurable", () => {
+  // The flag was retired with Phase 3c step 2: the message store is authoritative, so the policy is
+  // always active. These are the INVERSE of the pre-retirement assertions. The previous version
+  // asserted the policy was *inactive* under `mongo` — unreachable now — and was replaced rather
+  // than deleted, because what is worth pinning is the retirement itself: no environment value can
+  // turn the policy off, since turning it off would re-create the field the migration removed.
+  it("is active when no flag is set", () => {
+    expect(isMessageStoreAuthoritative()).toBe(true);
   });
 
-  it("is inactive for any value other than postgres", () => {
+  it("is active for any value, including a stale mongo", () => {
     process.env.REACTOR_MESSAGE_SOURCE = "mongo";
-    expect(isMessageStoreAuthoritative()).toBe(false);
+    expect(isMessageStoreAuthoritative()).toBe(true);
+    process.env.REACTOR_MESSAGES_SOURCE = "mongo";
+    expect(isMessageStoreAuthoritative()).toBe(true);
   });
 
   it("is active when the flag resolves to postgres", () => {

@@ -32,50 +32,41 @@ export const MESSAGE_WINDOW = {
 export type MessageSource = "mongo" | "postgres";
 
 /**
- * Environment keys consulted for the message source, in precedence order.
+ * The two spellings that once selected the message source.
  *
- * `REACTOR_MESSAGES_SOURCE` is the documented name and wins. `REACTOR_MESSAGE_SOURCE`
- * is accepted as an alias because the two differ by a single letter and the
- * failure mode of a mismatch is *silent*: an unrecognised key resolves to
- * `mongo`, so a deployment that believes it has flipped the read cutover keeps
- * serving Mongo and reports nothing. That already cost one restart cycle.
+ * RETIRED. The Postgres message store became authoritative when the embedded `history` /
+ * `truncatedHistory` arrays were retired across `reactor_conversations` (Phase 3c step 2,
+ * 2026-09-15), so there is no longer a second source to choose between.
+ *
+ * These keys are still read — but only so that setting one is *reported* rather than silently
+ * ignored. A stale flag is the exact failure mode that cost a restart cycle in §22: a deployment
+ * believing it had selected a source while a different one served it. An inert flag that looks live
+ * is worse than no flag, so the code says so out loud.
  */
 export const MESSAGE_SOURCE_ENV_KEYS = [
   "REACTOR_MESSAGES_SOURCE",
   "REACTOR_MESSAGE_SOURCE",
 ] as const;
 
-/** `postgres` only for the exact value; everything else is `mongo`. */
-const normaliseMessageSource = (raw: unknown): MessageSource =>
-  String(raw ?? "").trim().toLowerCase() === "postgres" ? "postgres" : "mongo";
-
+/**
+ * The message store is authoritative. This is not configurable.
+ *
+ * Kept as a function rather than collapsed to a constant so that its callers — and the branches
+ * they gate — can be deleted in the follow-up cleanup (§59) without a coordinated change here.
+ * Every branch it gates now takes the store path; the `mongo` branches are unreachable.
+ */
 export const resolveMessagesSource = (): MessageSource => {
-  const present = MESSAGE_SOURCE_ENV_KEYS.map((key) => ({
-    key,
-    raw: process.env[key],
-  })).filter((entry) => entry.raw !== undefined && String(entry.raw).trim() !== "");
-
-  if (present.length === 0) return "mongo";
-
-  const resolved = present.map((entry) => ({
-    ...entry,
-    value: normaliseMessageSource(entry.raw),
-  }));
-
-  // If both names are set and disagree, say so and honour the documented one.
-  // Silently picking a winner here would be the same class of bug this alias
-  // exists to prevent.
-  const distinct = new Set(resolved.map((entry) => entry.value));
-  if (distinct.size > 1) {
+  for (const key of MESSAGE_SOURCE_ENV_KEYS) {
+    const raw = process.env[key];
+    if (raw === undefined || String(raw).trim() === "") continue;
     // eslint-disable-next-line no-console
     console.warn(
-      `[reactor] Conflicting message-source configuration: ${resolved
-        .map((entry) => `${entry.key}=${entry.raw}`)
-        .join(", ")}. Using "${resolved[0].value}" from ${resolved[0].key}.`
+      `[reactor] ${key}=${raw} is set, but the message source is no longer configurable: the ` +
+        `Postgres message store is authoritative. Remove this variable — it has no effect.`
     );
   }
 
-  return resolved[0].value;
+  return "postgres";
 };
 
 /**
