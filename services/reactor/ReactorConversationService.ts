@@ -30,9 +30,7 @@ import { sseUriRoot } from "./streaming/sseOrigin";
 import resolveImageUrls from "@reactory/server-modules/reactory-reactor/utils/resolveImageUrls";
 import ReactorMacroService from "./providers/ReactorMacroService";
 import DocumentChunkingService from "./DocumentChunkingService";
-import ReactorConversationMessageService, {
-  resolveMessagesSource,
-} from "./ReactorConversationMessageService";
+import ReactorConversationMessageService from "./ReactorConversationMessageService";
 import { ReactorConversationHistoryItem } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import ReactoryFile, {
   ReactoryFileDocument,
@@ -1526,12 +1524,9 @@ export default class ReactorConversationService
       "before_truncation"
     );
 
-    // Source-aware working set. Under `postgres` the embedded array is no longer written — the
-    // write-path policy froze it — so the transcript this algorithm reasons about has to come from
-    // the message store. The algorithm itself is unchanged; only its input moved. `null` means the
-    // store could not answer, and then the array is used exactly as before.
-    const fromStore = await this.loadActiveHistory(conversationId, conversation.history);
-    const history: any[] = fromStore ?? [...conversation.history];
+    // Working set. The embedded array is retired, so the transcript this algorithm reasons about
+    // comes from the message store. The algorithm itself is unchanged; only its input moved.
+    const history: any[] = await this.loadActiveHistory(conversationId);
     // Only ever written back to Mongo (below). Under `postgres` the displacement is expressed as
     // `archived` rows instead, so this value is simply not consulted.
     const existingTruncatedHistory = conversation.truncatedHistory || [];
@@ -1602,30 +1597,23 @@ export default class ReactorConversationService
       movedToTruncated++;
     }
 
-    const messagesToKeep = [...systemMessages, ...keptNonSystemMessages];
+    // The kept set needs no bookkeeping: the store's active set is everything not archived, and the
+    // displacement is expressed by id below, so the retained transcript is implied. The combined
+    // count is retained only for the log line.
     const messagesToMove = archivedNonSystemMessages;
-
-    // Combine existing truncated history with new messages to move
     const updatedTruncatedHistory = [
       ...existingTruncatedHistory,
       ...messagesToMove,
     ];
 
-    // Persist. Under `mongo` this is the array rewrite, unchanged. Under `postgres` the arrays are
-    // NOT written — they are retired — and the displacement is expressed in the message store
-    // instead: the displaced messages become `archived`, which is exactly what `truncatedHistory`
-    // meant for them. The set is addressed by id rather than by a seq boundary on purpose — a
+    // Persist the displacement in the message store: the displaced messages become `archived`,
+    // which is exactly what `truncatedHistory` meant for them. The embedded arrays are not written
+    // — they are retired. The set is addressed by id rather than by a seq boundary on purpose — a
     // boundary would also archive the system prompt, and truncation keeps system messages.
-    const useMongoArrays = this.messagesSource() === "mongo";
-
     const truncationUpdate: any = {
       tokenCount: tokensUsed,
       updated: new Date(),
     };
-    if (useMongoArrays) {
-      truncationUpdate.history = messagesToKeep;
-      truncationUpdate.truncatedHistory = updatedTruncatedHistory;
-    }
 
     await ReactorConversationModel.findOneAndUpdate(
       { _id: conversationId },
@@ -1633,9 +1621,7 @@ export default class ReactorConversationService
       { new: true }
     ).exec();
 
-    if (!useMongoArrays) {
-      await this.mirrorArchivedMessages(conversationId, messagesToMove, "truncated");
-    }
+    await this.mirrorArchivedMessages(conversationId, messagesToMove, "truncated");
 
     this.sessionLog("info", `Truncated conversation ${conversationId}`, {
       originalTokens: currentTokens,
@@ -1817,11 +1803,9 @@ export default class ReactorConversationService
       throw new Error(`Conversation ${conversationId} not found for compaction`);
     }
 
-    // Source-aware working set — see the note in truncateConversationHistory. Compaction decides
-    // what to displace from this, so reading a frozen array here would archive the wrong set.
-    const fromStore = await this.loadActiveHistory(conversationId, conversation.history);
-    const history: any[] = fromStore ?? [...conversation.history];
-    const existingTruncatedHistory = conversation.truncatedHistory || [];
+    // Working set — see the note in truncateConversationHistory. Compaction decides what to displace
+    // from this, so it comes from the message store rather than any retired array.
+    const history: any[] = await this.loadActiveHistory(conversationId);
     const targetTokens = maxTokens * TOKEN_LIMITS.COMPACTION_TARGET_MULTIPLIER;
 
     // Separate system messages (always keep) from non-system messages
@@ -1941,16 +1925,11 @@ export default class ReactorConversationService
       tool_results: [],
     };
 
-    // Persist. Under `mongo`: the array rewrite, unchanged. Under `postgres`: archive the
-    // displaced messages, then place the summary immediately ahead of the kept ones, so the model's
-    // context reads `[system…, summary, …kept]` — the same transcript the array would have produced.
-    const useMongoArrays = this.messagesSource() === "mongo";
-
+    // Persist the displacement in the message store: archive the displaced messages, then place the
+    // summary immediately ahead of the kept ones, so the model's context reads
+    // `[system…, summary, …kept]` — the same transcript the array would have produced. The embedded
+    // arrays are not written — they are retired.
     const compactionUpdate: any = { updated: new Date() };
-    if (useMongoArrays) {
-      compactionUpdate.history = [...systemMessages, summaryMessage, ...messagesToKeep];
-      compactionUpdate.truncatedHistory = [...existingTruncatedHistory, ...messagesToArchive];
-    }
 
     const updatedConversation = await ReactorConversationModel.findOneAndUpdate(
       { _id: conversationId },
@@ -1958,12 +1937,10 @@ export default class ReactorConversationService
       { new: true },
     ).exec();
 
-    if (!useMongoArrays) {
-      // Order matters: archive first, so that the store's first active non-system row is the first
-      // message compaction kept — which is exactly where the summary has to be placed.
-      await this.mirrorArchivedMessages(conversationId, messagesToArchive, "compacted");
-      await this.mirrorCompactionSummary(conversationId, summaryMessage);
-    }
+    // Order matters: archive first, so that the store's first active non-system row is the first
+    // message compaction kept — which is exactly where the summary has to be placed.
+    await this.mirrorArchivedMessages(conversationId, messagesToArchive, "compacted");
+    await this.mirrorCompactionSummary(conversationId, summaryMessage);
 
     // Recalculate token count with forceReset=true so the reduced history is reflected
     const tokensAfter = await this.updateConversationTokenCount(conversationId, undefined, true);
@@ -2082,37 +2059,30 @@ export default class ReactorConversationService
       "before_retrieval"
     );
 
-    let activeHistory: any[] = conversation.history || [];
-    let truncatedHistory: any[] = conversation.truncatedHistory || [];
+    // The full history comes from the message store: active messages are the un-archived rows and
+    // 'truncated' history is the archived rows — exactly the split Mongo used to express as
+    // `history` / `truncatedHistory`. getAllArchivedMessages is deliberately unbounded: the
+    // full-read contract must not inherit the 500-row window cap.
+    let activeHistory: any[] = [];
+    let truncatedHistory: any[] = [];
 
-    // Step 3b: the full history reads from the configured source. Active messages
-    // are the un-archived rows; 'truncated' history is the archived rows —
-    // exactly the split Mongo expresses as `history` / `truncatedHistory`.
-    // getAllArchivedMessages is deliberately unbounded: the full-read contract
-    // must not inherit the 500-row window cap.
-    if (this.messagesSource() === "postgres") {
-      const store = this.getMessageStore();
-      if (store) {
-        try {
-          const [activeRows, archivedRows] = await Promise.all([
-            store.getActiveMessages(chatSessionId),
-            store.getAllArchivedMessages(chatSessionId),
-          ]);
-          if (activeRows.length > 0 || activeHistory.length === 0) {
-            activeHistory = store.toMessages(activeRows);
+    const store = this.getMessageStore();
+    if (store) {
+      try {
+        const [activeRows, archivedRows] = await Promise.all([
+          store.getActiveMessages(chatSessionId),
+          store.getAllArchivedMessages(chatSessionId),
+        ]);
+        activeHistory = store.toMessages(activeRows);
+        truncatedHistory = store.toMessages(archivedRows);
+      } catch (error) {
+        (this.context as any)?.warn?.(
+          "Full conversation history read from the message store failed",
+          {
+            chatSessionId,
+            error: error instanceof Error ? error.message : String(error),
           }
-          if (archivedRows.length > 0 || truncatedHistory.length === 0) {
-            truncatedHistory = store.toMessages(archivedRows);
-          }
-        } catch (error) {
-          (this.context as any)?.warn?.(
-            "Full conversation history read from Postgres failed; using Mongo",
-            {
-              chatSessionId,
-              error: error instanceof Error ? error.message : String(error),
-            }
-          );
-        }
+        );
       }
     }
 
@@ -2288,47 +2258,18 @@ export default class ReactorConversationService
       throw new Error(`Session ${chatSessionId} not found`);
     }
     
-    let messageFound = false;
-    let ratedByStore = false;
-
-    // Under the store source the array no longer holds post-cutover messages, so the lookup has to
-    // happen against the row. Otherwise the write lands on a document that no longer matches and the
-    // rating is silently lost.
-    const ratingStore = this.messagesSource() === "postgres" ? this.getMessageStore() : null;
+    // The rating is written to the message row. The embedded array is retired, so a document-based
+    // lookup would find nothing and the rating would be silently lost.
+    const ratingStore = this.getMessageStore();
     if (ratingStore) {
       const rated = await ratingStore.setMessageRatingByMongoId(String(messageId), rating as any);
       if (rated > 0) {
-        messageFound = true;
-        ratedByStore = true;
         ratedItem = { id: messageId, rating };
       }
     }
 
-    if (!messageFound && session.history && session.history.length > 0) {
-      const messageIndex = session.history.findIndex((msg: any) => msg.id?.toString() === messageId || msg.id === messageId);
-      if (messageIndex >= 0) {
-        // `rating` arrives as a GraphQL String; the history schema field is a
-        // Number, and Mongoose casts on save. Cast here to preserve that runtime
-        // behaviour now that `session` is typed rather than `any`.
-        session.history[messageIndex].rating = rating as any;
-        ratedItem = session.history[messageIndex];
-        messageFound = true;
-      }
-    }
-    
-    if (!messageFound) {
+    if (!ratedItem) {
       throw new Error(`Message ${messageId} not found in session ${chatSessionId}`);
-    }
-    
-    // When the store handled it, the row is already written and there is nothing to mirror: the
-    // mirror maps a whole message onto the row, so passing a synthesised `{ id, rating }` would
-    // blank every other column.
-    if (!ratedByStore) {
-      session.markModified('history');
-      await session.save();
-
-      // Mirror so the rating is visible under the Postgres read source too.
-      await this.mirrorUpdatedMessage(chatSessionId, ratedItem);
     }
 
     return session;
@@ -2343,7 +2284,6 @@ export default class ReactorConversationService
       throw new Error(`Session ${chatSessionId} not found`);
     }
 
-    let updatedSystemItem: any = null;
     let appendedSystemItem: any = null;
     
     // Update the persona in the session state. `persona` is not declared on the
@@ -2355,15 +2295,13 @@ export default class ReactorConversationService
     }
     sessionAsAny.persona.persona = systemPrompt;
 
-    // Under the store source the system message lives in a row, not the array. Update it there and
-    // learn whether one existed, so the same "edit or append" decision is preserved.
-    const promptStore = this.messagesSource() === "postgres" ? this.getMessageStore() : null;
-    let systemPromptHandledByStore = false;
+    // The system message lives in a row, not the retired array. Update it there and learn whether
+    // one existed, so the same "edit or append" decision is preserved.
+    const promptStore = this.getMessageStore();
     if (promptStore) {
       const changed = await promptStore.setSystemMessageContent(chatSessionId, systemPrompt);
-      systemPromptHandledByStore = changed > 0;
       if (changed === 0) {
-        // No system row yet: append one, exactly as the Mongo branch unshifts one.
+        // No system row yet: append one.
         appendedSystemItem = {
           id: new ObjectId(),
           role: 'system',
@@ -2374,38 +2312,6 @@ export default class ReactorConversationService
       }
     }
 
-    // Update the system message in the history if it exists
-    if (!systemPromptHandledByStore && session.history && session.history.length > 0) {
-      const systemMessageIndex = session.history.findIndex((msg: any) => msg.role === 'system');
-      if (systemMessageIndex >= 0) {
-        session.history[systemMessageIndex].content = systemPrompt;
-        // Previously never assigned, so the mirror below never fired and the edit stayed invisible
-        // to a store-backed read.
-        updatedSystemItem = session.history[systemMessageIndex];
-      } else {
-        // If no system message exists, unshift it to the beginning
-        const newSystemItem: any = {
-          id: new ObjectId(),
-          role: 'system',
-          content: systemPrompt,
-          timestamp: new Date(),
-          tool_results: [],
-        };
-        session.history.unshift(newSystemItem);
-        appendedSystemItem = newSystemItem;
-      }
-    }
-    
-    if (!systemPromptHandledByStore) {
-      session.markModified('history');
-      await session.save();
-
-      // Mirror so the edit is visible under the Postgres read source too. An edit
-      // of the existing system message is an update; a newly created one is an append.
-      if (updatedSystemItem) {
-        await this.mirrorUpdatedMessage(chatSessionId, updatedSystemItem);
-      }
-    }
     if (appendedSystemItem) {
       await this.mirrorAppendedMessage(chatSessionId, appendedSystemItem);
     }
@@ -2731,33 +2637,8 @@ export default class ReactorConversationService
   ): Promise<void> {
     if (!chatSessionId || !toolCallId) return;
     try {
-      // The filter below is against the embedded array, which is no longer written under the store
-      // source — it would match nothing. The mirror is the real write in that case.
-      const statusStore = this.messagesSource() === "postgres" ? this.getMessageStore() : null;
-      if (!statusStore) {
-        await ReactorConversationModel.findOneAndUpdate(
-          {
-            _id: chatSessionId,
-            "history.tool_calls.id": toolCallId,
-          },
-          {
-            $set: {
-              "history.$[msg].tool_calls.$[tc].status": status,
-              updated: new Date(),
-            },
-          },
-          {
-            arrayFilters: [
-              { "msg.tool_calls.id": toolCallId },
-              { "tc.id": toolCallId },
-            ],
-          }
-        ).exec();
-      }
-
-      // Mirror the status change: the arrayFilters update above touches Mongo
-      // only, so under the Postgres read source the tool call would keep its
-      // previous status indefinitely.
+      // The tool call lives on a message row, not the retired embedded array — an arrayFilters
+      // update would match nothing. The mirror is the write.
       await this.mirrorToolCallStatus(chatSessionId, toolCallId, status);
     } catch (e: any) {
       this.context.error(`Failed to update tool call status for ${toolCallId} in session ${chatSessionId}: ${e.message}`);
@@ -3461,35 +3342,31 @@ export default class ReactorConversationService
     }
 
     if (search && typeof search === 'string' && search.trim() !== '') {
-      // The title always matches from the session document. Message-body matches
-      // come from the configured source: a regex across the embedded array, or —
-      // after the cutover — the ids of conversations whose active messages match
-      // `search_text`, which is an indexed predicate instead of a scan across a
-      // multi-megabyte document.
+      // The title always matches from the session document. Message-body matches come from the
+      // message store: the ids of conversations whose active messages match `search_text`, which is
+      // an indexed predicate instead of a scan across a multi-megabyte document.
       const searchClauses: any[] = [
         { title: { $regex: search, $options: 'i' } },
       ];
 
-      let messageClause: any = {
-        'history.content': { $regex: search, $options: 'i' },
-      };
-
-      if (this.messagesSource() === 'postgres') {
-        const store = this.getMessageStore();
-        if (store) {
-          const ids = await store.searchConversationIds(search, 100_000);
-          messageClause = {
-            _id: {
-              $in: ids
-                .map((value) => String(value ?? '').trim())
-                .filter((value) => ObjectId.isValid(value))
-                .map((value) => new ObjectId(value)),
-            },
-          };
-        }
+      const store = this.getMessageStore();
+      if (store) {
+        const ids = await store.searchConversationIds(search, 100_000);
+        searchClauses.push({
+          _id: {
+            $in: ids
+              .map((value) => String(value ?? '').trim())
+              .filter((value) => ObjectId.isValid(value))
+              .map((value) => new ObjectId(value)),
+          },
+        });
+      } else {
+        (this.context as any)?.warn?.(
+          "Message-store search is unavailable; conversation search is limited to titles",
+          { search: String(search).slice(0, 80) }
+        );
       }
 
-      searchClauses.push(messageClause);
       query.$or = searchClauses;
     }
 
@@ -3601,15 +3478,10 @@ export default class ReactorConversationService
         ? history[history.length - 1]
         : null;
 
-    // Under `mongo` nothing changes: the array write is authoritative and Mongo assigned the
-    // `_id` the row must be keyed on.
-    if (this.messagesSource() === "mongo") {
-      await this.mirrorAppendedMessage(conversationId, persisted ?? fallback);
-      return;
-    }
-
-    // Under `postgres` the write-path policy (models/ReactorChatState.ts) removes `$push.history`
-    // from the update, so Mongo assigned no `_id` and there is no persisted item to read.
+    // The write-path policy (models/ReactorChatState.ts) removes `$push.history` from the update for
+    // an existing document, so Mongo assigned no `_id` and there is no persisted item to read. A
+    // brand-new document is exempt from the policy, so its push does land and Mongo owns that item's
+    // `_id` — which is why the two cases below must still be told apart.
     //
     // The two cases must be kept apart, because getting them wrong is silent in opposite
     // directions:
@@ -3999,11 +3871,27 @@ export default class ReactorConversationService
   }
 
   /**
-   * The configured message source. `mongo` unless REACTOR_MESSAGES_SOURCE is
-   * exactly `postgres`.
+   * Whether a conversation already holds a system message in the message store.
+   *
+   * The embedded `history` array used to answer this (`$size: 1` with a system role), and the answer
+   * decides whether a reused conversation needs the persona prompt pushed. The array no longer
+   * records messages, so it would answer "no" for every conversation — and the reuse predicate now
+   * treats an absent array as blank, so every reuse of a system-only conversation would append a
+   * second persona prompt.
+   *
+   * Fails open to `false` ("no prompt yet, push one"): a fresh conversation is the common case, and a
+   * missing persona prompt is worse than a duplicate one. A duplicate is also visible as two system
+   * rows rather than silent.
    */
-  private messagesSource(): "mongo" | "postgres" {
-    return resolveMessagesSource();
+  private async conversationHasSystemPrompt(conversationId?: string): Promise<boolean> {
+    if (!conversationId) return false;
+    const store = this.getMessageStore();
+    if (!store) return false;
+    try {
+      return await store.hasSystemMessage(conversationId);
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -4043,7 +3931,6 @@ export default class ReactorConversationService
    * an unrelated behaviour change smuggled in with the cutover.
    */
   private async resolveHistoryWindow(
-    session: any,
     conversationId: string,
     options: {
       historyLimit?: number;
@@ -4052,86 +3939,73 @@ export default class ReactorConversationService
       includeArchived?: boolean;
     }
   ): Promise<{ items: any[]; window: IReactorHistoryWindow }> {
-    if (this.messagesSource() === "postgres") {
-      const store = this.getMessageStore();
-      if (store) {
-        try {
-          const { items, window } = await store.getHistoryWindow(
+    const store = this.getMessageStore();
+    if (store) {
+      try {
+        const { items, window } = await store.getHistoryWindow(
+          conversationId,
+          {
+            limit: options.historyLimit,
+            before: options.before,
+            includeSystem: options.includeSystem,
+            includeArchived: options.includeArchived === true,
+          }
+        );
+        // Decided here rather than in the window itself: the count is a client
+        // affordance (whether to offer the expander), not part of the window
+        // selection contract the parity check pins.
+        window.archivedCount = await store.countArchived(conversationId);
+        return { items, window };
+      } catch (error) {
+        (this.context as any)?.warn?.(
+          "History window read from the message store failed",
+          {
             conversationId,
-            {
-              limit: options.historyLimit,
-              before: options.before,
-              includeSystem: options.includeSystem,
-              includeArchived: options.includeArchived === true,
-            }
-          );
-          // Decided here rather than in the window itself: the count is a client
-          // affordance (whether to offer the expander), not part of the window
-          // selection contract the parity check pins.
-          window.archivedCount = await store.countArchived(conversationId);
-          return { items, window };
-        } catch (error) {
-          (this.context as any)?.warn?.(
-            "History window read from Postgres failed; falling back to Mongo",
-            {
-              conversationId,
-              error: error instanceof Error ? error.message : String(error),
-            }
-          );
-        }
+            error: error instanceof Error ? error.message : String(error),
+          }
+        );
       }
     }
 
-    const fallback = this.buildHistoryWindow(session?.history, {
-      historyLimit: options.historyLimit,
-      before: options.before,
-      includeSystem: options.includeSystem,
-    });
-    // Mongo keeps displaced messages in truncatedHistory, already on the
-    // document, so the count is free here.
-    fallback.window.archivedCount = Array.isArray(session?.truncatedHistory)
-      ? session.truncatedHistory.length
-      : 0;
-    return fallback;
+    // The store owns the window. If it cannot answer, an empty window is the only honest result —
+    // there is no second copy of the transcript to fall back to.
+    return {
+      items: [],
+      window: {
+        total: 0,
+        returned: 0,
+        hasMoreBefore: false,
+        oldestId: null,
+        newestId: null,
+        archivedCount: 0,
+      },
+    };
   }
 
   /**
-   * The complete active transcript from the configured source, for full reads
+   * The complete active transcript from the message store, for full reads
    * (LLM context assembly, MCP tool dispatch, the CLI transport).
    *
-   * Returns null when the Mongo array should be used instead — either because
-   * the source is `mongo`, the store is unavailable, or the store holds no rows
-   * for a conversation Mongo does have (a mirror gap must not empty a transcript
-   * the model then reasons over).
+   * The store is the only source: the embedded array is retired, so there is no
+   * second copy to fall back to. An unavailable or failing store degrades to an
+   * empty transcript rather than to a stale array that would disagree with what
+   * the user is shown.
    */
-  private async loadActiveHistory(
-    conversationId: string,
-    mongoHistory: any[] | undefined
-  ): Promise<any[] | null> {
-    if (this.messagesSource() !== "postgres") return null;
-
+  private async loadActiveHistory(conversationId: string): Promise<any[]> {
     const store = this.getMessageStore();
-    if (!store) return null;
+    if (!store) return [];
 
     try {
-      const rows = await store.getActiveMessages(conversationId);
-      if (rows.length === 0 && Array.isArray(mongoHistory) && mongoHistory.length > 0) {
-        (this.context as any)?.warn?.(
-          "Postgres holds no messages for a conversation Mongo does; using Mongo",
-          { conversationId, mongoItems: mongoHistory.length }
-        );
-        return null;
-      }
-      return store.toMessages(rows);
+      return store.toMessages(await store.getActiveMessages(conversationId));
     } catch (error) {
       (this.context as any)?.warn?.(
-        "Full history read from Postgres failed; falling back to Mongo",
+        "Full history read from the message store failed",
         {
           conversationId,
           error: error instanceof Error ? error.message : String(error),
         }
       );
-      return null;
+      return [];
     }
   }
 
@@ -4176,7 +4050,6 @@ export default class ReactorConversationService
     // long-running session cannot flood the UI with thousands of items.
     if (loadOptions) {
       const { items, window: historyWindow } = await this.resolveHistoryWindow(
-        session,
         id,
         {
           historyLimit: loadOptions.historyLimit,
@@ -4187,13 +4060,10 @@ export default class ReactorConversationService
       session.history = items;
       session.historyWindow = historyWindow;
     } else {
-      // Full read. Under the Mongo source this is unchanged — the embedded array
-      // is already on the document. Under the Postgres source the transcript has
-      // to come from the message table, or every caller that needs the whole
-      // conversation (LLM assembly, MCP toolsCall, the CLI transport) would see
-      // whatever the frozen Mongo array held at cutover.
-      const active = await this.loadActiveHistory(id, session.history);
-      if (active) session.history = active;
+      // Full read. The transcript comes from the message table, or every caller
+      // that needs the whole conversation (LLM assembly, MCP toolsCall, the CLI
+      // transport) would see whatever the retired array last held.
+      session.history = await this.loadActiveHistory(id);
     }
 
     session.context = this.context;
@@ -4258,46 +4128,24 @@ export default class ReactorConversationService
           : null,
     });
 
-    if (this.messagesSource() === "postgres") {
-      const store = this.getMessageStore();
-      if (store) {
-        try {
-          const rows = await store.getAllArchivedMessages(id, max);
-          const items = store.toMessages(rows);
-          return { id, items, window: decorate(items) };
-        } catch (error) {
-          (this.context as any)?.warn?.(
-            "Archived history read from Postgres failed; falling back to Mongo",
-            {
-              conversationId: id,
-              error: error instanceof Error ? error.message : String(error),
-            }
-          );
-        }
+    const store = this.getMessageStore();
+    if (store) {
+      try {
+        const rows = await store.getAllArchivedMessages(id, max);
+        const items = store.toMessages(rows);
+        return { id, items, window: decorate(items) };
+      } catch (error) {
+        (this.context as any)?.warn?.(
+          "Archived history read from the message store failed",
+          {
+            conversationId: id,
+            error: error instanceof Error ? error.message : String(error),
+          }
+        );
       }
     }
 
-    const full: any = await ReactorConversationModel.findOne({
-      _id: new ObjectId(id),
-      user: this.context.user,
-    })
-      .select("truncatedHistory")
-      .exec();
-
-    const truncated: any[] = Array.isArray(full?.truncatedHistory)
-      ? full.truncatedHistory
-      : [];
-    const items = truncated.slice(0, max).map((entry: any) => {
-      const plain =
-        typeof entry?.toObject === "function" ? entry.toObject() : entry;
-      return {
-        ...plain,
-        archived: true,
-        archivedReason: plain?.archivedReason ?? "truncated",
-      };
-    });
-
-    return { id, items, window: decorate(items) };
+    return { id, items: [], window: decorate([]) };
   }
 
   async getConversationHistoryPage(args: {
@@ -4326,7 +4174,6 @@ export default class ReactorConversationService
     }
 
     const { items, window: historyWindow } = await this.resolveHistoryWindow(
-      session,
       id,
       {
         historyLimit: limit,
@@ -4476,7 +4323,13 @@ export default class ReactorConversationService
       use_case: useCase === 'standalone'
         ? { $in: ['standalone', null, undefined] }
         : useCase,
+      // A conversation is a reuse candidate when it carries no message array at all, an empty one, or
+      // a single system message. The `$exists: false` arm is load-bearing: a new document persists
+      // `history: []` (the write-path policy exempts it), but a document whose array was retired
+      // carries no field at all — and `{ $size: 0 }` does NOT match a missing field. Without that
+      // arm, blank conversations that lost their array could never be reused.
       $or: [
+        { history: { $exists: false } },
         { history: { $size: 0 } }, // Empty history
         {
           history: { $size: 1 },
@@ -4485,15 +4338,15 @@ export default class ReactorConversationService
       ],
     };
 
-    // The array above used to be the record of usage: a conversation that had been used grew a
-    // non-empty `history` and stopped matching. After the write-path cutover it is never written, so
-    // a conversation with hundreds of messages still reads as blank and every subsequent "new chat"
-    // would re-use it — the user never gets a new conversation, and is dropped into an old one.
+    // The array above stopped being the record of usage when the write path cut over: it is no longer
+    // written, so a conversation with hundreds of messages still reads as blank and every subsequent
+    // "new chat" would re-use it — the user never gets a new conversation, and is dropped into an old
+    // one.
     //
-    // When the message store is authoritative, ask it which candidates actually hold a transcript
-    // and exclude those. Bounded: the most recent candidates are the sensible ones to reuse anyway,
-    // and the cap keeps this to one extra round trip.
-    const reuseStore = this.messagesSource() === "postgres" ? this.getMessageStore() : null;
+    // So the store is asked which candidates actually hold a transcript, and those are excluded.
+    // Bounded: the most recent candidates are the sensible ones to reuse anyway, and the cap keeps
+    // this to one extra round trip.
+    const reuseStore = this.getMessageStore();
     if (reuseStore) {
       const reuseCandidateLimit = 25;
       const candidates: any[] = await ReactorConversationModel.find(reuseFilter)
@@ -6556,7 +6409,7 @@ export default class ReactorConversationService
       await this.mirrorPersistedAppend(chatSessionId, toolResultConversation, toolResult);
       // Backfill tool_results on the original assistant message that initiated this tool call
       if (callId) {
-        const macroResultStore = this.messagesSource() === "postgres" ? this.getMessageStore() : null;
+        const macroResultStore = this.getMessageStore();
         const macroResultEntry = {
           id: callId,
           name: macro,
@@ -6818,7 +6671,7 @@ export default class ReactorConversationService
       };
 
       // 1. Try to replace the placeholder tool message in history
-      const placeholderStore = this.messagesSource() === "postgres" ? this.getMessageStore() : null;
+      const placeholderStore = this.getMessageStore();
       let updateResult: any = null;
       if (placeholderStore) {
         // The lookup is by `tool_call_id` inside the frozen array; the row is found instead. A
@@ -7940,12 +7793,10 @@ export default class ReactorConversationService
       const removedMessageIds: string[] = [];
       const updatedMessages: any[] = [];
 
-      // The working set must come from the store under the store source. The array is frozen, so
-      // iterating it examines a stale set — and its `Array.isArray` guard would skip the ENTIRE
-      // operation once the array is retired, leaving the tool call visible in the transcript.
-      const storeHistory = await this.loadActiveHistory(chatSessionId, conversation.history);
-      const workingHistory: any[] =
-        storeHistory ?? (Array.isArray(conversation.history) ? conversation.history : []);
+      // The working set comes from the message store. The array is retired, so iterating it would
+      // examine an empty set — and its `Array.isArray` guard would skip the ENTIRE operation,
+      // leaving the tool call visible in the transcript.
+      const workingHistory: any[] = await this.loadActiveHistory(chatSessionId);
 
       {
         for (let i = workingHistory.length - 1; i >= 0; i--) {
@@ -7973,8 +7824,7 @@ export default class ReactorConversationService
             if (!hasContent && !hasOtherCalls && !hasThinking && !hasImages) {
               const removedId = this.historyItemId(msg);
               if (removedId) removedMessageIds.push(removedId);
-              // Only the document is spliced; under the store source the removal is mirrored below.
-              if (!storeHistory) conversation.history.splice(i, 1);
+              // The removal is expressed in the store by the mirrors below.
             } else {
               updatedMessages.push(msg);
             }
@@ -7982,20 +7832,15 @@ export default class ReactorConversationService
             // Remove standalone tool message for this tool call
             const removedId = this.historyItemId(msg);
             if (removedId) removedMessageIds.push(removedId);
-            // Only the document is spliced; under the store source the removal is mirrored below.
-            if (!storeHistory) conversation.history.splice(i, 1);
+            // The removal is expressed in the store by the mirrors below.
             modified = true;
           }
         }
       }
 
       if (modified) {
-        // Under the store source nothing on the document changed; the mirrors below are the write.
-        // (The strip policy would refuse to persist the array anyway, so this is clarity, not safety.)
-        if (!storeHistory) {
-          conversation.markModified('history');
-          await conversation.save();
-        }
+        // Nothing on the document is written: the message store is authoritative and the mirrors
+        // below are the write.
 
         // Mirror the mutation so the deleted tool call disappears under both
         // read sources, not just Mongo.
@@ -8337,10 +8182,11 @@ export default class ReactorConversationService
       const systemPromptTemplate = persona?.prompts?.["system"];
 
       // Only add the system prompt if the conversation doesn't already have one.
-      // getNewConversation() may return a reused conversation that already contains
-      // a system message (it matches conversations with history.$size: 1 & role: "system").
-      const hasSystemMessage = conversation.history.some(
-        (msg: any) => msg.role === "system"
+      // getNewConversation() may return a reused conversation that already carries one. The embedded
+      // array no longer records messages, so asking it would answer "no" every time and every reuse
+      // would append a second persona prompt — the store answers instead.
+      const hasSystemMessage = await this.conversationHasSystemPrompt(
+        conversation._id?.toString()
       );
 
       // Phase 3 step 3b: capture the history length *before* the system message(s)

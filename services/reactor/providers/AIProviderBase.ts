@@ -20,7 +20,6 @@ import { AIProviderError } from "./AIProviderError";
 import { resolvePromptDirectives } from "../../../ai/persona/loader/system-prompt";
 
 import { loadHistoryForContext } from "../conversationHistoryLoader";
-import { resolveMessagesSource } from "../ReactorConversationMessageService";
 
 abstract class AIProviderBase implements IAIProviderService {
   context: Reactory.Server.IReactoryContext;
@@ -38,7 +37,7 @@ abstract class AIProviderBase implements IAIProviderService {
    * Persists the chat state to the database
    */
   protected async persistChatState(): Promise<void> {
-    const { history, personaId, modelId, started, id, sseSession, vars } = this.chatState;
+    const { personaId, modelId, started, id, sseSession, vars } = this.chatState;
     const { user } = this.context;
     const meta = {
       summary: "Chat session",
@@ -60,14 +59,10 @@ abstract class AIProviderBase implements IAIProviderService {
         meta
       };
 
-      // Phase 3: only the Mongo source keeps the embedded `history` array
-      // authoritative. Under `postgres` the message store is the source of truth,
-      // so writing the whole array here would (a) re-create the field 3c removes
-      // and (b) race the `$push` + mirror writes the conversation service already
-      // performs for the same turn. Metadata is still persisted either way.
-      if (resolveMessagesSource() === "mongo") {
-        updateData.history = history;
-      }
+      // The message store is the source of truth, so the embedded `history` array is never written
+      // here: doing so would (a) re-create the retired field and (b) race the `$push` + mirror
+      // writes the conversation service already performs for the same turn. Metadata is still
+      // persisted either way.
 
       // Only set started and created if this is a new conversation
       if (!this.chatStateModel || !this.chatStateModel._id) {
@@ -109,12 +104,8 @@ abstract class AIProviderBase implements IAIProviderService {
         }).exec();
         
         if (existingConversation) {
-          // Update the existing conversation instead. Same Phase 3 rule as the
-          // upsert above: the embedded array is written only under the Mongo
-          // source, so `postgres` cannot re-create the removed field.
-          if (resolveMessagesSource() === "mongo") {
-            existingConversation.history = history;
-          }
+          // Update the existing conversation instead. Same rule as the upsert above: the embedded
+          // array is never written, so the retired field cannot be re-created.
           existingConversation.updated = new Date();
           existingConversation.sseSessionId = sseSession;
           existingConversation.vars = vars;

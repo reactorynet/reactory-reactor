@@ -41,10 +41,18 @@ import {
 const args = process.argv.slice(2);
 const KEEP = args.includes("--keep");
 
-/** Exactly the predicate `getNewConversation` uses to decide a conversation looks reusable. */
+/**
+ * Exactly the predicate `getNewConversation` starts from when it looks for a reusable conversation,
+ * before the message store excludes the ones that already hold a transcript.
+ *
+ * The `$exists: false` arm must match the method exactly: a document whose array was retired carries
+ * no field at all, and `{ $size: 0 }` does NOT match a missing field — so the guard would report a
+ * failure that is really a stale predicate.
+ */
 const LOOKS_BLANK: Record<string, any> = {
   _id: { $ne: null },
   $or: [
+    { history: { $exists: false } },
     { history: { $size: 0 } },
     { history: { $size: 1 }, "history.0.role": "system" },
   ],

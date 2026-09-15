@@ -1,6 +1,4 @@
-import ReactorConversationMessageService, {
-  resolveMessagesSource,
-} from "./ReactorConversationMessageService";
+import ReactorConversationMessageService from "./ReactorConversationMessageService";
 
 /**
  * Resolve a conversation's ACTIVE history for use as **model context**.
@@ -30,7 +28,6 @@ export const loadHistoryForContext = async (
   context?: { warn?: (message: string, data?: any) => void }
 ): Promise<any[] | null> => {
   if (!conversationId) return null;
-  if (resolveMessagesSource() !== "postgres") return null;
 
   try {
     const store = new ReactorConversationMessageService();

@@ -13,8 +13,9 @@
  *  1. How do I connect? — resolved from the environment, with the module's own precedence
  *     (`REACTORY_POSTGRES_*` → `POSTGRES_*`, `MONGOOSE`/`MONGODB_URI`/`MONGO_*`). No instance
  *     specific literals remain in the scripts.
- *  2. What is this instance? — the resolved source, whether each store is reachable, and whether
- *     the message table exists and holds rows.
+ *  2. What is this instance? — the source **observed from the data** (the env flag that used to
+ *     select it was retired in Phase 3c step 3), whether each store is reachable, and whether the
+ *     message table exists and holds rows.
  *  3. What should the write path be doing here? — derived, not assumed, so the scripts invert their
  *     expectations where they must and report **NOT APPLICABLE** where a prerequisite is absent
  *     rather than inventing a verdict.
@@ -42,11 +43,43 @@ const first = (...values: Array<string | undefined>): string | undefined => {
 };
 
 /**
- * Which store is authoritative, resolved the same way the running service resolves it.
+ * Which store is authoritative, observed from the instance's DATA rather than an environment flag.
  *
- * Deliberately reads both spellings: the alias exists because a one-letter difference silently
- * resolved to `mongo` for a whole cutover (§22), and a script that read only the documented key
- * would report a different instance than the one the server is actually serving.
+ * Phase 3c step 3 **retired the flag**: the service's `resolveMessagesSource()` now returns a
+ * constant, so a script that read `REACTOR_MESSAGES_SOURCE` would report `mongo` for an instance
+ * whose arrays are gone — and then expect the array to grow, which is a false failure. That is
+ * exactly what happened the first time this instance was re-checked after the flag was retired.
+ *
+ * The only durable evidence that the embedded array is authoritative is a document that still
+ * carries a **non-empty** one. So:
+ *
+ *  - at least one conversation with a non-empty array → the array is in use here (`mongo`);
+ *  - none → the arrays are retired and the store is the only source (`postgres`).
+ *
+ * This also stays correct on an un-migrated instance, which is the point: the question is answered
+ * by the data, not by the deployment's intent.
+ */
+export const deriveMessageSource = (
+  mongo: Pick<MongoProbe, "conversationsWithHistory">
+): MessageSource => (mongo.conversationsWithHistory > 0 ? "mongo" : "postgres");
+
+/**
+ * The env keys that used to select the source, consulted only to *report* that they are ignored.
+ *
+ * The alias exists because a one-letter difference silently resolved to `mongo` for a whole cutover
+ * (§22), so a stale value is worth naming even though it now has no effect.
+ */
+export const configuredSourceKeys = (): string[] =>
+  SOURCE_KEYS.filter((key) => {
+    const raw = process.env[key];
+    return raw !== undefined && String(raw).trim() !== "";
+  });
+
+/**
+ * Which store the environment *claims* is authoritative.
+ *
+ * RETIRED as a decision input — see `deriveMessageSource`. Kept so the suite can still pin the
+ * alias-tolerant parsing, and so a script can report a stale value as stale.
  */
 export const resolveMessageSource = (): MessageSource => {
   const raw = first(...SOURCE_KEYS.map((key) => process.env[key]));
@@ -276,9 +309,14 @@ export const probeInstance = async (options?: {
   mongoUri?: string;
   pgConfig?: PgConfig;
 }): Promise<InstanceProbe> => {
-  const messageSource = resolveMessageSource();
+  const configuredSource = resolveMessageSource();
+  const configuredKeys = configuredSourceKeys();
   const store = await probeStore(options?.pgConfig ?? resolvePgConfig());
   const mongo = await probeMongo(options?.mongoUri ?? resolveMongoUri());
+
+  // Derived from the DATA, not the environment — the flag was retired in step 3, so reading it would
+  // report `mongo` for an instance whose arrays are gone and then assert that the array grows.
+  const messageSource = deriveMessageSource(mongo);
 
   const notes: string[] = [];
   if (store.reason) notes.push(`store: ${store.reason}`);
@@ -286,8 +324,21 @@ export const probeInstance = async (options?: {
   if (store.reachable && store.tableExists && store.rows === 0) {
     notes.push(`the store table exists but holds no rows — a migrated instance would not be here`);
   }
+  if (configuredKeys.length > 0) {
+    notes.push(
+      `${configuredKeys.join(", ")}=${configuredSource} is set but IGNORED: the message source is no ` +
+        `longer configurable, and this check derives the source from the data instead. Remove the variable.`
+    );
+  }
+  if (mongo.collectionExists) {
+    notes.push(
+      messageSource === "mongo"
+        ? `${mongo.conversationsWithHistory} conversation(s) still carry a non-empty embedded array, so the array is in use here`
+        : `no conversation carries a non-empty embedded array, so the arrays are retired and the store is the only source`
+    );
+  }
   if (messageSource === "postgres" && !(store.reachable && store.tableExists)) {
-    notes.push(`source resolves to postgres but the store is unusable; the service fails open to Mongo`);
+    notes.push(`the arrays are retired here but the store is unusable, so the service persists no message anywhere`);
   }
 
   return { messageSource, store, mongo, expectations: deriveWriteExpectations(messageSource, store), notes };

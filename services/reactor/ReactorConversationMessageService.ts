@@ -479,6 +479,32 @@ export default class ReactorConversationMessageService {
   }
 
   /**
+   * Whether a conversation already holds a system message.
+   *
+   * `getNewConversation` may hand back a conversation that already carries the persona prompt, and
+   * the embedded `history` array used to answer that question (`$size: 1` with role `system`). That
+   * array no longer records messages, so a reuse would see "no system message" and append a second
+   * persona prompt — the store answers instead.
+   */
+  async hasSystemMessage(conversationId: string): Promise<boolean> {
+    const repo = this.getRepository();
+    if (!repo) return false;
+
+    try {
+      const count = await repo
+        .createQueryBuilder('m')
+        .where('m.conversationId = :conversationId', { conversationId })
+        .andWhere('m.role = :role', { role: 'system' })
+        .getCount();
+      return count > 0;
+    } catch {
+      // The caller decides the failure direction; report "no message" so a fresh conversation still
+      // receives its prompt.
+      return false;
+    }
+  }
+
+  /**
    * Of the given conversations, which hold a real transcript?
    *
    * A conversation has content when it has at least one non-system row, active or archived. This is
