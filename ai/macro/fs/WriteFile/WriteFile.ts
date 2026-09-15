@@ -3,6 +3,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { WriteFileProps, WriteFileResult } from '../types';
 import { MacroErrorCode } from '../../errors';
+import { digestPayload, describeDigest, summarisePayload } from '../payloadSummary';
 import { ChatState, Macro, MacroComponentDefinition } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import logger from '@reactory/server-core/logging';
 
@@ -55,13 +56,24 @@ export const WriteFile: Macro<WriteFileResult, WriteFileProps> = async (
     end = -1
   } = props;
 
+  // The result carries a DIGEST of the payload, never the payload itself.
+  //
+  // `params` is part of the tool result, which is appended to the conversation — so returning
+  // `props` verbatim re-sends the entire content on EVERY path, including the error paths below.
+  // For a large write that spends the session's context budget restating bytes the caller already
+  // has, and the size is unbounded. Computed once here so every return is bounded.
+  const resultParams: WriteFileProps = {
+    ...props,
+    content: summarisePayload(props.content, 'content'),
+  };
+
   if (!path) {
     return {
       success: false,
       error: 'No path provided',
       errorCode: MacroErrorCode.VALIDATION_REQUIRED_PARAM,
       tool: 'writeFile',
-      params: props
+      params: resultParams
     };
   }
 
@@ -71,7 +83,7 @@ export const WriteFile: Macro<WriteFileResult, WriteFileProps> = async (
       error: 'No content was provided',
       errorCode: MacroErrorCode.VALIDATION_REQUIRED_PARAM,
       tool: 'writeFile',
-      params: props
+      params: resultParams
     };
   }
 
@@ -108,7 +120,7 @@ export const WriteFile: Macro<WriteFileResult, WriteFileProps> = async (
         error: 'File already exists and overwrite is set to false',
         errorCode: MacroErrorCode.VALIDATION_INVALID_PARAM,
         tool: 'writeFile',
-        params: props
+        params: resultParams
       };
     }
 
@@ -123,7 +135,7 @@ export const WriteFile: Macro<WriteFileResult, WriteFileProps> = async (
           error: `Refusing to ${mode} ${targetPath}: file is held open by another process. ${handleCheck.details}`,
           errorCode: MacroErrorCode.IO_PERMISSION_DENIED,
           tool: 'writeFile',
-          params: props,
+          params: resultParams,
           metadata: {
             executionTime: Date.now() - startTime,
             timestamp: new Date(),
@@ -163,7 +175,7 @@ export const WriteFile: Macro<WriteFileResult, WriteFileProps> = async (
           error: `Invalid start line parameter: '${start}' must be a positive integer >= 1`,
           errorCode: MacroErrorCode.VALIDATION_INVALID_PARAM,
           tool: 'writeFile',
-          params: props
+          params: resultParams
         };
       }
 
@@ -174,7 +186,7 @@ export const WriteFile: Macro<WriteFileResult, WriteFileProps> = async (
           error: `Invalid end line parameter: '${end}' cannot be less than startLine - 1 (${startLine - 1})`,
           errorCode: MacroErrorCode.VALIDATION_INVALID_PARAM,
           tool: 'writeFile',
-          params: props
+          params: resultParams
         };
       }
 
@@ -212,7 +224,7 @@ export const WriteFile: Macro<WriteFileResult, WriteFileProps> = async (
         error: `Write verification failed: on-disk content does not match intended content (expected ${finalContent.length} bytes, got ${writtenBack.length} bytes). The file may be held open or modified by another process.`,
         errorCode: MacroErrorCode.IO_READ_WRITE_ERROR,
         tool: 'writeFile',
-        params: props,
+        params: resultParams,
         metadata: {
           executionTime: Date.now() - startTime,
           timestamp: new Date(),
@@ -227,13 +239,21 @@ export const WriteFile: Macro<WriteFileResult, WriteFileProps> = async (
     const stats = await fs.stat(targetPath);
     const executionTime = Date.now() - startTime;
 
-    // Store in chat state for AI reference
+    // A DIGEST, not the payload.
+    //
+    // This object is persisted through `state.vars` onto the conversation document, so storing the
+    // full content here grows that document by the size of every file written in a session — the
+    // same unbounded-growth problem the Phase 3 message migration removed for transcripts. Nothing
+    // reads `content` back; a digest is what a later reader needs to confirm what landed.
+    const contentDigest = digestPayload(finalContent);
+    const contentSummary = describeDigest(contentDigest, 'content');
+
     if (!state.vars) {
       state.vars = {};
     }
     state.vars.lastWriteFile = {
       path: targetPath,
-      content: finalContent,
+      content: contentSummary,
       size: stats.size,
       mode: mode,
       operation: operationType,
@@ -247,14 +267,18 @@ export const WriteFile: Macro<WriteFileResult, WriteFileProps> = async (
       success: true,
       data: {
         path: targetPath,
-        content: finalContent,
+        // A digest, not the content. The caller supplied these bytes, so echoing them back costs
+        // tokens equal to the payload for no information gain; `contentDigest` is what a caller
+        // needs to verify the write against disk (re-read, hash, compare).
+        content: contentSummary,
+        contentDigest,
         mode: mode,
         size: stats.size,
         sizeFormatted: `${(stats.size / 1024).toFixed(2)}KB`,
         operation: operationType
       },
       tool: 'writeFile',
-      params: props,
+      params: resultParams,
       metadata: {
         executionTime,
         timestamp: new Date(),
@@ -275,19 +299,14 @@ Successfully ${operationType} file: **${targetPath}**
 - **Execution Time**: ${executionTime}ms
 
 ### Available Data:
-- **path**: Full file path
-- **content**: Written content (may be truncated for large files)
-- **mode**: Write mode used
-- **size**: File size in bytes
-- **operation**: Type of operation performed
+- **content**: a DIGEST of what was written, not the content itself
+- **contentDigest**: \`{ chars, bytes, lines, sha256, preview }\`
 
-### State Variables Available:
-- lastWriteFile: Complete file information for future reference
-
-### Usage:
-- Use the \`content\` field to verify what was written
-- Use \`metadata\` for operation details and timing
-- Use \`data\` for file information and validation
+### Verification:
+- The written bytes are confirmed on disk before this result is returned.
+- To re-verify later, read the file and hash it: the digest's \`sha256\` must match.
+- Do NOT expect the content back in this result — you supplied it, so re-sending it would only
+  spend context. Use \`readFile\` or \`snip\` if you need to inspect the file.
       `
     };
 
@@ -305,7 +324,7 @@ Successfully ${operationType} file: **${targetPath}**
       error: `Failed to write file: ${(err as Error).message}`,
       errorCode,
       tool: 'writeFile',
-      params: props,
+      params: resultParams,
       metadata: {
         executionTime,
         timestamp: new Date(),
