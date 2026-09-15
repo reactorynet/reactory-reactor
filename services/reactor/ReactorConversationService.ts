@@ -2289,7 +2289,22 @@ export default class ReactorConversationService
     }
     
     let messageFound = false;
-    if (session.history && session.history.length > 0) {
+    let ratedByStore = false;
+
+    // Under the store source the array no longer holds post-cutover messages, so the lookup has to
+    // happen against the row. Otherwise the write lands on a document that no longer matches and the
+    // rating is silently lost.
+    const ratingStore = this.messagesSource() === "postgres" ? this.getMessageStore() : null;
+    if (ratingStore) {
+      const rated = await ratingStore.setMessageRatingByMongoId(String(messageId), rating as any);
+      if (rated > 0) {
+        messageFound = true;
+        ratedByStore = true;
+        ratedItem = { id: messageId, rating };
+      }
+    }
+
+    if (!messageFound && session.history && session.history.length > 0) {
       const messageIndex = session.history.findIndex((msg: any) => msg.id?.toString() === messageId || msg.id === messageId);
       if (messageIndex >= 0) {
         // `rating` arrives as a GraphQL String; the history schema field is a
@@ -2305,11 +2320,16 @@ export default class ReactorConversationService
       throw new Error(`Message ${messageId} not found in session ${chatSessionId}`);
     }
     
-    session.markModified('history');
-    await session.save();
+    // When the store handled it, the row is already written and there is nothing to mirror: the
+    // mirror maps a whole message onto the row, so passing a synthesised `{ id, rating }` would
+    // blank every other column.
+    if (!ratedByStore) {
+      session.markModified('history');
+      await session.save();
 
-    // Mirror so the rating is visible under the Postgres read source too.
-    await this.mirrorUpdatedMessage(chatSessionId, ratedItem);
+      // Mirror so the rating is visible under the Postgres read source too.
+      await this.mirrorUpdatedMessage(chatSessionId, ratedItem);
+    }
 
     return session;
   }
@@ -2335,11 +2355,33 @@ export default class ReactorConversationService
     }
     sessionAsAny.persona.persona = systemPrompt;
 
+    // Under the store source the system message lives in a row, not the array. Update it there and
+    // learn whether one existed, so the same "edit or append" decision is preserved.
+    const promptStore = this.messagesSource() === "postgres" ? this.getMessageStore() : null;
+    let systemPromptHandledByStore = false;
+    if (promptStore) {
+      const changed = await promptStore.setSystemMessageContent(chatSessionId, systemPrompt);
+      systemPromptHandledByStore = changed > 0;
+      if (changed === 0) {
+        // No system row yet: append one, exactly as the Mongo branch unshifts one.
+        appendedSystemItem = {
+          id: new ObjectId(),
+          role: 'system',
+          content: systemPrompt,
+          timestamp: new Date(),
+          tool_results: [],
+        };
+      }
+    }
+
     // Update the system message in the history if it exists
-    if (session.history && session.history.length > 0) {
+    if (!systemPromptHandledByStore && session.history && session.history.length > 0) {
       const systemMessageIndex = session.history.findIndex((msg: any) => msg.role === 'system');
       if (systemMessageIndex >= 0) {
         session.history[systemMessageIndex].content = systemPrompt;
+        // Previously never assigned, so the mirror below never fired and the edit stayed invisible
+        // to a store-backed read.
+        updatedSystemItem = session.history[systemMessageIndex];
       } else {
         // If no system message exists, unshift it to the beginning
         const newSystemItem: any = {
@@ -2354,13 +2396,15 @@ export default class ReactorConversationService
       }
     }
     
-    session.markModified('history');
-    await session.save();
+    if (!systemPromptHandledByStore) {
+      session.markModified('history');
+      await session.save();
 
-    // Mirror so the edit is visible under the Postgres read source too. An edit
-    // of the existing system message is an update; a newly created one is an append.
-    if (updatedSystemItem) {
-      await this.mirrorUpdatedMessage(chatSessionId, updatedSystemItem);
+      // Mirror so the edit is visible under the Postgres read source too. An edit
+      // of the existing system message is an update; a newly created one is an append.
+      if (updatedSystemItem) {
+        await this.mirrorUpdatedMessage(chatSessionId, updatedSystemItem);
+      }
     }
     if (appendedSystemItem) {
       await this.mirrorAppendedMessage(chatSessionId, appendedSystemItem);
@@ -2687,24 +2731,29 @@ export default class ReactorConversationService
   ): Promise<void> {
     if (!chatSessionId || !toolCallId) return;
     try {
-      await ReactorConversationModel.findOneAndUpdate(
-        {
-          _id: chatSessionId,
-          "history.tool_calls.id": toolCallId,
-        },
-        {
-          $set: {
-            "history.$[msg].tool_calls.$[tc].status": status,
-            updated: new Date(),
+      // The filter below is against the embedded array, which is no longer written under the store
+      // source — it would match nothing. The mirror is the real write in that case.
+      const statusStore = this.messagesSource() === "postgres" ? this.getMessageStore() : null;
+      if (!statusStore) {
+        await ReactorConversationModel.findOneAndUpdate(
+          {
+            _id: chatSessionId,
+            "history.tool_calls.id": toolCallId,
           },
-        },
-        {
-          arrayFilters: [
-            { "msg.tool_calls.id": toolCallId },
-            { "tc.id": toolCallId },
-          ],
-        }
-      ).exec();
+          {
+            $set: {
+              "history.$[msg].tool_calls.$[tc].status": status,
+              updated: new Date(),
+            },
+          },
+          {
+            arrayFilters: [
+              { "msg.tool_calls.id": toolCallId },
+              { "tc.id": toolCallId },
+            ],
+          }
+        ).exec();
+      }
 
       // Mirror the status change: the arrayFilters update above touches Mongo
       // only, so under the Postgres read source the tool call would keep its
@@ -6507,22 +6556,30 @@ export default class ReactorConversationService
       await this.mirrorPersistedAppend(chatSessionId, toolResultConversation, toolResult);
       // Backfill tool_results on the original assistant message that initiated this tool call
       if (callId) {
-        await ReactorConversationModel.findOneAndUpdate(
-          {
-            _id: chatSessionId,
-            "history.tool_calls.id": callId,
-          },
-          {
-            $push: {
-              "history.$.tool_results": {
-                id: callId,
-                name: macro,
-                content: result,
-                timestamp: new Date(),
-              },
+        const macroResultStore = this.messagesSource() === "postgres" ? this.getMessageStore() : null;
+        const macroResultEntry = {
+          id: callId,
+          name: macro,
+          content: result,
+          timestamp: new Date(),
+        };
+        if (macroResultStore) {
+          // The array is frozen, so `$push "history.$.tool_results"` would match nothing. The tool
+          // call id is not a row key, so the owning row is found by JSONB containment.
+          await macroResultStore.appendToolResultToOwningMessage(chatSessionId, callId, macroResultEntry);
+        } else {
+          await ReactorConversationModel.findOneAndUpdate(
+            {
+              _id: chatSessionId,
+              "history.tool_calls.id": callId,
             },
-          }
-        ).exec();
+            {
+              $push: {
+                "history.$.tool_results": macroResultEntry,
+              },
+            }
+          ).exec();
+        }
 
         await this.updateToolCallStatus(chatSessionId, callId, 'success');
       }
@@ -6753,27 +6810,42 @@ export default class ReactorConversationService
           : JSON.stringify(toolResult.result ?? 'No result');
       }
 
+      const clientToolResultEntry = {
+        id: toolResult.toolCallId,
+        name: toolResult.toolName,
+        content: toolResult.isError ? toolResult.error : toolResult.result,
+        timestamp: new Date(),
+      };
+
       // 1. Try to replace the placeholder tool message in history
-      const updateResult = await ReactorConversationModel.findOneAndUpdate(
-        {
-          _id: chatSessionId,
-          "history.tool_call_id": toolResult.toolCallId,
-          "history.role": "tool",
-        },
-        {
-          $set: {
-            "history.$.content": content,
-            "history.$.tool_results": [{
-              id: toolResult.toolCallId,
-              name: toolResult.toolName,
-              content: toolResult.isError ? toolResult.error : toolResult.result,
-              timestamp: new Date(),
-            }],
-            "history.$.timestamp": new Date(),
-            updated: new Date(),
+      const placeholderStore = this.messagesSource() === "postgres" ? this.getMessageStore() : null;
+      let updateResult: any = null;
+      if (placeholderStore) {
+        // The lookup is by `tool_call_id` inside the frozen array; the row is found instead. A
+        // non-zero result means a placeholder existed, preserving the append-fallback decision below.
+        const replaced = await placeholderStore.replaceToolMessageByToolCallId(
+          chatSessionId,
+          toolResult.toolCallId,
+          { content, toolResults: [clientToolResultEntry], timestamp: new Date() }
+        );
+        updateResult = replaced > 0 ? { _id: chatSessionId } : null;
+      } else {
+        updateResult = await ReactorConversationModel.findOneAndUpdate(
+          {
+            _id: chatSessionId,
+            "history.tool_call_id": toolResult.toolCallId,
+            "history.role": "tool",
           },
-        },
-      ).exec();
+          {
+            $set: {
+              "history.$.content": content,
+              "history.$.tool_results": [clientToolResultEntry],
+              "history.$.timestamp": new Date(),
+              updated: new Date(),
+            },
+          }
+        ).exec();
+      }
 
       // If no placeholder was found (e.g. client tool executed via PROMPT mode
       // where the server never created a placeholder), insert a new tool message.
@@ -6810,22 +6882,28 @@ export default class ReactorConversationService
       }
 
       // 2. Backfill tool_results in the original assistant message that had tool_calls
-      await ReactorConversationModel.findOneAndUpdate(
-        {
-          _id: chatSessionId,
-          "history.tool_calls.id": toolResult.toolCallId,
-        },
-        {
-          $push: {
-            "history.$.tool_results": {
-              id: toolResult.toolCallId,
-              name: toolResult.toolName,
-              content: toolResult.isError ? toolResult.error : toolResult.result,
-              timestamp: new Date(),
-            },
+      //
+      // The filter below is against the frozen array, so under the store source it matches nothing.
+      // The tool call id is not a row key, so the owning row is found by JSONB containment.
+      if (placeholderStore) {
+        await placeholderStore.appendToolResultToOwningMessage(
+          chatSessionId,
+          toolResult.toolCallId,
+          clientToolResultEntry
+        );
+      } else {
+        await ReactorConversationModel.findOneAndUpdate(
+          {
+            _id: chatSessionId,
+            "history.tool_calls.id": toolResult.toolCallId,
           },
-        },
-      ).exec();
+          {
+            $push: {
+              "history.$.tool_results": clientToolResultEntry,
+            },
+          }
+        ).exec();
+      }
 
       await this.updateToolCallStatus(
         chatSessionId,
@@ -7862,9 +7940,16 @@ export default class ReactorConversationService
       const removedMessageIds: string[] = [];
       const updatedMessages: any[] = [];
 
-      if (conversation.history && Array.isArray(conversation.history)) {
-        for (let i = conversation.history.length - 1; i >= 0; i--) {
-          const msg: any = conversation.history[i];
+      // The working set must come from the store under the store source. The array is frozen, so
+      // iterating it examines a stale set — and its `Array.isArray` guard would skip the ENTIRE
+      // operation once the array is retired, leaving the tool call visible in the transcript.
+      const storeHistory = await this.loadActiveHistory(chatSessionId, conversation.history);
+      const workingHistory: any[] =
+        storeHistory ?? (Array.isArray(conversation.history) ? conversation.history : []);
+
+      {
+        for (let i = workingHistory.length - 1; i >= 0; i--) {
+          const msg: any = workingHistory[i];
           const isTargetMsg = messageId ? (msg.id?.toString() === messageId || msg.id === messageId) : true;
 
           if (isTargetMsg && Array.isArray(msg.tool_calls) && msg.tool_calls.some((tc: any) => tc.id === toolCallId)) {
@@ -7888,7 +7973,8 @@ export default class ReactorConversationService
             if (!hasContent && !hasOtherCalls && !hasThinking && !hasImages) {
               const removedId = this.historyItemId(msg);
               if (removedId) removedMessageIds.push(removedId);
-              conversation.history.splice(i, 1);
+              // Only the document is spliced; under the store source the removal is mirrored below.
+              if (!storeHistory) conversation.history.splice(i, 1);
             } else {
               updatedMessages.push(msg);
             }
@@ -7896,15 +7982,20 @@ export default class ReactorConversationService
             // Remove standalone tool message for this tool call
             const removedId = this.historyItemId(msg);
             if (removedId) removedMessageIds.push(removedId);
-            conversation.history.splice(i, 1);
+            // Only the document is spliced; under the store source the removal is mirrored below.
+            if (!storeHistory) conversation.history.splice(i, 1);
             modified = true;
           }
         }
       }
 
       if (modified) {
-        conversation.markModified('history');
-        await conversation.save();
+        // Under the store source nothing on the document changed; the mirrors below are the write.
+        // (The strip policy would refuse to persist the array anyway, so this is clarity, not safety.)
+        if (!storeHistory) {
+          conversation.markModified('history');
+          await conversation.save();
+        }
 
         // Mirror the mutation so the deleted tool call disappears under both
         // read sources, not just Mongo.

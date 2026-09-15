@@ -960,6 +960,132 @@ export default class ReactorConversationMessageService {
   }
 
   /**
+   * Set the rating on the row keyed by `mongo_id`.
+   *
+   * `rateMessage` historically wrote `session.history[i].rating`. Once the array is retired it no
+   * longer holds the message at all, so without this the write is lost and the UI keeps showing the
+   * previous rating — silently, because the Mongo update succeeds against a document that no longer
+   * matches.
+   */
+  async setMessageRatingByMongoId(mongoId: string, rating: number | null): Promise<number> {
+    const repo = this.getRepository();
+    if (!repo || !mongoId) return 0;
+
+    const result = await repo.update({ mongoId } as any, { rating } as any);
+    return result?.affected ?? 0;
+  }
+
+  /**
+   * Set the content of a conversation's first active `system` message.
+   *
+   * Returns the number of rows changed so the caller can tell "edited the existing system message"
+   * from "there was none" and append instead — which is exactly what the Mongo path does with its
+   * `findIndex` / `unshift` pair.
+   */
+  async setSystemMessageContent(conversationId: string, content: string): Promise<number> {
+    const repo = this.getRepository();
+    if (!repo || !conversationId) return 0;
+
+    const rows: Array<{ id: string }> = await repo.query(
+      `SELECT id FROM reactor_conversation_messages
+        WHERE conversation_id = $1 AND role = 'system' AND archived = false
+        ORDER BY seq ASC
+        LIMIT 1`,
+      [conversationId]
+    );
+
+    const target = rows?.[0]?.id;
+    if (!target) return 0;
+
+    await repo.update(
+      { id: target } as any,
+      {
+        content: content as any,
+        searchText: buildMessageSearchText({ role: "system", content }),
+      } as any
+    );
+
+    return 1;
+  }
+
+  /**
+   * Append a tool result onto the message that owns a given tool call.
+   *
+   * Two paths push `tool_results` onto the assistant message that carries the call: the server macro
+   * tool result and the client tool result. The tool-call id is not a row key, so rows are matched by
+   * JSONB containment — the same technique as `updateToolCallStatusByToolCallId`.
+   *
+   * Existing results are appended to rather than replaced, matching `$push` semantics.
+   */
+  async appendToolResultToOwningMessage(
+    conversationId: string,
+    toolCallId: string,
+    toolResult: any
+  ): Promise<number> {
+    const repo = this.getRepository();
+    if (!repo || !conversationId || !toolCallId) return 0;
+
+    const needle = JSON.stringify([{ id: toolCallId }]);
+    const matches: Array<{ id: string; tool_results: any }> = await repo.query(
+      `SELECT id, tool_results FROM reactor_conversation_messages
+        WHERE conversation_id = $1 AND tool_calls @> $2::jsonb`,
+      [conversationId, needle]
+    );
+
+    let affected = 0;
+    for (const match of matches ?? []) {
+      const existing = Array.isArray(match?.tool_results) ? match.tool_results : [];
+      await repo.update(
+        { id: match.id } as any,
+        { toolResults: [...existing, toolResult] } as any
+      );
+      affected += 1;
+    }
+
+    return affected;
+  }
+
+  /**
+   * Overwrite the content of a conversation's `tool` message for a given tool call.
+   *
+   * `completeClientToolCalls` finds the placeholder tool message by `tool_call_id` and replaces its
+   * content, results and timestamp; when there is no placeholder it appends a new message, which is
+   * an ordinary append already handled by the append mirror. Only the replacement half lives here.
+   *
+   * Returns 1 when a row was updated and 0 when there was none — the caller uses that to decide
+   * whether to fall back to appending, exactly as the Mongo path uses a null `findOneAndUpdate`.
+   */
+  async replaceToolMessageByToolCallId(
+    conversationId: string,
+    toolCallId: string,
+    patch: { content: string; toolResults?: any[]; timestamp?: Date }
+  ): Promise<number> {
+    const repo = this.getRepository();
+    if (!repo || !conversationId || !toolCallId) return 0;
+
+    const rows: Array<{ id: string }> = await repo.query(
+      `SELECT id FROM reactor_conversation_messages
+        WHERE conversation_id = $1 AND role = 'tool' AND tool_call_id = $2 AND archived = false
+        ORDER BY seq ASC
+        LIMIT 1`,
+      [conversationId, toolCallId]
+    );
+
+    const target = rows?.[0]?.id;
+    if (!target) return 0;
+
+    const update: Record<string, any> = {
+      content: patch.content,
+      searchText: buildMessageSearchText({ role: "tool", content: patch.content }),
+    };
+    if (Array.isArray(patch.toolResults)) update.toolResults = patch.toolResults;
+    if (patch.timestamp) update.messageTs = patch.timestamp;
+
+    await repo.update({ id: target } as any, update as any);
+    return 1;
+  }
+
+  /**
    * Delete rows for a conversation whose `mongo_id` is not among the ids Mongo
    * currently holds.
    *
