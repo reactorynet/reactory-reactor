@@ -101,6 +101,12 @@ runs the schema migration.
 | `checkOrphanConversations.ts` | every store conversation still has an owning Mongo document |
 | `checkNewChatReuse.ts` | a conversation that looks blank but holds messages is never handed back as a new chat |
 
+### Analysis (read-only, no verdict)
+
+| script | what it does |
+|---|---|
+| `sweepEmbeddedHistory.ts` | finds every consumer of the `history` / `truncatedHistory` arrays — reads, query filters, writes, projections and read-modify-writes — so the work still outstanding before retiring the array is a number rather than a guess. Re-run it after each fix; the count should fall. Each hit is a candidate and needs triage (browser `window.history`, Slack API paths and the project-history form all match the pattern) |
+
 ### Pilots (write a throwaway, then delete it)
 
 | script | what it proves |
