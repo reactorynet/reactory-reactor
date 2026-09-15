@@ -23,7 +23,7 @@
 
 import mongoose from "mongoose";
 import { Client } from "pg";
-import { resolveMongoUri, resolvePgConfig } from "./lib/instanceProbe";
+import { resolveMongoUri, resolvePgConfig, CONVERSATIONS_COLLECTION } from "./lib/instanceProbe";
 
 const args = process.argv.slice(2);
 const VERBOSE = args.includes("--verbose");
@@ -129,6 +129,22 @@ const run = async () => {
     offenders.slice(0, 40).forEach((line) => console.log(line));
   }
 
+  // After step 2 the embedded arrays are retired, so an array-based comparison has no subject.
+  // Without this every harness in this directory reports PASS while examining nothing. This run is
+  // NOT evidence that the migration is correct; it is reported as NOT APPLICABLE for that reason.
+  {
+    const docsWithArrays = await mongoose.connection
+      .collection(CONVERSATIONS_COLLECTION)
+      .countDocuments({ "history.0": { $exists: true } });
+    if (docsWithArrays === 0) {
+      console.log("");
+      console.log("NOT APPLICABLE — no conversation carries an embedded history array.");
+      console.log("  This harness compares the Mongo array against the message store, so with the");
+      console.log("  arrays retired it has nothing to compare. Expected after step 2.");
+      console.log("  This run is NOT evidence that the migration is correct.");
+      process.exit(0);
+    }
+  }
   console.log("\n" + "─".repeat(58));
   console.log(
     drifted === 0

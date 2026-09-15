@@ -31,7 +31,7 @@ import mongoose from "mongoose";
 import { DataSource } from "typeorm";
 import ReactorConversationMessage from "../models/ReactorConversationMessage";
 import ReactorConversationMessageService from "../services/reactor/ReactorConversationMessageService";
-import { resolveMongoUri, resolvePgConfig } from "./lib/instanceProbe";
+import { resolveMongoUri, resolvePgConfig, CONVERSATIONS_COLLECTION } from "./lib/instanceProbe";
 
 const MONGODB_URI = resolveMongoUri();
 
@@ -249,6 +249,22 @@ const run = async () => {
   console.log(`Unstarted (transient): ${totalUnstarted}`);
   console.log("──────────────────────────────────────────────────────────");
 
+  // After step 2 the embedded arrays are retired, so an array-based comparison has no subject.
+  // Without this every harness in this directory reports PASS while examining nothing. This run is
+  // NOT evidence that the migration is correct; it is reported as NOT APPLICABLE for that reason.
+  {
+    const docsWithArrays = await mongoose.connection
+      .collection(CONVERSATIONS_COLLECTION)
+      .countDocuments({ "history.0": { $exists: true } });
+    if (docsWithArrays === 0) {
+      console.log("");
+      console.log("NOT APPLICABLE — no conversation carries an embedded history array.");
+      console.log("  This harness compares the Mongo array against the message store, so with the");
+      console.log("  arrays retired it has nothing to compare. Expected after step 2.");
+      console.log("  This run is NOT evidence that the migration is correct.");
+      process.exit(0);
+    }
+  }
   await dataSource.destroy();
   await mongoose.disconnect();
 

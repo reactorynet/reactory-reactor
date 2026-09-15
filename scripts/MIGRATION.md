@@ -49,7 +49,7 @@ REACTOR_MESSAGES_SOURCE=postgres   # or the accepted alias REACTOR_MESSAGE_SOURC
 | **3a** | additive: entity, migration, dual-write, backfill | **done** |
 | **3b** | cut reads over behind the flag | **done** |
 | **3c-step1** | stop writing the array; model context reads the store | **done** |
-| **3c-step2** | `$unset history` + `truncatedHistory` across `reactor_conversations` | **UNBLOCKED — script ready, awaiting go-ahead** (run `unsetEmbeddedHistory.ts`; dry run reports 41,222 items across 195 documents, 545.55 MB -> ~38 MB) |
+| **3c-step2** | `$unset history` + `truncatedHistory` across `reactor_conversations` | **DONE** (2026-09-15) — 545.54 MB → 36.93 MB; 199/199 documents carry no array |
 | **3c-step3** | retire the flag and the Mongo fallback | after step 2 |
 
 ### Step 2 preconditions — all met
@@ -99,6 +99,21 @@ runs the schema migration.
 | `checkProviderContextParity.ts` | the model receives the same transcript from either source |
 | `checkWritePathLive.ts` | on real traffic: rows appear and the array does **not** grow |
 | `checkOrphanConversations.ts` | every store conversation still has an owning Mongo document |
+
+**Superseded by step 2** — the five parity harnesses below are array-based, so with the arrays
+retired they have nothing to compare. Each now reports **NOT APPLICABLE** rather than PASS, so they
+cannot report an unearned green. They are removed in step 3.
+
+| harness | why it is now vacuous |
+|---|---|
+| `checkMirrorCompleteness.ts` | compares Mongo history items against rows; there are no items |
+| `checkWindowParity.ts` | compares the two sources' windows; there is nothing to compare against |
+| `checkSearchParity.ts` | compares Mongo's regex against the SQL predicate; Mongo matches nothing |
+| `checkArchiveParity.ts` | compares the archived flag against `truncatedHistory` membership |
+| `checkProviderContextParity.ts` | compares the store read against the embedded array |
+
+`reconcileConversationMessages.ts` and `repairMirrorGaps.ts` report **NOTHING WAS EXAMINED** for the
+same reason (they were given that guard earlier).
 | `checkNewChatReuse.ts` | a conversation that looks blank but holds messages is never handed back as a new chat |
 
 ### Analysis (read-only, no verdict)

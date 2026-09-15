@@ -24,7 +24,7 @@ import mongoose from "mongoose";
 import { Client } from "pg";
 import ReactorConversationMessageService from "../services/reactor/ReactorConversationMessageService";
 import { loadHistoryForContext } from "../services/reactor/conversationHistoryLoader";
-import { resolveMongoUri, resolvePgConfig } from "./lib/instanceProbe";
+import { resolveMongoUri, resolvePgConfig, CONVERSATIONS_COLLECTION } from "./lib/instanceProbe";
 const args = process.argv.slice(2);
 const ONLY = args.find((a) => a.startsWith("--conversation="))?.split("=")[1];
 const LIMIT = Number(args.find((a) => a.startsWith("--limit="))?.split("=")[1] || 25);
@@ -133,6 +133,22 @@ const run = async () => {
     `Fail-open probe (unknown id, non-empty Mongo array): ${failOpenOk ? "null ✓" : "NON-NULL ✗"}`
   );
 
+  // After step 2 the embedded arrays are retired, so an array-based comparison has no subject.
+  // Without this every harness in this directory reports PASS while examining nothing. This run is
+  // NOT evidence that the migration is correct; it is reported as NOT APPLICABLE for that reason.
+  {
+    const docsWithArrays = await mongoose.connection
+      .collection(CONVERSATIONS_COLLECTION)
+      .countDocuments({ "history.0": { $exists: true } });
+    if (docsWithArrays === 0) {
+      console.log("");
+      console.log("NOT APPLICABLE — no conversation carries an embedded history array.");
+      console.log("  This harness compares the Mongo array against the message store, so with the");
+      console.log("  arrays retired it has nothing to compare. Expected after step 2.");
+      console.log("  This run is NOT evidence that the migration is correct.");
+      process.exit(0);
+    }
+  }
   console.log("\n" + "─".repeat(58));
   console.log(
     divergences === 0 && failOpenOk
