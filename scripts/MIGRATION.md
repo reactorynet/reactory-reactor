@@ -49,7 +49,7 @@ REACTOR_MESSAGES_SOURCE=postgres   # or the accepted alias REACTOR_MESSAGE_SOURC
 | **3a** | additive: entity, migration, dual-write, backfill | **done** |
 | **3b** | cut reads over behind the flag | **done** |
 | **3c-step1** | stop writing the array; model context reads the store | **done** |
-| **3c-step2** | `$unset history` + `truncatedHistory` across `reactor_conversations` | **NOT DONE** |
+| **3c-step2** | `$unset history` + `truncatedHistory` across `reactor_conversations` | **UNBLOCKED — script ready, awaiting go-ahead** (run `unsetEmbeddedHistory.ts`; dry run reports 41,222 items across 195 documents, 545.55 MB -> ~38 MB) |
 | **3c-step3** | retire the flag and the Mongo fallback | after step 2 |
 
 ### Step 2 preconditions — all met
@@ -106,6 +106,12 @@ runs the schema migration.
 | script | what it does |
 |---|---|
 | `sweepEmbeddedHistory.ts` | finds every consumer of the `history` / `truncatedHistory` arrays — reads, query filters, writes, projections and read-modify-writes — so the work still outstanding before retiring the array is a number rather than a guess. Re-run it after each fix; the count should fall. Each hit is a candidate and needs triage (browser `window.history`, Slack API paths and the project-history form all match the pattern) |
+
+### Step 2 — retiring the arrays (destructive)
+
+| script | what it does |
+|---|---|
+| `unsetEmbeddedHistory.ts` | removes `history` / `truncatedHistory` across `reactor_conversations`. **Dry run by default**; `--apply` additionally requires `--confirm-backup=<path>` pointing at an existing dump, because the recovery path is a Mongo restore. Runs an inline orphan preflight and refuses if any store conversation has no owning document, then writes a manifest of what it removed (counts plus a per-conversation hash) and reports the BSON before and after |
 
 ### Pilots (write a throwaway, then delete it)
 
