@@ -439,7 +439,7 @@ ReactorConversationSchema.set('toObject', { virtuals: true });
  * Phase 3c step 1 — the embedded `history` arrays stop being persisted
  * ---------------------------------------------------------------------------------------------
  *
- * Once the Postgres message store is authoritative (`REACTOR_MESSAGE_SOURCE=postgres`), the
+ * The Postgres message store is authoritative (unconditionally since Phase 3c step 3 retired the
  * embedded `history` / `truncatedHistory` arrays are still maintained **in memory** — every
  * caller keeps using them unchanged — but they are no longer **persisted**. Two reasons, both
  * observed rather than assumed:
@@ -529,7 +529,8 @@ export const warnIfMongoSourceMayBeStale = (): void => {
       ? "[reactor] Phase3 write-path: SOURCE IS mongo WHILE A MESSAGE STORE IS CONFIGURED. " +
           because +
           ". Reads served from here will be silently incomplete — restore Mongo from the pre-3c " +
-          "backup before relying on this source, or set REACTOR_MESSAGES_SOURCE=postgres."
+          "backup before relying on this source. Note that the message source is no longer " +
+          "configurable, so setting REACTOR_MESSAGE*_SOURCE will not bring those messages back."
       : "[reactor] Phase3 write-path: source is mongo. If this instance has already been cut " +
           "over, " +
           because +

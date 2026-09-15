@@ -42,8 +42,12 @@ afterEach(() => {
   __resetMongoStalenessWarningForTests();
 });
 
+// NOTE: the guard's *caller* decides whether the warning fires (it is reached only when the store is
+// not authoritative). The warning function itself reads no environment — so the `REACTOR_MESSAGE*`
+// keys set below make no difference to these assertions. They are kept only to document that: with
+// the source retired in Phase 3c step 3, no value of either key changes this behaviour.
 describe("mongo-source staleness guard", () => {
-  it("warns when the source resolves to mongo", () => {
+  it("warns when it is called — the flag is irrelevant, only the caller's condition decides", () => {
     const warnings = captureWarnings();
     process.env.REACTOR_MESSAGES_SOURCE = "mongo";
     process.env.REACTOR_MESSAGE_SOURCE = "mongo";

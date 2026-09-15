@@ -916,10 +916,9 @@ export default class ReactorConversationMessageService {
    *
    * The mutating paths in `ReactorConversationService` (`deleteToolCall`,
    * `updateToolCallStatus`, `rateMessage`, `patchSystemPrompt`) historically
-   * wrote the Mongo document only. Under `REACTOR_MESSAGES_SOURCE=postgres`
-   * reads are served from this table, so such a write was invisible — the change
-   * landed in Mongo while the transcript came from Postgres. This applies the
-   * same item state to the row so both sources agree.
+   * wrote the Mongo document only, while reads are served from this table — so such a write was
+   * invisible: the change landed in Mongo and the transcript came from the store. This applies the
+   * same item state to the row, which is now the only record of it.
    */
   async updateMessageByMongoId(mongoId: string, message: any): Promise<boolean> {
     const repo = this.getRepository();
