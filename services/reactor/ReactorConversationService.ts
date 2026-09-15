@@ -4339,16 +4339,31 @@ export default class ReactorConversationService
     };
 
     // The array above stopped being the record of usage when the write path cut over: it is no longer
-    // written, so a conversation with hundreds of messages still reads as blank and every subsequent
-    // "new chat" would re-use it — the user never gets a new conversation, and is dropped into an old
-    // one.
+    // written, so a conversation with hundreds of messages still reads as blank. The store is the only
+    // authority on blankness, so it must decide — and it must decide over the **whole** candidate set,
+    // not a sample of it.
     //
-    // So the store is asked which candidates actually hold a transcript, and those are excluded.
-    // Bounded: the most recent candidates are the sensible ones to reuse anyway, and the cap keeps
-    // this to one extra round trip.
+    // ── Why this restricts to a VERIFIED set instead of excluding the used ones ──
+    //
+    // The first version of this sampled the 25 most recent candidates, asked the store which held a
+    // transcript, and applied `_id: { $nin: [those used ones] }`. That is a NEGATIVE filter over a
+    // SAMPLE, and it is wrong once the `$exists: false` arm above is in play: that arm matches every
+    // conversation whose array was retired — which is nearly all of them. Measured on this instance:
+    //
+    //   filter matches 199 · hold content 191 · genuinely blank 8 · sampled 25 · used-but-unexcluded 166
+    //
+    // The `$nin` removed the 25 samples and left the other 166 used conversations still matching, with
+    // `sort: { started: -1 }` free to return the most recently *started* one. "New chat" therefore
+    // opened an old transcript — reproduced 5/5, conversations carrying 12–761 rows.
+    //
+    // The fix inverts the polarity: keep only candidates the store has CONFIRMED blank. An allow-list
+    // cannot leak a used conversation the way a deny-list over a sample can.
+    //
+    // The window is wider now (a blank conversation is often an older, never-used one, so it is less
+    // likely to be among the newest 25) but still bounded — it selects `_id` only, so it is cheap.
     const reuseStore = this.getMessageStore();
     if (reuseStore) {
-      const reuseCandidateLimit = 25;
+      const reuseCandidateLimit = 200;
       const candidates: any[] = await ReactorConversationModel.find(reuseFilter)
         .sort({ started: -1 })
         .limit(reuseCandidateLimit)
@@ -4356,14 +4371,43 @@ export default class ReactorConversationService
         .lean()
         .exec();
 
-      const withContent = await reuseStore.conversationsWithContent(
-        (candidates ?? []).map((candidate: any) => String(candidate._id))
-      );
+      const candidateIds = (candidates ?? []).map((candidate: any) => String(candidate._id));
+      const withContent = await reuseStore.conversationsWithContent(candidateIds);
 
-      if (withContent.size > 0) {
-        // `$nin: [null, ...]` keeps the original null-id guard while excluding used conversations.
-        reuseFilter._id = { $nin: [null, ...Array.from(withContent)] };
+      // Positively verified blanks, preserving the most-recent-first order.
+      const blankIds = candidateIds.filter((id: string) => !withContent.has(id));
+
+      // `$in: []` matches nothing, so `findOneAndUpdate` returns null and the caller falls through to
+      // creating a new conversation — the correct outcome when there is nothing blank to reuse.
+      // Never widen this back to "everything the filter matched".
+      reuseFilter._id = { $in: blankIds };
+
+      if (blankIds.length === 0) {
+        this.sessionLog(
+          "info",
+          "No verified-blank conversation to reuse — creating a new one",
+          {
+            personaId: persona.id,
+            userId: this.context.user._id?.toString(),
+            scanned: candidateIds.length,
+            heldContent: withContent.size,
+          },
+          undefined,
+          persona.id
+        );
       }
+    } else {
+      // The store cannot answer, so blankness cannot be established at all. Refusing to reuse is the
+      // safe direction: the cost is one extra conversation, where the alternative is dropping the user
+      // into a transcript that has content.
+      this.sessionLog(
+        "warn",
+        "Message store unavailable — not reusing a blank conversation (cannot verify it is blank)",
+        { personaId: persona.id, userId: this.context.user._id?.toString() },
+        undefined,
+        persona.id
+      );
+      reuseFilter._id = { $in: [] };
     }
 
     const lastConversation = await ReactorConversationModel.findOneAndUpdate(

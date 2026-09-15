@@ -155,11 +155,39 @@ const run = async () => {
       failure = error?.message ?? String(error);
     }
 
+    // ── The assertion is about the conversation that comes BACK, not the candidate that went in ──
+    //
+    // This used to assert `returned !== id`. That could not fail: the bug this guard exists to catch
+    // returned a conversation that was NOT among the sampled candidates at all, so `returned !== id`
+    // was trivially true and the check reported PASS while "New chat" opened old transcripts.
+    //
+    // What matters is that whatever is handed back holds no content. That is checkable directly.
+    let handedBackRows: number | null = null;
+    let handedBackHoldsContent = false;
+    if (returned) {
+      handedBackRows = await store.countForConversation(returned, { includeArchived: true });
+      handedBackHoldsContent = (await store.conversationsWithContent([returned])).has(returned);
+    }
+
     reporter.check(
-      `${id} (store rows=${stats}, looks blank) is NOT handed back as a new chat`,
-      !failure && returned !== null && returned !== id,
-      failure ? `threw: ${failure}` : `returned ${returned}`
+      `${id} (store rows=${stats}, looks blank) -> a BLANK conversation is handed back`,
+      !failure && returned !== null && !handedBackHoldsContent,
+      failure
+        ? `threw: ${failure}`
+        : `returned ${returned} (rows=${handedBackRows}${
+            handedBackHoldsContent ? " *** HOLDS CONTENT ***" : ""
+          })`
     );
+
+    // Reported separately so a reused blank is distinguishable from a freshly created one. Either is
+    // correct; handing back the SAME used conversation is not.
+    if (returned && !handedBackHoldsContent) {
+      reporter.log(
+        returned === id
+          ? `      note: ${returned} was reused (it is genuinely blank)`
+          : `      note: ${returned} returned; asked about ${id}`
+      );
+    }
   }
 
   // Clean up anything this guard created. Existing conversations are left alone (reuse only stamps
