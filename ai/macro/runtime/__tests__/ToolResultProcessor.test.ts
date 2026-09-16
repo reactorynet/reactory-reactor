@@ -158,3 +158,147 @@ describe('ToolResultProcessor', () => {
     }
   });
 });
+
+describe('ToolResultProcessor - echoed request payloads are bounded', () => {
+  const createdFiles: string[] = [];
+
+  afterEach(() => {
+    createdFiles.forEach((file) => {
+      if (fs.existsSync(file)) {
+        try {
+          fs.unlinkSync(file);
+        } catch (e) {}
+      }
+    });
+    createdFiles.length = 0;
+  });
+
+  it('bounds an oversized params payload EVEN when the result is under the output threshold', () => {
+    // The regression this guards: the under-threshold path returned the result untouched, so a
+    // macro that echoes its input (`params: props`) re-sent the entire payload to the conversation
+    // just because the total happened to be under the limit. `writeFile` was the worst case — it
+    // echoed the file content twice (`params.content` and `data.content`).
+    const content = 'Y'.repeat(5000);
+    const rawResult = {
+      success: true,
+      data: { path: '/tmp/x', content: 'digest' },
+      tool: 'writeFile',
+      params: { path: '/tmp/x', mode: 'overwrite', content },
+    };
+
+    const processed = ToolResultProcessor.process(
+      'writeFile',
+      { path: '/tmp/x', content },
+      rawResult,
+      undefined,
+      undefined,
+      { maxOutputSize: 20000, fieldBudget: 2000 }
+    );
+
+    // Genuinely under the threshold — so this is the path that used to leak.
+    expect(processed.outputTruncated).toBe(false);
+    expect(processed.outputFile).toBeUndefined();
+
+    // The payload is described, not repeated.
+    expect(typeof processed.result.params.content).toBe('object');
+    expect(processed.result.params.content.truncated).toBe(true);
+    expect(processed.result.params.content.length).toBe(5000);
+
+    // Small sibling params stay readable, so anything reading `path`/`mode` is unaffected.
+    expect(processed.result.params.path).toBe('/tmp/x');
+    expect(processed.result.params.mode).toBe('overwrite');
+
+    // The whole result is small now, rather than 5000+ characters.
+    expect(JSON.stringify(processed.result).length).toBeLessThan(2000);
+  });
+
+  it('bounds params in the truncation path too (data curated AND params bounded)', () => {
+    const rawResult = {
+      success: true,
+      data: { stdout: 'B'.repeat(3000) },
+      tool: 'shell',
+      params: { command: 'ls', script: 'Z'.repeat(4000) },
+    };
+
+    const processed = ToolResultProcessor.process(
+      'shell',
+      { command: 'ls', script: 'Z'.repeat(4000) },
+      rawResult,
+      undefined,
+      undefined,
+      { maxOutputSize: 100, fieldBudget: 500 }
+    );
+
+    expect(processed.outputTruncated).toBe(true);
+    createdFiles.push(processed.outputFile!);
+
+    // `data` curated (pre-existing behaviour)...
+    expect(processed.result.data.stdout).toContain('exceeds maximum inline threshold');
+    // ...and `params` bounded now as well. This path previously curated `data` and left the whole
+    // request payload in `params`, so the truncation was defeated.
+    expect(processed.result.params.script.truncated).toBe(true);
+    expect(processed.result.params.script.length).toBe(4000);
+    // Small params still readable.
+    expect(processed.result.params.command).toBe('ls');
+  });
+
+  it('does not add a params key to a result that never had one', () => {
+    const rawResult = { success: true, data: 'small output' };
+    const processed = ToolResultProcessor.process(
+      'someTool',
+      { query: 'x' },
+      rawResult,
+      undefined,
+      undefined,
+      { maxOutputSize: 20000 }
+    );
+
+    expect(processed.outputTruncated).toBe(false);
+    expect(Object.prototype.hasOwnProperty.call(processed.result, 'params')).toBe(false);
+  });
+
+  it('leaves small params untouched, preserving the result shape', () => {
+    const rawResult = {
+      success: true,
+      data: { ok: true },
+      params: { path: '/tmp/y', limit: 10, nested: { a: 1 } },
+    };
+
+    const processed = ToolResultProcessor.process(
+      'readFile',
+      { path: '/tmp/y', limit: 10 },
+      rawResult,
+      undefined,
+      undefined,
+      { maxOutputSize: 20000 }
+    );
+
+    expect(processed.result.params).toEqual({ path: '/tmp/y', limit: 10, nested: { a: 1 } });
+  });
+
+  it('bounds the array placeholder preview, so a truncation cannot outgrow what it replaced', () => {
+    // Old behaviour: `preview: value.slice(0, 3)` — three items, each potentially enormous, so the
+    // "truncated" placeholder could itself dwarf the field it stood in for.
+    const huge = Array.from({ length: 3 }, (_, i) => ({ id: i, blob: 'Q'.repeat(5000) }));
+    const rawResult = { success: true, data: { results: huge, count: 3 } };
+
+    const processed = ToolResultProcessor.process(
+      'searchContent',
+      { query: 'q' },
+      rawResult,
+      undefined,
+      undefined,
+      { maxOutputSize: 500, fieldBudget: 500 }
+    );
+
+    if (processed.outputFile) createdFiles.push(processed.outputFile);
+
+    const placeholder = processed.result.data.results;
+    expect(placeholder.truncated).toBe(true);
+    expect(placeholder.itemCount).toBe(3);
+    // A bounded string, not three 5 KB objects.
+    expect(typeof placeholder.preview).toBe('string');
+    expect(placeholder.preview.length).toBeLessThanOrEqual(401);
+    expect(JSON.stringify(processed.result).length).toBeLessThan(2000);
+  });
+});

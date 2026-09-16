@@ -19,6 +19,7 @@ import ReactorAIUsageModel, { ReactorAIUsageModelComponentRegistryEntry } from '
 import ReactorUserBudgetModel, { ReactorUserBudgetModelComponentRegistryEntry } from './ReactorUserBudget';
 import ReactoryAiProvider from './ReactoryAiProvider';
 import ReactoryAiModel from './ReactoryAiModel';
+import ReactorConversationMessage from './ReactorConversationMessage';
 import seedAiProviders from './seedAiProviders';
 
 const {
@@ -51,6 +52,7 @@ export const ReactorPostgresDataSource = new DataSource({
   entities: [
     ReactoryAiProvider,
     ReactoryAiModel,
+    ReactorConversationMessage,
   ],
 });
 
@@ -125,6 +127,7 @@ export {
   ReactorUserBudgetModelComponentRegistryEntry,
   ReactoryAiProvider,
   ReactoryAiModel,
+  ReactorConversationMessage,
   seedAiProviders,
 };
 

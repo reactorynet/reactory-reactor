@@ -549,7 +549,25 @@ export type ReactorChatState = ChatState & {
 }
 
 export type ReactorInitChatResponse = ReactorChatState | ReactorErrorResponse | ReactorInitiateSSEResponse;
-  
+
+/**
+ * The descriptive metadata that can be set on a conversation and surfaced in
+ * the chat history. Every field is optional: only the fields supplied are
+ * updated, leaving the rest of the conversation metadata untouched.
+ */
+export interface UpdateChatDataInput {
+  /** A short, human readable title for the conversation (max ~80 chars). */
+  title?: string;
+  /** A 1-2 sentence summary of what the conversation is about. */
+  summary?: string;
+  /** Free-form tags for grouping and discovery. Replaces the existing tag list when supplied. */
+  tags?: string[];
+  /** Material icon name describing the conversation status (e.g. "check_circle"). */
+  icon?: string;
+  /** Hex colour code used to tint the status icon (e.g. "#2e7d32"). */
+  color?: string;
+}
+
 /**
  * Service interface for managing AI-powered chat conversations within the Reactor system.
  * 
@@ -587,8 +605,69 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
    * Gets a chat session by its ID without user authentication.
    * This method is designed for external access like GraphQL resolvers.
    */
-  getChatSession(args: { id: string }): Promise<TReactorConversationDocument & {
+  getChatSession(args: {
+    id: string;
+    loadOptions?: {
+      showAllFiles?: boolean;
+      /** Maximum history items to return. Defaults to 100, capped at 500. */
+      historyLimit?: number;
+      /** Cursor: return items strictly older than the history item with this id. */
+      before?: string;
+      /** Include raw role:"tool" messages. Defaults to false. */
+      includeToolMessages?: boolean;
+      /** Include archived (displaced) messages. Defaults to false. */
+      includeArchived?: boolean;
+    };
+  }): Promise<TReactorConversationDocument & {
     context?: Reactory.Server.IReactoryContext;
+    historyWindow?: {
+      total: number;
+      returned: number;
+      hasMoreBefore: boolean;
+      oldestId?: string | null;
+      newestId?: string | null;
+    };
+  }>;
+
+  /**
+   * Retrieves a page of older history items for a conversation, for a
+   * "load earlier messages" affordance. Pages are system-free and anchored so
+   * the oldest item is a `user` message.
+   */
+  getConversationHistoryPage(args: {
+    id: string;
+    before?: string;
+    limit?: number;
+    /** Include archived (displaced) messages. Defaults to false. */
+    includeArchived?: boolean;
+  }): Promise<{
+    id: string;
+    items: any[];
+    window: {
+      total: number;
+      returned: number;
+      hasMoreBefore: boolean;
+      oldestId?: string | null;
+      newestId?: string | null;
+    };
+  }>;
+
+  /**
+   * Retrieves the messages displaced from a conversation by truncation or
+   * compaction (archived rows), oldest first, for an "earlier, compacted"
+   * expander. Unlike getConversationHistoryPage this is not anchored to a
+   * `user` message and returns only archived items.
+   */
+  getArchivedHistoryPage(args: { id: string; limit?: number }): Promise<{
+    id: string;
+    items: any[];
+    window: {
+      total: number;
+      returned: number;
+      hasMoreBefore: boolean;
+      oldestId?: string | null;
+      newestId?: string | null;
+    };
   }>;
 
   /**
@@ -610,6 +689,16 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
    * Persist the side panel state for a chat session.
    */
   setSidePanelState(chatSessionId: string, sidePanelState: any): Promise<any>;
+
+  /**
+   * Update the descriptive metadata (title, summary, tags, icon, colour) for a
+   * chat session. Only the fields supplied in `data` are written; omitted
+   * fields are left as-is. Used by the `updateChatData` tool so the agent can
+   * maintain quality titles and status signalling during the chat flow.
+   * @param chatSessionId - The conversation to update
+   * @param data - The subset of metadata fields to change
+   */
+  updateChatData(chatSessionId: string, data: UpdateChatDataInput): Promise<any>;
 
   /**
    * Sets the maximum number of auto tool call iterations before pausing for user confirmation.
@@ -1689,6 +1778,62 @@ export interface IReactorProviderService extends Reactory.Service.IReactoryServi
    * Re-sync baseline providers from providers.yaml into PostgreSQL
    */
   syncFromYaml(overwrite?: boolean): Promise<{ providersCount: number; modelsCount: number }>;
+
+  /**
+   * Resolve the context-window limit, in tokens, for a model.
+   *
+   * The provider registry is the single source of truth for model limits: it is
+   * built from the module `providers.yaml`, the user registry
+   * (`~/.reactor/providers.yaml`) and the Postgres provider entities, all merged by
+   * {@link getProviders}. Personas no longer carry a limit — `IAIPersona.maxTokens`
+   * is deprecated — so this is the only place a context limit is derived.
+   *
+   * The resolution is **scoped to one provider**: the conversation's. A model id
+   * that exists under some *other* provider must not lend that provider's limit to a
+   * conversation being served elsewhere. If the model is not found under the given
+   * provider, the answer is not authoritative (§D1/D2 in the design note).
+   *
+   * `contextLength` is optional per model, so the caller is told *how* the value was
+   * obtained rather than being handed a bare number that it cannot interpret.
+   */
+  resolveModelContextLength(
+    modelId?: string,
+    providerId?: string
+  ): Promise<IModelContextLengthResolution>;
+}
+
+/**
+ * How a model's context-window limit was obtained.
+ *
+ * - `model-declared`   — the registry declares `contextLength` for this model under
+ *                        this provider. The only authoritative answer.
+ * - `configured-default` — the model declares nothing; the operator's
+ *                        `REACTORY_DEFAULT_CONTEXT_LENGTH` was used.
+ * - `builtin-default`  — the model declares nothing and no default was configured;
+ *                        the platform last resort was used. Invented, not measured.
+ * - `unresolved`       — nothing was invented (`value` is null).
+ */
+export type TModelContextLengthSource =
+  | "model-declared"
+  | "configured-default"
+  | "builtin-default"
+  | "unresolved";
+
+export interface IModelContextLengthResolution {
+  /** The limit in tokens, or null when nothing could be resolved. */
+  value: number | null;
+  /** How the value was obtained. */
+  source: TModelContextLengthSource;
+  /**
+   * True only for `model-declared`. Callers persisting a backend limit must never
+   * let a non-authoritative answer **shrink** an existing budget: a lookup miss is
+   * not evidence that the model's window got smaller.
+   */
+  authoritative: boolean;
+  /** The provider the resolution was scoped to (null when none was supplied). */
+  providerId: string | null;
+  /** The model that was asked about. */
+  modelId: string | null;
 }
 
 /**

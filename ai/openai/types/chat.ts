@@ -286,6 +286,18 @@ export type ChatState = {
   maxTokens?: number
   truncatedHistory?: ReactorConversationHistory
 
+  /**
+   * Window metadata for a bounded history read, describing which slice of the
+   * persisted history was returned and whether older items remain server-side.
+   */
+  historyWindow?: {
+    total: number
+    returned: number
+    hasMoreBefore: boolean
+    oldestId?: string | null
+    newestId?: string | null
+  }
+
   files?: Reactory.Models.IReactoryFile[]
 
   /**
@@ -298,6 +310,21 @@ export type ChatState = {
    * The model provider id
    */
   providerId?: string
+
+  /**
+   * A short, human readable title for the conversation, maintained by the
+   * agent via the `updateChatData` tool (or auto-generated from the first
+   * user message).
+   */
+  title?: string
+  /** A 1-2 sentence summary of what the conversation is about. */
+  summary?: string
+  /** Free-form tags for grouping and discovery in the chat history. */
+  tags?: string[]
+  /** Material icon name describing the conversation status. */
+  icon?: string
+  /** Hex colour code used to tint the status icon. */
+  color?: string
 }
   
 export interface QuestionHandlerResponse {

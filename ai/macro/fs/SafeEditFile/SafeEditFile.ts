@@ -3,6 +3,7 @@ import path from 'path';
 import { ChatState, Macro, MacroComponentDefinition } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import logger from '@reactory/server-core/logging';
 import { MacroErrorCode } from '../../errors';
+import { summarisePayload } from '../payloadSummary';
 
 export interface SafeEditFileProps {
   /** The file path to edit */
@@ -42,13 +43,27 @@ export const SafeEditFile: Macro<SafeEditFileResult, SafeEditFileProps> = async 
   const startTime = Date.now();
   const { path: targetPath, patches } = props;
 
+  // The result carries DIGESTS of the patch blocks, never the blocks themselves.
+  //
+  // `params` is part of the tool result, which is appended to the conversation — so returning
+  // `props` verbatim re-sends every `search` and `replace` string on EVERY path, including the
+  // error paths below. The caller authored those blocks, so echoing them costs tokens equal to the
+  // patch payload for no information gain. Computed once here so every return is bounded.
+  const resultParams: SafeEditFileProps = {
+    ...props,
+    patches: (Array.isArray(patches) ? patches : []).map((patch, index) => ({
+      search: summarisePayload(patch?.search, `patches[${index}].search`),
+      replace: summarisePayload(patch?.replace, `patches[${index}].replace`),
+    })),
+  };
+
   if (!targetPath) {
     return {
       success: false,
       error: 'No file path provided',
       errorCode: MacroErrorCode.VALIDATION_REQUIRED_PARAM,
       tool: 'safeEditFile',
-      params: props
+      params: resultParams
     };
   }
 
@@ -58,7 +73,7 @@ export const SafeEditFile: Macro<SafeEditFileResult, SafeEditFileProps> = async 
       error: 'No patches array provided or array is empty',
       errorCode: MacroErrorCode.VALIDATION_REQUIRED_PARAM,
       tool: 'safeEditFile',
-      params: props
+      params: resultParams
     };
   }
 
@@ -70,7 +85,7 @@ export const SafeEditFile: Macro<SafeEditFileResult, SafeEditFileProps> = async 
         error: `File not found at path: ${resolvedPath}`,
         errorCode: MacroErrorCode.IO_NOT_FOUND,
         tool: 'safeEditFile',
-        params: props
+        params: resultParams
       };
     }
 
@@ -92,7 +107,7 @@ export const SafeEditFile: Macro<SafeEditFileResult, SafeEditFileProps> = async 
           error: `Patch at index ${i} is missing 'search' block`,
           errorCode: MacroErrorCode.VALIDATION_INVALID_PARAM,
           tool: 'safeEditFile',
-          params: props
+          params: resultParams
         };
       }
 
@@ -103,7 +118,7 @@ export const SafeEditFile: Macro<SafeEditFileResult, SafeEditFileProps> = async 
           error: `Patch at index ${i} failed: The search block was not found in the file. Make sure spelling, whitespace, and line endings match exactly.`,
           errorCode: MacroErrorCode.VALIDATION_INVALID_PARAM,
           tool: 'safeEditFile',
-          params: props
+          params: resultParams
         };
       }
 
@@ -125,7 +140,7 @@ export const SafeEditFile: Macro<SafeEditFileResult, SafeEditFileProps> = async 
         error: 'Verification failed: Temp file content does not match intended content.',
         errorCode: MacroErrorCode.IO_READ_WRITE_ERROR,
         tool: 'safeEditFile',
-        params: props
+        params: resultParams
       };
     }
 
@@ -153,7 +168,7 @@ export const SafeEditFile: Macro<SafeEditFileResult, SafeEditFileProps> = async 
         patchesApplied
       },
       tool: 'safeEditFile',
-      params: props,
+      params: resultParams,
       metadata: {
         executionTime,
         timestamp: new Date(),
@@ -168,7 +183,7 @@ export const SafeEditFile: Macro<SafeEditFileResult, SafeEditFileProps> = async 
       error: `Failed to edit file safely: ${err.message}`,
       errorCode: MacroErrorCode.IO_READ_WRITE_ERROR,
       tool: 'safeEditFile',
-      params: props,
+      params: resultParams,
       metadata: {
         executionTime: Date.now() - startTime,
         timestamp: new Date()

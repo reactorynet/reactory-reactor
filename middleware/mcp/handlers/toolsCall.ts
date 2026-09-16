@@ -5,6 +5,7 @@ import ReactorMacroService from "@reactory/server-modules/reactory-reactor/servi
 import ReactorConversationService from "@reactory/server-modules/reactory-reactor/services/reactor/ReactorConversationService";
 import { ChatState } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import { CallToolRequest, JSONRPCRequest, ProgressToken } from "../types";
+import { loadHistoryForContext } from "@reactory/server-modules/reactory-reactor/services/reactor/conversationHistoryLoader";
 
 export async function toolsCall(
   req: Reactory.Server.ReactoryExpressRequest,
@@ -166,7 +167,15 @@ export async function toolsCall(
       persona: null, // Will be populated below
       modelId: conversationModel.modelId,
       started: conversationModel.started,
-      history: conversationModel.history,
+      // Phase 3: macros receive the transcript as `state.history`; read it from
+      // the message store when it is authoritative so tool execution sees the
+      // same conversation the conversation service does.
+      history:
+        (await loadHistoryForContext(
+          conversationModel._id?.toString(),
+          conversationModel.history,
+          context as any
+        )) ?? (conversationModel.history || []),
       user: conversationModel.user as Reactory.Models.IUserDocument,
       vars: conversationModel.vars || {},
       context,

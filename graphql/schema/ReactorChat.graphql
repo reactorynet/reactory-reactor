@@ -187,6 +187,18 @@ type ReactorChatMessage {
   """
   timestamp: Date
   """
+  True when this message was displaced from the active transcript by truncation
+  or compaction and now lives only in the archived set. Archived messages are
+  excluded from the transcript by default and surfaced on request — see
+  ReactorConversationArchivedHistory.
+  """
+  archived: Boolean
+  """
+  Why the message was archived: `truncated`, `compacted` or `cleared`. Null for
+  an active message.
+  """
+  archivedReason: String
+  """
   The tool calls requested by the AI in this message.
   Each tool call includes its execution status, derived from
   whether matching tool results or errors exist in the conversation history.
@@ -364,6 +376,37 @@ input ReactorConversationEdgeInput {
 }
 
 """
+Describes the slice of a conversation's persisted history that a read
+returned, and where that slice sits in the whole conversation.
+"""
+type ReactorHistoryWindow {
+  """Total number of items persisted in the conversation history."""
+  total: Int!
+  """Number of items included in the returned window (before client-irrelevant tool messages are dropped)."""
+  returned: Int!
+  """True when items older than the returned window still exist on the server."""
+  hasMoreBefore: Boolean!
+  """Cursor for the oldest returned item; pass as `before` to fetch the previous page."""
+  oldestId: String
+  """Id of the newest returned item."""
+  newestId: String
+  """
+  How many archived (displaced) messages this conversation holds, so the client
+  can offer the "earlier, compacted" expander without loading them first.
+  """
+  archivedCount: Int
+}
+
+"""
+A page of older conversation history, returned by ReactorConversationHistory.
+"""
+type ReactorHistoryPage {
+  id: String
+  items: [ReactorChatMessage]
+  window: ReactorHistoryWindow
+}
+
+"""
 Represents the overall state of a chat conversation, including
 its history and metadata.
 """
@@ -386,11 +429,34 @@ type ReactorChatState {
   A short title for the conversation, auto-generated from the user's first message.
   """
   title: String
+  """
+  A 1-2 sentence summary of what the conversation is about. Set by the agent
+  via the updateChatData tool so the history is scannable.
+  """
+  summary: String
+  """
+  Free-form tags for grouping and discovery in the chat history.
+  """
+  tags: [String]
+  """
+  Material icon name describing the conversation status (e.g. "check_circle").
+  """
+  icon: String
+  """
+  Hex colour code used to tint the status icon (e.g. "#2e7d32").
+  """
+  color: String
   created: Date
   updated: Date
   user: User
   history: [ReactorChatMessage]
   truncatedHistory: [ReactorChatMessage]
+  """
+  Window metadata describing which slice of the persisted history was
+  returned. Lets the client page older messages without loading the whole
+  conversation, and tells it whether older items remain on the server.
+  """
+  historyWindow: ReactorHistoryWindow
   """
   The maximum number of tokens allowed for the conversation.
   """
@@ -794,8 +860,49 @@ input ReactorSidePanelStateInput {
   isOpen: Boolean!
 }
 
+"""
+Input for updating the descriptive metadata of a conversation. Every field is
+optional: only the fields supplied are written, the rest are left untouched.
+"""
+input ReactorUpdateChatDataInput {
+  """A short, human readable title for the conversation."""
+  title: String
+  """A 1-2 sentence summary of what the conversation is about."""
+  summary: String
+  """Free-form tags for grouping and discovery. Replaces the existing list."""
+  tags: [String]
+  """Material icon name describing the conversation status."""
+  icon: String
+  """Hex colour code used to tint the status icon."""
+  color: String
+}
+
 input ReactorConversationLoadOptions {
   showAllFiles: Boolean
+  """
+  Maximum number of history items to return when loading the conversation.
+  Defaults to 100 and is capped at 500. The window is always anchored so the
+  oldest returned non-system item is a `user` message.
+  """
+  historyLimit: Int
+  """
+  Cursor: when supplied, return items strictly older than the history item
+  carrying this id. Used to page backwards through the conversation.
+  """
+  before: String
+  """
+  Include raw role:"tool" result messages in the payload. Defaults to false:
+  tool results are already correlated onto the assistant message that issued
+  the call, so shipping the standalone tool messages is pure overhead.
+  """
+  includeToolMessages: Boolean
+  """
+  Include messages displaced by truncation/compaction (archived rows) in the
+  returned history. Defaults to **false**, so the ordinary transcript is
+  unchanged. Each item still reports its own `archived` / `archivedReason`, so a
+  caller that opts in can tell the two apart.
+  """
+  includeArchived: Boolean
 }
 
 union ReactorChatStateOrError = ReactorChatState | ReactorErrorResponse
@@ -891,9 +998,29 @@ extend type Query {
   ReactorConversations(filter: ReactorConversationFilter): [ReactorChatState]
 
   """
-  Retrieves a specific chat conversation by its ID.
+  Retrieves a specific chat conversation by its ID. The history is returned as
+  a bounded window (see ReactorConversationLoadOptions); use
+  ReactorConversationHistory to page older messages.
   """
   ReactorConversation(id: String!, loadOptions: ReactorConversationLoadOptions): ReactorChatStateOrError
+
+  """
+  Retrieves a page of older history items for a conversation, for a
+  "load earlier messages" affordance. Pages are system-free and anchored so the
+  oldest item is a `user` message.
+  """
+  ReactorConversationHistory(id: String!, before: String, limit: Int, includeArchived: Boolean): ReactorHistoryPage
+
+  """
+  Retrieves messages displaced from a conversation by truncation or compaction —
+  the archived rows — oldest first, for an "earlier, compacted" expander.
+
+  Deliberately separate from ReactorConversationHistory: this returns *only*
+  archived items and is not anchored to a `user` message, because the archived
+  set is a discrete block of superseded history rather than a continuation of the
+  active transcript.
+  """
+  ReactorConversationArchivedHistory(id: String!, limit: Int): ReactorHistoryPage
 
   """
   Lists all available AI personas that the current user can access.
@@ -962,6 +1089,17 @@ extend type Mutation {
     chatSessionId: String!
     sidePanelState: ReactorSidePanelStateInput!
   ): ReactorChatState
+
+  """
+  Update the descriptive metadata (title, summary, tags, icon, colour) for a
+  chat session. Only supplied fields are written. This is the server-side
+  counterpart of the agent's `updateChatData` tool and is also available to
+  the UI for manual edits.
+  """
+  ReactorUpdateChatData(
+    chatSessionId: String!
+    input: ReactorUpdateChatDataInput!
+  ): ReactorChatStateOrError
 
   """
   Continue tool execution after the agent paused due to reaching the max tool iteration limit.

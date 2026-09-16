@@ -10,6 +10,8 @@ import {
   ReactorInitiateSSEResponse,
   ReactorChatState,
   IReactorConversationsService,
+  UpdateChatDataInput,
+  IModelContextLengthResolution,
 } from "../../types/service.types";
 import ReactorConversationModel, {
   ReactorConversationDocument,
@@ -29,6 +31,7 @@ import { sseUriRoot } from "./streaming/sseOrigin";
 import resolveImageUrls from "@reactory/server-modules/reactory-reactor/utils/resolveImageUrls";
 import ReactorMacroService from "./providers/ReactorMacroService";
 import DocumentChunkingService from "./DocumentChunkingService";
+import ReactorConversationMessageService from "./ReactorConversationMessageService";
 import { ReactorConversationHistoryItem } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import ReactoryFile, {
   ReactoryFileDocument,
@@ -153,9 +156,85 @@ import { session } from "passport";
  * @since 2024
  */
 
+/**
+ * Options controlling how much of a conversation's history is read.
+ * Mirrors the ReactorConversationLoadOptions GraphQL input.
+ */
+export interface IReactorConversationLoadOptions {
+  showAllFiles?: boolean;
+  /** Maximum history items to return. Defaults to HISTORY_WINDOW.DEFAULT_LIMIT, capped at MAX_LIMIT. */
+  historyLimit?: number;
+  /** Cursor: return items strictly older than the history item with this id. */
+  before?: string;
+  /** Include raw role:"tool" messages. Default false. */
+  includeToolMessages?: boolean;
+  /**
+   * Include messages displaced by truncation/compaction (rows flagged
+   * `archived`). Default **false**, so the ordinary transcript is unchanged;
+   * the "earlier, compacted" expander opts in explicitly.
+   */
+  includeArchived?: boolean;
+}
+
+/**
+ * Describes which slice of a conversation's persisted history a read returned.
+ */
+export interface IReactorHistoryWindow {
+  total: number;
+  returned: number;
+  hasMoreBefore: boolean;
+  oldestId: string | null;
+  newestId: string | null;
+  /**
+   * How many archived (displaced) messages this conversation holds, so the
+   * client can offer the "earlier, compacted" expander without loading them
+   * first. Optional: absent on reads that do not resolve it.
+   */
+  archivedCount?: number;
+}
+
+/**
+ * Outcome of evaluating whether a macro/tool result may be appended.
+ *
+ * `allowResult === false` always carries a `reason` and a `message` that is safe
+ * to surface. The two reasons are deliberately distinct because they used to be
+ * conflated into one misleading "Macro X result is too large":
+ *
+ *  - `result-exceeds-conversation`: the result alone is larger than the entire
+ *    context budget, so it could never be delivered in *any* conversation.
+ *  - `conversation-over-budget`: the result is fine; the conversation it would
+ *    join is already at/over its budget. That is a *conversation* condition and
+ *    must never be reported as a macro failure.
+ */
+export interface IToolResultBudgetDecision {
+  /** True when the result may be appended to the conversation as-is. */
+  allowResult: boolean;
+  /** Why the result was refused (only meaningful when `allowResult` is false). */
+  reason?: "result-exceeds-conversation" | "conversation-over-budget";
+  /** Tokens the result itself requires. */
+  resultTokens: number;
+  /** Conversation tokens considered when deciding. */
+  conversationTokens: number;
+  /** The budget the conversation was judged against. */
+  conversationMaxTokens: number | null;
+  /** Human readable explanation; safe to surface to the operator/model. */
+  message: string;
+}
+
 // Business Logic Constants
 const TOKEN_LIMITS = {
-  /** Default maximum tokens for new conversations when persona doesn't specify */
+  /**
+   * Arithmetic fallback for deriving a TRUNCATION TARGET, used only when a
+   * conversation has no resolved limit at all.
+   *
+   * This is **not** a source of context limits. Verified limits come from
+   * `ReactorProviderService.resolveModelContextLength` (the provider registry) and
+   * are written onto the conversation; every writer resolves through there, so a
+   * conversation reaching this fallback means the model could not be resolved either —
+   * in which case there is nothing better to aim a truncation target at.
+   *
+   * Do not use this to decide a conversation's limit.
+   */
   DEFAULT_MAX_TOKENS: 200000,
 
   /** Percentage over limit that triggers automatic truncation (120% of limit) */
@@ -173,6 +252,32 @@ const TOKEN_LIMITS = {
   /** Target percentage of maxTokens after compaction (65%) */
   COMPACTION_TARGET_MULTIPLIER: 0.65,
 } as const;
+
+/**
+ * Bounds on the conversation history returned to a client.
+ *
+ * Token-based truncation (TOKEN_LIMITS) governs what the model sees; these
+ * govern what the UI receives. They are deliberately independent: a 1M-token
+ * model will not engage token truncation until the conversation is enormous,
+ * by which point the client would be trying to render thousands of items.
+ */
+const HISTORY_WINDOW = {
+  /** Items returned when a caller does not specify a limit. */
+  DEFAULT_LIMIT: 100,
+  /** Hard ceiling on items returned in a single read. */
+  MAX_LIMIT: 500,
+} as const;
+
+/**
+ * Ceiling on a single archived-history read.
+ *
+ * Deliberately larger than HISTORY_WINDOW.MAX_LIMIT. That cap bounds a
+ * *transcript window*; the archived set is a discrete historical block whose
+ * complete size the "earlier, compacted" expander must be able to show. One real
+ * conversation holds 1,482 displaced messages, so the window cap would have
+ * hidden two thirds of it.
+ */
+const ARCHIVED_READ_MAX = 5000;
 
 const RETRY_SETTINGS = {
   /** Maximum number of retry attempts for recoverable errors */
@@ -231,6 +336,16 @@ export default class ReactorConversationService
 {
   /** Core Reactory context providing user, logging, and service access */
   private context: Reactory.Server.IReactoryContext;
+
+  /**
+   * Mirror of the Postgres conversation message log (Phase 3).
+   *
+   * Created lazily so a deployment without Postgres never constructs it.
+   * Writing to it is strictly additive: the Mongo `history` array remains the
+   * source of truth in this step, so a failure here is logged and swallowed
+   * rather than allowed to break a chat turn.
+   */
+  private messageMirror?: ReactorConversationMessageService;
 
   /** OpenAI service for OpenAI and xAI provider interactions */
   // @ts-ignore - injected via service dependencies
@@ -1449,7 +1564,11 @@ export default class ReactorConversationService
       "before_truncation"
     );
 
-    const history = [...conversation.history];
+    // Working set. The embedded array is retired, so the transcript this algorithm reasons about
+    // comes from the message store. The algorithm itself is unchanged; only its input moved.
+    const history: any[] = await this.loadActiveHistory(conversationId);
+    // Only ever written back to Mongo (below). Under `postgres` the displacement is expressed as
+    // `archived` rows instead, so this value is simply not consulted.
     const existingTruncatedHistory = conversation.truncatedHistory || [];
     let currentTokens = conversation.tokenCount || 0;
     let removedMessages = 0;
@@ -1518,26 +1637,31 @@ export default class ReactorConversationService
       movedToTruncated++;
     }
 
-    const messagesToKeep = [...systemMessages, ...keptNonSystemMessages];
+    // The kept set needs no bookkeeping: the store's active set is everything not archived, and the
+    // displacement is expressed by id below, so the retained transcript is implied. The combined
+    // count is retained only for the log line.
     const messagesToMove = archivedNonSystemMessages;
-
-    // Combine existing truncated history with new messages to move
     const updatedTruncatedHistory = [
       ...existingTruncatedHistory,
       ...messagesToMove,
     ];
 
-    // Update the conversation with truncated history and moved messages
+    // Persist the displacement in the message store: the displaced messages become `archived`,
+    // which is exactly what `truncatedHistory` meant for them. The embedded arrays are not written
+    // — they are retired. The set is addressed by id rather than by a seq boundary on purpose — a
+    // boundary would also archive the system prompt, and truncation keeps system messages.
+    const truncationUpdate: any = {
+      tokenCount: tokensUsed,
+      updated: new Date(),
+    };
+
     await ReactorConversationModel.findOneAndUpdate(
       { _id: conversationId },
-      {
-        history: messagesToKeep,
-        truncatedHistory: updatedTruncatedHistory,
-        tokenCount: tokensUsed,
-        updated: new Date(),
-      },
+      truncationUpdate,
       { new: true }
     ).exec();
+
+    await this.mirrorArchivedMessages(conversationId, messagesToMove, "truncated");
 
     this.sessionLog("info", `Truncated conversation ${conversationId}`, {
       originalTokens: currentTokens,
@@ -1584,7 +1708,14 @@ export default class ReactorConversationService
       return `[${i + 1}] ${role}${toolInfo}: ${content}`;
     }).join('\n\n');
 
-    const provider = conversation.providerId || 'google';
+    // Resolve via the single resolver so the compaction call cannot diverge from
+    // the conversation's authoritative provider (previously fell back to 'google').
+    const provider = await this.resolveConversationProvider(
+      conversation?._id ? String(conversation._id) : undefined,
+      await this.personaProvider.getPersona(conversation.personaId),
+      undefined,
+      conversation.providerId || undefined
+    );
     const tempConversationId = new ObjectId();
 
     // Build a minimal persona for the summary call
@@ -1660,6 +1791,10 @@ export default class ReactorConversationService
     } finally {
       // Always clean up the temporary conversation
       await ReactorConversationModel.deleteOne({ _id: tempConversationId }).exec();
+      // The temporary summary conversation is exempt from the strip policy (it persists its own
+      // history array so that array can be read back), so rows CAN exist for it. Remove them with
+      // the document.
+      await this.mirrorDeletedConversation(tempConversationId.toString());
     }
   }
 
@@ -1708,8 +1843,9 @@ export default class ReactorConversationService
       throw new Error(`Conversation ${conversationId} not found for compaction`);
     }
 
-    const history = [...conversation.history];
-    const existingTruncatedHistory = conversation.truncatedHistory || [];
+    // Working set — see the note in truncateConversationHistory. Compaction decides what to displace
+    // from this, so it comes from the message store rather than any retired array.
+    const history: any[] = await this.loadActiveHistory(conversationId);
     const targetTokens = maxTokens * TOKEN_LIMITS.COMPACTION_TARGET_MULTIPLIER;
 
     // Separate system messages (always keep) from non-system messages
@@ -1829,16 +1965,22 @@ export default class ReactorConversationService
       tool_results: [],
     };
 
-    // Atomic update: replace history and append to truncatedHistory
+    // Persist the displacement in the message store: archive the displaced messages, then place the
+    // summary immediately ahead of the kept ones, so the model's context reads
+    // `[system…, summary, …kept]` — the same transcript the array would have produced. The embedded
+    // arrays are not written — they are retired.
+    const compactionUpdate: any = { updated: new Date() };
+
     const updatedConversation = await ReactorConversationModel.findOneAndUpdate(
       { _id: conversationId },
-      {
-        history: [...systemMessages, summaryMessage, ...messagesToKeep],
-        truncatedHistory: [...existingTruncatedHistory, ...messagesToArchive],
-        updated: new Date(),
-      },
+      compactionUpdate,
       { new: true },
     ).exec();
+
+    // Order matters: archive first, so that the store's first active non-system row is the first
+    // message compaction kept — which is exactly where the summary has to be placed.
+    await this.mirrorArchivedMessages(conversationId, messagesToArchive, "compacted");
+    await this.mirrorCompactionSummary(conversationId, summaryMessage);
 
     // Recalculate token count with forceReset=true so the reduced history is reflected
     const tokensAfter = await this.updateConversationTokenCount(conversationId, undefined, true);
@@ -1957,8 +2099,32 @@ export default class ReactorConversationService
       "before_retrieval"
     );
 
-    const activeHistory = conversation.history || [];
-    const truncatedHistory = conversation.truncatedHistory || [];
+    // The full history comes from the message store: active messages are the un-archived rows and
+    // 'truncated' history is the archived rows — exactly the split Mongo used to express as
+    // `history` / `truncatedHistory`. getAllArchivedMessages is deliberately unbounded: the
+    // full-read contract must not inherit the 500-row window cap.
+    let activeHistory: any[] = [];
+    let truncatedHistory: any[] = [];
+
+    const store = this.getMessageStore();
+    if (store) {
+      try {
+        const [activeRows, archivedRows] = await Promise.all([
+          store.getActiveMessages(chatSessionId),
+          store.getAllArchivedMessages(chatSessionId),
+        ]);
+        activeHistory = store.toMessages(activeRows);
+        truncatedHistory = store.toMessages(archivedRows);
+      } catch (error) {
+        (this.context as any)?.warn?.(
+          "Full conversation history read from the message store failed",
+          {
+            chatSessionId,
+            error: error instanceof Error ? error.message : String(error),
+          }
+        );
+      }
+    }
 
     // Combine histories in chronological order based on timestamp
     const allMessages = [...activeHistory, ...truncatedHistory];
@@ -2120,58 +2286,75 @@ export default class ReactorConversationService
 
 
   async rateMessage(chatSessionId: string, messageId: string, rating: string): Promise<any> {
-    const session = await this.storage.loadSession(chatSessionId);
+    // NOTE (Phase 3): this method previously delegated to an undeclared
+    // `this.storage` (loadSession/saveSession), which does not exist on this
+    // class — so it threw unconditionally, under mongo *and* postgres. It is
+    // rewritten against the conversation model (as every other method in this
+    // class is) and paired with a mirror so a rating is visible under both
+    // message sources.
+    const session = await ReactorConversationModel.findOne({ _id: chatSessionId }).exec();
+    let ratedItem: any = null;
     if (!session) {
       throw new Error(`Session ${chatSessionId} not found`);
     }
     
-    let messageFound = false;
-    if (session.history && session.history.length > 0) {
-      const messageIndex = session.history.findIndex((msg: any) => msg.id?.toString() === messageId || msg.id === messageId);
-      if (messageIndex >= 0) {
-        session.history[messageIndex].rating = rating;
-        messageFound = true;
+    // The rating is written to the message row. The embedded array is retired, so a document-based
+    // lookup would find nothing and the rating would be silently lost.
+    const ratingStore = this.getMessageStore();
+    if (ratingStore) {
+      const rated = await ratingStore.setMessageRatingByMongoId(String(messageId), rating as any);
+      if (rated > 0) {
+        ratedItem = { id: messageId, rating };
       }
     }
-    
-    if (!messageFound) {
+
+    if (!ratedItem) {
       throw new Error(`Message ${messageId} not found in session ${chatSessionId}`);
     }
-    
-    await this.storage.saveSession(session);
+
     return session;
   }
 
   async patchSystemPrompt(chatSessionId: string, systemPrompt: string): Promise<any> {
-    const session = await this.storage.loadSession(chatSessionId);
+    // NOTE (Phase 3): like `rateMessage`, this previously used an undeclared
+    // `this.storage` and threw unconditionally. Rewritten against the model, and
+    // mirrored so an edited system prompt is visible under both sources.
+    const session = await ReactorConversationModel.findById(chatSessionId).exec();
     if (!session) {
       throw new Error(`Session ${chatSessionId} not found`);
     }
-    
-    // Update the persona in the session state
-    if (!session.persona) {
-      session.persona = {} as any;
-    }
-    session.persona.persona = systemPrompt;
 
-    // Update the system message in the history if it exists
-    if (session.history && session.history.length > 0) {
-      const systemMessageIndex = session.history.findIndex((msg: any) => msg.role === 'system');
-      if (systemMessageIndex >= 0) {
-        session.history[systemMessageIndex].content = systemPrompt;
-      } else {
-        // If no system message exists, unshift it to the beginning
-        session.history.unshift({
+    let appendedSystemItem: any = null;
+    
+    // Update the persona in the session state. `persona` is not declared on the
+    // conversation schema (only `personaId` is), so this is cast; the effective
+    // part of a system-prompt edit is the history message updated below.
+    const sessionAsAny = session as any;
+    if (!sessionAsAny.persona) {
+      sessionAsAny.persona = {};
+    }
+    sessionAsAny.persona.persona = systemPrompt;
+
+    // The system message lives in a row, not the retired array. Update it there and learn whether
+    // one existed, so the same "edit or append" decision is preserved.
+    const promptStore = this.getMessageStore();
+    if (promptStore) {
+      const changed = await promptStore.setSystemMessageContent(chatSessionId, systemPrompt);
+      if (changed === 0) {
+        // No system row yet: append one.
+        appendedSystemItem = {
           id: new ObjectId(),
           role: 'system',
           content: systemPrompt,
           timestamp: new Date(),
           tool_results: [],
-        } as any);
+        };
       }
     }
-    
-    await this.storage.saveSession(session);
+
+    if (appendedSystemItem) {
+      await this.mirrorAppendedMessage(chatSessionId, appendedSystemItem);
+    }
     
     return session;
   }
@@ -2271,6 +2454,101 @@ export default class ReactorConversationService
     }
 
     return chatState;
+  }
+
+  /**
+   * Update the descriptive metadata (title, summary, tags, icon, colour) for a
+   * conversation. Only the fields supplied are written, so a caller (most
+   * commonly the `updateChatData` agent tool) can change a single field without
+   * clobbering the rest.
+   */
+  async updateChatData(
+    chatSessionId: string,
+    data: UpdateChatDataInput
+  ): Promise<any> {
+    this.validateChatSessionId(chatSessionId, "updateChatData");
+
+    const update: Record<string, any> = {};
+    const changed: string[] = [];
+
+    if (data) {
+      if (typeof data.title === 'string') {
+        const title = data.title.trim();
+        if (title.length > 0) {
+          update.title = title.substring(0, 120);
+          changed.push('title');
+        }
+      }
+
+      if (typeof data.summary === 'string') {
+        const summary = data.summary.trim();
+        if (summary.length > 0) {
+          update.summary = summary.substring(0, 2000);
+          changed.push('summary');
+        }
+      }
+
+      if (Array.isArray(data.tags)) {
+        // Normalise: trim, drop blanks, de-duplicate, and cap the list length.
+        const tags = Array.from(
+          new Set(
+            data.tags
+              .filter((tag): tag is string => typeof tag === 'string')
+              .map((tag) => tag.trim())
+              .filter((tag) => tag.length > 0)
+          )
+        );
+        update.tags = tags.slice(0, 20);
+        changed.push('tags');
+      }
+
+      if (typeof data.icon === 'string') {
+        const icon = data.icon.trim();
+        if (icon.length > 0) {
+          update.icon = icon.substring(0, 60);
+          changed.push('icon');
+        }
+      }
+
+      if (typeof data.color === 'string') {
+        const color = data.color.trim();
+        if (color.length > 0) {
+          update.color = color.substring(0, 32);
+          changed.push('color');
+        }
+      }
+    }
+
+    if (changed.length === 0) {
+      throw new Error(
+        "No updatable fields supplied to updateChatData (expected one or more of: title, summary, tags, icon, color)."
+      );
+    }
+
+    this.sessionLog("info", "Updating chat data", {
+      chatSessionId,
+      fields: changed,
+      userId: this.context.user?._id,
+    }, chatSessionId);
+
+    const chatState = await ReactorConversationModel.findOneAndUpdate(
+      { _id: chatSessionId, user: this.context.user },
+      { $set: { ...update, updated: new Date() } },
+      { new: true }
+    ).exec();
+
+    if (!chatState) {
+      throw new Error(
+        `Chat session with id ${chatSessionId} not found or you do not have permission to modify it.`
+      );
+    }
+
+    // Return a plain object, not the Mongoose document. Spreading a document
+    // yields only its internals ({ $__, _doc }), so a caller doing
+    // `{ ...chatState }` would see every field as undefined.
+    return typeof (chatState as any).toObject === 'function'
+      ? (chatState as any).toObject()
+      : chatState;
   }
 
   /**
@@ -2399,24 +2677,9 @@ export default class ReactorConversationService
   ): Promise<void> {
     if (!chatSessionId || !toolCallId) return;
     try {
-      await ReactorConversationModel.findOneAndUpdate(
-        {
-          _id: chatSessionId,
-          "history.tool_calls.id": toolCallId,
-        },
-        {
-          $set: {
-            "history.$[msg].tool_calls.$[tc].status": status,
-            updated: new Date(),
-          },
-        },
-        {
-          arrayFilters: [
-            { "msg.tool_calls.id": toolCallId },
-            { "tc.id": toolCallId },
-          ],
-        }
-      ).exec();
+      // The tool call lives on a message row, not the retired embedded array — an arrayFilters
+      // update would match nothing. The mirror is the write.
+      await this.mirrorToolCallStatus(chatSessionId, toolCallId, status);
     } catch (e: any) {
       this.context.error(`Failed to update tool call status for ${toolCallId} in session ${chatSessionId}: ${e.message}`);
     }
@@ -2499,20 +2762,30 @@ export default class ReactorConversationService
       ? `Tool execution was interrupted by the user. Reason: ${reason}`
       : 'Tool execution was interrupted by the user.';
 
-    await ReactorConversationModel.findOneAndUpdate(
+    // Per-item so the mirror can receive the same object as the fallback.
+    const interruptHistoryItem = {
+      id: new ObjectId(),
+      role: 'assistant',
+      content: interruptMessage,
+      timestamp: new Date(),
+    };
+
+    const interruptHistoryItemUpdated = await ReactorConversationModel.findOneAndUpdate(
       { _id: chatSessionId },
       {
-        $push: {
-          history: {
-            id: new ObjectId(),
-            role: 'assistant',
-            content: interruptMessage,
-            timestamp: new Date(),
-          },
-        },
+        $push: { history: interruptHistoryItem },
         $set: { updated: new Date() },
-      }
+      },
+      // Required by the mirror: it reads the persisted item, which needs the
+      // `_id` Mongo assigns on write.
+      { new: true }
     ).exec();
+
+    await this.mirrorPersistedAppend(
+      chatSessionId,
+      interruptHistoryItemUpdated,
+      interruptHistoryItem
+    );
 
     const conversation = await ReactorConversationModel.findById(chatSessionId).lean().exec();
     const lastAssistant = [...(conversation?.history || [])].reverse().find((h: any) => h.role === 'assistant');
@@ -2546,50 +2819,234 @@ export default class ReactorConversationService
   }
 
   /**
-   * Resolves the maximum context token limit for a model.
-   * `providers.yaml` via ReactorProviderService is the primary source of truth.
-   * If a model's contextLength is declared in providers.yaml, it takes absolute precedence over defaults.
+   * Resolve the platform/user default provider id.
+   *
+   * Config-driven, so provider selection never depends on an inline literal at
+   * the call site. Priority: explicit env -> the user's account default
+   * (isDefault on their ai-provider auth) -> "openai" as a last resort.
+   */
+  private async getDefaultProviderId(): Promise<string> {
+    const configured = process.env.REACTOR_DEFAULT_PROVIDER || process.env.DEFAULT_AI_PROVIDER;
+    if (configured && configured.trim()) return configured.trim().toLowerCase();
+
+    try {
+      const svc = this.getProviderService();
+      const auth = await svc?.getUserProviderAuth?.();
+      const flagged = (auth || []).find((a: any) => a?.isDefault === true);
+      if (flagged?.provider) return String(flagged.provider).toLowerCase();
+    } catch (_) {
+      // non-fatal: fall through to the last resort
+    }
+
+    return "openai";
+  }
+
+  /**
+   * SINGLE SOURCE OF TRUTH for the provider id used for LLM calls.
+   *
+   * Provider resolution is re-entrant: the same conversation is re-resolved
+   * from `sendMessage`, the AUTO tool loop, client-tool continuations
+   * (`completeClientToolCalls`), `executeMacro`, `attachImage` and token
+   * compaction. Inline `conversation.providerId || persona.providerId ||
+   * "openai"` fallbacks previously let a hard-coded literal win mid-cycle and
+   * silently route the request to the OpenAI-compatible endpoint.
+   *
+   * Priority: override > conversation.providerId (authoritative) > persona >
+   * configured default. Every resolution is logged so a mis-route is visible.
+   */
+  private async resolveConversationProvider(
+    chatSessionId?: string,
+    persona?: Partial<IAIPersona> | null,
+    override?: string,
+    prefetchedConversationProviderId?: string
+  ): Promise<string> {
+    let provider: string | undefined;
+    let source: "override" | "conversation" | "persona" | "default" = "default";
+
+    if (override && String(override).trim()) {
+      provider = String(override).trim();
+      source = "override";
+    }
+
+    if (!provider) {
+      let stored = prefetchedConversationProviderId;
+      if (!stored && chatSessionId) {
+        try {
+          const conv = await ReactorConversationModel.findById(chatSessionId)
+            .select("providerId")
+            .lean()
+            .exec();
+          stored = (conv as any)?.providerId;
+        } catch (_) {
+          // non-fatal: fall through to persona/default
+        }
+      }
+      if (stored && String(stored).trim()) {
+        provider = String(stored).trim();
+        source = "conversation";
+      }
+    }
+
+    if (!provider && persona?.providerId) {
+      provider = String(persona.providerId).trim();
+      source = "persona";
+    }
+
+    if (!provider) {
+      provider = await this.getDefaultProviderId();
+      source = "default";
+    }
+
+    provider = provider.toLowerCase();
+
+    this.sessionLog(
+      "debug",
+      "LLM provider resolved",
+      {
+        provider,
+        source,
+        chatSessionId: chatSessionId || null,
+        personaProviderId: (persona as any)?.providerId || null,
+      },
+      chatSessionId
+    );
+
+    return provider;
+  }
+
+  /**
+   * Align a persona with the provider actually being routed to.
+   *
+   * `executeProviderChat` picks the *service* from the `provider` argument,
+   * while each provider service derives its endpoint and credentials from
+   * `persona.providerId` / `persona.config` (see `OpenAIService.initializeClient`).
+   * When those disagree, a request can be sent to provider A's endpoint with
+   * provider B's key and base URL. This normalises the persona so one provider
+   * governs both decisions.
+   *
+   * When the routed provider differs from the persona's own, the persona's
+   * `config` credentials belong to the *other* provider and are dropped; we then
+   * re-resolve credentials for the routed provider
+   * (sessionOverride > User > App > Persona > Environment).
+   */
+  private async resolveRoutedPersona(
+    provider: string,
+    persona: IAIPersona
+  ): Promise<IAIPersona> {
+    if (!persona) return persona;
+
+    const normalized = provider ? String(provider).toLowerCase() : undefined;
+    const personaProvider = persona.providerId
+      ? String(persona.providerId).toLowerCase()
+      : undefined;
+
+    // Already consistent (or we have nothing to go on) - leave untouched.
+    if (!normalized || personaProvider === normalized) return persona;
+
+    const carriedConfig: Record<string, any> = { ...(persona.config || {}) };
+    delete carriedConfig.apiKey;
+    delete carriedConfig.apiOrg;
+    delete carriedConfig.apiBaseURL;
+    delete carriedConfig.project;
+    delete carriedConfig.deploymentName;
+    delete carriedConfig.apiVersion;
+
+    const routedPersona: IAIPersona = {
+      ...persona,
+      providerId: normalized as any,
+      config: carriedConfig as any,
+    };
+
+    try {
+      const creds = await this.providerService?.resolveProviderCredentials?.(
+        normalized,
+        persona.config as any
+      );
+      if (creds && creds.source !== "none") {
+        routedPersona.config = {
+          ...carriedConfig,
+          ...(creds.apiKey ? { apiKey: creds.apiKey } : {}),
+          ...(creds.organization ? { apiOrg: creds.organization } : {}),
+          ...(creds.endpoint ? { apiBaseURL: creds.endpoint } : {}),
+        } as any;
+      }
+    } catch (_) {
+      // Credential resolution is best-effort; provider services still fall back
+      // to their own environment defaults.
+    }
+
+    this.sessionLog("debug", "Routed persona normalised to provider", {
+      fromProvider: personaProvider || null,
+      toProvider: normalized,
+    });
+
+    return routedPersona;
+  }
+
+  /**
+   * Resolve the context-window limit for a model.
+   *
+   * The **provider registry owns model limits** — it is built from `providers.yaml`,
+   * the user registry (`~/.reactor/providers.yaml`) and the provider entities — so
+   * this delegates to `ReactorProviderService.resolveModelContextLength` rather than
+   * reaching into `provider.models[]` itself.
+   *
+   * Two things this method deliberately no longer does:
+   *
+   *  1. **It does not consult the persona.** `IAIPersona.maxTokens` is deprecated;
+   *     limits are determined by the model and provider.
+   *  2. **It does not search other providers.** A model id that exists under a
+   *     different provider must not lend that provider's limit to this conversation.
+   *     The old cross-provider scan is how a `deepseek-flash` conversation (declared
+   *     64 000) could be recorded as having a 1 000 000 window.
    */
   public async resolveModelContextLength(
     modelId?: string,
-    providerId?: string,
-    fallbackMaxTokens?: number
-  ): Promise<number> {
-    if (modelId) {
-      try {
-        const providerSvc = this.getProviderService();
-        if (providerSvc) {
-          const provider = providerId
-            ? await providerSvc.getProvider(providerId)
-            : null;
-          const model = provider?.models?.find((m: any) => m.id === modelId);
-          if (model?.contextLength) {
-            return model.contextLength;
-          }
+    providerId?: string
+  ): Promise<IModelContextLengthResolution> {
+    const providerSvc = this.getProviderService();
 
-          // Search across all providers if not found under specified provider
-          const allProviders = await providerSvc.getProviders();
-          for (const p of allProviders) {
-            const found = p.models?.find((m: any) => m.id === modelId);
-            if (found?.contextLength) {
-              return found.contextLength;
-            }
+    if (providerSvc && typeof (providerSvc as any).resolveModelContextLength === "function") {
+      try {
+        const resolution = await (providerSvc as any).resolveModelContextLength(
+          modelId,
+          providerId
+        );
+        this.sessionLog(
+          resolution?.authoritative ? "debug" : "warn",
+          "Model context window resolved",
+          {
+            modelId: modelId ?? null,
+            providerId: providerId ?? null,
+            value: resolution?.value ?? null,
+            source: resolution?.source ?? "unknown",
+            authoritative: !!resolution?.authoritative,
           }
-        }
+        );
+        return resolution as IModelContextLengthResolution;
       } catch (err) {
         this.context.warn?.(
-          `[resolveModelContextLength] Failed to resolve contextLength for model ${modelId}: ${(err as Error)?.message}`,
+          `[resolveModelContextLength] provider service failed for ${providerId}/${modelId}: ${(err as Error)?.message}`,
           {},
           "ReactorConversationService.resolveModelContextLength"
         );
       }
     }
 
-    if (fallbackMaxTokens && fallbackMaxTokens > 0) {
-      return fallbackMaxTokens;
-    }
-
-    return TOKEN_LIMITS.DEFAULT_MAX_TOKENS;
+    // No provider service available (or it does not implement the accessor). Resolve
+    // nothing rather than inventing a number in a second place — an invented limit
+    // here would be indistinguishable from a measured one.
+    this.sessionLog("warn", "Model context window could not be resolved — no provider service", {
+      modelId: modelId ?? null,
+      providerId: providerId ?? null,
+    });
+    return {
+      value: null,
+      source: "unresolved",
+      authoritative: false,
+      providerId: providerId ?? null,
+      modelId: modelId ?? null,
+    };
   }
 
   /**
@@ -2620,11 +3077,71 @@ export default class ReactorConversationService
 
     // Look up the model's contextLength from the provider registry
     // and update maxTokens so the conversation reflects the new model's capacity.
+    //
+    // This writer used to call the resolver with NO fallback at all, so a lookup
+    // miss (provider absent from the registry, model id not found, or the model
+    // present but without a declared contextLength) silently produced
+    // TOKEN_LIMITS.DEFAULT_MAX_TOKENS = 200 000 and persisted it over a real, larger
+    // budget. The client adopts whatever this returns, so the cap visibly collapsed
+    // to "200k" and every subsequent tool result was then refused by the
+    // conversation-budget guard in executeMacro. Guard the downgrade here.
     if (modelId) {
       try {
-        const effectiveProviderId = providerId
-          || (await ReactorConversationModel.findOne({ _id: chatSessionId, user: this.context.user }).select('providerId').lean().exec())?.providerId;
-        update.maxTokens = await this.resolveModelContextLength(modelId, effectiveProviderId);
+        const existing = await ReactorConversationModel.findOne({
+          _id: chatSessionId,
+          user: this.context.user,
+        })
+          .select("providerId personaId maxTokens")
+          .lean()
+          .exec();
+
+        const effectiveProviderId =
+          providerId || (existing as any)?.providerId || undefined;
+
+        // The limit comes from the provider registry — never from the persona
+        // (`IAIPersona.maxTokens` is deprecated).
+        const resolution = await this.resolveModelContextLength(
+          modelId,
+          effectiveProviderId
+        );
+
+        const previousMaxTokens = (existing as any)?.maxTokens;
+
+        // A failed lookup is NOT evidence that the conversation's budget is 200 000.
+        // Never shrink an existing, larger budget on the strength of the default branch.
+        const nextMaxTokens = this.resolvePersistedMaxTokens(previousMaxTokens, resolution);
+
+        if (nextMaxTokens === undefined) {
+          this.sessionLog(
+            "warn",
+            "[setChatModelProvider] refusing to downgrade maxTokens to DEFAULT_MAX_TOKENS — model context length unresolved",
+            {
+              chatSessionId,
+              modelId,
+              providerId: effectiveProviderId ?? null,
+              branch: resolution.source,
+              previousMaxTokens,
+              resolvedMaxTokens: resolution.value,
+              keptMaxTokens: previousMaxTokens,
+            },
+            chatSessionId
+          );
+        } else {
+          if (
+            typeof previousMaxTokens === "number" &&
+            previousMaxTokens !== nextMaxTokens
+          ) {
+            this.sessionLog("info", "[setChatModelProvider] updating conversation maxTokens", {
+              chatSessionId,
+              modelId,
+              providerId: effectiveProviderId ?? null,
+              branch: resolution.source,
+              previousMaxTokens,
+              resolvedMaxTokens: nextMaxTokens,
+            }, chatSessionId);
+          }
+          update.maxTokens = nextMaxTokens;
+        }
       } catch (err) {
         this.context.warn?.(
           `[setChatModelProvider] Failed to resolve contextLength for model ${modelId}: ${(err as Error)?.message}`,
@@ -2944,10 +3461,32 @@ export default class ReactorConversationService
     }
 
     if (search && typeof search === 'string' && search.trim() !== '') {
-      query.$or = [
+      // The title always matches from the session document. Message-body matches come from the
+      // message store: the ids of conversations whose active messages match `search_text`, which is
+      // an indexed predicate instead of a scan across a multi-megabyte document.
+      const searchClauses: any[] = [
         { title: { $regex: search, $options: 'i' } },
-        { 'history.content': { $regex: search, $options: 'i' } }
       ];
+
+      const store = this.getMessageStore();
+      if (store) {
+        const ids = await store.searchConversationIds(search, 100_000);
+        searchClauses.push({
+          _id: {
+            $in: ids
+              .map((value) => String(value ?? '').trim())
+              .filter((value) => ObjectId.isValid(value))
+              .map((value) => new ObjectId(value)),
+          },
+        });
+      } else {
+        (this.context as any)?.warn?.(
+          "Message-store search is unavailable; conversation search is limited to titles",
+          { search: String(search).slice(0, 80) }
+        );
+      }
+
+      query.$or = searchClauses;
     }
 
     // ensure the query doesn't return any
@@ -2989,12 +3528,616 @@ export default class ReactorConversationService
    *
    * @since 1.0.0
    */
-  async getChatSession(args: { id: string }): Promise<
+  /**
+   * Resolve a stable identifier for a conversation history item.
+   *
+   * Persisted history subdocuments always carry a Mongoose `_id`, whereas the
+   * schema's optional `id` field is only populated by some writers. The window
+   * cursor must therefore prefer `_id`.
+   */
+  /**
+   * Mirror a history item into the Postgres message log.
+   *
+   * Phase 3 step 3a dual-write: the Mongo `history` array remains authoritative
+   * and every read path is unchanged, so this is purely additive. Never throws
+   * — a Postgres problem must not fail a chat turn, and the idempotent backfill
+   * reconciles anything this misses.
+   */
+  private async mirrorAppendedMessage(
+    conversationId: string,
+    message: any
+  ): Promise<void> {
+    if (!conversationId || !message) return;
+
+    // A row must be keyed on the identifier Mongo actually persisted. The
+    // in-memory item passed to `$push` only carries the provisional `id`; Mongo
+    // assigns `_id` itself on write. Mirroring the provisional object keyed the
+    // row on a different value than the idempotent backfill reads, so neither
+    // path could see the other and every message got duplicated on re-run.
+    // Mirroring therefore happens after the write, from the persisted item.
+    if (!message._id) {
+      this.sessionLog(
+        "warn",
+        "Phase3 dual-write skipped: item has no persisted _id",
+        { conversationId, role: message.role },
+        conversationId
+      );
+      return;
+    }
+
+    try {
+      if (!this.messageMirror) {
+        this.messageMirror = new ReactorConversationMessageService();
+      }
+      if (!this.messageMirror.isAvailable()) return;
+      await this.messageMirror.appendMessage(conversationId, message);
+    } catch (error: any) {
+      this.sessionLog(
+        "warn",
+        `Phase3 dual-write failed to mirror message: ${error?.message}`,
+        { conversationId },
+        conversationId
+      );
+    }
+  }
+  /**
+   * Mirror the item a `$push` just persisted, so the row is keyed on Mongo's
+   * own `_id`. Falls back to the provisional message when the update returned
+   * no document; the guard in `mirrorAppendedMessage` then skips it rather than
+   * risk writing a row that the backfill cannot reconcile.
+   */
+  private async mirrorPersistedAppend(
+    conversationId: string,
+    updated: any,
+    fallback: any
+  ): Promise<void> {
+    const history = updated?.history;
+    const persisted =
+      Array.isArray(history) && history.length > 0
+        ? history[history.length - 1]
+        : null;
+
+    // The write-path policy (models/ReactorChatState.ts) removes `$push.history` from the update for
+    // an existing document, so Mongo assigned no `_id` and there is no persisted item to read. A
+    // brand-new document is exempt from the policy, so its push does land and Mongo owns that item's
+    // `_id` — which is why the two cases below must still be told apart.
+    //
+    // The two cases must be kept apart, because getting them wrong is silent in opposite
+    // directions:
+    //
+    //  - the append was stripped (every append site after the cutover): mirror the provisional
+    //    item and mint its identity here. §44.2 asked only for the mint; the *selection* is what
+    //    matters, because reading `updated.history[last]` after a stripped push returns the
+    //    **previous** message — the mirror would re-mirror that (a unique-key warning, since the
+    //    row already exists) and the new message would never be written at all. Reads come from
+    //    the store, so the transcript would silently lose every turn's newest messages.
+    //  - the array was still persisted — a brand-new document, which the policy exempts — in which
+    //    case the persisted item is ours and must win: Mongo holds a *different* `_id` from any id
+    //    we would mint, and the row would then be unreconcilable with Mongo.
+    const candidate =
+      persisted && this.isSameHistoryItem(persisted, fallback) ? persisted : fallback;
+
+    if (!candidate) {
+      this.sessionLog(
+        "warn",
+        "Phase3 write-path: nothing to mirror for append",
+        { conversationId },
+        conversationId
+      );
+      return;
+    }
+
+    if (!candidate._id) {
+      // Minted identity, assigned onto the in-memory item as well so that a later in-place
+      // mutation (deleteToolCall / updateToolCallStatus) keys on the value this row was written
+      // with, instead of a provisional id no row carries.
+      const minted = (candidate.id as any) || new ObjectId();
+      candidate._id = minted;
+      if (!candidate.id) candidate.id = minted;
+
+      this.sessionLog(
+        "debug",
+        "Phase3 write-path: minted mongo_id for a stripped append",
+        { conversationId, mongoId: String(minted) },
+        conversationId
+      );
+    }
+
+    await this.mirrorAppendedMessage(conversationId, candidate);
+  }
+
+  /**
+   * Whether a persisted history item is the one an append just pushed.
+   *
+   * The `$push` payload carries a provisional `id` that Mongo preserves verbatim, so comparing it
+   * identifies our item without depending on array position — which is exactly the dependency that
+   * made the pre-3c mirror select the previous message once the push was stripped.
+   */
+  private isSameHistoryItem(persisted: any, candidate: any): boolean {
+    if (!persisted || !candidate) return false;
+    if (persisted === candidate) return true;
+    const left = persisted.id ?? persisted._id;
+    const right = candidate.id ?? candidate._id;
+    return Boolean(left && right && String(left) === String(right));
+  }
+
+  private historyItemId(item: any): string {
+    if (!item) return "";
+    const raw = item._id ?? item.id;
+    return raw ? String(raw) : "";
+  }
+
+  /**
+   * Mirror a displacement of messages into the store by archiving them.
+   *
+   * Truncation and compaction used to express a displacement by rewriting the Mongo arrays. Under
+   * `postgres` those arrays are retired, so the displacement is written where it now belongs: the
+   * displaced rows become `archived`, which is exactly what `truncatedHistory` meant for them.
+   *
+   * Addressed **by id**, not by a `seq` boundary, and that is the load-bearing choice:
+   * `archiveBefore(conversationId, boundary)` archives everything below the boundary, which would
+   * also archive the **system prompt** — and truncation keeps system messages. The displaced set is
+   * known exactly (it is what the algorithm just removed from its working copy), so saying so
+   * directly avoids a boundary that has to special-case roles.
+   *
+   * Fail-open, like every other mirror: the decision to shrink the transcript has been made and a
+   * store problem must not fail the turn. It does NOT fail silently — it reports, because a
+   * compaction whose displacement was not recorded leaves the model reading a transcript that was
+   * supposed to have been replaced.
+   */
+  private async mirrorArchivedMessages(
+    conversationId: string,
+    messages: any[],
+    reason: "truncated" | "compacted"
+  ): Promise<number> {
+    const ids = (Array.isArray(messages) ? messages : [])
+      .map((item) => this.historyItemId(item))
+      .filter((id) => Boolean(id));
+
+    if (ids.length === 0) return 0;
+
+    const store = this.getMessageStore();
+    if (!store) {
+      this.sessionLog(
+        "warn",
+        "Phase3 write-path: message store unavailable; displaced messages not archived",
+        { conversationId, reason, attempted: ids.length },
+        conversationId
+      );
+      return 0;
+    }
+
+    try {
+      const archived = await store.archiveByMongoIds(ids, reason);
+      this.sessionLog(
+        "info",
+        `Phase3 write-path: archived ${archived} displaced message(s)`,
+        { conversationId, reason, attempted: ids.length },
+        conversationId
+      );
+      return archived;
+    } catch (error: any) {
+      this.sessionLog(
+        "warn",
+        `Phase3 write-path failed to archive displaced messages: ${error?.message}`,
+        { conversationId, reason },
+        conversationId
+      );
+      return 0;
+    }
+  }
+
+  /**
+   * Place the compaction summary immediately before the messages compaction kept.
+   *
+   * Without this the summary would either be lost or land at the end of the transcript, where it
+   * would "summarise" history the model can already see — worse than not compacting, because it
+   * spends tokens to say nothing. Fail-open, but loud: a compaction whose summary went missing
+   * silently rewrites the model's context, which is the class of failure this migration keeps
+   * finding.
+   */
+  private async mirrorCompactionSummary(
+    conversationId: string,
+    summaryMessage: any
+  ): Promise<void> {
+    if (!conversationId || !summaryMessage) return;
+
+    const store = this.getMessageStore();
+    if (!store) {
+      this.sessionLog(
+        "warn",
+        "Phase3 write-path: message store unavailable; compaction summary not written",
+        { conversationId },
+        conversationId
+      );
+      return;
+    }
+
+    try {
+      if (!summaryMessage._id) summaryMessage._id = summaryMessage.id;
+      const inserted = await store.insertCompactionSummary(conversationId, summaryMessage);
+      if (!inserted) {
+        this.sessionLog(
+          "warn",
+          "Phase3 write-path: compaction summary was not written to the store",
+          { conversationId },
+          conversationId
+        );
+        return;
+      }
+      this.sessionLog(
+        "info",
+        "Phase3 write-path: compaction summary inserted ahead of the kept messages",
+        { conversationId, seq: inserted.seq, mongoId: inserted.id },
+        conversationId
+      );
+    } catch (error: any) {
+      this.sessionLog(
+        "warn",
+        `Phase3 write-path failed to write the compaction summary: ${error?.message}`,
+        { conversationId },
+        conversationId
+      );
+    }
+  }
+
+  /**
+   * Mirror an in-place mutation of an existing history item into the Postgres
+   * message log.
+   *
+   * Companion to `mirrorPersistedAppend`, which only covers inserts. Without it
+   * the mutating paths (`deleteToolCall`, `updateToolCallStatus`, `rateMessage`,
+   * `patchSystemPrompt`) change Mongo while reads are served from Postgres, so
+   * the change is invisible. Fail-open for the same reason as the append mirror:
+   * the Mongo write is what the caller asked for, and a message-store problem
+   * must not fail it.
+   */
+  private async mirrorUpdatedMessage(conversationId: string, message: any): Promise<void> {
+    const mongoId = this.historyItemId(message);
+    if (!conversationId || !mongoId) {
+      this.sessionLog(
+        "warn",
+        "Phase3 dual-write skipped: mutated item has no identifiable id",
+        { conversationId, role: message?.role },
+        conversationId
+      );
+      return;
+    }
+
+    try {
+      if (!this.messageMirror) {
+        this.messageMirror = new ReactorConversationMessageService();
+      }
+      if (!this.messageMirror.isAvailable()) return;
+      await this.messageMirror.updateMessageByMongoId(mongoId, message);
+    } catch (error: any) {
+      this.sessionLog(
+        "warn",
+        `Phase3 dual-write failed to mirror mutation: ${error?.message}`,
+        { conversationId, mongoId },
+        conversationId
+      );
+    }
+  }
+
+  /** Mirror the removal of a history item from the Postgres message log. */
+  private async mirrorDeletedMessage(conversationId: string, messageId: string): Promise<void> {
+    if (!conversationId || !messageId) return;
+
+    try {
+      if (!this.messageMirror) {
+        this.messageMirror = new ReactorConversationMessageService();
+      }
+      if (!this.messageMirror.isAvailable()) return;
+      await this.messageMirror.deleteByMongoId(messageId);
+    } catch (error: any) {
+      this.sessionLog(
+        "warn",
+        `Phase3 dual-write failed to mirror delete: ${error?.message}`,
+        { conversationId, messageId },
+        conversationId
+      );
+    }
+  }
+
+  /**
+   * Remove every message row for a conversation whose document has been deleted.
+   *
+   * The counterpart to the two Mongo delete paths. Without it, a deleted conversation leaves its
+   * transcript behind in the store — rows with no owning document, invisible to every harness that
+   * iterates Mongo documents. Four such conversations existed in this corpus (the 200-vs-196
+   * discrepancy). The dedicated gate is scripts/checkOrphanConversations.ts.
+   *
+   * Fail-open, like the other mirrors: the caller already performed its delete, and a store problem
+   * must not turn that into an error.
+   */
+  private async mirrorDeletedConversation(conversationId: string): Promise<number> {
+    if (!conversationId) return 0;
+
+    try {
+      if (!this.messageMirror) {
+        this.messageMirror = new ReactorConversationMessageService();
+      }
+      if (!this.messageMirror.isAvailable()) return 0;
+      const deleted = await this.messageMirror.deleteForConversation(conversationId);
+      if (deleted > 0) {
+        this.sessionLog(
+          "info",
+          "Phase3 dual-write removed " + deleted + " message row(s) for a deleted conversation",
+          { conversationId, deleted },
+          conversationId
+        );
+      }
+      return deleted;
+    } catch (error: any) {
+      this.sessionLog(
+        "warn",
+        "Phase3 dual-write failed to remove rows for a deleted conversation: " +
+          (error?.message ?? error),
+        { conversationId },
+        conversationId
+      );
+      return 0;
+    }
+  }
+  /** Mirror a tool-call status change into the Postgres message log. */
+  private async mirrorToolCallStatus(
+    conversationId: string,
+    toolCallId: string,
+    status: string
+  ): Promise<void> {
+    if (!conversationId || !toolCallId) return;
+
+    try {
+      if (!this.messageMirror) {
+        this.messageMirror = new ReactorConversationMessageService();
+      }
+      if (!this.messageMirror.isAvailable()) return;
+      await this.messageMirror.updateToolCallStatusByToolCallId(conversationId, toolCallId, status);
+    } catch (error: any) {
+      this.sessionLog(
+        "warn",
+        `Phase3 dual-write failed to mirror tool-call status: ${error?.message}`,
+        { conversationId, toolCallId },
+        conversationId
+      );
+    }
+  }
+
+  /**
+   * Select a bounded, contiguous window of conversation history.
+   *
+   * Rules:
+   *  - Leading `system` message(s) are always kept when includeSystem is true.
+   *  - Paging operates over non-system items only, so the system prompt never
+   *    consumes window budget.
+   *  - `before` selects items strictly older than the item carrying that id.
+   *  - The oldest kept non-system item is advanced forward until it is a `user`
+   *    message, so a page never starts mid tool-call/assistant exchange (which
+   *    would break rendering and provider replay alike).
+   */
+  private buildHistoryWindow(
+    history: any[],
+    options?: {
+      historyLimit?: number;
+      before?: string;
+      includeSystem?: boolean;
+    }
+  ): { items: any[]; window: IReactorHistoryWindow } {
+    const all = Array.isArray(history) ? history : [];
+    // A non-finite or non-positive limit is treated as "unset" rather than
+    // silently shrinking the window to a single item; MAX_LIMIT still caps it.
+    const requestedRaw = Number(options?.historyLimit);
+    const requested =
+      Number.isFinite(requestedRaw) && requestedRaw > 0
+        ? Math.floor(requestedRaw)
+        : HISTORY_WINDOW.DEFAULT_LIMIT;
+    const limit = Math.min(requested, HISTORY_WINDOW.MAX_LIMIT);
+    const includeSystem = options?.includeSystem !== false;
+
+    const systemItems = includeSystem
+      ? all.filter((m) => m?.role === "system")
+      : [];
+    const nonSystem = all.filter((m) => m?.role !== "system");
+
+    // Restrict to items older than the cursor when one is supplied. `nonSystem`
+    // and any cursor prefix both start at the same absolute offset, so `start`
+    // below remains an absolute index into the full non-system sequence.
+    let region = nonSystem;
+    if (options?.before) {
+      const cursor = String(options.before);
+      const cursorIdx = nonSystem.findIndex((m) => this.historyItemId(m) === cursor);
+      if (cursorIdx > -1) region = nonSystem.slice(0, cursorIdx);
+    }
+
+    let start = Math.max(0, region.length - limit);
+
+    // Anchor the window on a `user` message so it never begins mid-exchange
+    // (e.g. on an orphaned tool result or a continuation assistant turn).
+    // Prefer expanding backwards to the nearest earlier user message: that
+    // keeps the newest items, and never yields a smaller-than-requested or
+    // empty window. Only fall forwards if no user message precedes the slice.
+    if (region.length > 0) {
+      let anchor = start;
+      while (anchor > 0 && region[anchor]?.role !== "user") {
+        anchor -= 1;
+      }
+      if (region[anchor]?.role === "user") {
+        start = anchor;
+      } else {
+        while (start < region.length && region[start]?.role !== "user") {
+          start += 1;
+        }
+      }
+    }
+
+    const kept = region.slice(start);
+    const items = [...systemItems, ...kept];
+
+    return {
+      items,
+      window: {
+        total: all.length,
+        returned: items.length,
+        hasMoreBefore: start > 0,
+        oldestId: kept.length > 0 ? this.historyItemId(kept[0]) || null : null,
+        newestId:
+          kept.length > 0
+            ? this.historyItemId(kept[kept.length - 1]) || null
+            : null,
+      },
+    };
+  }
+
+  /**
+   * Whether a conversation already holds a system message in the message store.
+   *
+   * The embedded `history` array used to answer this (`$size: 1` with a system role), and the answer
+   * decides whether a reused conversation needs the persona prompt pushed. The array no longer
+   * records messages, so it would answer "no" for every conversation — and the reuse predicate now
+   * treats an absent array as blank, so every reuse of a system-only conversation would append a
+   * second persona prompt.
+   *
+   * Fails open to `false` ("no prompt yet, push one"): a fresh conversation is the common case, and a
+   * missing persona prompt is worse than a duplicate one. A duplicate is also visible as two system
+   * rows rather than silent.
+   */
+  private async conversationHasSystemPrompt(conversationId?: string): Promise<boolean> {
+    if (!conversationId) return false;
+    const store = this.getMessageStore();
+    if (!store) return false;
+    try {
+      return await store.hasSystemMessage(conversationId);
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The message store, or null when it is unavailable.
+   *
+   * Reuses the lazily-constructed instance that dual-write already holds, so a
+   * process keeps one repository and an unavailable store degrades to the Mongo
+   * path instead of throwing.
+   */
+  private getMessageStore(): ReactorConversationMessageService | null {
+    try {
+      if (!this.messageMirror) {
+        this.messageMirror = new ReactorConversationMessageService();
+      }
+      return this.messageMirror.isAvailable() ? this.messageMirror : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Resolve a bounded history window from the configured source.
+   *
+   * Repointing reads is a flag flip rather than a rewrite: with the source set
+   * to `postgres` the window comes from the message table, which reproduces the
+   * Mongo contract exactly (see ReactorConversationMessageService
+   * .getHistoryWindow and scripts/checkWindowParity.ts, which compares the two
+   * implementation-for-implementation on real transcripts).
+   *
+   * Fail-open: if Postgres is unavailable or errors, the pure array
+   * implementation answers instead. A bounded window from the authoritative
+   * array beats an empty transcript because a mirror hiccuped.
+   *
+   * NOTE: `before` is deliberately NOT forwarded from the getChatSession load
+   * options because the pre-existing windowed read never honoured it there;
+   * paging flows through getConversationHistoryPage. Forwarding it here would be
+   * an unrelated behaviour change smuggled in with the cutover.
+   */
+  private async resolveHistoryWindow(
+    conversationId: string,
+    options: {
+      historyLimit?: number;
+      before?: string;
+      includeSystem?: boolean;
+      includeArchived?: boolean;
+    }
+  ): Promise<{ items: any[]; window: IReactorHistoryWindow }> {
+    const store = this.getMessageStore();
+    if (store) {
+      try {
+        const { items, window } = await store.getHistoryWindow(
+          conversationId,
+          {
+            limit: options.historyLimit,
+            before: options.before,
+            includeSystem: options.includeSystem,
+            includeArchived: options.includeArchived === true,
+          }
+        );
+        // Decided here rather than in the window itself: the count is a client
+        // affordance (whether to offer the expander), not part of the window
+        // selection contract the parity check pins.
+        window.archivedCount = await store.countArchived(conversationId);
+        return { items, window };
+      } catch (error) {
+        (this.context as any)?.warn?.(
+          "History window read from the message store failed",
+          {
+            conversationId,
+            error: error instanceof Error ? error.message : String(error),
+          }
+        );
+      }
+    }
+
+    // The store owns the window. If it cannot answer, an empty window is the only honest result —
+    // there is no second copy of the transcript to fall back to.
+    return {
+      items: [],
+      window: {
+        total: 0,
+        returned: 0,
+        hasMoreBefore: false,
+        oldestId: null,
+        newestId: null,
+        archivedCount: 0,
+      },
+    };
+  }
+
+  /**
+   * The complete active transcript from the message store, for full reads
+   * (LLM context assembly, MCP tool dispatch, the CLI transport).
+   *
+   * The store is the only source: the embedded array is retired, so there is no
+   * second copy to fall back to. An unavailable or failing store degrades to an
+   * empty transcript rather than to a stale array that would disagree with what
+   * the user is shown.
+   */
+  private async loadActiveHistory(conversationId: string): Promise<any[]> {
+    const store = this.getMessageStore();
+    if (!store) return [];
+
+    try {
+      return store.toMessages(await store.getActiveMessages(conversationId));
+    } catch (error) {
+      (this.context as any)?.warn?.(
+        "Full history read from the message store failed",
+        {
+          conversationId,
+          error: error instanceof Error ? error.message : String(error),
+        }
+      );
+      return [];
+    }
+  }
+
+  async getChatSession(args: {
+    id: string;
+    loadOptions?: IReactorConversationLoadOptions;
+  }): Promise<
     TReactorConversationDocument & {
       context?: Reactory.Server.IReactoryContext;
+      historyWindow?: IReactorHistoryWindow;
     }
   > {
-    const { id } = args;
+    const { id, loadOptions } = args;
 
     this.sessionLog("debug", "Retrieving chat session", {
       chatSessionId: id,
@@ -3017,9 +4160,149 @@ export default class ReactorConversationService
       throw new Error("Chat session not found");
     }
 
+    // Window the history only when the caller asked for a bounded read.
+    //
+    // Callers that need the whole document — LLM assembly, MCP tool dispatch,
+    // the CLI transport, and the personaId fallback in sendMessage — pass no
+    // loadOptions and keep their existing behaviour. The GraphQL conversation
+    // read always supplies loadOptions (the service defaults the limit), so a
+    // long-running session cannot flood the UI with thousands of items.
+    if (loadOptions) {
+      const { items, window: historyWindow } = await this.resolveHistoryWindow(
+        id,
+        {
+          historyLimit: loadOptions.historyLimit,
+          includeSystem: true,
+          includeArchived: loadOptions.includeArchived === true,
+        }
+      );
+      session.history = items;
+      session.historyWindow = historyWindow;
+    } else {
+      // Full read. The transcript comes from the message table, or every caller
+      // that needs the whole conversation (LLM assembly, MCP toolsCall, the CLI
+      // transport) would see whatever the retired array last held.
+      session.history = await this.loadActiveHistory(id);
+    }
+
     session.context = this.context;
 
     return session;
+  }
+
+  /**
+   * Retrieve a page of older history items for a conversation.
+   *
+   * Used by the client's "load earlier messages" affordance. Pages are
+   * system-free (the client already holds the system prompt) and anchored so
+   * the oldest item is a `user` message.
+   */
+  /**
+   * The messages displaced from a conversation by truncation/compaction, oldest
+   * first — the "earlier, compacted" expander's read.
+   *
+   * Deliberately not anchored to a `user` message and not a window of the active
+   * transcript: the archived set is a discrete block of superseded history, so
+   * the active-transcript invariants (oldest item is a user message, paging over
+   * non-system items) do not apply to it.
+   */
+  async getArchivedHistoryPage(args: {
+    id: string;
+    limit?: number;
+  }): Promise<{ id: string; items: any[]; window: IReactorHistoryWindow }> {
+    const { id, limit } = args;
+
+    this.validateChatSessionId(id, "getArchivedHistoryPage");
+
+    if (!ObjectId.isValid(id)) {
+      throw new Error(`Invalid conversation ID format: ${id}`);
+    }
+
+    const session: any = await ReactorConversationModel.findOne({
+      _id: new ObjectId(id),
+      user: this.context.user,
+    })
+      .select("_id")
+      .exec();
+
+    if (!session) {
+      throw new Error("Chat session not found");
+    }
+
+    const requested = Number(limit);
+    const cap =
+      Number.isFinite(requested) && requested > 0
+        ? Math.floor(requested)
+        : HISTORY_WINDOW.MAX_LIMIT;
+    const max = Math.min(cap, ARCHIVED_READ_MAX);
+
+    const decorate = (items: any[]): IReactorHistoryWindow => ({
+      total: items.length,
+      returned: items.length,
+      hasMoreBefore: false,
+      oldestId: items.length > 0 ? this.historyItemId(items[0]) || null : null,
+      newestId:
+        items.length > 0
+          ? this.historyItemId(items[items.length - 1]) || null
+          : null,
+    });
+
+    const store = this.getMessageStore();
+    if (store) {
+      try {
+        const rows = await store.getAllArchivedMessages(id, max);
+        const items = store.toMessages(rows);
+        return { id, items, window: decorate(items) };
+      } catch (error) {
+        (this.context as any)?.warn?.(
+          "Archived history read from the message store failed",
+          {
+            conversationId: id,
+            error: error instanceof Error ? error.message : String(error),
+          }
+        );
+      }
+    }
+
+    return { id, items: [], window: decorate([]) };
+  }
+
+  async getConversationHistoryPage(args: {
+    id: string;
+    before?: string;
+    limit?: number;
+    includeArchived?: boolean;
+  }): Promise<{ id: string; items: any[]; window: IReactorHistoryWindow }> {
+    const { id, before, limit } = args;
+
+    this.validateChatSessionId(id, "getConversationHistoryPage");
+
+    if (!ObjectId.isValid(id)) {
+      throw new Error(`Invalid conversation ID format: ${id}`);
+    }
+
+    const session: any = await ReactorConversationModel.findOne({
+      _id: new ObjectId(id),
+      user: this.context.user,
+    })
+      .select("history")
+      .exec();
+
+    if (!session) {
+      throw new Error("Chat session not found");
+    }
+
+    const { items, window: historyWindow } = await this.resolveHistoryWindow(
+      id,
+      {
+        historyLimit: limit,
+        before,
+        includeSystem: false,
+        includeArchived: args.includeArchived === true,
+      }
+    );
+
+    return { id, items, window: historyWindow };
   }
 
   /**
@@ -3149,25 +4432,105 @@ export default class ReactorConversationService
 
     // Check if there's an existing empty conversation for this persona and user
     // Use findOneAndUpdate with atomic operation to prevent race conditions
-    const lastConversation = await ReactorConversationModel.findOneAndUpdate(
-      {
-        _id: { $ne: null },
-        personaId: persona.id,
-        user: this.context.user._id,
-        // Only reuse a blank conversation of the same kind. Without this a
-        // content session could silently continue in an empty standalone one,
-        // inheriting the wrong scope and edges.
-        use_case: useCase === 'standalone'
-          ? { $in: ['standalone', null, undefined] }
-          : useCase,
-        $or: [
-          { history: { $size: 0 } }, // Empty history
+    const reuseFilter: Record<string, any> = {
+      _id: { $ne: null },
+      personaId: persona.id,
+      user: this.context.user._id,
+      // Only reuse a blank conversation of the same kind. Without this a
+      // content session could silently continue in an empty standalone one,
+      // inheriting the wrong scope and edges.
+      use_case: useCase === 'standalone'
+        ? { $in: ['standalone', null, undefined] }
+        : useCase,
+      // A conversation is a reuse candidate when it carries no message array at all, an empty one, or
+      // a single system message. The `$exists: false` arm is load-bearing: a new document persists
+      // `history: []` (the write-path policy exempts it), but a document whose array was retired
+      // carries no field at all — and `{ $size: 0 }` does NOT match a missing field. Without that
+      // arm, blank conversations that lost their array could never be reused.
+      $or: [
+        { history: { $exists: false } },
+        { history: { $size: 0 } }, // Empty history
+        {
+          history: { $size: 1 },
+          "history.0.role": "system", // Only system message
+        },
+      ],
+    };
+
+    // The array above stopped being the record of usage when the write path cut over: it is no longer
+    // written, so a conversation with hundreds of messages still reads as blank. The store is the only
+    // authority on blankness, so it must decide — and it must decide over the **whole** candidate set,
+    // not a sample of it.
+    //
+    // ── Why this restricts to a VERIFIED set instead of excluding the used ones ──
+    //
+    // The first version of this sampled the 25 most recent candidates, asked the store which held a
+    // transcript, and applied `_id: { $nin: [those used ones] }`. That is a NEGATIVE filter over a
+    // SAMPLE, and it is wrong once the `$exists: false` arm above is in play: that arm matches every
+    // conversation whose array was retired — which is nearly all of them. Measured on this instance:
+    //
+    //   filter matches 199 · hold content 191 · genuinely blank 8 · sampled 25 · used-but-unexcluded 166
+    //
+    // The `$nin` removed the 25 samples and left the other 166 used conversations still matching, with
+    // `sort: { started: -1 }` free to return the most recently *started* one. "New chat" therefore
+    // opened an old transcript — reproduced 5/5, conversations carrying 12–761 rows.
+    //
+    // The fix inverts the polarity: keep only candidates the store has CONFIRMED blank. An allow-list
+    // cannot leak a used conversation the way a deny-list over a sample can.
+    //
+    // The window is wider now (a blank conversation is often an older, never-used one, so it is less
+    // likely to be among the newest 25) but still bounded — it selects `_id` only, so it is cheap.
+    const reuseStore = this.getMessageStore();
+    if (reuseStore) {
+      const reuseCandidateLimit = 200;
+      const candidates: any[] = await ReactorConversationModel.find(reuseFilter)
+        .sort({ started: -1 })
+        .limit(reuseCandidateLimit)
+        .select("_id")
+        .lean()
+        .exec();
+
+      const candidateIds = (candidates ?? []).map((candidate: any) => String(candidate._id));
+      const withContent = await reuseStore.conversationsWithContent(candidateIds);
+
+      // Positively verified blanks, preserving the most-recent-first order.
+      const blankIds = candidateIds.filter((id: string) => !withContent.has(id));
+
+      // `$in: []` matches nothing, so `findOneAndUpdate` returns null and the caller falls through to
+      // creating a new conversation — the correct outcome when there is nothing blank to reuse.
+      // Never widen this back to "everything the filter matched".
+      reuseFilter._id = { $in: blankIds };
+
+      if (blankIds.length === 0) {
+        this.sessionLog(
+          "info",
+          "No verified-blank conversation to reuse — creating a new one",
           {
-            history: { $size: 1 },
-            "history.0.role": "system", // Only system message
+            personaId: persona.id,
+            userId: this.context.user._id?.toString(),
+            scanned: candidateIds.length,
+            heldContent: withContent.size,
           },
-        ],
-      },
+          undefined,
+          persona.id
+        );
+      }
+    } else {
+      // The store cannot answer, so blankness cannot be established at all. Refusing to reuse is the
+      // safe direction: the cost is one extra conversation, where the alternative is dropping the user
+      // into a transcript that has content.
+      this.sessionLog(
+        "warn",
+        "Message store unavailable — not reusing a blank conversation (cannot verify it is blank)",
+        { personaId: persona.id, userId: this.context.user._id?.toString() },
+        undefined,
+        persona.id
+      );
+      reuseFilter._id = { $in: [] };
+    }
+
+    const lastConversation = await ReactorConversationModel.findOneAndUpdate(
+      reuseFilter,
       {
         $set: {
           started: new Date(),
@@ -3195,23 +4558,29 @@ export default class ReactorConversationService
         lastConversation.sseSessionId = lastConversation._id.toString();
       }
 
-      // Re-sync maxTokens against providers.yaml to ensure stale database values don't override providers.yaml
+      // Re-sync maxTokens against the provider registry: a `default`-branch
+      // resolution is a failed lookup, not a real 200 000 — never let it shrink the
+      // budget. The limit comes from the provider, never from the persona.
       const currentModelId = lastConversation.modelId || persona.modelId;
       const currentProviderId = lastConversation.providerId || persona.providerId;
-      const resolvedMaxTokens = await this.resolveModelContextLength(
+      const resolution = await this.resolveModelContextLength(
         currentModelId,
-        currentProviderId,
-        persona.maxTokens
+        currentProviderId
+      );
+      const nextMaxTokens = this.resolvePersistedMaxTokens(
+        lastConversation.maxTokens,
+        resolution
       );
 
-      if (lastConversation.maxTokens !== resolvedMaxTokens) {
+      if (nextMaxTokens !== undefined && lastConversation.maxTokens !== nextMaxTokens) {
         this.sessionLog("info", "Updating reused conversation maxTokens to match provider config", {
           conversationId: lastConversation._id?.toString(),
           oldMaxTokens: lastConversation.maxTokens,
-          newMaxTokens: resolvedMaxTokens,
+          newMaxTokens: nextMaxTokens,
           modelId: currentModelId,
+          branch: resolution.source,
         }, lastConversation._id?.toString(), persona.id);
-        lastConversation.maxTokens = resolvedMaxTokens;
+        lastConversation.maxTokens = nextMaxTokens;
       }
 
       await lastConversation.save();
@@ -3226,11 +4595,10 @@ export default class ReactorConversationService
       return lastConversation;
     }
 
-    const maxTokens = await this.resolveModelContextLength(
+    const maxTokens = (await this.resolveModelContextLength(
       persona.modelId,
-      persona.providerId,
-      persona.maxTokens
-    );
+      persona.providerId
+    )).value;
 
     const conversationData: any = {
       personaId: persona.id,
@@ -3387,6 +4755,12 @@ export default class ReactorConversationService
       tool_call_id?: string;
       streamingMode?: StreamingMode;
       providerConfig?: ReactorProviderConfig;
+      /**
+       * `id` of the turn as persisted in the transcript before this call.
+       * Forwarded so the provider can exclude it from the history it loads,
+       * preventing the current turn from being sent to the model twice.
+       */
+      currentTurnMessageId?: string;
     }
   ): Promise<any> {
     // Capability gate: fail fast (and clearly) when structured output is requested
@@ -3407,12 +4781,23 @@ export default class ReactorConversationService
     // Provider IDs from the registry (e.g. providers.yaml) may be cased
     // arbitrarily (e.g. "Ollama"). Normalize so routing is case-insensitive;
     // otherwise a mismatch silently falls through to the OpenAI-compatible default.
+    // Normalise the persona to the routed provider BEFORE handing off to a
+    // provider service. `executeProviderChat` selects the *service* from
+    // `provider`, but `OpenAIService.initializeClient` (and the other services)
+    // derive the *endpoint and credentials* from `persona.providerId`. When the
+    // two disagree - e.g. a client-tool continuation passing the base persona
+    // while the conversation runs on another provider - the request silently
+    // targets the wrong endpoint with the wrong key. Keeping one source of
+    // truth here closes that class of bug for every caller.
+    const routedPersona = await this.resolveRoutedPersona(provider, persona);
+
     const llmStartTime = Date.now();
     try {
       switch (provider?.toLowerCase()) {
         case "ollama":
           // Ollama uses the native Ollama Node SDK via OllamaAIService
-          await this.ollamaService.initialize(chatSessionId, persona);
+          await this.ollamaService.initialize(chatSessionId, routedPersona);
+          this.ollamaService.excludeInFlightTurn(chatArgs.currentTurnMessageId);
           return await this.ollamaService.chat({
             ...chatArgs,
             persistState: false, // Don't persist here since we handle it in ReactorConversationService
@@ -3420,21 +4805,24 @@ export default class ReactorConversationService
 
         case "google":
           // Google AI service implementation
-          await this.googleAIService.initialize(chatSessionId, persona);
+          await this.googleAIService.initialize(chatSessionId, routedPersona);
+          this.googleAIService.excludeInFlightTurn(chatArgs.currentTurnMessageId);
           return await this.googleAIService.chat({
             ...chatArgs,
             persistState: false, // Don't persist here since we handle it in ReactorConversationService
           });
         case "anthropic":
           // Anthropic service implementation
-          await this.anthropicService.initialize(chatSessionId, persona);
+          await this.anthropicService.initialize(chatSessionId, routedPersona);
+          this.anthropicService.excludeInFlightTurn(chatArgs.currentTurnMessageId);
           return await this.anthropicService.chat({
             ...chatArgs,
             persistState: false, // Don't persist here since we handle it in ReactorConversationService
           });
         default:
           // x-ai, openai, copilot, and azure-openai use the same OpenAI-compatible service
-          await this.openaiService.initialize(chatSessionId, persona);
+          await this.openaiService.initialize(chatSessionId, routedPersona);
+          this.openaiService.excludeInFlightTurn(chatArgs.currentTurnMessageId);
           return await this.openaiService.chat({
             ...chatArgs,
             persistState: false, // Don't persist here since we handle it in ReactorConversationService
@@ -3729,7 +5117,12 @@ export default class ReactorConversationService
         }
 
         const effectiveModelId = modelIdOverride || storedModelId || persona.modelId;
-        const provider = providerIdOverride || storedProviderId || persona.providerId || "xai";
+        const provider = await this.resolveConversationProvider(
+          chatSessionId,
+          persona,
+          providerIdOverride,
+          storedProviderId
+        );
         // Apply overrides: if caller specified a different model/provider, use it
         const hasOverride = effectiveModelId !== persona.modelId || provider !== persona.providerId;
         const effectivePersona = hasOverride
@@ -3744,6 +5137,11 @@ export default class ReactorConversationService
 
         // Save message to conversation history
         let conversation;
+        // Identity of the turn persisted below. Threaded to the provider so it can
+        // drop the duplicate copy that `loadChatState` reads back out of the
+        // transcript (see `AIProviderBase.excludeInFlightTurn`). Left undefined on
+        // the `continueAfterTools` path, which pushes nothing new.
+        let persistedTurnId: string | undefined;
         if (chatSessionId) {
           // For SSE streaming on a resumed session, check that the SSE transport
           // is connected *before* persisting the message.  If the session/transport
@@ -3869,6 +5267,11 @@ export default class ReactorConversationService
             )
               .populate("user")
               .exec();
+
+            // Phase 3 step 3a dual-write, applied AFTER the write so the row is
+            // keyed on the `_id` Mongo assigned rather than the provisional one.
+            await this.mirrorPersistedAppend(chatSessionId, conversation, messageToAdd);
+            persistedTurnId = String(messageToAdd.id);
           }
 
           // Generate a title from the first user message (fire-and-forget)
@@ -3998,6 +5401,14 @@ export default class ReactorConversationService
 
           await conversation.save();
 
+          // Dual-write the initial message of a brand-new conversation. The
+          // document is saved by now, so history[0] carries Mongo's _id.
+          await this.mirrorPersistedAppend(
+            conversation._id.toString(),
+            conversation,
+            conversation.history?.[0]
+          );
+
           // Generate a title from the first user message (fire-and-forget)
           if (role === "user") {
             this.generateConversationTitle(
@@ -4080,6 +5491,7 @@ export default class ReactorConversationService
             tool_call_id,
             streamingMode,
             providerConfig,
+            currentTurnMessageId: persistedTurnId,
           }
         );
 
@@ -4200,7 +5612,7 @@ export default class ReactorConversationService
                 }, effectiveConversationId, personaId);
 
                 // Persist a placeholder tool result in conversation history
-                await ReactorConversationModel.findOneAndUpdate(
+                const clientToolPlaceholderUpdated = await ReactorConversationModel.findOneAndUpdate(
                   { _id: effectiveConversationId },
                   {
                     $push: {
@@ -4218,6 +5630,12 @@ export default class ReactorConversationService
                   },
                   { new: true }
                 ).exec();
+
+                await this.mirrorPersistedAppend(
+                  effectiveConversationId,
+                  clientToolPlaceholderUpdated,
+                  undefined
+                );
 
                 // Forward the tool call to the client via SSE so the client can execute it
                 if (streamingMode === StreamingMode.SSE) {
@@ -4324,7 +5742,7 @@ export default class ReactorConversationService
                 });
                 await this.updateToolCallStatus(effectiveConversationId, toolCall.id, 'error');
                 // Add an error tool result to history so the AI knows the tool failed
-                await ReactorConversationModel.findOneAndUpdate(
+                const toolExecErrorUpdated = await ReactorConversationModel.findOneAndUpdate(
                   { _id: effectiveConversationId },
                   {
                     $push: {
@@ -4342,6 +5760,12 @@ export default class ReactorConversationService
                   },
                   { new: true }
                 ).exec();
+
+                await this.mirrorPersistedAppend(
+                  effectiveConversationId,
+                  toolExecErrorUpdated,
+                  undefined
+                );
               }
             }
 
@@ -4387,20 +5811,30 @@ export default class ReactorConversationService
             const partialContent = response?.choices?.[0]?.message?.content || response?.content || '';
 
             // Add assistant message so the user sees the pause
-            await ReactorConversationModel.findOneAndUpdate(
+            // Per-item so the mirror can receive the same object as the fallback.
+            const iterationLimitItem = {
+              id: new ObjectId(),
+              role: 'assistant',
+              content: `I've completed ${iteration} tool call iterations and reached the configured limit of ${MAX_TOOL_ITERATIONS}. You can adjust the limit and continue, or accept the current results.`,
+              timestamp: new Date(),
+            };
+
+            const iterationLimitItemUpdated = await ReactorConversationModel.findOneAndUpdate(
               { _id: effectiveConversationId },
               {
-                $push: {
-                  history: {
-                    id: new ObjectId(),
-                    role: 'assistant',
-                    content: `I've completed ${iteration} tool call iterations and reached the configured limit of ${MAX_TOOL_ITERATIONS}. You can adjust the limit and continue, or accept the current results.`,
-                    timestamp: new Date(),
-                  },
-                },
+                $push: { history: iterationLimitItem },
                 $set: { updated: new Date(), processing: false },
-              }
+              },
+              // Required by the mirror: it reads the persisted item, which needs the
+              // `_id` Mongo assigns on write.
+              { new: true }
             ).exec();
+
+            await this.mirrorPersistedAppend(
+              effectiveConversationId,
+              iterationLimitItemUpdated,
+              iterationLimitItem
+            );
 
             const componentFqn = 'core.WorkflowTaskApproval@1.0.0';
             const componentProps = {
@@ -4732,26 +6166,35 @@ export default class ReactorConversationService
           status: tc.status || 'pending',
         }));
 
-        await ReactorConversationModel.findOneAndUpdate(
+        // Per-item so the mirror can receive the same object as the fallback.
+        const assistantHistoryItem = {
+          id: new ObjectId(),
+          response, // add the original response for debugging
+          role: aiMessage.role,
+          content: aiMessage.content,
+          thinking,
+          images,
+          timestamp: new Date(),
+          tool_calls: toolCallsWithStatus,
+          tool_results: [],
+        };
+
+        const assistantHistoryItemUpdated = await ReactorConversationModel.findOneAndUpdate(
           { _id: conversation._id },
           {
-            $push: {
-              history: {
-                id: new ObjectId(),
-                response, // add the original response for debugging
-                role: aiMessage.role,
-                content: aiMessage.content,
-                thinking,
-                images,
-                timestamp: new Date(),
-                tool_calls: toolCallsWithStatus,
-                tool_results: [],
-              },
-            },
+            $push: { history: assistantHistoryItem },
             $set: { updated: new Date() },
           },
+          // Required by the mirror: it reads the persisted item, which needs the
+          // `_id` Mongo assigns on write.
           { new: true }
         ).exec();
+
+        await this.mirrorPersistedAppend(
+          conversation._id.toString(),
+          assistantHistoryItemUpdated,
+          assistantHistoryItem
+        );
       }
 
       // Update token count after adding AI response — prefer provider-reported usage
@@ -4846,22 +6289,31 @@ export default class ReactorConversationService
         response,
       }, conversation._id?.toString(), conversation.personaId);
 
-      await ReactorConversationModel.findOneAndUpdate(
+      // Per-item so the mirror can receive the same object as the fallback.
+      const noResponseItem = {
+        id: new ObjectId(),
+        role: "system",
+        content: "No AI response received",
+        timestamp: new Date(),
+        tool_results: [],
+      };
+
+      const noResponseItemUpdated = await ReactorConversationModel.findOneAndUpdate(
         { _id: conversation._id },
         {
-          $push: {
-            history: {
-              id: new ObjectId(),
-              role: "system",
-              content: "No AI response received",
-              timestamp: new Date(),
-              tool_results: [],
-            },
-          },
+          $push: { history: noResponseItem },
           $set: { updated: new Date() },
         },
+        // Required by the mirror: it reads the persisted item, which needs the
+        // `_id` Mongo assigns on write.
         { new: true }
       ).exec();
+
+      await this.mirrorPersistedAppend(
+        conversation._id.toString(),
+        noResponseItemUpdated,
+        noResponseItem
+      );
 
       // Update token count after adding system message
       await this.updateConversationTokenCount(conversation._id.toString());
@@ -4956,6 +6408,141 @@ export default class ReactorConversationService
    *
    * @since 1.0.0
    */
+  /**
+   * Decide what to persist as `maxTokens`, given a resolution and the current value.
+   *
+   * Returns the value to store, or `undefined` to leave the stored value alone.
+   *
+   * Only `provider-hit` / `cross-provider-hit` are authoritative. `persona-fallback`
+   * and `default` both mean the model could NOT be resolved from providers.yaml, so
+   * the number is a guess — and a guess may never SHRINK an existing budget. That is
+   * precisely how a real 1 000 000 collapsed to 200 000.
+   *
+   * All three writers (`setChatModelProvider`, the `getNewConversation` reuse path
+   * and `startChatSession`) apply this same rule; before the fix, none of them did.
+   */
+  private resolvePersistedMaxTokens(
+    currentMaxTokens: number | null | undefined,
+    resolution: IModelContextLengthResolution
+  ): number | undefined {
+    // Nothing resolved: leave whatever the conversation already has.
+    if (resolution?.value == null) {
+      return undefined;
+    }
+
+    // A model-declared limit is authoritative in both directions.
+    if (resolution.authoritative) {
+      return resolution.value;
+    }
+
+    // A fallback may never shrink an existing budget. It MAY raise one, or set one
+    // where none existed: an over-large budget fails loudly at the provider, whereas
+    // an under-sized one silently disables every tool and misreports the cause.
+    if (typeof currentMaxTokens === "number" && currentMaxTokens > resolution.value) {
+      return undefined;
+    }
+    return resolution.value;
+  }
+
+  /**
+   * Resolve the budget a single tool result is judged against.
+   *
+   * Defaults to the conversation budget, which preserves historical behaviour
+   * exactly. Set `REACTORY_MACRO_RESULT_TOKEN_BUDGET` to separate "how big may one
+   * result be" from "how big is this conversation's window".
+   */
+  private resolveMacroResultBudget(conversationMaxTokens?: number | null): number | null {
+    const configured = Number(process.env.REACTORY_MACRO_RESULT_TOKEN_BUDGET);
+    if (Number.isFinite(configured) && configured > 0) {
+      return configured;
+    }
+    return conversationMaxTokens ?? null;
+  }
+
+  /**
+   * Decide whether a macro result may be appended to a conversation.
+   *
+   * Pure and `static` on purpose: this predicate is what was wrong, so it is unit
+   * tested directly rather than through the whole service (which needs Mongo and a
+   * provider registry to reach the macro path at all).
+   *
+   * The two questions are deliberately separated:
+   *  - `result-exceeds-conversation`: the result alone is larger than the result
+   *    budget, so it could never be delivered in any conversation.
+   *  - `conversation-over-budget`: the result is fine, but the conversation it would
+   *    join is already at/over its budget. A conversation condition — never a macro failure.
+   */
+  static evaluateToolResultBudget(input: {
+    macro: string;
+    chatSessionId: string;
+    resultTokens: number;
+    conversationTokens?: number | null;
+    conversationMaxTokens?: number | null;
+    resultMaxTokens?: number | null;
+  }): IToolResultBudgetDecision {
+    const {
+      macro,
+      chatSessionId,
+      resultTokens,
+      conversationTokens = 0,
+      conversationMaxTokens = null,
+      resultMaxTokens = null,
+    } = input;
+
+    const usedConversation = conversationTokens ?? 0;
+
+    if (conversationMaxTokens == null) {
+      return {
+        allowResult: true,
+        resultTokens,
+        conversationTokens: usedConversation,
+        conversationMaxTokens,
+        message: "",
+      };
+    }
+
+    const resultBudget = resultMaxTokens ?? conversationMaxTokens;
+
+    // Question 1 — can this result ever fit, in any conversation?
+    if (resultTokens > resultBudget) {
+      return {
+        allowResult: false,
+        reason: "result-exceeds-conversation",
+        resultTokens,
+        conversationTokens: usedConversation,
+        conversationMaxTokens,
+        message:
+          `Macro ${macro} produced a result larger than the tool-result budget; it cannot be delivered. ` +
+          `Result tokens: ${resultTokens}, result budget: ${resultBudget}, conversation budget: ${conversationMaxTokens}, conversation: ${chatSessionId}. ` +
+          `Reduce the amount of data the macro returns.`,
+      };
+    }
+
+    // Question 2 — is the conversation already over its budget?
+    const projected = resultTokens + usedConversation;
+    if (projected > conversationMaxTokens) {
+      return {
+        allowResult: false,
+        reason: "conversation-over-budget",
+        resultTokens,
+        conversationTokens: usedConversation,
+        conversationMaxTokens,
+        message:
+          `Conversation ${chatSessionId} is over its context budget. ` +
+          `Conversation tokens: ${usedConversation}, result tokens: ${resultTokens}, projected: ${projected}, conversation budget: ${conversationMaxTokens}. ` +
+          `This is a conversation context-limit condition, not a macro failure.`,
+      };
+    }
+
+    return {
+      allowResult: true,
+      resultTokens,
+      conversationTokens: usedConversation,
+      conversationMaxTokens,
+      message: "",
+    };
+  }
+
   async executeMacro(args: {
     macro: string;
     personaId: string;
@@ -4980,7 +6567,7 @@ export default class ReactorConversationService
     try {
       // Get the persona's provider
       const persona = await this.context
-        .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0")
+        .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0", { chatSessionId })
         .getPersona(personaId);
 
       // Get provider adapter
@@ -4994,7 +6581,12 @@ export default class ReactorConversationService
         throw new Error("Conversation not found");
       }
 
-      const provider = conversation.providerId || persona.providerId || "openai";
+      const provider = await this.resolveConversationProvider(
+        chatSessionId,
+        persona,
+        undefined,
+        conversation.providerId || undefined
+      );
       const adapter = await this.providerService.getAdapter(provider);
 
       // @ts-ignore
@@ -5063,27 +6655,91 @@ export default class ReactorConversationService
         throw new Error(`Macro ${macro} returned no result`);
       }
 
-      // we need to calculate token count of the result, and add it to the conversation
-      let resultString = JSON.stringify(result);
-      const tokenCount = await this.chunkingService.estimateTokenCount(
+      // Token accounting for the result. Two *separate* questions used to be
+      // conflated here and both reported as "Macro X result is too large":
+      //   1. Is the result itself deliverable at all?   (a result-level budget)
+      //   2. Is the *conversation* over its context budget?  (a conversation condition)
+      // Question 2 is not a macro failure, and refusing the result did nothing to reduce
+      // the conversation — it just disabled every tool while the conversation stayed over
+      // budget. That misattribution is the defect these guards used to cause.
+      const resultString = JSON.stringify(result);
+      const resultTokens = await this.chunkingService.estimateTokenCount(
         resultString
       );
+      const conversationBudget = conversation.maxTokens;
+      const conversationTokens = (conversation as any).tokenCount ?? 0;
 
-      if (conversation.maxTokens != null && tokenCount > conversation.maxTokens) {
-        throw new Error(
-          `Macro ${macro} result is too large. Max tokens: ${conversation.maxTokens}, Token count: ${tokenCount}`
-        );
+      const resultDecision = ReactorConversationService.evaluateToolResultBudget({
+        macro,
+        chatSessionId,
+        resultTokens,
+        conversationTokens,
+        conversationMaxTokens: conversationBudget,
+        resultMaxTokens: this.resolveMacroResultBudget(conversationBudget),
+      });
+
+      if (!resultDecision.allowResult && resultDecision.reason === "result-exceeds-conversation") {
+        // The result alone cannot fit any conversation. Refusing is correct — but say so
+        // in terms of the result budget, not as a vague "result is too large" that
+        // collides with the conversation budget figure.
+        this.sessionLog("error", "Tool result exceeds the tool-result budget", {
+          macro,
+          chatSessionId,
+          resultTokens,
+          conversationMaxTokens: conversationBudget,
+        }, chatSessionId);
+        throw new Error(resultDecision.message);
       }
 
-      if (conversation.maxTokens != null && tokenCount + conversation.tokenCount > conversation.maxTokens) {
-        // create a copy of the original history, in the event that
-        // the truncation is not enough to fit the result.
-        // first check what size the new history would be if we truncate it.
-        throw new Error(
-          `Macro ${macro} result is too large. Max tokens: ${
-            conversation.maxTokens
-          }, Token count: ${tokenCount + conversation.tokenCount}`
-        );
+      if (!resultDecision.allowResult && resultDecision.reason === "conversation-over-budget") {
+        // The conversation is over its budget. That is NOT a macro failure, and refusing this
+        // result does not reduce the conversation — so this is deliberately a clean refusal.
+        //
+        // There is intentionally NO truncation/compaction here. The conversation was already under
+        // budget when this turn was dispatched (`sendMessage` reduces before dispatch), so an
+        // over-budget state mid-turn means it grew *during* the turn. Truncating from inside tool
+        // execution is unsafe: `truncateConversationHistory` keeps a contiguous recent suffix and
+        // then drops leading non-user messages, so in a tool-heavy turn it can archive the
+        // assistant message that owns the *in-flight* tool call and orphan this very result. The
+        // anchor loop in that method pops from the front with no lower bound, so the in-flight
+        // exchange is not protected. Recovery belongs in the pre-dispatch path, where the boundary
+        // is known; here we fail cleanly and attribute the condition correctly.
+        this.sessionLog("warn", "Conversation is over its context budget during tool execution", {
+          macro,
+          chatSessionId,
+          cachedConversationTokens: conversationTokens,
+          conversationMaxTokens: conversationBudget,
+          resultTokens,
+        }, chatSessionId);
+
+        // Recompute rather than trusting the loaded document's cached tokenCount. A failure here
+        // must not surface as a macro error — the condition is still the conversation's budget.
+        let freshTokens = conversationTokens;
+        let freshMaxTokens: number | null = conversationBudget ?? null;
+        try {
+          const fresh = await this.updateTokenCountAndCheckLimits(chatSessionId);
+          freshTokens = fresh.currentTokens;
+          freshMaxTokens = fresh.maxTokens ?? conversationBudget ?? null;
+        } catch (freshErr: any) {
+          this.sessionLog("error", "Failed to recompute conversation token count while over budget", {
+            macro,
+            chatSessionId,
+            error: freshErr?.message,
+          }, chatSessionId);
+        }
+
+        const budgetMessage =
+          `Conversation ${chatSessionId} is over its context budget. ` +
+          `Conversation tokens: ${freshTokens}, result tokens: ${resultTokens}, conversation budget: ${freshMaxTokens}. ` +
+          `This is a conversation context-limit condition, not a macro failure.`;
+        this.sessionLog("error", budgetMessage, {
+          macro,
+          chatSessionId,
+          currentTokens: freshTokens,
+          resultTokens,
+          conversationMaxTokens: freshMaxTokens,
+        }, chatSessionId);
+        throw new Error(budgetMessage);
       }
 
       // Build a content string that includes the actual result data so the AI
@@ -5125,7 +6781,7 @@ export default class ReactorConversationService
         persistedVars = {};
       }
 
-      await ReactorConversationModel.findOneAndUpdate(
+      const toolResultConversation = await ReactorConversationModel.findOneAndUpdate(
         { _id: chatSessionId },
         {
           $push: { history: toolResult },
@@ -5134,24 +6790,33 @@ export default class ReactorConversationService
         { new: true }
       ).exec();
 
+      await this.mirrorPersistedAppend(chatSessionId, toolResultConversation, toolResult);
       // Backfill tool_results on the original assistant message that initiated this tool call
       if (callId) {
-        await ReactorConversationModel.findOneAndUpdate(
-          {
-            _id: chatSessionId,
-            "history.tool_calls.id": callId,
-          },
-          {
-            $push: {
-              "history.$.tool_results": {
-                id: callId,
-                name: macro,
-                content: result,
-                timestamp: new Date(),
-              },
+        const macroResultStore = this.getMessageStore();
+        const macroResultEntry = {
+          id: callId,
+          name: macro,
+          content: result,
+          timestamp: new Date(),
+        };
+        if (macroResultStore) {
+          // The array is frozen, so `$push "history.$.tool_results"` would match nothing. The tool
+          // call id is not a row key, so the owning row is found by JSONB containment.
+          await macroResultStore.appendToolResultToOwningMessage(chatSessionId, callId, macroResultEntry);
+        } else {
+          await ReactorConversationModel.findOneAndUpdate(
+            {
+              _id: chatSessionId,
+              "history.tool_calls.id": callId,
             },
-          }
-        ).exec();
+            {
+              $push: {
+                "history.$.tool_results": macroResultEntry,
+              },
+            }
+          ).exec();
+        }
 
         await this.updateToolCallStatus(chatSessionId, callId, 'success');
       }
@@ -5239,7 +6904,7 @@ export default class ReactorConversationService
       // Persist the error entry to conversation history so the AI provider
       // can read the failure on the next turn.
       try {
-        await ReactorConversationModel.findOneAndUpdate(
+        const errorConversation = await ReactorConversationModel.findOneAndUpdate(
           { _id: chatSessionId },
           {
             $push: { history: toolErrorEntry },
@@ -5247,6 +6912,7 @@ export default class ReactorConversationService
           },
           { new: true }
         ).exec();
+        await this.mirrorPersistedAppend(chatSessionId, errorConversation, toolErrorEntry);
       } catch (persistError: any) {
         this.sessionLog(
           "warn",
@@ -5263,7 +6929,12 @@ export default class ReactorConversationService
           _id: chatSessionId,
         }).exec();
         const providerAdapter = await this.providerService.getAdapter(
-          conv?.providerId || persona?.providerId || "openai"
+          await this.resolveConversationProvider(
+            chatSessionId,
+            persona,
+            undefined,
+            conv?.providerId || undefined
+          )
         );
         return providerAdapter.adaptResponse(toolErrorEntry);
       } catch {
@@ -5376,32 +7047,47 @@ export default class ReactorConversationService
           : JSON.stringify(toolResult.result ?? 'No result');
       }
 
+      const clientToolResultEntry = {
+        id: toolResult.toolCallId,
+        name: toolResult.toolName,
+        content: toolResult.isError ? toolResult.error : toolResult.result,
+        timestamp: new Date(),
+      };
+
       // 1. Try to replace the placeholder tool message in history
-      const updateResult = await ReactorConversationModel.findOneAndUpdate(
-        {
-          _id: chatSessionId,
-          "history.tool_call_id": toolResult.toolCallId,
-          "history.role": "tool",
-        },
-        {
-          $set: {
-            "history.$.content": content,
-            "history.$.tool_results": [{
-              id: toolResult.toolCallId,
-              name: toolResult.toolName,
-              content: toolResult.isError ? toolResult.error : toolResult.result,
-              timestamp: new Date(),
-            }],
-            "history.$.timestamp": new Date(),
-            updated: new Date(),
+      const placeholderStore = this.getMessageStore();
+      let updateResult: any = null;
+      if (placeholderStore) {
+        // The lookup is by `tool_call_id` inside the frozen array; the row is found instead. A
+        // non-zero result means a placeholder existed, preserving the append-fallback decision below.
+        const replaced = await placeholderStore.replaceToolMessageByToolCallId(
+          chatSessionId,
+          toolResult.toolCallId,
+          { content, toolResults: [clientToolResultEntry], timestamp: new Date() }
+        );
+        updateResult = replaced > 0 ? { _id: chatSessionId } : null;
+      } else {
+        updateResult = await ReactorConversationModel.findOneAndUpdate(
+          {
+            _id: chatSessionId,
+            "history.tool_call_id": toolResult.toolCallId,
+            "history.role": "tool",
           },
-        },
-      ).exec();
+          {
+            $set: {
+              "history.$.content": content,
+              "history.$.tool_results": [clientToolResultEntry],
+              "history.$.timestamp": new Date(),
+              updated: new Date(),
+            },
+          }
+        ).exec();
+      }
 
       // If no placeholder was found (e.g. client tool executed via PROMPT mode
       // where the server never created a placeholder), insert a new tool message.
       if (!updateResult) {
-        await ReactorConversationModel.findOneAndUpdate(
+        const toolResultFallbackUpdated = await ReactorConversationModel.findOneAndUpdate(
           { _id: chatSessionId },
           {
             $push: {
@@ -5424,25 +7110,37 @@ export default class ReactorConversationService
           },
           { new: true },
         ).exec();
+
+        await this.mirrorPersistedAppend(
+          chatSessionId,
+          toolResultFallbackUpdated,
+          undefined
+        );
       }
 
       // 2. Backfill tool_results in the original assistant message that had tool_calls
-      await ReactorConversationModel.findOneAndUpdate(
-        {
-          _id: chatSessionId,
-          "history.tool_calls.id": toolResult.toolCallId,
-        },
-        {
-          $push: {
-            "history.$.tool_results": {
-              id: toolResult.toolCallId,
-              name: toolResult.toolName,
-              content: toolResult.isError ? toolResult.error : toolResult.result,
-              timestamp: new Date(),
-            },
+      //
+      // The filter below is against the frozen array, so under the store source it matches nothing.
+      // The tool call id is not a row key, so the owning row is found by JSONB containment.
+      if (placeholderStore) {
+        await placeholderStore.appendToolResultToOwningMessage(
+          chatSessionId,
+          toolResult.toolCallId,
+          clientToolResultEntry
+        );
+      } else {
+        await ReactorConversationModel.findOneAndUpdate(
+          {
+            _id: chatSessionId,
+            "history.tool_calls.id": toolResult.toolCallId,
           },
-        },
-      ).exec();
+          {
+            $push: {
+              "history.$.tool_results": clientToolResultEntry,
+            },
+          }
+        ).exec();
+      }
 
       await this.updateToolCallStatus(
         chatSessionId,
@@ -5477,10 +7175,15 @@ export default class ReactorConversationService
     // Continue the AI processing loop: send the tool results to the provider
     // so the agent can see the real outputs and respond.
     const persona = await this.context
-      .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0")
+      .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0", { chatSessionId })
       .getPersona(personaId);
     const storedConv = await ReactorConversationModel.findById(chatSessionId).select('providerId').lean().exec();
-    const provider = storedConv?.providerId || persona.providerId || "xai";
+    const provider = await this.resolveConversationProvider(
+      chatSessionId,
+      persona,
+      undefined,
+      storedConv?.providerId || undefined
+    );
     const adapter = await this.providerService.getAdapter(provider);
 
     if (streamingMode === StreamingMode.SSE) {
@@ -5576,13 +7279,18 @@ export default class ReactorConversationService
       }
 
       const persona = await this.context
-        .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0")
+        .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0", { chatSessionId })
         .getPersona(personaId);
-      const provider = conversation.providerId || persona.providerId || "openai";
+      const provider = await this.resolveConversationProvider(
+        chatSessionId,
+        persona,
+        undefined,
+        conversation.providerId || undefined
+      );
       const adapter = await this.providerService.getAdapter(provider);
 
       // Use atomic update to add image message to history
-      await ReactorConversationModel.findOneAndUpdate(
+      const imageAttachedUpdated = await ReactorConversationModel.findOneAndUpdate(
         { _id: chatSessionId },
         {
           $push: {
@@ -5600,6 +7308,12 @@ export default class ReactorConversationService
         { new: true }
       ).exec();
 
+      await this.mirrorPersistedAppend(
+        chatSessionId,
+        imageAttachedUpdated,
+        undefined
+      );
+
       // Process image with AI if supported
       let response;
       if (provider === "openai" && persona.modelId === "gpt-4-vision-preview") {
@@ -5613,22 +7327,31 @@ export default class ReactorConversationService
         if (response.choices && response.choices.length > 0) {
           const aiMessage = response.choices[0].message;
           // Use atomic update to add AI response
-          await ReactorConversationModel.findOneAndUpdate(
+          // Per-item so the mirror can receive the same object as the fallback.
+          const imageReplyItem = {
+            id: new ObjectId(),
+            role: aiMessage.role,
+            content: aiMessage.content,
+            timestamp: new Date(),
+            tool_calls: aiMessage.tool_calls,
+          };
+
+          const imageReplyItemUpdated = await ReactorConversationModel.findOneAndUpdate(
             { _id: chatSessionId },
             {
-              $push: {
-                history: {
-                  id: new ObjectId(),
-                  role: aiMessage.role,
-                  content: aiMessage.content,
-                  timestamp: new Date(),
-                  tool_calls: aiMessage.tool_calls,
-                },
-              },
+              $push: { history: imageReplyItem },
               $set: { updated: new Date() },
             },
+            // Required by the mirror: it reads the persisted item, which needs the
+            // `_id` Mongo assigns on write.
             { new: true }
           ).exec();
+
+          await this.mirrorPersistedAppend(
+            chatSessionId,
+            imageReplyItemUpdated,
+            imageReplyItem
+          );
         }
       }
 
@@ -5743,6 +7466,8 @@ export default class ReactorConversationService
       if (!updatedConversation) {
         throw new Error("Failed to update conversation with file attachment");
       }
+
+      await this.mirrorPersistedAppend(chatSessionId, updatedConversation, fileMessage);
 
       // Update token count after adding file attachment message
       await this.updateConversationTokenCount(chatSessionId);
@@ -5950,6 +7675,12 @@ export default class ReactorConversationService
         }
       ).exec();
 
+      await this.mirrorPersistedAppend(
+        sessionId,
+        updatedConversation,
+        fileMessage
+      );
+
       if (!updatedConversation) {
         throw new Error("Failed to attach user file to session");
       }
@@ -6054,6 +7785,12 @@ export default class ReactorConversationService
         { new: true, runValidators: true }
       ).exec();
 
+      await this.mirrorPersistedAppend(
+        sessionId,
+        updated,
+        folderMessage
+      );
+
       if (!updated) {
         throw new Error("Failed to pin folder to session");
       }
@@ -6157,6 +7894,8 @@ export default class ReactorConversationService
       if (!updated) {
         throw new Error("Failed to pin graph perspective to session");
       }
+
+      await this.mirrorPersistedAppend(sessionId, updated, perspectiveMessage);
 
       return {
         __typename: "ReactorPinPerspectiveResponse",
@@ -6391,6 +8130,13 @@ export default class ReactorConversationService
         });
       }
 
+      // Rows are removed ONLY when the document delete actually happened. Pruning rows for a
+      // conversation we did not delete (wrong owner, already gone) would destroy a transcript that
+      // still belongs to someone.
+      if (result.deletedCount > 0) {
+        await this.mirrorDeletedConversation(String(id));
+      }
+
       this.sessionLog(result.deletedCount > 0 ? "info" : "warn",
         result.deletedCount > 0 ? "Chat session deleted" : "Chat session not found for deletion",
         { chatSessionId: id, deletedCount: result.deletedCount }, id);
@@ -6424,10 +8170,21 @@ export default class ReactorConversationService
       }
 
       let modified = false;
+      // Phase 3 step 3b: the loop below mutates the Mongo document only, but
+      // reads may be served from Postgres. Record exactly what changed so the
+      // same change can be mirrored onto the message rows — otherwise the
+      // deletion lands in Mongo and the tool call still appears in the UI.
+      const removedMessageIds: string[] = [];
+      const updatedMessages: any[] = [];
 
-      if (conversation.history && Array.isArray(conversation.history)) {
-        for (let i = conversation.history.length - 1; i >= 0; i--) {
-          const msg: any = conversation.history[i];
+      // The working set comes from the message store. The array is retired, so iterating it would
+      // examine an empty set — and its `Array.isArray` guard would skip the ENTIRE operation,
+      // leaving the tool call visible in the transcript.
+      const workingHistory: any[] = await this.loadActiveHistory(chatSessionId);
+
+      {
+        for (let i = workingHistory.length - 1; i >= 0; i--) {
+          const msg: any = workingHistory[i];
           const isTargetMsg = messageId ? (msg.id?.toString() === messageId || msg.id === messageId) : true;
 
           if (isTargetMsg && Array.isArray(msg.tool_calls) && msg.tool_calls.some((tc: any) => tc.id === toolCallId)) {
@@ -6449,19 +8206,35 @@ export default class ReactorConversationService
             const hasImages = Array.isArray(msg.images) && msg.images.length > 0;
 
             if (!hasContent && !hasOtherCalls && !hasThinking && !hasImages) {
-              conversation.history.splice(i, 1);
+              const removedId = this.historyItemId(msg);
+              if (removedId) removedMessageIds.push(removedId);
+              // The removal is expressed in the store by the mirrors below.
+            } else {
+              updatedMessages.push(msg);
             }
           } else if (msg.role === 'tool' && (msg.tool_call_id === toolCallId || msg.id === toolCallId)) {
             // Remove standalone tool message for this tool call
-            conversation.history.splice(i, 1);
+            const removedId = this.historyItemId(msg);
+            if (removedId) removedMessageIds.push(removedId);
+            // The removal is expressed in the store by the mirrors below.
             modified = true;
           }
         }
       }
 
       if (modified) {
-        conversation.markModified('history');
-        await conversation.save();
+        // Nothing on the document is written: the message store is authoritative and the mirrors
+        // below are the write.
+
+        // Mirror the mutation so the deleted tool call disappears under both
+        // read sources, not just Mongo.
+        for (const removedId of removedMessageIds) {
+          await this.mirrorDeletedMessage(chatSessionId, removedId);
+        }
+        for (const updated of updatedMessages) {
+          await this.mirrorUpdatedMessage(chatSessionId, updated);
+        }
+
         this.sessionLog("info", `Tool call ${toolCallId} deleted successfully`, { chatSessionId, toolCallId }, chatSessionId);
         return true;
       }
@@ -6769,14 +8542,22 @@ export default class ReactorConversationService
         modelOrProviderChanged = true;
       }
 
-      // Re-resolve maxTokens whenever starting a session or when model/provider changed
-      const resolvedMaxTokens = await this.resolveModelContextLength(
+      // Re-resolve maxTokens whenever starting a session or when model/provider changed.
+      // A non-authoritative resolution is a failed lookup, not a real 200 000 — never let it
+      // shrink the budget, but still persist a genuine model/provider change. The limit comes
+      // from the provider registry, never from the persona.
+      const previousMaxTokens = conversation.maxTokens;
+      const resolution = await this.resolveModelContextLength(
         conversation.modelId,
-        conversation.providerId,
-        persona.maxTokens
+        conversation.providerId
       );
-      if (conversation.maxTokens !== resolvedMaxTokens || modelOrProviderChanged) {
-        conversation.maxTokens = resolvedMaxTokens;
+      const nextMaxTokens = this.resolvePersistedMaxTokens(previousMaxTokens, resolution);
+      if (nextMaxTokens !== undefined) {
+        conversation.maxTokens = nextMaxTokens;
+      }
+      const maxTokensChanged =
+        nextMaxTokens !== undefined && nextMaxTokens !== previousMaxTokens;
+      if (maxTokensChanged || modelOrProviderChanged) {
         await conversation.save();
       }
 
@@ -6793,11 +8574,20 @@ export default class ReactorConversationService
       const systemPromptTemplate = persona?.prompts?.["system"];
 
       // Only add the system prompt if the conversation doesn't already have one.
-      // getNewConversation() may return a reused conversation that already contains
-      // a system message (it matches conversations with history.$size: 1 & role: "system").
-      const hasSystemMessage = conversation.history.some(
-        (msg: any) => msg.role === "system"
+      // getNewConversation() may return a reused conversation that already carries one. The embedded
+      // array no longer records messages, so asking it would answer "no" every time and every reuse
+      // would append a second persona prompt — the store answers instead.
+      const hasSystemMessage = await this.conversationHasSystemPrompt(
+        conversation._id?.toString()
       );
+
+      // Phase 3 step 3b: capture the history length *before* the system message(s)
+      // are pushed below. This creation path persists with `conversation.save()`
+      // rather than an inline `$push`, so it bypassed every `$push` mirror site;
+      // the delta from this index is mirrored after the save, once Mongoose has
+      // assigned each pushed subdocument its persisted `_id` (which the mirror
+      // requires as the row key).
+      const historyLengthBeforeSystemPush = conversation.history.length;
 
       if (systemPromptTemplate && !hasSystemMessage) {
         // The prompt content may already be fully compiled (e.g. from buildSystemPrompt()).
@@ -6894,6 +8684,25 @@ export default class ReactorConversationService
 
       // @ts-ignore
       await conversation.save();
+
+      // Mirror the system message(s) pushed above (persona prompt, and optionally a
+      // `contextFromSessionId` summary). Must run after the save: the mirror is
+      // keyed on Mongo's persisted `_id`, which only exists once the document has
+      // been written. Fail-open — `mirrorAppendedMessage` logs and swallows any
+      // Postgres error so a chat session is never failed by the message store.
+      if (conversation.history.length > historyLengthBeforeSystemPush) {
+        const mirrorConversationId = conversation._id?.toString();
+        for (
+          let mirrorIndex = historyLengthBeforeSystemPush;
+          mirrorIndex < conversation.history.length;
+          mirrorIndex += 1
+        ) {
+          await this.mirrorAppendedMessage(
+            mirrorConversationId,
+            conversation.history[mirrorIndex]
+          );
+        }
+      }
 
       // Validate the final conversation after all modifications
       this.validateConversationDocument(
@@ -7037,7 +8846,7 @@ export default class ReactorConversationService
 
             // Add error entry to history — executeMacro only pushes on success,
             // so we need to record failures here.
-            await ReactorConversationModel.findOneAndUpdate(
+            const toolFailedUpdated = await ReactorConversationModel.findOneAndUpdate(
               { _id: chatSessionId },
               {
                 $push: {
@@ -7059,6 +8868,12 @@ export default class ReactorConversationService
               },
               { new: true }
             ).exec();
+
+            await this.mirrorPersistedAppend(
+              chatSessionId,
+              toolFailedUpdated,
+              undefined
+            );
 
             // Continue with next tool even if one fails
             this.sessionLog("warn",

@@ -75,6 +75,7 @@ const REACTOR_TOOL_INCLUDES = [
   'jiraLinkIssues',
   'jiraAddWorklog',
   'jiraMoveToSprint',
+  'updateChatData',
 ];
 
 const REACTOR_RESOURCES: IAIPersonaResource[] = [  
@@ -341,7 +342,6 @@ export const ReactoryPersona: IAIPersona = {
       ],
     }
   ],
-  maxTokens: 1048576,
   // @ts-ignore
   macros: [
     ...REACTOR_MACROS

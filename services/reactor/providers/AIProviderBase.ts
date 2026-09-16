@@ -19,6 +19,8 @@ import { IAIPersona, IAIPersonaPromptTemplate, IAIProviderService } from "../../
 import { AIProviderError } from "./AIProviderError";
 import { resolvePromptDirectives } from "../../../ai/persona/loader/system-prompt";
 
+import { loadHistoryForContext } from "../conversationHistoryLoader";
+
 abstract class AIProviderBase implements IAIProviderService {
   context: Reactory.Server.IReactoryContext;
   props: any;
@@ -35,7 +37,7 @@ abstract class AIProviderBase implements IAIProviderService {
    * Persists the chat state to the database
    */
   protected async persistChatState(): Promise<void> {
-    const { history, personaId, modelId, started, id, sseSession, vars } = this.chatState;
+    const { personaId, modelId, started, id, sseSession, vars } = this.chatState;
     const { user } = this.context;
     const meta = {
       summary: "Chat session",
@@ -48,7 +50,6 @@ abstract class AIProviderBase implements IAIProviderService {
       const updateData: any = {
         personaId,
         modelId,
-        history,
         sseSessionId: sseSession,
         user,
         vars,
@@ -57,6 +58,11 @@ abstract class AIProviderBase implements IAIProviderService {
         updated: new Date(),
         meta
       };
+
+      // The message store is the source of truth, so the embedded `history` array is never written
+      // here: doing so would (a) re-create the retired field and (b) race the `$push` + mirror
+      // writes the conversation service already performs for the same turn. Metadata is still
+      // persisted either way.
 
       // Only set started and created if this is a new conversation
       if (!this.chatStateModel || !this.chatStateModel._id) {
@@ -98,8 +104,8 @@ abstract class AIProviderBase implements IAIProviderService {
         }).exec();
         
         if (existingConversation) {
-          // Update the existing conversation instead
-          existingConversation.history = history;
+          // Update the existing conversation instead. Same rule as the upsert above: the embedded
+          // array is never written, so the retired field cannot be re-created.
           existingConversation.updated = new Date();
           existingConversation.sseSessionId = sseSession;
           existingConversation.vars = vars;
@@ -119,6 +125,56 @@ abstract class AIProviderBase implements IAIProviderService {
       );
       throw new AIProviderError('Failed to persist chat state');
     }
+  }
+
+  /**
+   * Remove the in-flight user turn from the transcript this provider loaded.
+   *
+   * The message store (Postgres) is authoritative and `sendMessage` persists the
+   * turn *before* handing it to the provider; `loadChatState` then loads the whole
+   * transcript, which already ends with that turn. Every provider's message builder
+   * iterates the transcript **and** appends the current `message`, so without this
+   * the turn reaches the model twice — once from history, once from the append.
+   *
+   * Removing the duplicate here rather than dropping the append is deliberate: the
+   * append is still load-bearing for callers that do *not* persist first —
+   * `generateCompactionSummary` sends a synthesised transcript that has no row in
+   * the message store, and the audio path sends a freshly transcribed message.
+   * Those callers pass no `messageId`, so this is a no-op for them.
+   *
+   * Matching is by identity, not content, on purpose: a content comparison would
+   * silently swallow a legitimate back-to-back repeat of identical text.
+   *
+   * @param messageId `id` of the turn as persisted in the transcript. When absent
+   *   (any caller that did not persist first) this does nothing.
+   * @returns number of transcript entries removed — 0 or 1 in practice.
+   */
+  public excludeInFlightTurn(messageId?: string | null): number {
+    if (!messageId) return 0;
+
+    const history = this.chatState?.history;
+    if (!Array.isArray(history) || history.length === 0) return 0;
+
+    const target = String(messageId);
+    const kept = history.filter((item: any) => {
+      const id = item?.id ?? item?._id;
+      return id === undefined || id === null || String(id) !== target;
+    });
+
+    const removed = history.length - kept.length;
+    if (removed > 0) {
+      // Reassign so providers that read `chatState.history` at build time (all of
+      // them) see the trimmed transcript without any further plumbing.
+      this.chatState.history = kept as any;
+
+      this.context?.debug?.(
+        `Excluded in-flight turn ${target} from provider history`,
+        { removed, remaining: kept.length },
+        'AIProviderBase.excludeInFlightTurn'
+      );
+    }
+
+    return removed;
   }
 
   /**
@@ -169,7 +225,15 @@ abstract class AIProviderBase implements IAIProviderService {
         context,
         modelId: chatSession.modelId,
         started: chatSession.started,
-        history: chatSession.history,        
+        // Phase 3: model context comes from the message store when it is
+        // authoritative. `loadHistoryForContext` fails open to the embedded
+        // array, so this is behaviour-preserving under the `mongo` source.
+        history:
+          (await loadHistoryForContext(
+            chatSession._id.toString(),
+            chatSession.history,
+            this.context as any
+          )) ?? chatSession.history,        
         personaId: chatSession.personaId,
         persona,
         vars: chatSession.vars || {},

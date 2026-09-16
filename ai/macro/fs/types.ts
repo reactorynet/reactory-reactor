@@ -2,6 +2,7 @@
  * Property interfaces for fs macros - converting from array-based args to named parameters
  */
 import { MacroErrorCode } from '../errors';
+import { PayloadDigest } from './payloadSummary';
 
 /**
  * Properties for ReadFile macro
@@ -83,8 +84,16 @@ export interface WriteFileResult {
   data?: {
     /** Full file path */
     path: string;
-    /** Written content */
+    /**
+     * A DIGEST of what was written — deliberately NOT the content itself.
+     *
+     * The macro result is appended to the conversation, so echoing the payload back would spend
+     * tokens equal to its size for no information gain (the caller supplied the bytes). Verify a
+     * write by re-reading the file and comparing to `contentDigest.sha256`.
+     */
     content: string;
+    /** Machine-readable digest of the written content: size, line count, hash and preview. */
+    contentDigest: PayloadDigest;
     /** Write mode used */
     mode: string;
     /** File size in bytes */
@@ -96,7 +105,13 @@ export interface WriteFileResult {
   };
   /** Tool name for context */
   tool: string;
-  /** Original parameters passed to the macro */
+  /**
+   * Original parameters passed to the macro.
+   *
+   * `content` here is a DIGEST, not the payload (see `summarisePayload`). The field is kept so the
+   * shape is unchanged for any consumer that reads `path`/`mode`/`start`/`end`, but the bytes the
+   * caller sent are never echoed back.
+   */
   params: WriteFileProps;
   /** Metadata about the operation */
   metadata?: {

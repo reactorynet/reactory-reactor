@@ -8,6 +8,7 @@ import ReactorConversationModel from '@reactory/server-modules/reactory-reactor/
 import { ReactorNodeModel } from '@reactory/server-modules/reactory-reactor/models/ReactorGraphNode';
 import { ReactorNodeLinkModel } from '@reactory/server-modules/reactory-reactor/models/ReactorNodeLink';
 import { nodeId, linkId } from '@reactory/server-modules/reactory-reactor/services/graph/GraphIdentity';
+import { loadHistoryForContext } from '@reactory/server-modules/reactory-reactor/services/reactor/conversationHistoryLoader';
 
 export interface ProcessConversationStepConfig extends AgentConversationStepConfig {
   conversationId: string;
@@ -43,7 +44,11 @@ export class ProcessConversationStep extends AgentConversationStep {
         };
       }
 
-      const history = conversation.history || [];
+      // Phase 3: read the transcript from the message store when it is
+      // authoritative, falling back to the embedded array (fails open).
+      const history =
+        (await loadHistoryForContext(conversationId, conversation.history, context as any)) ??
+        (conversation.history || []);
       if (history.length === 0) {
         context.logger.info(`Conversation "${conversationId}" has no history — skipping graphing`);
         return {

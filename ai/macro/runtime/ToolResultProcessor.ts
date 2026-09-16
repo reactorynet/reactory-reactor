@@ -19,6 +19,14 @@ export interface ToolResultProcessorOptions {
    * being kept in full. Default: 2000.
    */
   fieldBudget?: number;
+  /**
+   * Per-field character budget applied to `params` — the echoed request payload.
+   *
+   * Defaults to `fieldBudget`, because the same reasoning applies: bound what the result
+   * carries. Applied unconditionally rather than only when the result exceeds
+   * `maxOutputSize` — see `curateParams`.
+   */
+  paramsBudget?: number;
 }
 
 export interface ProcessedToolResult {
@@ -35,6 +43,11 @@ export interface ProcessedToolResult {
 export class ToolResultProcessor {
   /** Default per-field character budget applied when curating a `data` object. */
   private static readonly DEFAULT_FIELD_BUDGET = 2000;
+
+  /** Notice attached to a curated `params` field, distinguishing it from curated output. */
+  private static readonly PARAMS_NOTICE =
+    'The request payload was omitted from this result to avoid echoing your own input back to ' +
+    'you at full size. The tool received it in full. This is not a tool failure and no data was lost.';
 
   /**
    * Curates an oversized `data` object field-by-field instead of blanket-spreading
@@ -98,7 +111,7 @@ export class ToolResultProcessor {
         type: 'array',
         itemCount: value.length,
         approxSize: size,
-        preview: value.slice(0, 3),
+        preview: ToolResultProcessor.boundedPreview(value, budget),
         notice: noticeMessage,
       };
     }
@@ -121,6 +134,78 @@ export class ToolResultProcessor {
     }
 
     return value;
+  }
+
+  /**
+   * A size-bounded textual preview of an oversized value.
+   *
+   * The previous array placeholder used `value.slice(0, 3)` — three items, each of which may be
+   * arbitrarily large, so the "truncated" placeholder could itself be far bigger than the field it
+   * replaced (a 3-item array of 100 KB objects produced a 300 KB "truncation"). This caps the
+   * rendered preview at `limit` characters regardless of item size.
+   */
+  private static boundedPreview(value: any, limit: number): string {
+    let rendered: string;
+    try {
+      rendered = JSON.stringify(value);
+    } catch {
+      rendered = String(value);
+    }
+    const cap = Math.max(0, Math.min(limit, 400));
+    return rendered.length > cap ? `${rendered.slice(0, cap)}…` : rendered;
+  }
+
+  /**
+   * Bound an echoed request payload (`result.params`).
+   *
+   * Macros conventionally return `params: props` — a restatement of the caller's own input. It is
+   * part of the tool result, so it is appended to the conversation and paid for in tokens, yet
+   * nothing consumes it. For a macro whose input is large (`writeFile.content`,
+   * `safeEditFile.patches`, `mongoWrite.documents`) that is the request echoed back at full size.
+   *
+   * It also **defeated the gate below**: the truncation path curates `data` but left `params`
+   * untouched, so an oversized result could have its `data` replaced with placeholders while still
+   * carrying the entire payload in `params`.
+   *
+   * Bounded **unconditionally**, not only when the total exceeds `maxOutputSize`, because those
+   * bytes are never worth carrying: a small result with a large `params` should not slip through
+   * just because it happened to be under the threshold. Fields within budget pass through
+   * untouched, so shapes and existing consumers are unaffected.
+   */
+  private static curateParams(params: any, budget: number): any {
+    if (params === null || params === undefined) return params;
+
+    if (typeof params !== 'object' || Array.isArray(params)) {
+      return ToolResultProcessor.curateField(params, budget, ToolResultProcessor.PARAMS_NOTICE);
+    }
+
+    // Per key, like `data`: small values such as `path`, `mode` or `limit` stay readable.
+    const curated: Record<string, any> = {};
+    for (const [key, value] of Object.entries(params)) {
+      curated[key] = ToolResultProcessor.curateField(
+        value,
+        budget,
+        ToolResultProcessor.PARAMS_NOTICE
+      );
+    }
+    return curated;
+  }
+
+  /**
+   * Replace an attached `params` with its bounded form.
+   *
+   * Only a `params` that is **already present** is replaced, so a tool that does not echo its
+   * request keeps its exact result shape. Non-object and array results are returned unchanged.
+   *
+   * Bounds the `params` **on the result**, not the `params` argument passed to `process()` — those
+   * are usually the same object, but when they differ the result's own value is the one that would
+   * actually be sent, so that is the one to bound. Substituting the argument instead silently
+   * replaced the result's payload with a different object.
+   */
+  private static withBoundedParams(result: any, budget: number): any {
+    if (result === null || typeof result !== 'object' || Array.isArray(result)) return result;
+    if (!Object.prototype.hasOwnProperty.call(result, 'params')) return result;
+    return { ...result, params: ToolResultProcessor.curateParams(result.params, budget) };
   }
 
   /**
@@ -156,6 +241,13 @@ export class ToolResultProcessor {
       ? options.maxOutputSize
       : ToolResultProcessor.getDefaultMaxOutputSize();
 
+    const paramsBudget =
+      options?.paramsBudget && options.paramsBudget > 0
+        ? options.paramsBudget
+        : options?.fieldBudget && options.fieldBudget > 0
+          ? options.fieldBudget
+          : ToolResultProcessor.DEFAULT_FIELD_BUDGET;
+
     // Convert result to string payload to measure size
     let payloadString = '';
     if (typeof rawResult === 'string') {
@@ -168,9 +260,12 @@ export class ToolResultProcessor {
       }
     }
 
-    // If within safe size limits, return unmodified
+    // If within safe size limits, return the result with its `params` bounded.
     if (payloadString.length <= maxOutputSize) {
-      return { result: rawResult, outputTruncated: false };
+      return {
+        result: ToolResultProcessor.withBoundedParams(rawResult, paramsBudget),
+        outputTruncated: false,
+      };
     }
 
     // Determine target directory for file offloading
@@ -235,6 +330,8 @@ export class ToolResultProcessor {
         processedResult.instructions = processedResult.instructions
           ? `${processedResult.instructions}\n\n${instructionsText}`
           : instructionsText;
+
+        processedResult.params = ToolResultProcessor.curateParams(processedResult.params, paramsBudget);
       } else {
         // Plain object or array payload
         processedResult = {
@@ -244,7 +341,7 @@ export class ToolResultProcessor {
           message: noticeMessage,
           instructions: instructionsText,
           tool: toolName,
-          params
+          params: ToolResultProcessor.curateParams(params, paramsBudget)
         };
       }
     } else {

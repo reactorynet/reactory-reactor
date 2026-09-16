@@ -1,7 +1,7 @@
 import Reactory from "@reactorynet/reactory-core";
 import { service } from "@reactory/server-core/application/decorators/service";
-import { IReactorProviderService, ReactorProviderAuthStatus } from "../../types/service.types";
-import { loadProviders, ProviderConfig, ProviderModelConfig, getCompatibleModels, findModelById } from "../../ai/providers/provider-loader";
+import { IReactorProviderService, ReactorProviderAuthStatus, IModelContextLengthResolution } from "../../types/service.types";
+import { loadProviders, ProviderConfig, ProviderModelConfig, getCompatibleModels, findModelById, findMissingContextLengths } from "../../ai/providers/provider-loader";
 import {
   decryptCredentials,
   encryptCredentials,
@@ -9,6 +9,24 @@ import {
 import { ReactorPostgresDataSource, ReactoryAiProvider, ReactoryAiModel, seedAiProviders } from "../../models";
 
 const AUTH_KEY_PREFIX = "ai-provider:";
+
+/**
+ * The platform's last-resort context window, used only when a model declares no
+ * `contextLength` in the registry and no `REACTORY_DEFAULT_CONTEXT_LENGTH` is
+ * configured.
+ *
+ * This lives here — not in the conversation service — because the provider registry
+ * is the single owner of model limits. Every use of it is logged at WARN: an
+ * invented limit is not a measurement, and a silent invention is exactly how a
+ * conversation ended up capped at a number that matched no model.
+ */
+export const DEFAULT_CONTEXT_LENGTH = 200000;
+
+/**
+ * Operator override for the last resort, in tokens. Set only if the platform
+ * default is wrong for a deployment; it does NOT override a model's declared limit.
+ */
+const CONFIGURED_CONTEXT_LENGTH_ENV = "REACTORY_DEFAULT_CONTEXT_LENGTH";
 
 export interface ResolvedCredentials {
   apiKey?: string;
@@ -128,6 +146,12 @@ class ReactorProviderService implements IReactorProviderService {
     }
     // Register response adapters for each provider type
     this.registerAdapters();
+
+    // A model that consumes a context window but declares none will silently fall back
+    // to an invented limit. Surface that at load time — it is a configuration gap, and
+    // finding it here costs nothing, whereas discovering it from a refused tool call
+    // costs an incident.
+    this.reportMissingContextLengths(Array.from(this.providers.values()));
 
     // Async hydration from PostgreSQL if database is online
     this.ensureLoaded().catch((err) => {
@@ -1004,6 +1028,117 @@ class ReactorProviderService implements IReactorProviderService {
       // Registry lookup failure should not block a wired provider.
       return true;
     }
+  }
+
+  /**
+   * Log models that consume a context window but declare none. Non-fatal by design:
+   * an incomplete registry must not stop the platform from booting.
+   */
+  private reportMissingContextLengths(providers: ProviderConfig[]): void {
+    try {
+      const gaps = findMissingContextLengths(providers);
+      if (gaps.length === 0) return;
+
+      const summary = gaps
+        .slice(0, 20)
+        .map((g) => `${g.providerId}/${g.modelId}`)
+        .join(", ");
+
+      const message =
+        `[ReactorProviderService] ${gaps.length} model(s) consume a context window but declare no contextLength ` +
+        `and will fall back to an invented limit: ${summary}${gaps.length > 20 ? ", …" : ""}. ` +
+        `Declare contextLength in providers.yaml.`;
+
+      if (typeof this.context?.warn === "function") {
+        this.context.warn(message, { gaps });
+      } else {
+        console.warn(message);
+      }
+    } catch {
+      // A validation pass must never break provider loading.
+    }
+  }
+
+  /**
+   * Resolve the context-window limit for a model from the provider registry.
+   *
+   * Scope is deliberately one provider: a model id found under a *different* provider
+   * must never lend its limit to a conversation served elsewhere. The previous
+   * implementation scanned every provider and returned the first match, which is how
+   * a `deepseek-flash` conversation (declared 64 000) could be reported as having a
+   * 1 000 000 window taken from an unrelated vendor's model of the same name.
+   */
+  async resolveModelContextLength(
+    modelId?: string,
+    providerId?: string
+  ): Promise<IModelContextLengthResolution> {
+    await this.ensureLoaded();
+
+    const requestedModelId = modelId ? String(modelId).trim() : null;
+    const requestedProviderId = providerId ? String(providerId).trim().toLowerCase() : null;
+
+    const unresolved = (
+      source: IModelContextLengthResolution["source"],
+      value: number | null
+    ): IModelContextLengthResolution => ({
+      value,
+      source,
+      authoritative: false,
+      providerId: requestedProviderId,
+      modelId: requestedModelId,
+    });
+
+    if (requestedModelId && requestedProviderId) {
+      const provider = await this.getProvider(requestedProviderId);
+
+      if (provider) {
+        const model = provider.models?.find((m) => m.id === requestedModelId);
+
+        if (model?.contextLength && model.contextLength > 0) {
+          this.context?.debug?.(
+            `[ReactorProviderService] context window resolved from registry: ${requestedProviderId}/${requestedModelId} = ${model.contextLength}`,
+            { providerId: requestedProviderId, modelId: requestedModelId, source: "model-declared" }
+          );
+          return {
+            value: model.contextLength,
+            source: "model-declared",
+            authoritative: true,
+            providerId: provider.id ?? requestedProviderId,
+            modelId: requestedModelId,
+          };
+        }
+
+        // Found the provider, but the model is absent or declares no contextLength.
+        // Both are configuration gaps, not evidence about the window size.
+        this.context?.warn?.(
+          `[ReactorProviderService] model ${requestedModelId} under provider ${requestedProviderId} ` +
+            (model
+              ? "declares no contextLength in the provider registry"
+              : "was not found in the provider registry") +
+            `; using a fallback context window. Declare contextLength in providers.yaml for the model.`,
+          { providerId: requestedProviderId, modelId: requestedModelId, modelFound: !!model }
+        );
+      } else {
+        this.context?.warn?.(
+          `[ReactorProviderService] provider ${requestedProviderId} is not in the registry; cannot resolve a context window for ${requestedModelId}`,
+          { providerId: requestedProviderId, modelId: requestedModelId }
+        );
+      }
+    } else {
+      this.context?.warn?.(
+        "[ReactorProviderService] resolveModelContextLength called without both a model and a provider; " +
+          "a limit cannot be resolved authoritatively.",
+        { providerId: requestedProviderId, modelId: requestedModelId }
+      );
+    }
+
+    // Nothing declared. Use the operator's default if configured, else the platform one.
+    const configured = Number(process.env[CONFIGURED_CONTEXT_LENGTH_ENV]);
+    if (Number.isFinite(configured) && configured > 0) {
+      return unresolved("configured-default", configured);
+    }
+
+    return unresolved("builtin-default", DEFAULT_CONTEXT_LENGTH);
   }
 
   /**

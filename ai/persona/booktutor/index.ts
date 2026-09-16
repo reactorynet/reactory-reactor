@@ -73,7 +73,8 @@ const BOOKTUTOR_TOOL_INCLUDES = [
   'get_book_page',
   'list_books',
   'list_chapters',
-  'track_progress'
+  'track_progress',
+  'updateChatData',
 ];
 
 const APP_DATA_ROOT = process.env.APP_DATA_ROOT || process.env.REACTORY_DATA

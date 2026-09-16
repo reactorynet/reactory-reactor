@@ -9,10 +9,22 @@ import { MacroComponentDefinition, MacroToolDefinition, ToolApprovalMode } from 
 import { McpSession } from '../types/model.types';
 // Removed incorrect import as 'ChatCompletionResponseMessage' is not exported by 'openai'
 
+/**
+ * Descriptive metadata for a conversation, surfaced in the chat history.
+ *
+ * The AI agent maintains these via the `updateChatData` tool so a session can
+ * be recognised at a glance: a human readable title, a short summary of what
+ * the conversation is about, discovery tags, and a status icon with a colour
+ * code (e.g. green = done, amber = in progress, red = blocked).
+ */
 export interface ConversationMeta { 
   tags?: string[]
   summary?: string
   title: string
+  /** Material icon name describing the conversation status (e.g. "check_circle"). */
+  icon?: string
+  /** Hex colour code used to tint the status icon (e.g. "#2e7d32"). */
+  color?: string
 }
 
 export type ChatHistoryItem = OpenAI.Chat.Completions.ChatCompletionMessage |
@@ -103,6 +115,20 @@ export interface ReactorConversationDocument {
   user: Reactory.Models.IUser
   // The meta data for the conversation
   meta: Reactory.Models.IRecordMeta<ConversationMeta>
+  /**
+   * A short, human readable title for the conversation. Auto-generated from
+   * the user's first message, but the agent may override it (and the fields
+   * below) at any point via the `updateChatData` tool.
+   */
+  title?: string
+  /** A short summary (1-2 sentences) of what the conversation is about. */
+  summary?: string
+  /** Free-form tags for grouping and discovery in the chat history. */
+  tags?: string[]
+  /** Material icon name describing the conversation status. */
+  icon?: string
+  /** Hex colour code used to tint the status icon. */
+  color?: string
   // The history of the conversation
   history: ReactorConversationHistory
   // The variables for the conversation
@@ -329,6 +355,26 @@ const ReactorConversationSchema = new Schema({
     type: String,
     default: null,
   },
+  // A short summary (1-2 sentences) of what the conversation is about.
+  summary: {
+    type: String,
+    default: null,
+  },
+  // Free-form tags for grouping and discovery in the chat history.
+  tags: {
+    type: [String],
+    default: [],
+  },
+  // Material icon name describing the conversation status.
+  icon: {
+    type: String,
+    default: null,
+  },
+  // Hex colour code used to tint the status icon.
+  color: {
+    type: String,
+    default: null,
+  },
   // Optional reference to a parent session that provided context for this session
   parentSessionId: {
     type: String,
@@ -387,6 +433,268 @@ ReactorConversationSchema.virtual('chats', {
 
 ReactorConversationSchema.set('toJSON', { virtuals: true });
 ReactorConversationSchema.set('toObject', { virtuals: true });
+
+/**
+ * ---------------------------------------------------------------------------------------------
+ * Phase 3c step 1 — the embedded `history` arrays stop being persisted
+ * ---------------------------------------------------------------------------------------------
+ *
+ * The Postgres message store is authoritative (unconditionally since Phase 3c step 3 retired the
+ * embedded `history` / `truncatedHistory` arrays are still maintained **in memory** — every
+ * caller keeps using them unchanged — but they are no longer **persisted**. Two reasons, both
+ * observed rather than assumed:
+ *
+ *  1. `$unset history` cannot be durable while the array is still written. In the §43.4 pilot the
+ *     field was removed, the model still answered from the message store — and the array **came
+ *     back** holding exactly the latest turn's messages, because the ordinary `$push` append path
+ *     was still writing it. The cutover would have looked finished while not being finished.
+ *  2. A second copy of the transcript written by some paths and not others is worse than no second
+ *     copy: it disagrees silently, and the disagreement is only found by whoever trusts it.
+ *
+ * This is the single choke point (§44.2, Option B): one pair of hooks covers every write site in
+ * `ReactorConversationService`. Because it removes the arrays from the *payload* — never from the
+ * document — every in-memory use of `history` is untouched, which is the point: the risk here was
+ * never the number of sites, it was the implicit in-memory assumption at each of them.
+ *
+ * Deliberate exceptions, each with a reason, each recorded in the design log §47:
+ *
+ *  - **New documents are exempt from the `save()` strip.** A brand-new conversation's array is
+ *    created deliberately (the persona system prompt), and the ephemeral compaction-summary
+ *    conversation in `generateCompactionSummary` is read back through the Mongo array *because it
+ *    has no rows in the message store*. Stripping a new document would empty the model's context
+ *    for that call. The array a new document carries is bounded and small.
+ *  - **Whole-array rewrites are reported, not stripped.** `truncateConversationHistory` and
+ *    `compactConversationHistory` replace the arrays wholesale and have no message-store
+ *    counterpart yet — compaction must also insert a summary *before* the kept messages, which
+ *    needs a `seq` shift (§47 step 1b). Stripping them without that counterpart would turn
+ *    compaction into a silent no-op on the authoritative store, so they are permitted and logged
+ *    loudly instead of half-applied.
+ *
+ * Only keys **named exactly** `history` / `truncatedHistory` are touched. That is load-bearing:
+ * `$push: { "history.$.tool_results": … }` backfills a sub-array of an *existing* item and is never
+ * a new row, so name-equality leaves those two backfills working by construction, where a
+ * subtree-wise "remove anything under history" rule would silently break them.
+ */
+const EMBEDDED_HISTORY_PATHS = ["history", "truncatedHistory"] as const;
+
+const PHASE3C_WRITE_PREFIX = "[reactor] Phase3c write-path:";
+
+/**
+ * Whether the Postgres message store is authoritative for this process.
+ *
+ * Resolved through the same resolver the read path uses, so one environment variable decides both
+ * directions and they cannot drift. Required lazily because the model layer must not statically
+ * depend on services, and guarded because a failure here must degrade to today's behaviour —
+ * writing the array — rather than to a write that silently drops the transcript.
+ */
+/**
+ * Warn — once per process — that a `mongo` source can no longer see the whole conversation.
+ *
+ * This is the second half of the "remove the trap" decision (§45.1): the write path stopped
+ * persisting the embedded array, so from that moment the array is authoritative only for messages
+ * written **before** the conversion. An operator who flips back to `mongo` expecting a clean
+ * rollback gets a transcript quietly missing everything written since — no error, just a short
+ * history. That silence is the hazard this warns about.
+ *
+ * Phrased as a condition rather than a fault, deliberately: on an instance that was never migrated
+ * the array genuinely *is* authoritative, and claiming otherwise would be a false alarm. It is
+ * louder when a Postgres DataSource is also initialised in this process, because "a message store
+ * exists here and reads are pointed away from it" is the configuration worth shouting about.
+ *
+ * Fired from the write hooks (so it carries the context of a real write) and gated to once per
+ * process (so it does not become noise).
+ */
+let mongoStalenessWarned = false;
+
+export const warnIfMongoSourceMayBeStale = (): void => {
+  if (mongoStalenessWarned) return;
+  mongoStalenessWarned = true;
+
+  let storeConfigured = false;
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { ReactorPostgresDataSource } = require("../models") as { ReactorPostgresDataSource: any };
+    storeConfigured = ReactorPostgresDataSource?.isInitialized === true;
+  } catch {
+    storeConfigured = false;
+  }
+
+  const because =
+    "the write path stopped persisting the embedded history array when the message store became " +
+    "authoritative, so this array is only authoritative for messages written BEFORE the cutover";
+
+  // eslint-disable-next-line no-console
+  console.warn(
+    storeConfigured
+      ? "[reactor] Phase3 write-path: SOURCE IS mongo WHILE A MESSAGE STORE IS CONFIGURED. " +
+          because +
+          ". Reads served from here will be silently incomplete — restore Mongo from the pre-3c " +
+          "backup before relying on this source. Note that the message source is no longer " +
+          "configurable, so setting REACTOR_MESSAGE*_SOURCE will not bring those messages back."
+      : "[reactor] Phase3 write-path: source is mongo. If this instance has already been cut " +
+          "over, " +
+          because +
+          ". On an instance that has never been migrated this is expected."
+  );
+};
+
+/** Test seam: the warning is once-per-process, so a suite must be able to re-arm it. */
+export const __resetMongoStalenessWarningForTests = (): void => {
+  mongoStalenessWarned = false;
+};
+export const isMessageStoreAuthoritative = (): boolean => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { resolveMessagesSource } = require("../services/reactor/ReactorConversationMessageService") as {
+      resolveMessagesSource: () => string;
+    };
+    return resolveMessagesSource() === "postgres";
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Strip the embedded-array **append** keys from one update document, in place.
+ *
+ * Returns the paths it removed. A whole-array rewrite is passed to `onReplacement` instead of
+ * being removed, so the caller can report that something still writes Mongo — silence is the
+ * failure mode this change exists to remove.
+ */
+export const stripEmbeddedHistoryAppends = (
+  update: Record<string, any>,
+  onReplacement: (path: string) => void
+): string[] => {
+  const paths = EMBEDDED_HISTORY_PATHS;
+  const removed: string[] = [];
+
+  const handle = (op: string, container: Record<string, any>) => {
+    for (const path of paths) {
+      if (!Object.prototype.hasOwnProperty.call(container, path)) continue;
+
+      if (op === "$push" || op === "$addToSet") {
+        // The append path this change exists to stop.
+        delete container[path];
+        removed.push(op + "." + path);
+      } else if (op === "bare" || op === "$set") {
+        // A whole-array rewrite, not an append. Reported, not stripped.
+        onReplacement(op === "bare" ? path : op + "." + path);
+      }
+    }
+  };
+
+  // A bare (operator-less) update: { history: [...], tokenCount: n }
+  handle("bare", update);
+
+  for (const op of Object.keys(update)) {
+    if (op.indexOf("$") !== 0) continue;
+    const payload = update[op];
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) continue;
+    if (op === "$push" || op === "$addToSet" || op === "$set") handle(op, payload);
+  }
+
+  return removed;
+};
+
+/**
+ * Drop operator objects that stripping has emptied, and keep what remains a valid update.
+ * MongoDB rejects an empty update document and an empty `$set`, so a site whose update was *only*
+ * a `history` push would otherwise start throwing after the strip.
+ */
+export const normaliseStrippedUpdate = (update: Record<string, any>): void => {
+  for (const op of Object.keys(update)) {
+    if (op.indexOf("$") !== 0) continue;
+    const payload = update[op];
+    if (payload && typeof payload === "object" && !Array.isArray(payload) && Object.keys(payload).length === 0) {
+      delete update[op];
+    }
+  }
+
+  if (Object.keys(update).length === 0) {
+    update.$set = { updated: new Date() };
+  }
+};
+
+/**
+ * Append path: `findOneAndUpdate`. Covers all 17 item-appending sites plus the two
+ * `history.$.tool_results` backfills, which name-equality leaves alone.
+ */
+ReactorConversationSchema.pre("findOneAndUpdate", function (next) {
+  if (!isMessageStoreAuthoritative()) {
+    warnIfMongoSourceMayBeStale();
+    return next();
+  }
+
+  const query: any = this;
+  const raw = typeof query.getUpdate === "function" ? query.getUpdate() : query._update;
+  const entries: Record<string, any>[] = Array.isArray(raw)
+    ? (raw.filter((entry: any) => entry && typeof entry === "object") as Record<string, any>[])
+    : raw && typeof raw === "object"
+      ? [raw as Record<string, any>]
+      : [];
+
+  const removed: string[] = [];
+  const replacements: string[] = [];
+
+  entries.forEach((entry) => {
+    removed.push(...stripEmbeddedHistoryAppends(entry, (path) => replacements.push(path)));
+    normaliseStrippedUpdate(entry);
+  });
+
+  if (removed.length > 0) {
+    // Recorded on the query so a later check can *prove* the choke point fired rather than
+    // assume it — the failure mode being guarded against is a hook that silently does nothing.
+    query.__embeddedHistoryAppendsStripped = removed;
+  }
+
+  if (replacements.length > 0) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      PHASE3C_WRITE_PREFIX +
+        " a whole-array rewrite is still persisted to Mongo (" +
+        replacements.join(", ") +
+        "). That is truncation/compaction, which has no message-store counterpart yet — see design log §47 step 1b. Reads are unaffected; this conversation's array is simply not retired."
+    );
+  }
+
+  next();
+});
+
+/**
+ * Save path: here the document *is* the payload, so the arrays are cleared from the modified set
+ * rather than deleted. `unmarkModified` leaves the values in place, which is why no
+ * snapshot/restore is needed and why the caller's in-memory document is unchanged.
+ *
+ * Verified against `doc.$__delta()` before this was written: a push, a splice and a subdocument
+ * mutation all mark only the array path, and clearing the modified paths under the prefixes
+ * removes them from the delta entirely (probe: /tmp/history-choke-probe.js, design log §47).
+ */
+export const stripEmbeddedHistoryFromSave = (doc: any): string[] => {
+  if (!doc || doc.isNew) return [];
+
+  const tracked: string[] = typeof doc.modifiedPaths === "function" ? doc.modifiedPaths() : [];
+  const modifiedArrays = tracked.filter((path) =>
+    EMBEDDED_HISTORY_PATHS.some((prefix) => path === prefix || path.indexOf(prefix + ".") === 0)
+  );
+
+  if (modifiedArrays.length === 0) return [];
+
+  modifiedArrays.forEach((path) => doc.unmarkModified(path));
+  // Clearing a sub-path can leave an ancestor marked; clearing the prefixes as well is
+  // belt-and-braces and was verified to yield a delta containing neither array.
+  EMBEDDED_HISTORY_PATHS.forEach((prefix) => doc.unmarkModified(prefix));
+
+  return modifiedArrays;
+};
+
+ReactorConversationSchema.pre("save", function (next) {
+  if (!isMessageStoreAuthoritative()) {
+    warnIfMongoSourceMayBeStale();
+    return next();
+  }
+  stripEmbeddedHistoryFromSave(this);
+  next();
+});
 
 const ReactorConversationModelName = 'ReactorConversation';
 const ReactorConversationModel = mongoose.model<ReactorConversationDocument>(ReactorConversationModelName, ReactorConversationSchema, 'reactor_conversations');

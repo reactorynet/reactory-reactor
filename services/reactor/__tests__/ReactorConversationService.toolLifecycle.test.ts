@@ -42,65 +42,36 @@ describe("ReactorConversationService - Tool Call State Tracking & Lifecycle", ()
   });
 
   describe("updateToolCallStatus", () => {
-    it("atomically updates the tool_call status in history using arrayFilters", async () => {
-      const mockFindOneAndUpdate = jest.spyOn(ReactorConversationModel, "findOneAndUpdate").mockReturnValue({
-        exec: jest.fn(async () => ({} as any)),
-      } as any);
+    it("writes the status to the message store and NOT to the embedded array", async () => {
+      const mockFindOneAndUpdate = jest.spyOn(ReactorConversationModel, "findOneAndUpdate");
+      service.mirrorToolCallStatus = jest.fn(async () => {});
 
       const sessionId = new ObjectId().toString();
       const callId = "call_abc123";
 
       await service.updateToolCallStatus(sessionId, callId, "running");
 
-      expect(mockFindOneAndUpdate).toHaveBeenCalledWith(
-        {
-          _id: sessionId,
-          "history.tool_calls.id": callId,
-        },
-        {
-          $set: {
-            "history.$[msg].tool_calls.$[tc].status": "running",
-            updated: expect.any(Date),
-          },
-        },
-        {
-          arrayFilters: [
-            { "msg.tool_calls.id": callId },
-            { "tc.id": callId },
-          ],
-        }
-      );
+      // The arrayFilters update is gone: the embedded array is retired, so a filter over
+      // `history.tool_calls.id` would match nothing and the status change would be lost. The store
+      // mirror is the write.
+      expect(mockFindOneAndUpdate).not.toHaveBeenCalled();
+      expect(service.mirrorToolCallStatus).toHaveBeenCalledWith(sessionId, callId, "running");
     });
 
     it("handles success and error status updates", async () => {
-      const mockFindOneAndUpdate = jest.spyOn(ReactorConversationModel, "findOneAndUpdate").mockReturnValue({
-        exec: jest.fn(async () => ({} as any)),
-      } as any);
+      const mockFindOneAndUpdate = jest.spyOn(ReactorConversationModel, "findOneAndUpdate");
+      service.mirrorToolCallStatus = jest.fn(async () => {});
 
       const sessionId = new ObjectId().toString();
       const callId = "call_xyz789";
 
       await service.updateToolCallStatus(sessionId, callId, "success");
-      expect(mockFindOneAndUpdate).toHaveBeenLastCalledWith(
-        expect.anything(),
-        expect.objectContaining({
-          $set: expect.objectContaining({
-            "history.$[msg].tool_calls.$[tc].status": "success",
-          }),
-        }),
-        expect.anything()
-      );
+      expect(service.mirrorToolCallStatus).toHaveBeenLastCalledWith(sessionId, callId, "success");
 
       await service.updateToolCallStatus(sessionId, callId, "error");
-      expect(mockFindOneAndUpdate).toHaveBeenLastCalledWith(
-        expect.anything(),
-        expect.objectContaining({
-          $set: expect.objectContaining({
-            "history.$[msg].tool_calls.$[tc].status": "error",
-          }),
-        }),
-        expect.anything()
-      );
+      expect(service.mirrorToolCallStatus).toHaveBeenLastCalledWith(sessionId, callId, "error");
+
+      expect(mockFindOneAndUpdate).not.toHaveBeenCalled();
     });
 
     it("gracefully ignores empty sessionId or callId", async () => {

@@ -278,6 +278,53 @@ export function resolveSamplingSupport(
 }
 
 /**
+ * Capabilities that mean a model actually consumes a context window. Image, video,
+ * audio and embedding models legitimately declare no `contextLength`, so the check
+ * keys off capability rather than the mere absence of the field.
+ */
+const CONTEXT_BEARING_CAPABILITIES = ["text-generation", "reasoning"];
+
+export interface ModelContextLengthGap {
+  providerId: string;
+  modelId: string;
+  modelName: string;
+}
+
+/**
+ * Report models that consume a context window but declare no `contextLength`.
+ *
+ * `contextLength` is optional in the registry. A model without one silently falls
+ * back to an *invented* window (see `ReactorProviderService.resolveModelContextLength`),
+ * and a silent invention is how a conversation can sit at a cap that matches no
+ * model at all. Surfacing the gap at load time moves that discovery from a refused
+ * tool call to a log line.
+ *
+ * Deliberately non-fatal: a deployment must still boot with an incomplete registry.
+ *
+ * @param providers - The merged registry (module YAML + user YAML + DB entities).
+ */
+export function findMissingContextLengths(
+  providers: ProviderConfig[]
+): ModelContextLengthGap[] {
+  const gaps: ModelContextLengthGap[] = [];
+
+  for (const provider of providers) {
+    for (const model of provider.models || []) {
+      const capabilities = model.capabilities || [];
+      const consumesContext = capabilities.some((capability) =>
+        CONTEXT_BEARING_CAPABILITIES.includes(capability)
+      );
+
+      if (consumesContext && !(model.contextLength && model.contextLength > 0)) {
+        gaps.push({ providerId: provider.id, modelId: model.id, modelName: model.name });
+      }
+    }
+  }
+
+  return gaps;
+}
+
+/**
  * Resolves a model's thinking support. A missing `thinking` block defaults to
  * `mode: "none"` (no thinking) — the safe default, since thinking is opt-in and
  * an unsupported request shape (e.g. `budget_tokens` on an adaptive-only model)

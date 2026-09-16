@@ -118,12 +118,68 @@ class AWSBedrockService extends AIProviderBase {
   /**
    * Convert chat history to Bedrock format
    */
+  /**
+   * Convert OpenAI-style message content (plain string or a content-parts array)
+   * into Bedrock/Anthropic content blocks.
+   *
+   * Data-URL images become inline base64 image blocks so historical vision turns
+   * survive. Remote (non-data) image URLs cannot be fetched by Bedrock, so they
+   * become a text placeholder instead of being dropped silently — the previous
+   * implementation joined array parts with `.join(" ")`, discarding every image.
+   */
+  private toBedrockContentBlocks(content: any): any[] {
+    if (content == null) return [];
+
+    if (typeof content === "string") {
+      return content.trim() ? [{ type: "text", text: content }] : [];
+    }
+
+    if (Array.isArray(content)) {
+      const blocks: any[] = [];
+      for (const part of content) {
+        if (!part) continue;
+        if (typeof part === "string") {
+          if (part.trim()) blocks.push({ type: "text", text: part });
+          continue;
+        }
+        if (part.type === "image_url" && part.image_url?.url) {
+          const imageBlock = this.toBedrockImageBlock(part.image_url.url);
+          blocks.push(imageBlock ?? { type: "text", text: `[Image: ${part.image_url.url}]` });
+          continue;
+        }
+        if (typeof part.text === "string" && part.text.trim()) {
+          blocks.push({ type: "text", text: part.text });
+        }
+      }
+      return blocks;
+    }
+
+    if (typeof content === "object" && typeof content.text === "string") {
+      return content.text.trim() ? [{ type: "text", text: content.text }] : [];
+    }
+
+    return [];
+  }
+
+  /**
+   * Build a Bedrock inline image block from a `data:` URL, or null when the URL
+   * is not an inline payload Bedrock can consume.
+   */
+  private toBedrockImageBlock(url: string): any | null {
+    const match = /^data:([^;]+);base64,(.+)$/.exec(url);
+    if (!match) return null;
+    return {
+      type: "image",
+      source: { type: "base64", media_type: match[1], data: match[2] },
+    };
+  }
+
   private convertHistoryToBedrockFormat(history: ReactorConversationHistoryItem[]): any[] {
     const messages: any[] = [];
-    
+
     for (const msg of history) {
       let role = "user";
-      let content = "";
+      let contentBlocks: any[] = [];
       
       switch (msg.role) {
         case "assistant":
@@ -139,15 +195,9 @@ class AWSBedrockService extends AIProviderBase {
           role = "user";
       }
 
-      // Extract content
+      // Extract content blocks (text parts + inline images)
       if (msg.content) {
-        if (Array.isArray(msg.content)) {
-          content = msg.content.map(c => typeof c === "string" ? c : (c as any).text || "").join(" ");
-        } else if (typeof msg.content === "string") {
-          content = msg.content;
-        } else if (msg.content && typeof msg.content === "object" && "text" in msg.content) {
-          content = (msg.content as any).text;
-        }
+        contentBlocks = this.toBedrockContentBlocks(msg.content);
       }
 
       // Handle tool calls and results
@@ -181,11 +231,8 @@ class AWSBedrockService extends AIProviderBase {
         }
       }
 
-      if (content.trim()) {
-        messages.push({
-          role,
-          content: [{ type: "text", text: content }]
-        });
+      if (contentBlocks.length > 0) {
+        messages.push({ role, content: contentBlocks });
       }
     }
 
@@ -274,7 +321,7 @@ class AWSBedrockService extends AIProviderBase {
    */
   private async handleStreamingRequest(args: {
     sessionId: string;
-    message: string;
+    message: string | any[];
     persona: IAIPersona;
     history: ReactorConversationHistory;
     messageId?: string;
@@ -283,11 +330,12 @@ class AWSBedrockService extends AIProviderBase {
 
     // Convert history to Bedrock format
     const messages = this.convertHistoryToBedrockFormat(history);
-    
+
     // Add the current user message
+    const currentBlocks = this.toBedrockContentBlocks(message);
     messages.push({
       role: "user",
-      content: [{ type: "text", text: message }]
+      content: currentBlocks.length > 0 ? currentBlocks : [{ type: "text", text: "" }],
     });
 
     const input: InvokeModelWithResponseStreamCommandInput = {
@@ -362,7 +410,7 @@ class AWSBedrockService extends AIProviderBase {
   }
 
   private async getAIResponse(
-    message: string,
+    message: string | any[],
     role: "user" | "assistant" | "tool" | "system" = "user",
     messageId?: string
   ): Promise<AIChatCompletion> {
@@ -443,9 +491,10 @@ class AWSBedrockService extends AIProviderBase {
           });
         } else {
           const messages = this.convertHistoryToBedrockFormat(this.chatState.history);
+          const currentBlocks = this.toBedrockContentBlocks(message);
           messages.push({
             role: "user",
-            content: [{ type: "text", text: message }]
+            content: currentBlocks.length > 0 ? currentBlocks : [{ type: "text", text: "" }],
           });
 
           const input: InvokeModelCommandInput = {
@@ -489,7 +538,7 @@ class AWSBedrockService extends AIProviderBase {
         const userConversationHistoryItem: ReactorConversationHistoryItem = {
           id: new ObjectId(),
           role: "user",
-          content: message,
+          content: message as any,
           timestamp: new Date(),
           tool_results: [],
         };

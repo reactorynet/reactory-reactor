@@ -184,6 +184,11 @@ class OpenAIService extends AIProviderBase {
         openAIArgs.apiKey = apiKey || process.env.VLLM_API_KEY || "vllm-no-key";
         delete openAIArgs.organization;
         break;
+      case "deepseek":
+        openAIArgs.baseURL = apiBaseURL || process.env.DEEPSEEK_API_BASE_URL || "https://api.deepseek.com/v1";
+        openAIArgs.apiKey = apiKey || process.env.DEEPSEEK_API_KEY || "deepseek-no-key";
+        delete openAIArgs.organization;
+        break;
       default:
         // Default to OpenAI-compatible endpoint
         openAIArgs.baseURL = apiBaseURL || process.env.OPENAI_API_BASE_URL || "https://api.openai.com/v1";
@@ -246,7 +251,7 @@ class OpenAIService extends AIProviderBase {
   // --- Prompt building ---
 
   private async createPrompt(
-    message: string,
+    message: string | any[],
     providerConfig?: ReactorProviderConfig,
   ): Promise<OpenAI.Chat.Completions.ChatCompletionCreateParams> {
     const { chatState } = this;
@@ -261,7 +266,10 @@ class OpenAIService extends AIProviderBase {
       if (msg.role === "system" && msg.content) {
         systemMessages.push({ role: "system", content: msg.content as string });
       } else if (msg.role === "user" && msg.content) {
-        conversationMessages.push({ role: "user", content: msg.content as string });
+        // Content may be a plain string OR an array of multimodal content parts
+        // (e.g. [{ type: "text", ... }, { type: "image_url", ... }]) — preserve
+        // it verbatim so historical vision turns keep the image parts.
+        conversationMessages.push({ role: "user", content: msg.content as any });
       } else if (msg.role === "assistant") {
         const toolCalls = (msg as any).tool_calls;
         if (toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0) {
@@ -317,7 +325,7 @@ class OpenAIService extends AIProviderBase {
 
     messages.push({
       role: "user",
-      content: message,
+      content: message as any,
     });
 
     // Augmented per-request config (structured output, sampling, reasoning, tool_choice).
@@ -587,6 +595,45 @@ class OpenAIService extends AIProviderBase {
 
   // --- AI response ---
 
+  /**
+   * Decide whether a message carries content worth sending to the model.
+   *
+   * Handles BOTH plain string content and multimodal (array) content parts:
+   * a `text` part counts when it holds non-whitespace text, an `image_url` part
+   * counts when it carries a url, and unknown part types are retained so future
+   * modalities are never silently dropped.
+   *
+   * This is deliberately permissive. The previous string-only check discarded
+   * every vision turn, which (a) silently stripped the screenshot from the
+   * prompt and (b) tripped the "has a user message" guard below — surfacing as
+   * `AI-PROVIDER-500 No valid messages found in prompt` whenever the
+   * image-bearing turn was the only user message in the prompt.
+   */
+  private hasRenderableContent(msg: any): boolean {
+    if (!msg) return false;
+    // Tool results and assistant tool-call turns are valid regardless of content.
+    if (msg.role === "tool") return true;
+    if (msg.role === "assistant" && msg.tool_calls?.length > 0) return true;
+
+    const content = msg.content;
+    if (typeof content === "string") return content.trim() !== "";
+
+    if (Array.isArray(content)) {
+      return content.some((part: any) => {
+        if (!part) return false;
+        if (typeof part === "string") return part.trim() !== "";
+        if (part.type === "text") {
+          return typeof part.text === "string" && part.text.trim() !== "";
+        }
+        if (part.type === "image_url") return !!part.image_url?.url;
+        // Unknown/new part types: keep the message rather than drop the turn.
+        return true;
+      });
+    }
+
+    return false;
+  }
+
   private async getAIResponse(
     prompt: OpenAI.Chat.Completions.ChatCompletionCreateParams,
     messageId?: string,
@@ -594,12 +641,8 @@ class OpenAIService extends AIProviderBase {
     // Filter out empty/invalid messages
     if (prompt.messages && Array.isArray(prompt.messages)) {
       prompt.messages = prompt.messages.filter(
-        (msg: OpenAI.ChatCompletionMessageParam) => {
-          if (!msg) return false;
-          if (msg.role === "tool") return true;
-          if (msg.role === "assistant" && (msg as any).tool_calls?.length > 0) return true;
-          return msg?.content && typeof msg.content === "string" && msg.content.trim() !== "";
-        },
+        (msg: OpenAI.ChatCompletionMessageParam) =>
+          this.hasRenderableContent(msg),
       );
 
       if (
@@ -697,7 +740,12 @@ class OpenAIService extends AIProviderBase {
     return malformedSignals.some((p) => msg.includes(p) || code.includes(p));
   }
 
-  private modifyMessageForRetry(message: string, lastError: any): string {
+  private modifyMessageForRetry(message: string | any[], lastError: any): string | any[] {
+    // Multimodal turns must pass through untouched: interpolating an array into
+    // the template below would flatten it to a comma-joined string and drop
+    // every image part on the retry.
+    if (typeof message !== "string") return message;
+
     const errorMsg = lastError?.message?.toLowerCase() || "";
     if (errorMsg.includes("tool") || errorMsg.includes("function")) {
       return (
