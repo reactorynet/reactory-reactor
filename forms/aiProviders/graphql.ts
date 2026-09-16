@@ -1,45 +1,62 @@
 import Reactory from '@reactorynet/reactory-core';
 
-const graphql: Reactory.Forms.IFormGraphDefinition = {
-  queries: {
-    providers: {
-      name: 'ReactorAiProvidersAdmin',
-      text: `query ReactorAiProvidersAdmin($filter: ReactorAiProviderFilterInput) {
-        ReactorAiProvidersAdmin(filter: $filter) {
+const providersQuery: Reactory.Forms.IReactoryFormQuery = {
+  name: 'ReactorAiProvidersAdmin',
+  text: `query ReactorAiProvidersAdmin($filter: ReactorAiProviderFilterInput, $paging: PagingRequest) {
+    ReactorAiProvidersAdmin(filter: $filter, paging: $paging) {
+      paging {
+        page
+        pageSize
+        hasNext
+        total
+      }
+      providers {
+        id
+        name
+        description
+        providerType
+        endpointUrl
+        apiVersion
+        defaultModel
+        authComponentFqn
+        isEnabled
+        capabilities
+        roles
+        status {
+          available
+          lastChecked
+          uptime
+          responseTime
+          errorRate
+          quotaRemaining
+        }
+        models {
           id
           name
-          description
-          providerType
-          endpointUrl
-          apiVersion
-          defaultModel
-          authComponentFqn
-          isEnabled
+          version
+          contextLength
+          supportsStreaming
           capabilities
-          roles
-          status {
-            available
-            lastChecked
-            uptime
-            responseTime
-            errorRate
-            quotaRemaining
-          }
-          models {
-            id
-            name
-            version
-            contextLength
-            supportsStreaming
-            capabilities
-          }
         }
-      }`,
-      resultType: 'array',
-      resultMap: {
-        '': 'providers',
-      },
-    },
+      }
+    }
+  }`,
+  variables: {
+    'query.search': 'filter.searchString',
+    'query.page': 'paging.page',
+    'query.pageSize': 'paging.pageSize',
+  },
+  resultType: 'object',
+  resultMap: {
+    'paging': 'paging',
+    'providers': 'data',
+  },
+};
+
+const graphql: Reactory.Forms.IFormGraphDefinition = {
+  query: providersQuery,
+  queries: {
+    providers: providersQuery,
   },
   mutation: {
     new: {

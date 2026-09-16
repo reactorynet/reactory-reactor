@@ -36,7 +36,10 @@ class ReactorProvidersResolver {
   @query("ReactorAiProvidersAdmin")
   async ReactorAiProvidersAdmin(
     _: any,
-    args: { filter?: { isEnabled?: boolean; searchString?: string; providerType?: string } },
+    args: {
+      filter?: { isEnabled?: boolean; searchString?: string; providerType?: string };
+      paging?: { page?: number; pageSize?: number };
+    },
     context: Reactory.Server.IReactoryContext
   ) {
     if (!context.user) {
@@ -65,7 +68,78 @@ class ReactorProvidersResolver {
       }
     }
 
-    return providers;
+    const total = providers.length;
+    const page = Math.max(1, args.paging?.page || 1);
+    const pageSize = Math.max(1, args.paging?.pageSize || 20);
+    const start = (page - 1) * pageSize;
+    const end = start + pageSize;
+    const pagedProviders = providers.slice(start, end);
+
+    return {
+      paging: {
+        page,
+        pageSize,
+        total,
+        hasNext: end < total,
+      },
+      providers: pagedProviders,
+    };
+  }
+
+  @query("ReactorAiModelsAdmin")
+  async ReactorAiModelsAdmin(
+    _: any,
+    args: {
+      providerId?: string;
+      searchString?: string;
+      paging?: { page?: number; pageSize?: number };
+    },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!context.user) {
+      throw new ApiError("Authentication required", { code: "UNAUTHORIZED" });
+    }
+
+    const providerService = context.getService<IReactorProviderService>("reactor.ReactorProviderService@1.0.0");
+    let providers = await providerService.getProviders();
+
+    if (args.providerId) {
+      providers = providers.filter((p: any) => p.id === args.providerId);
+    }
+
+    let allModels: any[] = [];
+    for (const p of providers) {
+      if (Array.isArray(p.models)) {
+        allModels.push(...p.models);
+      }
+    }
+
+    if (args.searchString) {
+      const lower = args.searchString.toLowerCase();
+      allModels = allModels.filter(
+        (m: any) =>
+          m.name.toLowerCase().includes(lower) ||
+          m.id.toLowerCase().includes(lower) ||
+          m.providerId?.toLowerCase().includes(lower)
+      );
+    }
+
+    const total = allModels.length;
+    const page = Math.max(1, args.paging?.page || 1);
+    const pageSize = Math.max(1, args.paging?.pageSize || 20);
+    const start = (page - 1) * pageSize;
+    const end = start + pageSize;
+    const pagedModels = allModels.slice(start, end);
+
+    return {
+      paging: {
+        page,
+        pageSize,
+        total,
+        hasNext: end < total,
+      },
+      models: pagedModels,
+    };
   }
 
   @query("ReactorAiProviderAdmin")

@@ -6,6 +6,24 @@ export const ModelTableUIOptions: Reactory.Client.Components.IMaterialTableWidge
   allowDelete: true,
   search: true,
   dense: true,
+  remoteData: true,
+  query: 'models',
+  resultMap: {
+    'paging.page': 'paging.page',
+    'paging.total': 'paging.total',
+    'paging.pageSize': 'paging.pageSize',
+    'models': 'data',
+  },
+  variables: {
+    'query.search': 'searchString',
+    'query.page': 'paging.page',
+    'query.pageSize': 'paging.pageSize',
+  },
+  options: {
+    search: true,
+    pageSize: 20,
+    pageSizeOptions: [10, 20, 50],
+  },
   addButtonProps: {
     icon: 'add',
     tooltip: 'Add AI Model',

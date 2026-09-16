@@ -6,6 +6,24 @@ export const ProviderTableUIOptions: Reactory.Client.Components.IMaterialTableWi
   allowDelete: true,
   search: true,
   dense: true,
+  remoteData: true,
+  query: 'providers',
+  resultMap: {
+    'paging.page': 'paging.page',
+    'paging.total': 'paging.total',
+    'paging.pageSize': 'paging.pageSize',
+    'providers': 'data',
+  },
+  variables: {
+    'query.search': 'filter.searchString',
+    'query.page': 'paging.page',
+    'query.pageSize': 'paging.pageSize',
+  },
+  options: {
+    search: true,
+    pageSize: 20,
+    pageSizeOptions: [10, 20, 50],
+  },
   addButtonProps: {
     icon: 'add',
     tooltip: 'Add AI Provider',

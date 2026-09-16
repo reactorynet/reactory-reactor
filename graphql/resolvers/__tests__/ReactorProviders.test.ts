@@ -59,7 +59,10 @@ describe('ReactorProvidersResolver CRUD & Admin Queries/Mutations', () => {
 
     it('returns all providers when no filter is supplied', async () => {
       const result = await resolver.ReactorAiProvidersAdmin({}, {}, mockContext);
-      expect(result).toHaveLength(2);
+      expect(result.providers).toHaveLength(2);
+      expect(result.paging.total).toBe(2);
+      expect(result.paging.page).toBe(1);
+      expect(result.paging.pageSize).toBe(20);
       expect(mockProviderService.getProviders).toHaveBeenCalled();
     });
 
@@ -69,8 +72,9 @@ describe('ReactorProvidersResolver CRUD & Admin Queries/Mutations', () => {
         { filter: { isEnabled: true } },
         mockContext
       );
-      expect(result).toHaveLength(1);
-      expect(result[0].id).toBe('openai');
+      expect(result.providers).toHaveLength(1);
+      expect(result.providers[0].id).toBe('openai');
+      expect(result.paging.total).toBe(1);
     });
 
     it('filters providers by searchString', async () => {
@@ -79,8 +83,66 @@ describe('ReactorProvidersResolver CRUD & Admin Queries/Mutations', () => {
         { filter: { searchString: 'ollama' } },
         mockContext
       );
-      expect(result).toHaveLength(1);
-      expect(result[0].id).toBe('ollama');
+      expect(result.providers).toHaveLength(1);
+      expect(result.providers[0].id).toBe('ollama');
+      expect(result.paging.total).toBe(1);
+    });
+
+    it('supports server-side pagination for providers', async () => {
+      const result = await resolver.ReactorAiProvidersAdmin(
+        {},
+        { paging: { page: 2, pageSize: 1 } },
+        mockContext
+      );
+      expect(result.providers).toHaveLength(1);
+      expect(result.providers[0].id).toBe('ollama');
+      expect(result.paging.page).toBe(2);
+      expect(result.paging.pageSize).toBe(1);
+      expect(result.paging.total).toBe(2);
+      expect(result.paging.hasNext).toBe(false);
+    });
+  });
+
+  describe('ReactorAiModelsAdmin', () => {
+    it('throws unauthorized if user is not authenticated', async () => {
+      await expect(
+        resolver.ReactorAiModelsAdmin({}, {}, { user: null } as any)
+      ).rejects.toThrow('Authentication required');
+    });
+
+    it('returns all models across providers', async () => {
+      const result = await resolver.ReactorAiModelsAdmin({}, {}, mockContext);
+      expect(result.models).toHaveLength(2);
+      expect(result.paging.total).toBe(2);
+      expect(result.models.map((m: any) => m.id)).toEqual(['gpt-4o', 'llama3']);
+    });
+
+    it('filters models by providerId', async () => {
+      const result = await resolver.ReactorAiModelsAdmin({}, { providerId: 'openai' }, mockContext);
+      expect(result.models).toHaveLength(1);
+      expect(result.models[0].id).toBe('gpt-4o');
+      expect(result.paging.total).toBe(1);
+    });
+
+    it('filters models by searchString', async () => {
+      const result = await resolver.ReactorAiModelsAdmin({}, { searchString: 'llama' }, mockContext);
+      expect(result.models).toHaveLength(1);
+      expect(result.models[0].id).toBe('llama3');
+      expect(result.paging.total).toBe(1);
+    });
+
+    it('supports server-side pagination for models', async () => {
+      const result = await resolver.ReactorAiModelsAdmin(
+        {},
+        { paging: { page: 1, pageSize: 1 } },
+        mockContext
+      );
+      expect(result.models).toHaveLength(1);
+      expect(result.models[0].id).toBe('gpt-4o');
+      expect(result.paging.page).toBe(1);
+      expect(result.paging.pageSize).toBe(1);
+      expect(result.paging.total).toBe(2);
+      expect(result.paging.hasNext).toBe(true);
     });
   });
 

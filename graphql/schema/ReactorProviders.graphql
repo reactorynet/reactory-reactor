@@ -49,15 +49,19 @@ Configuration for a specific AI provider integration.
 type ReactorProviderConfig {
   id: String!
   name: String!
+  description: String
+  providerType: String
   endpointUrl: String
   apiVersion: String
   models: [ReactorModelDefinition!]!
   defaultModel: String
   status: ReactorProviderStatus!
   capabilities: [String!]!
+  roles: [String!]
   rateLimits: ReactorProviderRateLimits
   credentialRequirements: [String]
   authComponentFqn: String
+  isEnabled: Boolean
 }
 
 """
@@ -174,6 +178,22 @@ input ReactorProviderConfigInput {
   raw: Any
 }
 
+"""
+Paged response for AI Providers.
+"""
+type ReactorAiProvidersPagedResponse {
+  paging: PagingResult
+  providers: [ReactorProviderConfig!]!
+}
+
+"""
+Paged response for AI Models.
+"""
+type ReactorAiModelsPagedResponse {
+  paging: PagingResult
+  models: [ReactorModelDefinition!]!
+}
+
 extend type Query {
   """
   Returns the authentication status for each provider for the current user,
@@ -183,9 +203,14 @@ extend type Query {
   ReactorUserProviderAuth: [ReactorProviderAuthConfig!]!
 
   """
-  Get all providers for administrative management with optional filtering.
+  Get all providers for administrative management with optional filtering and server-side paging.
   """
-  ReactorAiProvidersAdmin(filter: ReactorAiProviderFilterInput): [ReactorProviderConfig!]!
+  ReactorAiProvidersAdmin(filter: ReactorAiProviderFilterInput, paging: PagingRequest): ReactorAiProvidersPagedResponse!
+
+  """
+  Get all models across providers for administrative management with optional filtering and server-side paging.
+  """
+  ReactorAiModelsAdmin(providerId: String, searchString: String, paging: PagingRequest): ReactorAiModelsPagedResponse!
 
   """
   Get specific provider details for administration.

@@ -1,46 +1,53 @@
 import Reactory from '@reactorynet/reactory-core';
 
+const modelsQuery: Reactory.Forms.IReactoryFormQuery = {
+  name: 'ReactorAiModelsAdmin',
+  text: `query ReactorAiModelsAdmin($providerId: String, $searchString: String, $paging: PagingRequest) {
+    ReactorAiModelsAdmin(providerId: $providerId, searchString: $searchString, paging: $paging) {
+      paging {
+        page
+        pageSize
+        hasNext
+        total
+      }
+      models {
+        id
+        providerId
+        name
+        version
+        capabilities
+        contextLength
+        costPerToken
+        inputCostPerToken
+        outputCostPerToken
+        inputCostPerTokenUsdCents
+        outputCostPerTokenUsdCents
+        rpm
+        itpm
+        otpm
+        maxParallelRequests
+        supportsStreaming
+        supportedTools
+        supportedMediaTypes
+      }
+    }
+  }`,
+  variables: {
+    'query.search': 'searchString',
+    'query.page': 'paging.page',
+    'query.pageSize': 'paging.pageSize',
+  },
+  resultType: 'object',
+  resultMap: {
+    'paging': 'paging',
+    'models': 'data',
+  },
+};
+
 const graphql: Reactory.Forms.IFormGraphDefinition = {
+  query: modelsQuery,
   queries: {
-    models: {
-      name: 'ReactorAiProvidersAdmin',
-      text: `query ReactorAiProvidersAdmin($filter: ReactorAiProviderFilterInput) {
-        ReactorAiProvidersAdmin(filter: $filter) {
-          id
-          name
-          models {
-            id
-            providerId
-            name
-            version
-            contextLength
-            maxParallelRequests
-            supportsStreaming
-            capabilities
-            costPerToken
-            inputCostPerTokenUsdCents
-            outputCostPerTokenUsdCents
-            rpm
-            itpm
-            otpm
-            sampling {
-              temperature
-              topP
-              topK
-            }
-            thinking {
-              mode
-              effort
-              display
-            }
-          }
-        }
-      }`,
-      resultType: 'array',
-      resultMap: {
-        '': 'providers',
-      },
-    },
+    models: modelsQuery,
   },
   mutation: {
     new: {
