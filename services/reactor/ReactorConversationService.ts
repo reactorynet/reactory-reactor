@@ -11,6 +11,7 @@ import {
   ReactorChatState,
   IReactorConversationsService,
   UpdateChatDataInput,
+  IModelContextLengthResolution,
 } from "../../types/service.types";
 import ReactorConversationModel, {
   ReactorConversationDocument,
@@ -192,9 +193,48 @@ export interface IReactorHistoryWindow {
   archivedCount?: number;
 }
 
+/**
+ * Outcome of evaluating whether a macro/tool result may be appended.
+ *
+ * `allowResult === false` always carries a `reason` and a `message` that is safe
+ * to surface. The two reasons are deliberately distinct because they used to be
+ * conflated into one misleading "Macro X result is too large":
+ *
+ *  - `result-exceeds-conversation`: the result alone is larger than the entire
+ *    context budget, so it could never be delivered in *any* conversation.
+ *  - `conversation-over-budget`: the result is fine; the conversation it would
+ *    join is already at/over its budget. That is a *conversation* condition and
+ *    must never be reported as a macro failure.
+ */
+export interface IToolResultBudgetDecision {
+  /** True when the result may be appended to the conversation as-is. */
+  allowResult: boolean;
+  /** Why the result was refused (only meaningful when `allowResult` is false). */
+  reason?: "result-exceeds-conversation" | "conversation-over-budget";
+  /** Tokens the result itself requires. */
+  resultTokens: number;
+  /** Conversation tokens considered when deciding. */
+  conversationTokens: number;
+  /** The budget the conversation was judged against. */
+  conversationMaxTokens: number | null;
+  /** Human readable explanation; safe to surface to the operator/model. */
+  message: string;
+}
+
 // Business Logic Constants
 const TOKEN_LIMITS = {
-  /** Default maximum tokens for new conversations when persona doesn't specify */
+  /**
+   * Arithmetic fallback for deriving a TRUNCATION TARGET, used only when a
+   * conversation has no resolved limit at all.
+   *
+   * This is **not** a source of context limits. Verified limits come from
+   * `ReactorProviderService.resolveModelContextLength` (the provider registry) and
+   * are written onto the conversation; every writer resolves through there, so a
+   * conversation reaching this fallback means the model could not be resolved either —
+   * in which case there is nothing better to aim a truncation target at.
+   *
+   * Do not use this to decide a conversation's limit.
+   */
   DEFAULT_MAX_TOKENS: 200000,
 
   /** Percentage over limit that triggers automatic truncation (120% of limit) */
@@ -2944,50 +2984,69 @@ export default class ReactorConversationService
   }
 
   /**
-   * Resolves the maximum context token limit for a model.
-   * `providers.yaml` via ReactorProviderService is the primary source of truth.
-   * If a model's contextLength is declared in providers.yaml, it takes absolute precedence over defaults.
+   * Resolve the context-window limit for a model.
+   *
+   * The **provider registry owns model limits** — it is built from `providers.yaml`,
+   * the user registry (`~/.reactor/providers.yaml`) and the provider entities — so
+   * this delegates to `ReactorProviderService.resolveModelContextLength` rather than
+   * reaching into `provider.models[]` itself.
+   *
+   * Two things this method deliberately no longer does:
+   *
+   *  1. **It does not consult the persona.** `IAIPersona.maxTokens` is deprecated;
+   *     limits are determined by the model and provider.
+   *  2. **It does not search other providers.** A model id that exists under a
+   *     different provider must not lend that provider's limit to this conversation.
+   *     The old cross-provider scan is how a `deepseek-flash` conversation (declared
+   *     64 000) could be recorded as having a 1 000 000 window.
    */
   public async resolveModelContextLength(
     modelId?: string,
-    providerId?: string,
-    fallbackMaxTokens?: number
-  ): Promise<number> {
-    if (modelId) {
-      try {
-        const providerSvc = this.getProviderService();
-        if (providerSvc) {
-          const provider = providerId
-            ? await providerSvc.getProvider(providerId)
-            : null;
-          const model = provider?.models?.find((m: any) => m.id === modelId);
-          if (model?.contextLength) {
-            return model.contextLength;
-          }
+    providerId?: string
+  ): Promise<IModelContextLengthResolution> {
+    const providerSvc = this.getProviderService();
 
-          // Search across all providers if not found under specified provider
-          const allProviders = await providerSvc.getProviders();
-          for (const p of allProviders) {
-            const found = p.models?.find((m: any) => m.id === modelId);
-            if (found?.contextLength) {
-              return found.contextLength;
-            }
+    if (providerSvc && typeof (providerSvc as any).resolveModelContextLength === "function") {
+      try {
+        const resolution = await (providerSvc as any).resolveModelContextLength(
+          modelId,
+          providerId
+        );
+        this.sessionLog(
+          resolution?.authoritative ? "debug" : "warn",
+          "Model context window resolved",
+          {
+            modelId: modelId ?? null,
+            providerId: providerId ?? null,
+            value: resolution?.value ?? null,
+            source: resolution?.source ?? "unknown",
+            authoritative: !!resolution?.authoritative,
           }
-        }
+        );
+        return resolution as IModelContextLengthResolution;
       } catch (err) {
         this.context.warn?.(
-          `[resolveModelContextLength] Failed to resolve contextLength for model ${modelId}: ${(err as Error)?.message}`,
+          `[resolveModelContextLength] provider service failed for ${providerId}/${modelId}: ${(err as Error)?.message}`,
           {},
           "ReactorConversationService.resolveModelContextLength"
         );
       }
     }
 
-    if (fallbackMaxTokens && fallbackMaxTokens > 0) {
-      return fallbackMaxTokens;
-    }
-
-    return TOKEN_LIMITS.DEFAULT_MAX_TOKENS;
+    // No provider service available (or it does not implement the accessor). Resolve
+    // nothing rather than inventing a number in a second place — an invented limit
+    // here would be indistinguishable from a measured one.
+    this.sessionLog("warn", "Model context window could not be resolved — no provider service", {
+      modelId: modelId ?? null,
+      providerId: providerId ?? null,
+    });
+    return {
+      value: null,
+      source: "unresolved",
+      authoritative: false,
+      providerId: providerId ?? null,
+      modelId: modelId ?? null,
+    };
   }
 
   /**
@@ -3018,11 +3077,71 @@ export default class ReactorConversationService
 
     // Look up the model's contextLength from the provider registry
     // and update maxTokens so the conversation reflects the new model's capacity.
+    //
+    // This writer used to call the resolver with NO fallback at all, so a lookup
+    // miss (provider absent from the registry, model id not found, or the model
+    // present but without a declared contextLength) silently produced
+    // TOKEN_LIMITS.DEFAULT_MAX_TOKENS = 200 000 and persisted it over a real, larger
+    // budget. The client adopts whatever this returns, so the cap visibly collapsed
+    // to "200k" and every subsequent tool result was then refused by the
+    // conversation-budget guard in executeMacro. Guard the downgrade here.
     if (modelId) {
       try {
-        const effectiveProviderId = providerId
-          || (await ReactorConversationModel.findOne({ _id: chatSessionId, user: this.context.user }).select('providerId').lean().exec())?.providerId;
-        update.maxTokens = await this.resolveModelContextLength(modelId, effectiveProviderId);
+        const existing = await ReactorConversationModel.findOne({
+          _id: chatSessionId,
+          user: this.context.user,
+        })
+          .select("providerId personaId maxTokens")
+          .lean()
+          .exec();
+
+        const effectiveProviderId =
+          providerId || (existing as any)?.providerId || undefined;
+
+        // The limit comes from the provider registry — never from the persona
+        // (`IAIPersona.maxTokens` is deprecated).
+        const resolution = await this.resolveModelContextLength(
+          modelId,
+          effectiveProviderId
+        );
+
+        const previousMaxTokens = (existing as any)?.maxTokens;
+
+        // A failed lookup is NOT evidence that the conversation's budget is 200 000.
+        // Never shrink an existing, larger budget on the strength of the default branch.
+        const nextMaxTokens = this.resolvePersistedMaxTokens(previousMaxTokens, resolution);
+
+        if (nextMaxTokens === undefined) {
+          this.sessionLog(
+            "warn",
+            "[setChatModelProvider] refusing to downgrade maxTokens to DEFAULT_MAX_TOKENS — model context length unresolved",
+            {
+              chatSessionId,
+              modelId,
+              providerId: effectiveProviderId ?? null,
+              branch: resolution.source,
+              previousMaxTokens,
+              resolvedMaxTokens: resolution.value,
+              keptMaxTokens: previousMaxTokens,
+            },
+            chatSessionId
+          );
+        } else {
+          if (
+            typeof previousMaxTokens === "number" &&
+            previousMaxTokens !== nextMaxTokens
+          ) {
+            this.sessionLog("info", "[setChatModelProvider] updating conversation maxTokens", {
+              chatSessionId,
+              modelId,
+              providerId: effectiveProviderId ?? null,
+              branch: resolution.source,
+              previousMaxTokens,
+              resolvedMaxTokens: nextMaxTokens,
+            }, chatSessionId);
+          }
+          update.maxTokens = nextMaxTokens;
+        }
       } catch (err) {
         this.context.warn?.(
           `[setChatModelProvider] Failed to resolve contextLength for model ${modelId}: ${(err as Error)?.message}`,
@@ -4439,23 +4558,29 @@ export default class ReactorConversationService
         lastConversation.sseSessionId = lastConversation._id.toString();
       }
 
-      // Re-sync maxTokens against providers.yaml to ensure stale database values don't override providers.yaml
+      // Re-sync maxTokens against the provider registry: a `default`-branch
+      // resolution is a failed lookup, not a real 200 000 — never let it shrink the
+      // budget. The limit comes from the provider, never from the persona.
       const currentModelId = lastConversation.modelId || persona.modelId;
       const currentProviderId = lastConversation.providerId || persona.providerId;
-      const resolvedMaxTokens = await this.resolveModelContextLength(
+      const resolution = await this.resolveModelContextLength(
         currentModelId,
-        currentProviderId,
-        persona.maxTokens
+        currentProviderId
+      );
+      const nextMaxTokens = this.resolvePersistedMaxTokens(
+        lastConversation.maxTokens,
+        resolution
       );
 
-      if (lastConversation.maxTokens !== resolvedMaxTokens) {
+      if (nextMaxTokens !== undefined && lastConversation.maxTokens !== nextMaxTokens) {
         this.sessionLog("info", "Updating reused conversation maxTokens to match provider config", {
           conversationId: lastConversation._id?.toString(),
           oldMaxTokens: lastConversation.maxTokens,
-          newMaxTokens: resolvedMaxTokens,
+          newMaxTokens: nextMaxTokens,
           modelId: currentModelId,
+          branch: resolution.source,
         }, lastConversation._id?.toString(), persona.id);
-        lastConversation.maxTokens = resolvedMaxTokens;
+        lastConversation.maxTokens = nextMaxTokens;
       }
 
       await lastConversation.save();
@@ -4470,11 +4595,10 @@ export default class ReactorConversationService
       return lastConversation;
     }
 
-    const maxTokens = await this.resolveModelContextLength(
+    const maxTokens = (await this.resolveModelContextLength(
       persona.modelId,
-      persona.providerId,
-      persona.maxTokens
-    );
+      persona.providerId
+    )).value;
 
     const conversationData: any = {
       personaId: persona.id,
@@ -6267,6 +6391,141 @@ export default class ReactorConversationService
    *
    * @since 1.0.0
    */
+  /**
+   * Decide what to persist as `maxTokens`, given a resolution and the current value.
+   *
+   * Returns the value to store, or `undefined` to leave the stored value alone.
+   *
+   * Only `provider-hit` / `cross-provider-hit` are authoritative. `persona-fallback`
+   * and `default` both mean the model could NOT be resolved from providers.yaml, so
+   * the number is a guess — and a guess may never SHRINK an existing budget. That is
+   * precisely how a real 1 000 000 collapsed to 200 000.
+   *
+   * All three writers (`setChatModelProvider`, the `getNewConversation` reuse path
+   * and `startChatSession`) apply this same rule; before the fix, none of them did.
+   */
+  private resolvePersistedMaxTokens(
+    currentMaxTokens: number | null | undefined,
+    resolution: IModelContextLengthResolution
+  ): number | undefined {
+    // Nothing resolved: leave whatever the conversation already has.
+    if (resolution?.value == null) {
+      return undefined;
+    }
+
+    // A model-declared limit is authoritative in both directions.
+    if (resolution.authoritative) {
+      return resolution.value;
+    }
+
+    // A fallback may never shrink an existing budget. It MAY raise one, or set one
+    // where none existed: an over-large budget fails loudly at the provider, whereas
+    // an under-sized one silently disables every tool and misreports the cause.
+    if (typeof currentMaxTokens === "number" && currentMaxTokens > resolution.value) {
+      return undefined;
+    }
+    return resolution.value;
+  }
+
+  /**
+   * Resolve the budget a single tool result is judged against.
+   *
+   * Defaults to the conversation budget, which preserves historical behaviour
+   * exactly. Set `REACTORY_MACRO_RESULT_TOKEN_BUDGET` to separate "how big may one
+   * result be" from "how big is this conversation's window".
+   */
+  private resolveMacroResultBudget(conversationMaxTokens?: number | null): number | null {
+    const configured = Number(process.env.REACTORY_MACRO_RESULT_TOKEN_BUDGET);
+    if (Number.isFinite(configured) && configured > 0) {
+      return configured;
+    }
+    return conversationMaxTokens ?? null;
+  }
+
+  /**
+   * Decide whether a macro result may be appended to a conversation.
+   *
+   * Pure and `static` on purpose: this predicate is what was wrong, so it is unit
+   * tested directly rather than through the whole service (which needs Mongo and a
+   * provider registry to reach the macro path at all).
+   *
+   * The two questions are deliberately separated:
+   *  - `result-exceeds-conversation`: the result alone is larger than the result
+   *    budget, so it could never be delivered in any conversation.
+   *  - `conversation-over-budget`: the result is fine, but the conversation it would
+   *    join is already at/over its budget. A conversation condition — never a macro failure.
+   */
+  static evaluateToolResultBudget(input: {
+    macro: string;
+    chatSessionId: string;
+    resultTokens: number;
+    conversationTokens?: number | null;
+    conversationMaxTokens?: number | null;
+    resultMaxTokens?: number | null;
+  }): IToolResultBudgetDecision {
+    const {
+      macro,
+      chatSessionId,
+      resultTokens,
+      conversationTokens = 0,
+      conversationMaxTokens = null,
+      resultMaxTokens = null,
+    } = input;
+
+    const usedConversation = conversationTokens ?? 0;
+
+    if (conversationMaxTokens == null) {
+      return {
+        allowResult: true,
+        resultTokens,
+        conversationTokens: usedConversation,
+        conversationMaxTokens,
+        message: "",
+      };
+    }
+
+    const resultBudget = resultMaxTokens ?? conversationMaxTokens;
+
+    // Question 1 — can this result ever fit, in any conversation?
+    if (resultTokens > resultBudget) {
+      return {
+        allowResult: false,
+        reason: "result-exceeds-conversation",
+        resultTokens,
+        conversationTokens: usedConversation,
+        conversationMaxTokens,
+        message:
+          `Macro ${macro} produced a result larger than the tool-result budget; it cannot be delivered. ` +
+          `Result tokens: ${resultTokens}, result budget: ${resultBudget}, conversation budget: ${conversationMaxTokens}, conversation: ${chatSessionId}. ` +
+          `Reduce the amount of data the macro returns.`,
+      };
+    }
+
+    // Question 2 — is the conversation already over its budget?
+    const projected = resultTokens + usedConversation;
+    if (projected > conversationMaxTokens) {
+      return {
+        allowResult: false,
+        reason: "conversation-over-budget",
+        resultTokens,
+        conversationTokens: usedConversation,
+        conversationMaxTokens,
+        message:
+          `Conversation ${chatSessionId} is over its context budget. ` +
+          `Conversation tokens: ${usedConversation}, result tokens: ${resultTokens}, projected: ${projected}, conversation budget: ${conversationMaxTokens}. ` +
+          `This is a conversation context-limit condition, not a macro failure.`,
+      };
+    }
+
+    return {
+      allowResult: true,
+      resultTokens,
+      conversationTokens: usedConversation,
+      conversationMaxTokens,
+      message: "",
+    };
+  }
+
   async executeMacro(args: {
     macro: string;
     personaId: string;
@@ -6379,27 +6638,91 @@ export default class ReactorConversationService
         throw new Error(`Macro ${macro} returned no result`);
       }
 
-      // we need to calculate token count of the result, and add it to the conversation
-      let resultString = JSON.stringify(result);
-      const tokenCount = await this.chunkingService.estimateTokenCount(
+      // Token accounting for the result. Two *separate* questions used to be
+      // conflated here and both reported as "Macro X result is too large":
+      //   1. Is the result itself deliverable at all?   (a result-level budget)
+      //   2. Is the *conversation* over its context budget?  (a conversation condition)
+      // Question 2 is not a macro failure, and refusing the result did nothing to reduce
+      // the conversation — it just disabled every tool while the conversation stayed over
+      // budget. That misattribution is the defect these guards used to cause.
+      const resultString = JSON.stringify(result);
+      const resultTokens = await this.chunkingService.estimateTokenCount(
         resultString
       );
+      const conversationBudget = conversation.maxTokens;
+      const conversationTokens = (conversation as any).tokenCount ?? 0;
 
-      if (conversation.maxTokens != null && tokenCount > conversation.maxTokens) {
-        throw new Error(
-          `Macro ${macro} result is too large. Max tokens: ${conversation.maxTokens}, Token count: ${tokenCount}`
-        );
+      const resultDecision = ReactorConversationService.evaluateToolResultBudget({
+        macro,
+        chatSessionId,
+        resultTokens,
+        conversationTokens,
+        conversationMaxTokens: conversationBudget,
+        resultMaxTokens: this.resolveMacroResultBudget(conversationBudget),
+      });
+
+      if (!resultDecision.allowResult && resultDecision.reason === "result-exceeds-conversation") {
+        // The result alone cannot fit any conversation. Refusing is correct — but say so
+        // in terms of the result budget, not as a vague "result is too large" that
+        // collides with the conversation budget figure.
+        this.sessionLog("error", "Tool result exceeds the tool-result budget", {
+          macro,
+          chatSessionId,
+          resultTokens,
+          conversationMaxTokens: conversationBudget,
+        }, chatSessionId);
+        throw new Error(resultDecision.message);
       }
 
-      if (conversation.maxTokens != null && tokenCount + conversation.tokenCount > conversation.maxTokens) {
-        // create a copy of the original history, in the event that
-        // the truncation is not enough to fit the result.
-        // first check what size the new history would be if we truncate it.
-        throw new Error(
-          `Macro ${macro} result is too large. Max tokens: ${
-            conversation.maxTokens
-          }, Token count: ${tokenCount + conversation.tokenCount}`
-        );
+      if (!resultDecision.allowResult && resultDecision.reason === "conversation-over-budget") {
+        // The conversation is over its budget. That is NOT a macro failure, and refusing this
+        // result does not reduce the conversation — so this is deliberately a clean refusal.
+        //
+        // There is intentionally NO truncation/compaction here. The conversation was already under
+        // budget when this turn was dispatched (`sendMessage` reduces before dispatch), so an
+        // over-budget state mid-turn means it grew *during* the turn. Truncating from inside tool
+        // execution is unsafe: `truncateConversationHistory` keeps a contiguous recent suffix and
+        // then drops leading non-user messages, so in a tool-heavy turn it can archive the
+        // assistant message that owns the *in-flight* tool call and orphan this very result. The
+        // anchor loop in that method pops from the front with no lower bound, so the in-flight
+        // exchange is not protected. Recovery belongs in the pre-dispatch path, where the boundary
+        // is known; here we fail cleanly and attribute the condition correctly.
+        this.sessionLog("warn", "Conversation is over its context budget during tool execution", {
+          macro,
+          chatSessionId,
+          cachedConversationTokens: conversationTokens,
+          conversationMaxTokens: conversationBudget,
+          resultTokens,
+        }, chatSessionId);
+
+        // Recompute rather than trusting the loaded document's cached tokenCount. A failure here
+        // must not surface as a macro error — the condition is still the conversation's budget.
+        let freshTokens = conversationTokens;
+        let freshMaxTokens: number | null = conversationBudget ?? null;
+        try {
+          const fresh = await this.updateTokenCountAndCheckLimits(chatSessionId);
+          freshTokens = fresh.currentTokens;
+          freshMaxTokens = fresh.maxTokens ?? conversationBudget ?? null;
+        } catch (freshErr: any) {
+          this.sessionLog("error", "Failed to recompute conversation token count while over budget", {
+            macro,
+            chatSessionId,
+            error: freshErr?.message,
+          }, chatSessionId);
+        }
+
+        const budgetMessage =
+          `Conversation ${chatSessionId} is over its context budget. ` +
+          `Conversation tokens: ${freshTokens}, result tokens: ${resultTokens}, conversation budget: ${freshMaxTokens}. ` +
+          `This is a conversation context-limit condition, not a macro failure.`;
+        this.sessionLog("error", budgetMessage, {
+          macro,
+          chatSessionId,
+          currentTokens: freshTokens,
+          resultTokens,
+          conversationMaxTokens: freshMaxTokens,
+        }, chatSessionId);
+        throw new Error(budgetMessage);
       }
 
       // Build a content string that includes the actual result data so the AI
@@ -8202,14 +8525,22 @@ export default class ReactorConversationService
         modelOrProviderChanged = true;
       }
 
-      // Re-resolve maxTokens whenever starting a session or when model/provider changed
-      const resolvedMaxTokens = await this.resolveModelContextLength(
+      // Re-resolve maxTokens whenever starting a session or when model/provider changed.
+      // A non-authoritative resolution is a failed lookup, not a real 200 000 — never let it
+      // shrink the budget, but still persist a genuine model/provider change. The limit comes
+      // from the provider registry, never from the persona.
+      const previousMaxTokens = conversation.maxTokens;
+      const resolution = await this.resolveModelContextLength(
         conversation.modelId,
-        conversation.providerId,
-        persona.maxTokens
+        conversation.providerId
       );
-      if (conversation.maxTokens !== resolvedMaxTokens || modelOrProviderChanged) {
-        conversation.maxTokens = resolvedMaxTokens;
+      const nextMaxTokens = this.resolvePersistedMaxTokens(previousMaxTokens, resolution);
+      if (nextMaxTokens !== undefined) {
+        conversation.maxTokens = nextMaxTokens;
+      }
+      const maxTokensChanged =
+        nextMaxTokens !== undefined && nextMaxTokens !== previousMaxTokens;
+      if (maxTokensChanged || modelOrProviderChanged) {
         await conversation.save();
       }
 

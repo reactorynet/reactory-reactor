@@ -179,7 +179,6 @@ export const SecurityPersona: IAIPersona = {
   appearance,
   modelId: process.env.GOOGLE_AI_STUDIO_MODEL_ID || "gemini-2.5-pro",
   providerId: "google",  
-  maxTokens: 1048576,
   defaultGreeting: "Hello, I am Security Sam, your intelligent AI assistant specializing in the Security domain. I can help you with threat detection, compliance management, incident response, access control, and Slack channel insights. How may I assist you today?",
   prompts: {
     system: {

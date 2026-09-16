@@ -1778,6 +1778,62 @@ export interface IReactorProviderService extends Reactory.Service.IReactoryServi
    * Re-sync baseline providers from providers.yaml into PostgreSQL
    */
   syncFromYaml(overwrite?: boolean): Promise<{ providersCount: number; modelsCount: number }>;
+
+  /**
+   * Resolve the context-window limit, in tokens, for a model.
+   *
+   * The provider registry is the single source of truth for model limits: it is
+   * built from the module `providers.yaml`, the user registry
+   * (`~/.reactor/providers.yaml`) and the Postgres provider entities, all merged by
+   * {@link getProviders}. Personas no longer carry a limit — `IAIPersona.maxTokens`
+   * is deprecated — so this is the only place a context limit is derived.
+   *
+   * The resolution is **scoped to one provider**: the conversation's. A model id
+   * that exists under some *other* provider must not lend that provider's limit to a
+   * conversation being served elsewhere. If the model is not found under the given
+   * provider, the answer is not authoritative (§D1/D2 in the design note).
+   *
+   * `contextLength` is optional per model, so the caller is told *how* the value was
+   * obtained rather than being handed a bare number that it cannot interpret.
+   */
+  resolveModelContextLength(
+    modelId?: string,
+    providerId?: string
+  ): Promise<IModelContextLengthResolution>;
+}
+
+/**
+ * How a model's context-window limit was obtained.
+ *
+ * - `model-declared`   — the registry declares `contextLength` for this model under
+ *                        this provider. The only authoritative answer.
+ * - `configured-default` — the model declares nothing; the operator's
+ *                        `REACTORY_DEFAULT_CONTEXT_LENGTH` was used.
+ * - `builtin-default`  — the model declares nothing and no default was configured;
+ *                        the platform last resort was used. Invented, not measured.
+ * - `unresolved`       — nothing was invented (`value` is null).
+ */
+export type TModelContextLengthSource =
+  | "model-declared"
+  | "configured-default"
+  | "builtin-default"
+  | "unresolved";
+
+export interface IModelContextLengthResolution {
+  /** The limit in tokens, or null when nothing could be resolved. */
+  value: number | null;
+  /** How the value was obtained. */
+  source: TModelContextLengthSource;
+  /**
+   * True only for `model-declared`. Callers persisting a backend limit must never
+   * let a non-authoritative answer **shrink** an existing budget: a lookup miss is
+   * not evidence that the model's window got smaller.
+   */
+  authoritative: boolean;
+  /** The provider the resolution was scoped to (null when none was supplied). */
+  providerId: string | null;
+  /** The model that was asked about. */
+  modelId: string | null;
 }
 
 /**

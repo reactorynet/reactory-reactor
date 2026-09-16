@@ -1,80 +1,112 @@
-import ReactorConversationService from '../ReactorConversationService';
+import { describe, it, expect, beforeEach } from "@jest/globals";
+import ReactorConversationService from "../ReactorConversationService";
 
-describe('ReactorConversationService - Model Context Length Resolution', () => {
-  let conversationService: any;
-  let mockProviderService: any;
-  let mockContext: any;
+/**
+ * The conversation service must not own model limits.
+ *
+ * `IAIPersona.maxTokens` is deprecated — "Max tokens is determined by the model and
+ * provider" — so the conversation service **delegates** to
+ * `ReactorProviderService.resolveModelContextLength` and consults no other source.
+ *
+ * Two regressions this pins:
+ *
+ *  - The old resolver read `provider.models[]` itself *and* fell back to the persona.
+ *    Both are gone: the registry is asked, and only the registry answers.
+ *  - The old resolver scanned **every** provider for a matching model id. That is how
+ *    a `deepseek-flash` conversation (declared 64 000) was recorded at 1 000 000 —
+ *    a value borrowed from an unrelated vendor's model. Scoping is now the provider
+ *    service's job and is asserted in `ReactorProviderService.contextLength.test.ts`.
+ */
+describe("ReactorConversationService.resolveModelContextLength - delegation only", () => {
+  let service: any;
+  let providerService: any;
 
   beforeEach(() => {
-    mockProviderService = {
-      getProvider: jest.fn().mockImplementation(async (providerId: string) => {
-        if (providerId === 'google') {
-          return {
-            id: 'google',
-            models: [
-              { id: 'gemini-2.5-pro', contextLength: 1048576 },
-              { id: 'gemini-3.6-flash', contextLength: 1048576 },
-            ],
-          };
-        }
-        if (providerId === 'anthropic') {
-          return {
-            id: 'anthropic',
-            models: [
-              { id: 'claude-sonnet-5', contextLength: 1000000 },
-              { id: 'claude-haiku-4-5', contextLength: 200000 },
-            ],
-          };
-        }
-        return null;
-      }),
-      getProviders: jest.fn().mockResolvedValue([
-        {
-          id: 'google',
-          models: [
-            { id: 'gemini-2.5-pro', contextLength: 1048576 },
-            { id: 'gemini-3.6-flash', contextLength: 1048576 },
-          ],
-        },
-        {
-          id: 'anthropic',
-          models: [
-            { id: 'claude-sonnet-5', contextLength: 1000000 },
-            { id: 'claude-haiku-4-5', contextLength: 200000 },
-          ],
-        },
-      ]),
+    providerService = {
+      resolveModelContextLength: jest.fn(async () => ({
+        value: 64000,
+        source: "model-declared",
+        authoritative: true,
+        providerId: "deepseek",
+        modelId: "deepseek-flash",
+      })),
     };
 
-    mockContext = {
-      user: { _id: 'user-123' },
-      getService: jest.fn().mockReturnValue(mockProviderService),
-      debug: jest.fn(),
-      info: jest.fn(),
-      warn: jest.fn(),
-      error: jest.fn(),
+    service = Object.create(ReactorConversationService.prototype);
+    service.context = {
+      getService: jest.fn().mockReturnValue(providerService),
+      debug: () => {},
+      info: () => {},
+      warn: () => {},
+      error: () => {},
     };
-
-    conversationService = new (ReactorConversationService as any)({}, mockContext);
+    service.providerService = providerService;
+    service.sessionLog = jest.fn();
   });
 
-  test('resolves contextLength from specific provider in providers.yaml', async () => {
-    const length = await conversationService.resolveModelContextLength('gemini-2.5-pro', 'google');
-    expect(length).toBe(1048576);
+  it("asks the provider service, with the model and the provider", async () => {
+    const result = await service.resolveModelContextLength("deepseek-flash", "deepseek");
+
+    expect(providerService.resolveModelContextLength).toHaveBeenCalledWith(
+      "deepseek-flash",
+      "deepseek"
+    );
+    // The incident's true window, surfaced as authoritative.
+    expect(result.value).toBe(64000);
+    expect(result.authoritative).toBe(true);
   });
 
-  test('resolves contextLength via cross-provider search when providerId is omitted or mismatched', async () => {
-    const length = await conversationService.resolveModelContextLength('claude-sonnet-5');
-    expect(length).toBe(1000000);
+  it("passes the resolution through unchanged, including source and provider", async () => {
+    const expected = {
+      value: 131072,
+      source: "configured-default",
+      authoritative: false,
+      providerId: "ollama",
+      modelId: "qwen3.5",
+    };
+    providerService.resolveModelContextLength = jest.fn(async () => expected);
+
+    await expect(service.resolveModelContextLength("qwen3.5", "ollama")).resolves.toEqual(
+      expected
+    );
   });
 
-  test('falls back to persona maxTokens if model is not found in provider registry', async () => {
-    const length = await conversationService.resolveModelContextLength('unknown-model', 'unknown-provider', 500000);
-    expect(length).toBe(500000);
+  it("reports UNRESOLVED rather than inventing a limit when there is no provider service", async () => {
+    // A second place that invents a number would be indistinguishable from a measured
+    // one — which is the whole defect class. Refuse to answer instead.
+    service.providerService = null;
+    service.context.getService = jest.fn(() => {
+      throw new Error("service registry unavailable");
+    });
+
+    const result = await service.resolveModelContextLength("deepseek-flash", "deepseek");
+
+    expect(result).toEqual({
+      value: null,
+      source: "unresolved",
+      authoritative: false,
+      providerId: "deepseek",
+      modelId: "deepseek-flash",
+    });
   });
 
-  test('falls back to DEFAULT_MAX_TOKENS (200,000) if model and persona maxTokens are both missing', async () => {
-    const length = await conversationService.resolveModelContextLength('non-existent-model');
-    expect(length).toBe(200000);
+  it("reports UNRESOLVED when the provider service throws, instead of failing the call", async () => {
+    providerService.resolveModelContextLength = jest.fn(async () => {
+      throw new Error("registry read failed");
+    });
+
+    const result = await service.resolveModelContextLength("deepseek-flash", "deepseek");
+
+    expect(result.value).toBeNull();
+    expect(result.authoritative).toBe(false);
+  });
+
+  it("does not consult the persona — the persona carries no limit any more", async () => {
+    // If a persona were consulted, this would be the call site. There is no persona
+    // parameter, and the provider service is asked exactly once with two arguments.
+    await service.resolveModelContextLength("deepseek-flash", "deepseek");
+
+    expect(providerService.resolveModelContextLength).toHaveBeenCalledTimes(1);
+    expect(providerService.resolveModelContextLength.mock.calls[0]).toHaveLength(2);
   });
 });

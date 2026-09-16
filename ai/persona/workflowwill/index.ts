@@ -384,7 +384,6 @@ export const WorkflowWillPersona: IAIPersona = {
       ],
     },
   ],
-  maxTokens: 1048576,
   // @ts-ignore
   macros: [
     ...WORKFLOW_MACROS
