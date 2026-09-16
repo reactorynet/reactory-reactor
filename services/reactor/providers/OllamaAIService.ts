@@ -121,7 +121,55 @@ class OllamaAIService extends AIProviderBase {
 
   // --- Message building ---
 
-  private buildMessages(userMessage: string): Message[] {
+  /**
+   * Split message content (plain string or OpenAI-style content-parts array)
+   * into Ollama's shape: text on `content`, images as a separate base64 array.
+   *
+   * Ollama's `Message` does not accept inline content parts — images must be
+   * lifted onto `images`. Historical vision turns stored as
+   * `[{type:'text'}, {type:'image_url'}]` are therefore converted rather than
+   * silently stringified (which previously dropped every image).
+   */
+  private toOllamaContent(content: any): { text: string; images: string[] } {
+    const images: string[] = [];
+
+    if (typeof content === "string") return { text: content, images };
+
+    if (Array.isArray(content)) {
+      const texts: string[] = [];
+      for (const part of content) {
+        if (!part) continue;
+        if (typeof part === "string") {
+          if (part.trim()) texts.push(part);
+          continue;
+        }
+        if (part.type === "image_url" && part.image_url?.url) {
+          const b64 = this.dataUrlToBase64(part.image_url.url);
+          if (b64) images.push(b64);
+          continue;
+        }
+        if (typeof part.text === "string" && part.text.trim()) texts.push(part.text);
+      }
+      return { text: texts.join("\n"), images };
+    }
+
+    if (content && typeof content === "object" && typeof content.text === "string") {
+      return { text: content.text, images };
+    }
+
+    return { text: content == null ? "" : String(content), images };
+  }
+
+  /**
+   * Extract the raw base64 payload from a `data:` URL. Ollama expects bare
+   * base64, not a data URL, and cannot fetch remote image URLs.
+   */
+  private dataUrlToBase64(url: string): string | null {
+    const match = /^data:[^;]+;base64,(.+)$/.exec(url);
+    return match ? match[1] : null;
+  }
+
+  private buildMessages(userMessage: string | any[]): Message[] {
     const messages: Message[] = [];
     const { history } = this.chatState;
 
@@ -129,7 +177,10 @@ class OllamaAIService extends AIProviderBase {
       if (!msg) return;
 
       if ((msg.role === "system" || msg.role === "user") && msg.content) {
-        messages.push({ role: msg.role, content: msg.content as string });
+        const { text, images } = this.toOllamaContent(msg.content);
+        const entry: Message = { role: msg.role, content: text };
+        if (images.length > 0) entry.images = images;
+        messages.push(entry);
       } else if (msg.role === "assistant") {
         const toolCalls = (msg as any).tool_calls;
         if (toolCalls && Array.isArray(toolCalls) && toolCalls.length > 0) {
@@ -144,11 +195,11 @@ class OllamaAIService extends AIProviderBase {
           }));
           messages.push({
             role: "assistant",
-            content: (msg.content as string) || "",
+            content: this.toOllamaContent(msg.content).text,
             tool_calls: ollamaToolCalls,
           });
         } else if (msg.content) {
-          messages.push({ role: "assistant", content: msg.content as string });
+          messages.push({ role: "assistant", content: this.toOllamaContent(msg.content).text });
         }
       } else if (msg.role === "tool") {
         messages.push({
@@ -175,7 +226,10 @@ class OllamaAIService extends AIProviderBase {
       });
     }
 
-    messages.push({ role: "user", content: userMessage });
+    const current = this.toOllamaContent(userMessage);
+    const currentMessage: Message = { role: "user", content: current.text };
+    if (current.images.length > 0) currentMessage.images = current.images;
+    messages.push(currentMessage);
 
     return messages;
   }
@@ -490,7 +544,11 @@ class OllamaAIService extends AIProviderBase {
    * the user's original message unchanged, since the message was not the
    * problem.
    */
-  private modifyMessageForRetry(message: string, lastError: any): string {
+  private modifyMessageForRetry(message: string | any[], lastError: any): string | any[] {
+    // Multimodal turns pass through untouched — interpolating an array into the
+    // template below would flatten it to a comma-joined string and drop images.
+    if (typeof message !== "string") return message;
+
     const errorMsg = lastError?.message?.toLowerCase() || "";
     if (errorMsg.includes("tool") || errorMsg.includes("function")) {
       return (

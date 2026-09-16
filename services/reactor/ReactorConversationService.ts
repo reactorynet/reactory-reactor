@@ -4755,6 +4755,12 @@ export default class ReactorConversationService
       tool_call_id?: string;
       streamingMode?: StreamingMode;
       providerConfig?: ReactorProviderConfig;
+      /**
+       * `id` of the turn as persisted in the transcript before this call.
+       * Forwarded so the provider can exclude it from the history it loads,
+       * preventing the current turn from being sent to the model twice.
+       */
+      currentTurnMessageId?: string;
     }
   ): Promise<any> {
     // Capability gate: fail fast (and clearly) when structured output is requested
@@ -4791,6 +4797,7 @@ export default class ReactorConversationService
         case "ollama":
           // Ollama uses the native Ollama Node SDK via OllamaAIService
           await this.ollamaService.initialize(chatSessionId, routedPersona);
+          this.ollamaService.excludeInFlightTurn(chatArgs.currentTurnMessageId);
           return await this.ollamaService.chat({
             ...chatArgs,
             persistState: false, // Don't persist here since we handle it in ReactorConversationService
@@ -4799,6 +4806,7 @@ export default class ReactorConversationService
         case "google":
           // Google AI service implementation
           await this.googleAIService.initialize(chatSessionId, routedPersona);
+          this.googleAIService.excludeInFlightTurn(chatArgs.currentTurnMessageId);
           return await this.googleAIService.chat({
             ...chatArgs,
             persistState: false, // Don't persist here since we handle it in ReactorConversationService
@@ -4806,6 +4814,7 @@ export default class ReactorConversationService
         case "anthropic":
           // Anthropic service implementation
           await this.anthropicService.initialize(chatSessionId, routedPersona);
+          this.anthropicService.excludeInFlightTurn(chatArgs.currentTurnMessageId);
           return await this.anthropicService.chat({
             ...chatArgs,
             persistState: false, // Don't persist here since we handle it in ReactorConversationService
@@ -4813,6 +4822,7 @@ export default class ReactorConversationService
         default:
           // x-ai, openai, copilot, and azure-openai use the same OpenAI-compatible service
           await this.openaiService.initialize(chatSessionId, routedPersona);
+          this.openaiService.excludeInFlightTurn(chatArgs.currentTurnMessageId);
           return await this.openaiService.chat({
             ...chatArgs,
             persistState: false, // Don't persist here since we handle it in ReactorConversationService
@@ -5127,6 +5137,11 @@ export default class ReactorConversationService
 
         // Save message to conversation history
         let conversation;
+        // Identity of the turn persisted below. Threaded to the provider so it can
+        // drop the duplicate copy that `loadChatState` reads back out of the
+        // transcript (see `AIProviderBase.excludeInFlightTurn`). Left undefined on
+        // the `continueAfterTools` path, which pushes nothing new.
+        let persistedTurnId: string | undefined;
         if (chatSessionId) {
           // For SSE streaming on a resumed session, check that the SSE transport
           // is connected *before* persisting the message.  If the session/transport
@@ -5256,6 +5271,7 @@ export default class ReactorConversationService
             // Phase 3 step 3a dual-write, applied AFTER the write so the row is
             // keyed on the `_id` Mongo assigned rather than the provisional one.
             await this.mirrorPersistedAppend(chatSessionId, conversation, messageToAdd);
+            persistedTurnId = String(messageToAdd.id);
           }
 
           // Generate a title from the first user message (fire-and-forget)
@@ -5475,6 +5491,7 @@ export default class ReactorConversationService
             tool_call_id,
             streamingMode,
             providerConfig,
+            currentTurnMessageId: persistedTurnId,
           }
         );
 

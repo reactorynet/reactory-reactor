@@ -128,6 +128,56 @@ abstract class AIProviderBase implements IAIProviderService {
   }
 
   /**
+   * Remove the in-flight user turn from the transcript this provider loaded.
+   *
+   * The message store (Postgres) is authoritative and `sendMessage` persists the
+   * turn *before* handing it to the provider; `loadChatState` then loads the whole
+   * transcript, which already ends with that turn. Every provider's message builder
+   * iterates the transcript **and** appends the current `message`, so without this
+   * the turn reaches the model twice — once from history, once from the append.
+   *
+   * Removing the duplicate here rather than dropping the append is deliberate: the
+   * append is still load-bearing for callers that do *not* persist first —
+   * `generateCompactionSummary` sends a synthesised transcript that has no row in
+   * the message store, and the audio path sends a freshly transcribed message.
+   * Those callers pass no `messageId`, so this is a no-op for them.
+   *
+   * Matching is by identity, not content, on purpose: a content comparison would
+   * silently swallow a legitimate back-to-back repeat of identical text.
+   *
+   * @param messageId `id` of the turn as persisted in the transcript. When absent
+   *   (any caller that did not persist first) this does nothing.
+   * @returns number of transcript entries removed — 0 or 1 in practice.
+   */
+  public excludeInFlightTurn(messageId?: string | null): number {
+    if (!messageId) return 0;
+
+    const history = this.chatState?.history;
+    if (!Array.isArray(history) || history.length === 0) return 0;
+
+    const target = String(messageId);
+    const kept = history.filter((item: any) => {
+      const id = item?.id ?? item?._id;
+      return id === undefined || id === null || String(id) !== target;
+    });
+
+    const removed = history.length - kept.length;
+    if (removed > 0) {
+      // Reassign so providers that read `chatState.history` at build time (all of
+      // them) see the trimmed transcript without any further plumbing.
+      this.chatState.history = kept as any;
+
+      this.context?.debug?.(
+        `Excluded in-flight turn ${target} from provider history`,
+        { removed, remaining: kept.length },
+        'AIProviderBase.excludeInFlightTurn'
+      );
+    }
+
+    return removed;
+  }
+
+  /**
    * Loads a chat state from the database or creates a new one if it doesn't exist
    */
   protected async loadChatState(chatSessionId?: string): Promise<boolean> {

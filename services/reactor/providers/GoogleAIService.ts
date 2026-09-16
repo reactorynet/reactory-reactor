@@ -2083,7 +2083,11 @@ class GoogleAIService extends AIProviderBase {
   /**
    * Modify the message on retry to potentially avoid the same error
    */
-  private modifyMessageForRetry(message: string, lastError: any): string {
+  private modifyMessageForRetry(message: string | any[], lastError: any): string | any[] {
+    // Multimodal turns pass through untouched — interpolating an array into the
+    // templates below would flatten it to a comma-joined string and drop images.
+    if (typeof message !== "string") return message;
+
     const errorMessage = lastError?.message?.toLowerCase() || "";
     const malformedDetail: string =
       typeof lastError?.meta?.malformedDetail === "string"

@@ -509,6 +509,19 @@ export interface AIChatParams {
   role?: "user" | "assistant" | "tool" | "system";
   /** Optional normalized, provider-agnostic augmented config for this turn. */
   providerConfig?: ReactorProviderConfig;
+  /**
+   * Identity of the turn being sent, when it has ALREADY been persisted to the
+   * conversation transcript before the provider was called.
+   *
+   * The message store is authoritative and `ReactorConversationService.sendMessage`
+   * writes the turn before invoking the provider, so the transcript the provider
+   * loads ends with it. Providers use this id to drop that duplicate instead of
+   * sending the turn twice — see `AIProviderBase.excludeInFlightTurn`.
+   *
+   * Omitted by callers that do not persist first (e.g. compaction summaries and
+   * the audio path), where the current message genuinely is not in the transcript.
+   */
+  currentTurnMessageId?: string;
   [key: string]: any;
 }
 
