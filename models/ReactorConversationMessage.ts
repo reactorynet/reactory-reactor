@@ -8,6 +8,20 @@ import {
 } from 'typeorm';
 
 /**
+ * Where a turn's token counts came from.
+ *
+ * `provider`  — reported by the provider in `provider_response.usage`. This is the
+ *               only value safe to bill against.
+ * `estimated` — derived from content length because the response carried no usage.
+ *               Kept distinguishable so a fabricated figure is never presented as
+ *               a measured one, and so reporting can exclude it on request. The
+ *               legacy ingest script produced these silently; see
+ *               `scripts/backfillUsageAttribution.ts`.
+ * `none`      — no usage present and nothing to estimate from.
+ */
+export type UsageSource = 'provider' | 'estimated' | 'none';
+
+/**
  * A single entry in a conversation's message log.
  *
  * Conversation *sessions* stay in MongoDB (`reactor_conversations`); the
@@ -38,6 +52,13 @@ import {
 @Index('IDX_rcm_conv_archived_seq', ['conversationId', 'archived', 'seq'])
 @Index('IDX_rcm_conv_role_seq', ['conversationId', 'role', 'seq'])
 @Index('IDX_rcm_conv_seq', ['conversationId', 'seq'], { unique: true })
+// Usage reporting scans. Declared on the entity rather than only in the migration
+// because `synchronize` reconciles against entity metadata and drops anything it
+// cannot see — the exact failure recorded in the index note above.
+@Index('IDX_rcm_usage_created', ['createdAt'])
+@Index('IDX_rcm_usage_user_created', ['userId', 'createdAt'])
+@Index('IDX_rcm_usage_provider_created', ['providerId', 'createdAt'])
+@Index('IDX_rcm_usage_model_created', ['modelId', 'createdAt'])
 @Entity({ name: 'reactor_conversation_messages' })
 export default class ReactorConversationMessage {
   /** Internal row identity. Not exposed to clients; `mongoId` is. */
@@ -127,6 +148,80 @@ export default class ReactorConversationMessage {
 
   @Column({ name: 'audio', type: 'jsonb', nullable: true })
   audio?: unknown;
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Usage attribution
+  //
+  // Denormalised onto the row on purpose. At read time neither available source
+  // can say which provider actually served a turn:
+  //   - the adapters normalise every `providerResponse` to the OpenAI
+  //     `chat.completion` shape, so no provider/model survives on the envelope;
+  //   - `reactor_conversations`, which does carry `providerId`/`modelId`, lives
+  //     in a different store and can hold a null provider.
+  // Capturing the *routed* values here at append time is therefore the only
+  // reliable basis for cost and per-provider reporting. See
+  // `ReactorUsageAnalyticsService`.
+  // ───────────────────────────────────────────────────────────────────────────
+
+  /** Owner of the conversation, denormalised for per-user aggregation. */
+  @Column({ name: 'user_id', type: 'char', length: 24, nullable: true })
+  userId?: string | null;
+
+  /**
+   * Provider that actually served this turn, after routing overrides.
+   * Lower-cased, matching the registry ids.
+   */
+  @Column({ name: 'provider_id', type: 'varchar', length: 128, nullable: true })
+  providerId?: string | null;
+
+  /** Model id that actually served this turn, after routing overrides. */
+  @Column({ name: 'model_id', type: 'varchar', length: 255, nullable: true })
+  modelId?: string | null;
+
+  @Column({ name: 'persona_id', type: 'varchar', length: 128, nullable: true })
+  personaId?: string | null;
+
+  @Column({ name: 'use_case', type: 'varchar', length: 64, nullable: true })
+  useCase?: string | null;
+
+  /** Wall-clock duration of the provider call, for the latency metric. */
+  @Column({ name: 'duration_ms', type: 'integer', nullable: true })
+  durationMs?: number | null;
+
+  /**
+   * Cost of this turn in USD cents, priced at append time.
+   *
+   * Stored rather than derived so a later price-list change cannot retroactively
+   * restate what a past turn cost — billing figures must be a snapshot. NULL
+   * means "not priced" (an unknown model), which is deliberately distinct from
+   * `0`, a genuinely free model.
+   */
+  @Column({ name: 'cost_usd_cents', type: 'numeric', precision: 18, scale: 6, nullable: true })
+  costUsdCents?: number | null;
+
+  /**
+   * How the token counts were obtained. See {@link UsageSource}.
+   *
+   * Exists so an *estimated* figure can never be mistaken for a reported one:
+   * the legacy ingest script fabricated counts from content length and billed
+   * them as though they were real.
+   */
+  @Column({ name: 'usage_source', type: 'varchar', length: 16, nullable: true })
+  usageSource?: string | null;
+
+  /**
+   * Provider declared on the session at the time of the turn.
+   *
+   * Retained alongside the routed value so a mis-route is detectable after the
+   * fact: `providerId <> sessionProviderId` means the request did not go where
+   * the conversation said it should.
+   */
+  @Column({ name: 'session_provider_id', type: 'varchar', length: 128, nullable: true })
+  sessionProviderId?: string | null;
+
+  /** Model declared on the session; see {@link sessionProviderId}. */
+  @Column({ name: 'session_model_id', type: 'varchar', length: 255, nullable: true })
+  sessionModelId?: string | null;
 
   /**
    * Flattened, searchable text derived from content (and thinking). Maintained

@@ -32,6 +32,14 @@ import resolveImageUrls from "@reactory/server-modules/reactory-reactor/utils/re
 import ReactorMacroService from "./providers/ReactorMacroService";
 import DocumentChunkingService from "./DocumentChunkingService";
 import ReactorConversationMessageService from "./ReactorConversationMessageService";
+import {
+  IUsageAttribution,
+} from "./ReactorConversationMessageService";
+import {
+  resolveModelPricing,
+  calculateCostUsdCents,
+  extractUsage,
+} from "./usagePricing";
 import { ReactorConversationHistoryItem } from "@reactory/server-modules/reactory-reactor/models/ReactorChatState";
 import ReactoryFile, {
   ReactoryFileDocument,
@@ -100,6 +108,14 @@ enum ReactorErrorCode {
 
   // Resource errors
   CONVERSATION_NOT_FOUND = "CONVERSATION_NOT_FOUND",
+  /**
+   * The conversation already has a turn in flight.
+   *
+   * Distinct from `CONVERSATION_UPDATE_ERROR` on purpose: this is not a failure, it is a refusal to
+   * interleave. Overlapping turns append to the same transcript, which is how an assistant message
+   * ends up inside an earlier turn's tool batch — a transcript no provider will accept.
+   */
+  CONVERSATION_PROCESSING = "CONVERSATION_PROCESSING",
   PERSONA_NOT_FOUND = "PERSONA_NOT_FOUND",
   USER_NOT_FOUND = "USER_NOT_FOUND",
   MACRO_NOT_FOUND = "MACRO_NOT_FOUND",
@@ -108,6 +124,9 @@ enum ReactorErrorCode {
   AI_PROVIDER_ERROR = "AI_PROVIDER_ERROR",
   AI_PROVIDER_TIMEOUT = "AI_PROVIDER_TIMEOUT",
   AI_PROVIDER_RATE_LIMIT = "AI_PROVIDER_RATE_LIMIT",
+
+  // Budget enforcement
+  BUDGET_EXCEEDED = "BUDGET_EXCEEDED",
 
   // Internal errors
   DATABASE_ERROR = "DATABASE_ERROR",
@@ -901,6 +920,8 @@ export default class ReactorConversationService
         "Contact an administrator for the required permissions",
       [ReactorErrorCode.CONVERSATION_NOT_FOUND]:
         "Please check the conversation ID and try again",
+      [ReactorErrorCode.CONVERSATION_PROCESSING]:
+        "A response is still being generated for this conversation, please wait for it to finish",
       [ReactorErrorCode.PERSONA_NOT_FOUND]: "Please select a valid AI persona",
       [ReactorErrorCode.USER_NOT_FOUND]:
         "User session may have expired, please log in again",
@@ -2838,6 +2859,23 @@ export default class ReactorConversationService
       // non-fatal: fall through to the last resort
     }
 
+    // Loud, because this is a routing decision made by absence.
+    //
+    // Nothing above named a provider, so every request that does not carry its own
+    // providerId is dispatched here. The codebase already documents this exact
+    // hazard — a provider/persona mismatch "silently targets the wrong endpoint
+    // with the wrong key" — and returning the literal was previously silent.
+    //
+    // The literal is still the least-bad option: refusing outright would break
+    // every session that legitimately has no provider. But it must never be quiet.
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[reactor] No default AI provider is configured (REACTOR_DEFAULT_PROVIDER / ' +
+        'DEFAULT_AI_PROVIDER) and no user default is flagged, so "openai" (the ' +
+        'OpenAI-compatible endpoint) is being used as the fallback. A request whose ' +
+        'conversation belongs to a different provider may be sent to the wrong endpoint.'
+    );
+
     return "openai";
   }
 
@@ -2898,6 +2936,33 @@ export default class ReactorConversationService
     }
 
     provider = provider.toLowerCase();
+
+    // A fallback is not a routing decision, it is the absence of one — and it used
+    // to be silent. When an *existing* conversation is routed by the global
+    // default rather than by its own declaration, either its `providerId` is null
+    // (a real session in production reads that way) or it never had one. The
+    // declared `modelId` then belongs to a different provider than the one about
+    // to serve the request, which is how a request ends up at the OpenAI-compatible
+    // endpoint while the session says `deepseek-flash`.
+    //
+    // Reported, not corrected: guessing a provider here would silently substitute
+    // one wrong answer for another. The model registry owns the model→provider
+    // relationship, so reconciliation belongs there.
+    if (source === "default" && chatSessionId) {
+      this.sessionLog(
+        "warn",
+        "Existing conversation routed by the global default provider because it declares none; the request may target the wrong endpoint",
+        {
+          chatSessionId,
+          resolvedProvider: provider,
+          personaProviderId: (persona as any)?.providerId || null,
+          sessionProviderId: prefetchedConversationProviderId || null,
+          remedy:
+            "Set REACTOR_DEFAULT_PROVIDER, or repair the conversation's providerId from its modelId.",
+        },
+        chatSessionId
+      );
+    }
 
     this.sessionLog(
       "debug",
@@ -3545,7 +3610,8 @@ export default class ReactorConversationService
    */
   private async mirrorAppendedMessage(
     conversationId: string,
-    message: any
+    message: any,
+    attribution?: IUsageAttribution
   ): Promise<void> {
     if (!conversationId || !message) return;
 
@@ -3570,7 +3636,7 @@ export default class ReactorConversationService
         this.messageMirror = new ReactorConversationMessageService();
       }
       if (!this.messageMirror.isAvailable()) return;
-      await this.messageMirror.appendMessage(conversationId, message);
+      await this.messageMirror.appendMessage(conversationId, message, attribution);
     } catch (error: any) {
       this.sessionLog(
         "warn",
@@ -3581,6 +3647,114 @@ export default class ReactorConversationService
     }
   }
   /**
+   * Build the usage attribution for an assistant turn.
+   *
+   * Captured here because this is the last point at which the routing decision is
+   * still known. It cannot be reconstructed later: the provider adapters normalise
+   * every stored `provider_response` to the OpenAI `chat.completion` shape, so no
+   * provider or model survives on the envelope, and the session document lives in
+   * a different store and may carry a null provider.
+   *
+   * Pricing happens once, here, and the result is stored — so a later price-list
+   * change cannot retroactively restate what a past turn cost. A model with no
+   * known price is recorded as NULL, never 0: zero would read as "free" and
+   * understate spend invisibly, which is the defect this whole path exists to fix.
+   *
+   * Never throws. Attribution is telemetry; failing to price a turn must not fail
+   * the turn. A null cost is counted in `coverage.unpricedTurns` so the gap is
+   * visible rather than assumed away.
+   */
+  private async buildUsageAttribution(
+    conversation: any,
+    response: any,
+    durationMs?: number,
+    routing?: { providerId?: string | null; modelId?: string | null }
+  ): Promise<IUsageAttribution> {
+    // What the session *declared*.
+    const sessionProviderId = conversation?.providerId
+      ? String(conversation.providerId).trim().toLowerCase()
+      : null;
+    const sessionModelId = conversation?.modelId
+      ? String(conversation.modelId).trim()
+      : null;
+
+    // What was *routed to*. Preferring the caller's value is the whole point of
+    // this parameter: when the two differ, the routed one is what incurred the
+    // cost, and the session one is retained only as a divergence marker.
+    const providerId = routing?.providerId
+      ? String(routing.providerId).trim().toLowerCase()
+      : sessionProviderId;
+    const modelId = routing?.modelId
+      ? String(routing.modelId).trim()
+      : sessionModelId;
+
+    // `conversation.user` is populated on the SSE path and a raw ObjectId on
+    // others, so both shapes have to be read.
+    const rawUser = conversation?.user;
+    const userId = rawUser?._id
+      ? String(rawUser._id)
+      : rawUser
+        ? String(rawUser)
+        : null;
+
+    const usage = extractUsage(response);
+
+    const attribution: IUsageAttribution = {
+      userId,
+      providerId,
+      modelId,
+      personaId: conversation?.personaId ? String(conversation.personaId) : null,
+      useCase: conversation?.use_case ? String(conversation.use_case) : 'standalone',
+      durationMs:
+        typeof durationMs === 'number' && Number.isFinite(durationMs)
+          ? Math.round(durationMs)
+          : null,
+      usageSource: usage.source,
+      costUsdCents: null,
+      // What the session declared, as distinct from what served the turn. A
+      // mismatch (`provider_id <> session_provider_id`) is what
+      // `coverage.reroutedTurns` counts, so a mis-route is now measurable rather
+      // than only visible in a warning log.
+      sessionProviderId,
+      sessionModelId,
+    };
+
+    if (!providerId || !modelId || usage.source === 'none') {
+      return attribution;
+    }
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { ReactorPostgresDataSource } = require('../../models') as {
+        ReactorPostgresDataSource: any;
+      };
+
+      const resolved = await resolveModelPricing(
+        ReactorPostgresDataSource,
+        modelId,
+        providerId
+      );
+
+      attribution.costUsdCents = resolved.pricing
+        ? calculateCostUsdCents(
+            resolved.pricing,
+            usage.promptTokens,
+            usage.completionTokens
+          )
+        : null;
+    } catch (error: any) {
+      this.sessionLog(
+        'warn',
+        `Usage attribution could not be priced for ${providerId}/${modelId}: ${error?.message}`,
+        { conversationId: conversation?._id?.toString() },
+        conversation?._id?.toString()
+      );
+    }
+
+    return attribution;
+  }
+
+  /**
    * Mirror the item a `$push` just persisted, so the row is keyed on Mongo's
    * own `_id`. Falls back to the provisional message when the update returned
    * no document; the guard in `mirrorAppendedMessage` then skips it rather than
@@ -3589,7 +3763,14 @@ export default class ReactorConversationService
   private async mirrorPersistedAppend(
     conversationId: string,
     updated: any,
-    fallback: any
+    // Deliberately a concrete object type, not `any`: passing `undefined` here is not a harmless
+    // omission, it is the one input that makes this method *silently drop the message*. An `any`
+    // (or optional) parameter let six call sites do exactly that, and the failure was invisible —
+    // the row simply never appeared, and the transcript only broke later, at the provider, as
+    // "an assistant message with 'tool_calls' must be followed by tool messages". The type is what
+    // keeps a seventh site from being written. Every caller must pass the item it pushed.
+    fallback: Record<string, any>,
+    attribution?: IUsageAttribution
   ): Promise<void> {
     const history = updated?.history;
     const persisted =
@@ -3618,10 +3799,19 @@ export default class ReactorConversationService
       persisted && this.isSameHistoryItem(persisted, fallback) ? persisted : fallback;
 
     if (!candidate) {
+      // Should be unreachable now that `fallback` is required and typed as an object; a caller can
+      // only reach this by pushing a null/empty value through `any`. Kept, and made specific, on
+      // purpose: this warn is the *only* local signal that a message was silently dropped, and in
+      // its original form it named neither the role nor the missing fallback, which is a large part
+      // of why the defect took a session-ending 400 to find. It must say what was lost.
       this.sessionLog(
         "warn",
-        "Phase3 write-path: nothing to mirror for append",
-        { conversationId },
+        "Phase3 write-path: nothing to mirror for append — no fallback item was supplied, so this message was NOT persisted",
+        {
+          conversationId,
+          role: (fallback as any)?.role ?? null,
+          hasPersistedItem: Boolean(persisted),
+        },
         conversationId
       );
       return;
@@ -3643,7 +3833,7 @@ export default class ReactorConversationService
       );
     }
 
-    await this.mirrorAppendedMessage(conversationId, candidate);
+    await this.mirrorAppendedMessage(conversationId, candidate, attribution);
   }
 
   /**
@@ -5021,7 +5211,249 @@ export default class ReactorConversationService
    *
    * @since 1.0.0
    */
+  /**
+   * Refuse a turn when the user's budget is spent and enforcement is on.
+   *
+   * Called for two kinds of spend, both of which stand at the head of a fresh
+   * provider request:
+   *
+   *  - `user-turn` — the top of `sendMessage`, before the retry loop, so a blocked
+   *    turn cannot be retried into a charge.
+   *  - `client-tool-continuation` — the continuation inside
+   *    `completeClientToolCalls`. That path re-enters the provider loop after the
+   *    browser reports its tool results, and it bypassed this gate entirely,
+   *    making it the one route by which a spent budget could still buy calls: a
+   *    `hardStop` bounded the user's *messages* but not the AI turns they
+   *    indirectly triggered.
+   *
+   * Deliberately NOT applied to a `tool` continuation inside a single `sendMessage`.
+   * That is mid-exchange and already counted against the turn's initial check;
+   * re-checking per tool iteration would abort a loop part-way and strand an
+   * assistant message whose tool calls can never be answered, which is a worse
+   * state than the incremental spend it would prevent.
+   *
+   * Returns null when the turn may proceed — including when the gate cannot be
+   * evaluated, because `checkUserBudget` fails open by design and says so in its
+   * reason.
+   *
+   * `checkUserBudget` was previously correct and unreachable — called only by the
+   * display resolver — so `hardStop: true` configured limits that could never take
+   * effect.
+   */
+  private async enforceUsageBudget(
+    userId: string | undefined,
+    turnKind: "user-turn" | "client-tool-continuation",
+    chatSessionId?: string,
+    personaId?: string
+  ): Promise<any | null> {
+    if (!userId) return null;
+
+    try {
+      const usageService = this.context.getService<any>(
+        "reactor.ReactorAIUsageService@1.0.0"
+      );
+      if (!usageService || typeof usageService.checkUserBudget !== "function") {
+        return null;
+      }
+
+      const status = await usageService.checkUserBudget(userId);
+      if (status?.allowed !== false) {
+        // A warning is worth recording: the admin asked to be told before the
+        // limit is hit, and the turn is the moment that matters.
+        if (status?.status === "WARNING") {
+          this.sessionLog(
+            "warn",
+            "AI usage budget is approaching its limit",
+            { userId, percentageUsed: status.percentageUsed },
+            chatSessionId,
+            personaId
+          );
+        }
+        return null;
+      }
+
+      this.sessionLog(
+        "warn",
+        "Refusing AI turn: usage budget exceeded with hard stop enabled",
+        {
+          userId,
+          percentageUsed: status?.percentageUsed,
+          reason: status?.reason,
+        },
+        chatSessionId,
+        personaId
+      );
+
+      if (this.context?.telemetry) {
+        this.context.telemetry.increment("reactor_budget_blocked_total", 1, {
+          personaId: personaId || "unknown",
+        });
+      }
+
+      return this.createErrorResponse(
+        ReactorErrorCode.BUDGET_EXCEEDED,
+        status?.reason ||
+          "Your AI usage budget has been reached, so this request was not sent. " +
+            "Ask an administrator to raise the limit.",
+        { operation: "sendMessage", recoverable: false }
+      );
+    } catch (error: any) {
+      // Fail open, matching `checkUserBudget`. A gate that cannot be evaluated
+      // must not become a gate that blocks everyone.
+      this.sessionLog(
+        "warn",
+        `Usage budget could not be evaluated, allowing the turn: ${error?.message}`,
+        { userId },
+        chatSessionId,
+        personaId
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Serialise turns within one conversation.
+   *
+   * WHY THIS IS NOT THE `processing` FLAG
+   *
+   * The conversation document already carries `processing`, and it does not work for this. It is set
+   * by `sendMessage` before the AUTO tool loop and cleared by *every* attempt's catch — including an
+   * attempt that then retries. So a turn that fails once and retries reports itself as not
+   * processing, and a second send accepted during that window runs concurrently with the first. That
+   * is not theoretical: a live session shows four turns overlapping over ~90 seconds
+   * (`Sending message` ×4 with distinct turn ids, then appends interleaved from two of them), which
+   * is how a tool result ended up four messages later than the call it answered, and how an assistant
+   * message ended up in the middle of an earlier turn's tool batch.
+   *
+   * A flag on the document cannot fix this, because the bug is *which turn owns it*. This map is
+   * keyed on the conversation and held for the whole turn — across retries — and released only when
+   * the turn is genuinely finished, in a `finally`.
+   *
+   * Process-local by design. Overlapping writes from one process are what the transcript shows; a
+   * second process would need a lock in the shared store, which is a larger change and belongs with
+   * multi-process deployment rather than inferred from a single instance. Recorded here so the
+   * boundary is visible rather than assumed.
+   */
+  private static activeTurns: Map<string, { turnId: string; startedAt: number; personaId?: string }> = new Map();
+
+  /**
+   * Acquire the per-conversation turn lock, waiting briefly before giving up.
+   *
+   * Waiting rather than refusing outright, because the common case is legitimate: a user who did not
+   * see a response yet sends "continue". Refusing that would be a poor answer to a reasonable
+   * action, and interleaving it corrupts the transcript — so it queues. The wait is bounded because a
+   * front-end timeout would otherwise leave the request hanging with no answer at all, and a turn that
+   * is genuinely stuck should surface as a refusal that names the problem, not as silence.
+   *
+   * Returns a release function, or null when the lock could not be taken.
+   */
+  private async acquireConversationTurn(
+    chatSessionId: string,
+    personaId?: string
+  ): Promise<(() => void) | null> {
+    const POLL_MS = 250;
+    const MAX_WAIT_MS = 30_000;
+    const deadline = Date.now() + MAX_WAIT_MS;
+    let announcedWait = false;
+
+    while (ReactorConversationService.activeTurns.has(chatSessionId)) {
+      if (Date.now() >= deadline) {
+        const holder = ReactorConversationService.activeTurns.get(chatSessionId);
+        this.sessionLog(
+          "warn",
+          "Refusing to start a turn while another turn holds this conversation — overlapping turns interleave appends and make the transcript invalid for providers. The client should retry once the running turn finishes.",
+          {
+            chatSessionId,
+            runningFor: holder ? Date.now() - holder.startedAt : null,
+            runningTurnId: holder?.turnId ?? null,
+            waitedMs: MAX_WAIT_MS,
+          },
+          chatSessionId,
+          personaId
+        );
+        return null;
+      }
+
+      if (!announcedWait) {
+        announcedWait = true;
+        this.sessionLog(
+          "info",
+          "Waiting for the in-flight turn on this conversation to finish before starting this one",
+          { chatSessionId, maxWaitMs: MAX_WAIT_MS },
+          chatSessionId,
+          personaId
+        );
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+    }
+
+    const turnId = new ObjectId().toString();
+    ReactorConversationService.activeTurns.set(chatSessionId, {
+      turnId,
+      startedAt: Date.now(),
+      personaId,
+    });
+
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const holder = ReactorConversationService.activeTurns.get(chatSessionId);
+      // Only the owner releases. A later turn can hold the lock by the time a slow predecessor
+      // finishes, and clearing it here would let a third turn in beside that one.
+      if (holder?.turnId === turnId) {
+        ReactorConversationService.activeTurns.delete(chatSessionId);
+      }
+    };
+  }
+
   async sendMessage(args: {
+    personaId?: string;
+    chatSessionId?: string;
+    message: string | any;
+    role?: string;
+    tool_name?: string;
+    tool_args?: any;
+    tool_call_id?: string;
+    streamingMode?: StreamingMode;
+    modelId?: string;
+    providerId?: string;
+    continueAfterTools?: boolean;
+    images?: string[];
+    toolApprovalMode?: ToolApprovalMode;
+    parentSessionId?: string;
+    providerAuthOverride?: {
+      apiKey?: string;
+      endpoint?: string;
+      organization?: string;
+      deploymentName?: string;
+      apiVersion?: string;
+    };
+    providerConfig?: ReactorProviderConfig;
+  }): Promise<any> {
+    // One turn at a time per conversation. See `acquireConversationTurn` for why the `processing`
+    // flag on the document is not sufficient and cannot be made to be.
+    const lockId = args?.chatSessionId;
+    if (!lockId) return this.sendMessageUnlocked(args);
+
+    const release = await this.acquireConversationTurn(lockId, args?.personaId);
+    if (!release) {
+      return this.createErrorResponse(
+        ReactorErrorCode.CONVERSATION_PROCESSING,
+        "Another turn is already running on this conversation. Wait for it to finish, then try again.",
+        { operation: "sendMessage", conversationId: lockId, recoverable: true }
+      );
+    }
+
+    try {
+      return await this.sendMessageUnlocked(args);
+    } finally {
+      release();
+    }
+  }
+
+  private async sendMessageUnlocked(args: {
     personaId?: string;
     chatSessionId?: string;
     message: string | any;
@@ -5065,6 +5497,24 @@ export default class ReactorConversationService
       providerConfig,
     } = args;
     const { user } = this.context;
+
+    // Budget gate, before any provider work is done or tokens are spent. Placed
+    // after persona/session resolution so the refusal can be logged against the
+    // right conversation, but before the retry loop so a blocked turn cannot be
+    // retried into a charge.
+    //
+    // Gated only for a fresh user turn. A `tool` continuation here is mid-exchange
+    // and already covered by the turn's initial check; the client-tool
+    // continuation carries its own gate in `completeClientToolCalls`.
+    if (role === "user") {
+      const budgetRefusal = await this.enforceUsageBudget(
+        user?._id ? String(user._id) : undefined,
+        "user-turn",
+        chatSessionId,
+        personaId
+      );
+      if (budgetRefusal) return budgetRefusal;
+    }
 
     // Fallback: If personaId is missing, attempt to resolve it from existing session
     if (!personaId && chatSessionId) {
@@ -5363,22 +5813,24 @@ export default class ReactorConversationService
         } else {
           // Create new conversation only when no chatSessionId is provided
           const sessionId = new ObjectId();
+          // Hoisted so the same object can be handed to `mirrorPersistedAppend` as the fallback.
+          // A brand-new document is exempt from the strip policy, so `$push` lands and Mongo owns
+          // this item's `_id` — the mirror must be given the item, not left to infer it.
+          const initialHistoryItem = {
+            id: new ObjectId(),
+            role: role as any,
+            content: message,
+            timestamp: new Date(),
+            tool_name,
+            tool_args,
+            tool_call_id,
+          };
           conversation = new ReactorConversationModel({
             personaId,
             user,
             modelId: modelIdOverride || persona.modelId,
             providerId: provider,
-            history: [
-              {
-                id: new ObjectId(),
-                role: role as any,
-                content: message,
-                timestamp: new Date(),
-                tool_name,
-                tool_args,
-                tool_call_id,
-              },
-            ],
+            history: [initialHistoryItem],
             vars: {},
             meta: {
               summary: "Reactor Chat Session with agent " + persona.name,
@@ -5401,12 +5853,13 @@ export default class ReactorConversationService
 
           await conversation.save();
 
-          // Dual-write the initial message of a brand-new conversation. The
-          // document is saved by now, so history[0] carries Mongo's _id.
+          // Dual-write the initial message of a brand-new conversation. The document is saved by
+          // now, so `history[0]` carries Mongo's `_id` and wins over the fallback; the fallback is
+          // supplied so the mirror is never left with nothing to write.
           await this.mirrorPersistedAppend(
             conversation._id.toString(),
             conversation,
-            conversation.history?.[0]
+            (conversation.history?.[0] as any) ?? initialHistoryItem
           );
 
           // Generate a title from the first user message (fire-and-forget)
@@ -5501,7 +5954,8 @@ export default class ReactorConversationService
           conversation,
           message,
           streamingMode,
-          turnStartTime
+          turnStartTime,
+          { providerId: provider, modelId: effectiveModelId }
         );
 
         // Server-side auto tool execution loop for AUTO mode.
@@ -5578,19 +6032,34 @@ export default class ReactorConversationService
             // If any client tools are present in this batch, the AUTO loop will
             // pause after executing server tools, waiting for the client to
             // report results via ReactorCompleteClientToolCalls.
-            const clientToolNames = new Set<string>();
+            // A tool is client-routed when the session says so, when the macro
+            // registry says so, or when it belongs to a client macro's own tool
+            // list. Checking only the session's own arrays was not enough: a
+            // session that never recorded a client macro — the stale-session case
+            // `syncClientCapabilities` repairs — left the tool unrecognised, and
+            // the model's call then failed the turn instead of being forwarded to
+            // the browser that could actually run it.
+            const clientToolNames = this.collectClientRoutedToolNames(conversation);
+
+            // Every tool this conversation actually declares, server or client.
+            //
+            // A model can ask for a tool that is not in here at all — most often a
+            // client-only capability (the `chart` tool has no server-side macro
+            // definition, so it exists only if the browser reported it) for a
+            // session whose conversation document never recorded it. Without this
+            // set the model's request was passed to `executeMacro`, which threw
+            // `Macro chart not found in chat session`, failing the whole turn and
+            // — because the failure path re-resolves the provider — risking the
+            // follow-up request being routed to the default OpenAI-compatible
+            // endpoint instead of the conversation's own provider.
+            const knownToolNames = new Set<string>();
             for (const t of (conversation.tools || [])) {
-              if ((t as any).runat === 'client' || (t as any).function?.runat === 'client') {
-                const name = (t as any).function?.name || (t as any).name;
-                if (name) clientToolNames.add(name);
-              }
+              const name = (t as any).function?.name || (t as any).name;
+              if (name) knownToolNames.add(name);
             }
-            // Also check conversation.macros for client-only entries
             for (const m of (conversation.macros || [])) {
-              if ((m as any).runat === 'client') {
-                const name = (m as any).alias || (m as any).name;
-                if (name) clientToolNames.add(name);
-              }
+              const name = (m as any).alias || (m as any).name;
+              if (name) knownToolNames.add(name);
             }
 
             hasClientToolsPending = false;
@@ -5600,6 +6069,89 @@ export default class ReactorConversationService
               const toolArgs = typeof toolCall.function?.arguments === 'string'
                 ? JSON.parse(toolCall.function.arguments)
                 : toolCall.function?.arguments;
+
+              // Fail fast on a tool this conversation does not declare.
+              //
+              // The model is told, in the tool result, exactly what went wrong and
+              // the turn continues — rather than the whole request failing with an
+              // opaque macro error the model cannot act on. A client-only tool
+              // that was not registered for this session is called out by name,
+              // because that is the actionable cause.
+              if (toolName && !knownToolNames.has(toolName)) {
+                // Consult the macro registry as well as the session's own tools.
+                // The session's recorded set can be stale — see
+                // `syncClientCapabilities` — and the registry may still know the
+                // name, including the case that matters most here: a macro the
+                // server knows runs in the browser.
+                //
+                // The decision itself lives in `classifyUndeclaredToolCall` so the
+                // policy is a pure function that can be asserted without standing
+                // up the AUTO loop.
+                const verdict = this.classifyUndeclaredToolCall(toolName, conversation);
+
+                // A client tool the registry vouches for is forwarded, not refused.
+                // The browser can run it, so continuing the turn is strictly better
+                // than failing it merely because this session never recorded the
+                // capability.
+                if (verdict.forwardToClient) {
+                  hasClientToolsPending = true;
+
+                  // The plumbing — placeholder persistence, mirror, SSE forward —
+                  // lives in its own method so it can be exercised directly. It was
+                  // inline here, reachable only by standing up a provider, an SSE
+                  // transport and Mongo, which meant the two things most likely to
+                  // be silently wrong (the placeholder row's shape and the emitted
+                  // event) had no test at all.
+                  await this.persistClientToolForwarding({
+                    conversationId: effectiveConversationId,
+                    toolCall,
+                    toolName,
+                    streamingMode,
+                    personaId,
+                  });
+
+                  continue; // Skip to next tool call
+                }
+
+                const message = verdict.message;
+
+                this.sessionLog(
+                  "warn",
+                  `[sendMessage] AUTO mode: refusing undeclared tool "${toolName}"`,
+                  {
+                    conversationId: effectiveConversationId,
+                    refusalReason: verdict.reason,
+                    knownTools: [...knownToolNames].slice(0, 40),
+                  },
+                  effectiveConversationId,
+                  personaId
+                );
+
+                const undeclaredEntry = {
+                  id: new ObjectId(),
+                  role: 'tool' as const,
+                  content: message,
+                  tool_call_id: toolCall.id,
+                  tool_name: toolName,
+                  timestamp: new Date(),
+                  tool_results: [],
+                  tool_errors: [{ code: 'TOOL_NOT_DECLARED', message }],
+                };
+
+                const undeclaredUpdated = await ReactorConversationModel.findOneAndUpdate(
+                  { _id: effectiveConversationId },
+                  { $push: { history: undeclaredEntry }, $set: { updated: new Date() } },
+                  { new: true }
+                ).exec();
+
+                await this.mirrorPersistedAppend(
+                  effectiveConversationId,
+                  undeclaredUpdated,
+                  undeclaredEntry
+                );
+
+                continue; // Skip to next tool call
+              }
 
               // Skip client-only tools — they can only run in the browser.
               // Store a placeholder tool result so the AI provider receives a
@@ -5612,20 +6164,25 @@ export default class ReactorConversationService
                 }, effectiveConversationId, personaId);
 
                 // Persist a placeholder tool result in conversation history
+                //
+                // Hoisted so the mirror receives the item that was pushed. The `$push` is stripped
+                // for an existing document, so `updated.history` cannot be used to recover it: its
+                // last entry is the *previous* message. Passing `undefined` here is what left the
+                // assistant's `tool_call` unanswered and permanently wedged the conversation.
+                const clientToolPlaceholder = {
+                  id: new ObjectId(),
+                  role: 'tool',
+                  content: `[Client-side tool "${toolName}" will be executed in the user\'s browser. The result is not available server-side.]`,
+                  tool_call_id: toolCall.id,
+                  tool_name: toolName,
+                  timestamp: new Date(),
+                  tool_results: [] as any[],
+                };
+
                 const clientToolPlaceholderUpdated = await ReactorConversationModel.findOneAndUpdate(
                   { _id: effectiveConversationId },
                   {
-                    $push: {
-                      history: {
-                        id: new ObjectId(),
-                        role: 'tool',
-                        content: `[Client-side tool "${toolName}" will be executed in the user\'s browser. The result is not available server-side.]`,
-                        tool_call_id: toolCall.id,
-                        tool_name: toolName,
-                        timestamp: new Date(),
-                        tool_results: [],
-                      },
-                    },
+                    $push: { history: clientToolPlaceholder },
                     $set: { updated: new Date() },
                   },
                   { new: true }
@@ -5634,7 +6191,7 @@ export default class ReactorConversationService
                 await this.mirrorPersistedAppend(
                   effectiveConversationId,
                   clientToolPlaceholderUpdated,
-                  undefined
+                  clientToolPlaceholder
                 );
 
                 // Forward the tool call to the client via SSE so the client can execute it
@@ -5741,21 +6298,25 @@ export default class ReactorConversationService
                   conversationId: effectiveConversationId,
                 });
                 await this.updateToolCallStatus(effectiveConversationId, toolCall.id, 'error');
-                // Add an error tool result to history so the AI knows the tool failed
+                // Add an error tool result to history so the AI knows the tool failed.
+                //
+                // The error result is what *closes* the tool call, so it must not be skipped: a
+                // failed tool whose result is missing is indistinguishable, to the provider, from a
+                // tool that was never answered. Hoisted and passed explicitly for that reason.
+                const toolExecErrorEntry = {
+                  id: new ObjectId(),
+                  role: 'tool',
+                  content: `Error executing tool ${toolName}: ${toolError.message}`,
+                  tool_call_id: toolCall.id,
+                  tool_name: toolName,
+                  timestamp: new Date(),
+                  tool_results: [] as any[],
+                };
+
                 const toolExecErrorUpdated = await ReactorConversationModel.findOneAndUpdate(
                   { _id: effectiveConversationId },
                   {
-                    $push: {
-                      history: {
-                        id: new ObjectId(),
-                        role: 'tool',
-                        content: `Error executing tool ${toolName}: ${toolError.message}`,
-                        tool_call_id: toolCall.id,
-                        tool_name: toolName,
-                        timestamp: new Date(),
-                        tool_results: [],
-                      },
-                    },
+                    $push: { history: toolExecErrorEntry },
                     $set: { updated: new Date() },
                   },
                   { new: true }
@@ -5764,7 +6325,7 @@ export default class ReactorConversationService
                 await this.mirrorPersistedAppend(
                   effectiveConversationId,
                   toolExecErrorUpdated,
-                  undefined
+                  toolExecErrorEntry
                 );
               }
             }
@@ -5799,7 +6360,8 @@ export default class ReactorConversationService
               conversation,
               '',
               streamingMode,
-              turnStartTime
+              turnStartTime,
+              { providerId: provider, modelId: (effectivePersona as any)?.modelId }
             );
           }
 
@@ -6076,6 +6638,64 @@ export default class ReactorConversationService
       chatSessionId, personaId
     );
 
+    // Record the failure so it is attributable.
+    //
+    // This is the terminal failure path — retries are exhausted and the turn is
+    // about to be reported as failed. Recording here rather than at each attempt
+    // means one row per failed *turn* rather than per provider call, which is what
+    // an error rate needs to be meaningful: retries are part of one attempt to
+    // serve a turn, not separate turns.
+    //
+    // Best effort by contract. We are inside the error handler and a throw here
+    // would replace a clear provider error with an obscure telemetry error, so the
+    // service swallows its own failures and returns a boolean we deliberately
+    // ignore. Without this call `errorCount` stays structurally 0 — the dashboard
+    // would still be unable to show that anything is failing.
+    try {
+      const usageAnalytics = this.context.getService<any>(
+        'reactor.ReactorUsageAnalyticsService@1.0.0'
+      );
+      if (usageAnalytics && typeof usageAnalytics.recordFailure === 'function') {
+        const failureConversation = chatSessionId
+          ? await ReactorConversationModel.findById(chatSessionId)
+              .select('providerId modelId personaId user use_case')
+              .lean()
+              .exec()
+          : null;
+
+        await usageAnalytics.recordFailure({
+          userId: (failureConversation as any)?.user
+            ? String((failureConversation as any).user)
+            : this.context.user?._id
+              ? String(this.context.user._id)
+              : null,
+          conversationId: chatSessionId ?? null,
+          personaId:
+            (failureConversation as any)?.personaId ?? personaId ?? null,
+          providerId: (failureConversation as any)?.providerId ?? null,
+          modelId: (failureConversation as any)?.modelId ?? null,
+          useCase: (failureConversation as any)?.use_case ?? null,
+          // The code is a stable classification; the message is free text and
+          // varies by provider SDK, so both are kept but only one is groupable.
+          errorCode: this.classifyProviderError(lastError),
+          errorMessage: lastError?.message ?? String(lastError ?? 'Unknown error'),
+          retryable: this.isRetryableError(lastError),
+          // Attempts *made*, which equals maxRetries once the loop is exhausted.
+          attempts: maxRetries,
+          durationMs: Date.now() - turnStartTime,
+          turnKind: role === 'user' ? 'user-turn' : 'continuation',
+        });
+      }
+    } catch (recordErr: any) {
+      this.sessionLog(
+        'warn',
+        `Failed to record AI usage failure: ${recordErr?.message}`,
+        { conversationId: chatSessionId },
+        chatSessionId,
+        personaId
+      );
+    }
+
     // When in SSE mode, send an error event so the client can exit the
     // "thinking" state. Without this the client waits for an SSE COMPLETE
     // event that never arrives.
@@ -6128,7 +6748,21 @@ export default class ReactorConversationService
     conversation: any,
     message: string | any,
     streamingMode: StreamingMode = StreamingMode.NONE,
-    turnStartTime: number = Date.now()
+    turnStartTime: number = Date.now(),
+    /**
+     * The provider and model the router actually dispatched to.
+     *
+     * Supplied by the caller because only it knows: `resolveConversationProvider`
+     * may return a provider that differs from `conversation.providerId` (an
+     * override, a persona default, or the global fallback), and
+     * `executeProviderChat` then normalises the persona to match. Attributing the
+     * turn to the *session's* declared provider instead of the routed one is how a
+     * mis-routed request gets priced at the wrong provider's rates — silently.
+     *
+     * Absent, attribution falls back to the session's own values and reports no
+     * divergence, which is the pre-existing behaviour.
+     */
+    routing?: { providerId?: string | null; modelId?: string | null }
   ): Promise<any> {
     // Add AI response if available
     if (response?.choices && response?.choices?.length > 0) {
@@ -6190,10 +6824,21 @@ export default class ReactorConversationService
           { new: true }
         ).exec();
 
+        // Usage attribution, captured while the routing decision is still known.
+        // Without this the row lands with NULL provider/model/cost and only a
+        // re-run of the backfill can attribute it.
+        const usageAttribution = await this.buildUsageAttribution(
+          conversation,
+          response,
+          Date.now() - turnStartTime,
+          routing
+        );
+
         await this.mirrorPersistedAppend(
           conversation._id.toString(),
           assistantHistoryItemUpdated,
-          assistantHistoryItem
+          assistantHistoryItem,
+          usageAttribution
         );
       }
 
@@ -7087,25 +7732,30 @@ export default class ReactorConversationService
       // If no placeholder was found (e.g. client tool executed via PROMPT mode
       // where the server never created a placeholder), insert a new tool message.
       if (!updateResult) {
+        // No placeholder row existed to replace, so the result is inserted fresh. The inserted
+        // item is hoisted and handed to the mirror: this is the *ordinary* path for a client tool
+        // reported for a batch the browser never received a placeholder for, and leaving the
+        // fallback undefined dropped the result — leaving the tool_call unanswered and the
+        // transcript permanently invalid.
+        const toolResultFallbackEntry = {
+          id: new ObjectId(),
+          role: 'tool',
+          content,
+          tool_call_id: toolResult.toolCallId,
+          tool_name: toolResult.toolName,
+          timestamp: new Date(),
+          tool_results: [{
+            id: toolResult.toolCallId,
+            name: toolResult.toolName,
+            content: toolResult.isError ? toolResult.error : toolResult.result,
+            timestamp: new Date(),
+          }],
+        };
+
         const toolResultFallbackUpdated = await ReactorConversationModel.findOneAndUpdate(
           { _id: chatSessionId },
           {
-            $push: {
-              history: {
-                id: new ObjectId(),
-                role: 'tool',
-                content,
-                tool_call_id: toolResult.toolCallId,
-                tool_name: toolResult.toolName,
-                timestamp: new Date(),
-                tool_results: [{
-                  id: toolResult.toolCallId,
-                  name: toolResult.toolName,
-                  content: toolResult.isError ? toolResult.error : toolResult.result,
-                  timestamp: new Date(),
-                }],
-              },
-            },
+            $push: { history: toolResultFallbackEntry },
             $set: { updated: new Date() },
           },
           { new: true },
@@ -7114,7 +7764,7 @@ export default class ReactorConversationService
         await this.mirrorPersistedAppend(
           chatSessionId,
           toolResultFallbackUpdated,
-          undefined
+          toolResultFallbackEntry
         );
       }
 
@@ -7172,8 +7822,39 @@ export default class ReactorConversationService
       };
     }
 
-    // Continue the AI processing loop: send the tool results to the provider
-    // so the agent can see the real outputs and respond.
+    // Budget gate for the continuation.
+    //
+    // This path re-enters the provider loop to let the agent see the tool results,
+    // so it stands at the head of a fresh, billable request — one the `sendMessage`
+    // gate never saw. Placed *after* the persistence loop above and after the
+    // `!continueProcessing` early return, so:
+    //
+    //   - tool results the browser already produced are recorded (they cost
+    //     nothing and losing them would corrupt the transcript), and
+    //   - a report-only call, which makes no provider request, is never refused.
+    //
+    // Refusing here is the right trade. A `hardStop` that bounded the user's
+    // *messages* but not the AI turns they indirectly triggered is not a stop.
+    // The transcript stays structurally valid either way: an assistant `tool_call`
+    // with a matching `tool` result is exactly the shape providers require, so
+    // stopping before the follow-up leaves nothing dangling.
+    const continuationRefusal = await this.enforceUsageBudget(
+      this.context.user?._id ? String(this.context.user._id) : undefined,
+      "client-tool-continuation",
+      chatSessionId,
+      personaId
+    );
+    if (continuationRefusal) {
+      this.sessionLog(
+        "warn",
+        "[completeClientToolCalls] Budget exhausted; tool results persisted but the continuation was refused",
+        { chatSessionId, personaId },
+        chatSessionId,
+        personaId
+      );
+      return continuationRefusal;
+    }
+
     const persona = await this.context
       .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0", { chatSessionId })
       .getPersona(personaId);
@@ -7212,6 +7893,9 @@ export default class ReactorConversationService
             '',
             streamingMode,
             turnStartTime,
+            // The continuation re-resolved the provider above; attribute the turn
+            // to that, not to the session, so a re-route is priced correctly.
+            { providerId: provider, modelId: (persona as any)?.modelId }
           );
         } catch (err: any) {
           this.sessionLog("error", `[completeClientToolCalls] SSE continuation failed: ${err.message}`, {
@@ -7250,6 +7934,7 @@ export default class ReactorConversationService
       '',
       StreamingMode.NONE,
       turnStartTime,
+      { providerId: provider, modelId: (persona as any)?.modelId }
     );
 
     return adapter.adaptResponse(response);
@@ -7290,19 +7975,21 @@ export default class ReactorConversationService
       const adapter = await this.providerService.getAdapter(provider);
 
       // Use atomic update to add image message to history
+      // The attached-image message is a real turn input, so it is mirrored from the item that was
+      // pushed rather than left to be inferred from `updated.history`.
+      const imageAttachedEntry = {
+        id: new ObjectId(),
+        role: "user",
+        content: "[Image attached]",
+        timestamp: new Date(),
+        // @ts-ignore
+        imageData: image,
+      };
+
       const imageAttachedUpdated = await ReactorConversationModel.findOneAndUpdate(
         { _id: chatSessionId },
         {
-          $push: {
-            history: {
-              id: new ObjectId(),
-              role: "user",
-              content: "[Image attached]",
-              timestamp: new Date(),
-              // @ts-ignore
-              imageData: image,
-            },
-          },
+          $push: { history: imageAttachedEntry },
           $set: { updated: new Date() },
         },
         { new: true }
@@ -7311,7 +7998,7 @@ export default class ReactorConversationService
       await this.mirrorPersistedAppend(
         chatSessionId,
         imageAttachedUpdated,
-        undefined
+        imageAttachedEntry
       );
 
       // Process image with AI if supported
@@ -8358,6 +9045,12 @@ export default class ReactorConversationService
             runat: "client", // these are client side macros
             roles: macro?.roles ?? [],
             alias: macro.alias,
+            // The macro's own tool declarations are part of its capability.
+            // Dropping them was silently lossy: a macro that advertises its
+            // function schema only through `tools` then had no server-side
+            // definition, so the model's call could not be classified as
+            // client-only and failed the turn.
+            tools: (macro as any).tools ?? [],
           });
         }
       });
@@ -8414,6 +9107,450 @@ export default class ReactorConversationService
       macros: Array.from(macroMap.values()),
       tools: Array.from(toolMap.values()),
     };
+  }
+
+  /**
+   * Reconcile the client-side capabilities recorded against a session.
+   *
+   * WHY THIS EXISTS
+   *
+   * A client's macro set is advertised once, when a session is *created*. Every
+   * other way a session becomes active — a page reload, a new tab, a reconnect, a
+   * navigation back into the conversation — loads the transcript and never
+   * re-advertises. The session keeps whatever set it was born with, so if the
+   * client's tools have since changed (a macro added, renamed, or shipped in a new
+   * build) the stored set is stale and a tool the browser is perfectly able to run
+   * is not recognised server-side.
+   *
+   * The failure is nastier than a missing feature: the model calls the tool, the
+   * server cannot classify it as client-only, and the turn dies on a macro error.
+   *
+   * Calling this on **every** session establish makes the recorded set converge on
+   * the client's real capabilities, whichever path opened the session.
+   *
+   * IDEMPOTENT AND ADDITIVE-BY-REPLACEMENT:
+   *   - Client-reported entries are replaced wholesale, so a removed macro really
+   *     does disappear rather than lingering forever.
+   *   - Server-side (runat: 'server') macros and tools are left untouched — the
+   *     client has no authority over what the persona may run server-side.
+   *   - An empty advertisement is treated as "the client reports nothing" only when
+   *     it is explicitly an empty array; `undefined` means "no change", so a caller
+   *     that omits the field cannot accidentally wipe the session's tool set.
+   */
+  async syncClientCapabilities(args: {
+    chatSessionId: string;
+    macros?: Partial<MacroComponentDefinition<unknown>>[] | null;
+    tools?: Partial<MacroToolDefinition>[] | null;
+  }): Promise<{
+    synced: boolean;
+    clientMacros: string[];
+    clientTools: string[];
+    macrosTotal: number;
+    toolsTotal: number;
+  }> {
+    const { chatSessionId } = args;
+    this.validateChatSessionId(chatSessionId, "syncClientCapabilities");
+
+    const conversation = await ReactorConversationModel.findOne({
+      _id: chatSessionId,
+      user: this.context.user,
+    }).exec();
+
+    if (!conversation) {
+      throw new Error(
+        "Conversation not found or you do not have permission to access it"
+      );
+    }
+
+    const existingMacros = (conversation.macros || []) as any[];
+    const existingTools = (conversation.tools || []) as any[];
+
+    // Server-side entries are never the client's to change.
+    const serverMacros = existingMacros.filter((m) => m?.runat !== "client");
+    const serverTools = existingTools.filter((t) => t?.runat !== "client");
+
+    // The client-reported entries as they stand now, split out so an *omitted*
+    // `macros`/`tools` argument can preserve them.
+    //
+    // This distinction matters and was got wrong first time round: seeding the
+    // next set from the server entries alone meant that calling this with, say,
+    // only `macros` supplied silently emptied `tools`. A caller omitting a field
+    // is saying "no change", not "remove everything" — and the cost of guessing
+    // wrong is a session that can no longer run tools the browser supports, which
+    // is precisely the failure this method exists to prevent.
+    //
+    //   undefined  -> preserve the existing client entries
+    //   []         -> clear them
+    //   [ ... ]    -> replace them
+    const existingClientMacros = existingMacros.filter((m) => m?.runat === "client");
+    const existingClientTools = existingTools.filter((t) => t?.runat === "client");
+    const nextMacros = [...serverMacros];
+    const nextTools = [...serverTools];
+
+    if (Array.isArray(args.macros)) {
+      for (const macro of args.macros) {
+        const key = (macro as any)?.alias || (macro as any)?.name;
+        if (!key) continue;
+        nextMacros.push({
+          name: (macro as any).name,
+          nameSpace: (macro as any).nameSpace,
+          description: (macro as any).description,
+          version: (macro as any).version,
+          component: (macro as any).component,
+          runat: "client",
+          roles: (macro as any)?.roles ?? [],
+          alias: (macro as any).alias,
+          // The macro's own tool declarations are part of its capability. Dropping
+          // them here would leave a macro that advertises itself only through
+          // `tools` with no server-side definition at all.
+          tools: (macro as any).tools ?? [],
+        } as any);
+      }
+    } else {
+      // Omitted means "no change", not "remove every client macro". Seeding the
+      // next set from the server entries alone made an omitted field silently
+      // destructive — the session would lose macros the browser still runs.
+      nextMacros.push(...existingClientMacros);
+    }
+
+    if (Array.isArray(args.tools)) {
+      for (const tool of args.tools) {
+        const toolName =
+          (tool as any)?.function?.name || (tool as any)?.name;
+        if (!toolName) continue;
+        nextTools.push({
+          type: (tool as any).type ?? "function",
+          // Client-reported tools are client-run unless they say otherwise; a
+          // browser cannot execute a server tool.
+          runat: (tool as any).runat ?? "client",
+          enabled: (tool as any).enabled ?? true,
+          roles: (tool as any).roles ?? [],
+          function: (tool as any).function,
+        } as any);
+      }
+    } else {
+      // Same contract as `macros` above: omitted preserves, `[]` clears.
+      nextTools.push(...existingClientTools);
+    }
+
+    conversation.macros = nextMacros;
+    conversation.tools = nextTools;
+    await conversation.save();
+
+    const clientMacros = nextMacros
+      .filter((m: any) => m?.runat === "client")
+      .map((m: any) => m?.alias || m?.name)
+      .filter(Boolean);
+    const clientTools = nextTools
+      .filter((t: any) => t?.runat === "client")
+      .map((t: any) => t?.function?.name || t?.name)
+      .filter(Boolean);
+
+    this.sessionLog(
+      "info",
+      "Synchronised client capabilities onto session",
+      {
+        chatSessionId,
+        clientMacros,
+        clientTools,
+        macrosTotal: nextMacros.length,
+        toolsTotal: nextTools.length,
+      },
+      chatSessionId,
+      conversation.personaId
+    );
+
+    return {
+      synced: true,
+      clientMacros,
+      clientTools,
+      macrosTotal: nextMacros.length,
+      toolsTotal: nextTools.length,
+    };
+  }
+
+  /**
+   * Client-routed tool calls still awaiting a result.
+   *
+   * This is the *replay* surface. When a client executes a client-side tool and
+   * the completion call then fails — a dropped connection, a closed tab, a browser
+   * that slept mid-request — the assistant message keeps a `tool_call` that nothing
+   * ever answers. The transcript is permanently malformed: the next provider
+   * request carries a tool call with no tool result, which providers reject or, at
+   * best, mis-handle.
+   *
+   * Today nothing recovers from that. A client that reconnects can instead ask
+   * this question, re-run or re-report whatever is still outstanding, and the
+   * session heals.
+   *
+   * A call is outstanding when:
+   *   - it belongs to an assistant message in the active transcript,
+   *   - it is client-routed (declared `runat: 'client'` on the session, or known
+   *     to the macro registry as a client tool), and
+   *   - no `tool` message exists for its `tool_call_id` yet.
+   */
+  async getPendingClientToolCalls(args: {
+    chatSessionId: string;
+  }): Promise<
+    Array<{
+      toolCallId: string;
+      toolName: string;
+      args: any;
+      status: string;
+      createdAt: string | null;
+    }>
+  > {
+    const { chatSessionId } = args;
+    this.validateChatSessionId(chatSessionId, "getPendingClientToolCalls");
+
+    const conversation = await ReactorConversationModel.findOne({
+      _id: chatSessionId,
+      user: this.context.user,
+    }).lean().exec();
+
+    if (!conversation) {
+      throw new Error(
+        "Conversation not found or you do not have permission to access it"
+      );
+    }
+
+    const clientRouted = this.collectClientRoutedToolNames(conversation as any);
+
+    const store = this.getMessageStore();
+    const messages = store
+      ? store.toMessages(await store.getActiveMessages(chatSessionId))
+      : ((conversation as any).history || []);
+
+    // Everything already answered, regardless of role ordering.
+    const answered = new Set<string>();
+    for (const message of messages as any[]) {
+      if (message?.role === "tool" && message?.tool_call_id) {
+        answered.add(String(message.tool_call_id));
+      }
+    }
+
+    const pending: Array<{
+      toolCallId: string;
+      toolName: string;
+      args: any;
+      status: string;
+      createdAt: string | null;
+    }> = [];
+
+    for (const message of messages as any[]) {
+      if (message?.role !== "assistant" || !Array.isArray(message?.tool_calls)) {
+        continue;
+      }
+
+      for (const call of message.tool_calls) {
+        const callId = call?.id ? String(call.id) : null;
+        const name = call?.function?.name || call?.name;
+        if (!callId || !name) continue;
+        if (answered.has(callId)) continue;
+        if (!clientRouted.has(name)) continue;
+
+        pending.push({
+          toolCallId: callId,
+          toolName: name,
+          args: call?.function?.arguments ?? call?.arguments ?? null,
+          status: call?.status || "pending",
+          createdAt: message?.timestamp
+            ? new Date(message.timestamp).toISOString()
+            : null,
+        });
+      }
+    }
+
+    return pending;
+  }
+
+  /**
+   * Decide how to handle a tool call the conversation does not declare.
+   *
+   * Extracted from the AUTO loop because this is the branch that decides whether a
+   * client-side tool is forwarded to the browser or the turn is refused — and both
+   * ways of getting it wrong are silent:
+   *
+   *   - refusing a tool the browser can run turns a working capability into a
+   *     macro error, which is the `chart` failure this whole path exists to fix;
+   *   - forwarding a tool the browser cannot run leaves a `tool_call` that nothing
+   *     will ever answer, and the transcript stays malformed.
+   *
+   * As a pure function of (name, conversation, registry) the policy can be asserted
+   * without standing up a provider, a transport or a database.
+   *
+   * PRECEDENCE
+   *
+   *   1. Registry says `runat: 'client'`  -> forward. The registry is
+   *      authoritative about what the server can run, so a client macro the server
+   *      knows about is forwarded even if this session never recorded it — the
+   *      stale-session case `syncClientCapabilities` repairs.
+   *   2. Session says client (including a tool declared only inside a client
+   *      macro's own `tools` list) -> refuse, but with the *actionable* message:
+   *      the browser could run this, it just was not advertised for this session.
+   *   3. Neither -> refuse as unknown. The model is told not to retry.
+   */
+  /**
+   * Persist the placeholder for a client-routed tool call and forward it to the browser.
+   *
+   * Extracted from the AUTO loop so the plumbing can be exercised directly. Inline, it
+   * was reachable only by standing up a provider, an SSE transport and Mongo — which
+   * left the two things most likely to be silently wrong with no test at all: the
+   * **shape of the placeholder row** and the **event the client receives**.
+   *
+   * WHY THE PLACEHOLDER EXISTS
+   *
+   * Providers require every `tool_call` in an assistant message to have a matching
+   * `tool` result. The browser may take a while — or never answer — so a placeholder
+   * is written immediately to keep the transcript structurally valid in the meantime.
+   * `completeClientToolCalls` later replaces it with the real result, which is why the
+   * placeholder carries the `tool_call_id` it does.
+   *
+   * FAILURE HANDLING, deliberately asymmetric:
+   *
+   *  - A failure to persist or mirror propagates. Without the placeholder the turn
+   *    must not proceed as if the call had been forwarded, and the caller's own error
+   *    handling is better placed to decide than a swallow here.
+   *  - A failure to emit the SSE event is caught and warned. The placeholder is
+   *    already durable, so the transcript is intact; the client simply was not told
+   *    yet and will discover the call from the pending-tool query on reconnect. Losing
+   *    the notification is recoverable, losing the placeholder is not.
+   *
+   * Non-SSE modes deliberately emit nothing: there is no stream to carry the event,
+   * and the client learns of the call from the transcript instead.
+   */
+  private async persistClientToolForwarding(args: {
+    conversationId: string;
+    toolCall: any;
+    toolName: string;
+    streamingMode?: StreamingMode;
+    personaId?: string;
+  }): Promise<void> {
+    const { conversationId, toolCall, toolName, streamingMode, personaId } = args;
+
+    const placeholderEntry = {
+      id: new ObjectId(),
+      role: 'tool',
+      content: `[Client-side tool "${toolName}" will be executed in the user's browser. The result is not available server-side.]`,
+      tool_call_id: toolCall.id,
+      tool_name: toolName,
+      timestamp: new Date(),
+      tool_results: [] as any[],
+    };
+
+    const placeholderUpdated = await ReactorConversationModel.findOneAndUpdate(
+      { _id: conversationId },
+      {
+        $push: { history: placeholderEntry },
+        $set: { updated: new Date() },
+      },
+      { new: true }
+    ).exec();
+
+    await this.mirrorPersistedAppend(conversationId, placeholderUpdated, placeholderEntry);
+
+    if (streamingMode !== StreamingMode.SSE) return;
+
+    try {
+      const forwardedEvent = StreamingEventFactory.createToolCallEvent(
+        toolCall.id,
+        toolName,
+        typeof toolCall.function?.arguments === 'string'
+          ? toolCall.function.arguments
+          : JSON.stringify(toolCall.function?.arguments || {}),
+        false,
+        undefined,
+        {
+          sessionId: conversationId,
+          conversationId,
+          messageId: new ObjectId().toString(),
+        }
+      );
+      await this.streamingTransportManager.sendEventToSession(conversationId, forwardedEvent);
+    } catch (sseError: any) {
+      this.sessionLog(
+        'warn',
+        `[sendMessage] AUTO mode: failed to forward registry-known client tool via SSE: ${sseError.message}`,
+        { toolName, conversationId },
+        conversationId,
+        personaId
+      );
+    }
+  }
+
+  private classifyUndeclaredToolCall(
+    toolName: string,
+    conversation: any
+  ):
+    | { forwardToClient: true; reason: null; message: null }
+    | {
+        forwardToClient: false;
+        reason: "client-unavailable" | "unknown";
+        message: string;
+      } {
+    // A registry lookup failure must not be read as "not a client tool" *or* as
+    // "definitely a client tool". Failing closed to a refusal is the safe
+    // direction: the model gets actionable feedback and the turn survives, whereas
+    // forwarding a guess leaves a dangling tool call if the browser cannot run it.
+    let registered: any = null;
+    try {
+      registered = this.macroService?.getMacro?.(toolName) as any;
+    } catch {
+      registered = null;
+    }
+
+    // `runat` defaults to server, matching every other read of it in this codebase
+    // (`getToolRunAt` returns `tool.runat || "server"`). An entry that omits it is
+    // therefore server-owned and must NOT be forwarded to a browser, which could
+    // never produce a result and would hang the turn.
+    if (registered?.runat === "client") {
+      return { forwardToClient: true, reason: null, message: null };
+    }
+
+    if (this.collectClientRoutedToolNames(conversation).has(toolName)) {
+      return {
+        forwardToClient: false,
+        reason: "client-unavailable",
+        message:
+          `The client-side tool "${toolName}" is not available in this session: it runs in the browser and was not ` +
+          `registered when the conversation was created. Re-open the conversation, or ask the user to re-send so the ` +
+          `client can advertise its tools, then retry.`,
+      };
+    }
+
+    return {
+      forwardToClient: false,
+      reason: "unknown",
+      message:
+        `The tool "${toolName}" is not available in this conversation. Do not retry it; continue using the tools ` +
+        `listed in your persona, or tell the user it is unavailable.`,
+    };
+  }
+
+  private collectClientRoutedToolNames(conversation: any): Set<string> {
+    const names = new Set<string>();
+
+    for (const tool of (conversation?.tools || []) as any[]) {
+      if (tool?.runat === "client") {
+        const name = tool?.function?.name || tool?.name;
+        if (name) names.add(String(name));
+      }
+    }
+
+    for (const macro of (conversation?.macros || []) as any[]) {
+      if (macro?.runat === "client") {
+        const name = macro?.alias || macro?.name;
+        if (name) names.add(String(name));
+      }
+      // A client macro may also declare tools of its own, which are client-run by
+      // virtue of belonging to it.
+      for (const tool of (macro?.tools || []) as any[]) {
+        const name = tool?.function?.name || tool?.name;
+        if (name) names.add(String(name));
+      }
+    }
+
+    return names;
   }
 
   private async createInitiateSSEResponse(chatSessionId: string, conversation: ReactorConversationDocument): Promise<ReactorInitiateSSEResponse> {
@@ -8845,25 +9982,27 @@ export default class ReactorConversationService
             });
 
             // Add error entry to history — executeMacro only pushes on success,
-            // so we need to record failures here.
+            // so we need to record failures here. The error result closes the tool call: dropping
+            // it left the assistant's `tool_calls` unanswered, which no later turn can recover
+            // from. Mirrored from the pushed item for that reason.
+            const toolFailedEntry = {
+              id: new ObjectId(),
+              role: "tool",
+              content: `Tool ${toolCalls[i].function?.name} failed: ${error.message}`,
+              timestamp: new Date(),
+              tool_errors: [
+                {
+                  name: toolCalls[i].function?.name,
+                  error: error.message,
+                },
+              ],
+              tool_call_id: toolCalls[i].id,
+            };
+
             const toolFailedUpdated = await ReactorConversationModel.findOneAndUpdate(
               { _id: chatSessionId },
               {
-                $push: {
-                  history: {
-                    id: new ObjectId(),
-                    role: "tool",
-                    content: `Tool ${toolCalls[i].function?.name} failed: ${error.message}`,
-                    timestamp: new Date(),
-                    tool_errors: [
-                      {
-                        name: toolCalls[i].function?.name,
-                        error: error.message,
-                      },
-                    ],
-                    tool_call_id: toolCalls[i].id,
-                  },
-                },
+                $push: { history: toolFailedEntry },
                 $set: { updated: new Date() },
               },
               { new: true }
@@ -8872,7 +10011,7 @@ export default class ReactorConversationService
             await this.mirrorPersistedAppend(
               chatSessionId,
               toolFailedUpdated,
-              undefined
+              toolFailedEntry
             );
 
             // Continue with next tool even if one fails
@@ -9017,6 +10156,37 @@ export default class ReactorConversationService
   /**
    * Determine if an error is retryable
    */
+  /**
+   * Classify a provider failure into a stable code.
+   *
+   * Exists because the error *message* is free text and varies by provider SDK —
+   * it cannot be grouped or alerted on. The code is a small closed set, so failures
+   * can be counted by kind rather than skimmed by eye.
+   *
+   * Deliberately conservative: an unrecognised error is `UNKNOWN` rather than being
+   * forced into a category. A wrong classification is worse than an absent one,
+   * because it makes the breakdown "confidently" mislead.
+   */
+  private classifyProviderError(error: any): string {
+    if (!error) return "UNKNOWN";
+
+    const message = String(error.message ?? "").toLowerCase();
+    const code = String(error.code ?? error.status ?? "").toLowerCase();
+    const haystack = `${code} ${message}`;
+
+    if (/rate.?limit|429|quota|resource.?exhausted/.test(haystack)) return "RATE_LIMIT";
+    if (/timeout|etimedout|deadline/.test(haystack)) return "TIMEOUT";
+    if (/unauthor|401|403|api.?key|permission|forbidden/.test(haystack)) return "AUTH";
+    if (/not.?found|404|model.*(unavailable|not)/.test(haystack)) return "MODEL_UNAVAILABLE";
+    if (/context.?(length|window)|too many tokens|max.?tokens/.test(haystack)) return "CONTEXT_EXCEEDED";
+    if (/unavailable|503|502|504|overloaded|internal server error/.test(haystack)) return "PROVIDER_UNAVAILABLE";
+    if (/content.?filter|safety|blocked|refus/.test(haystack)) return "CONTENT_BLOCKED";
+    if (/network|econnrefused|econnreset|socket|enotfound|dns/.test(haystack)) return "NETWORK";
+    if (/invalid.?request|400|malformed|schema/.test(haystack)) return "INVALID_REQUEST";
+
+    return "UNKNOWN";
+  }
+
   private isRetryableError(error: any): boolean {
     if (!error) return false;
 

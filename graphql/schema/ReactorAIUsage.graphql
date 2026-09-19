@@ -3,20 +3,42 @@ An individual AI model turn usage ledger record.
 """
 type ReactorAIUsageRecord {
   id: String!
-  userId: String!
+  """
+  Nullable: a turn can be logged before the owning session is attributed.
+  Reporting counts those in `coverage.turns` less `coverage.attributedTurns`.
+  """
+  userId: String
   user: User
   organizationId: String
   businessUnitId: String
   chatSessionId: String
   parentSessionId: String
   personaId: String
-  provider: String!
-  model: String!
+  """
+  Provider that actually served the turn, after routing overrides. Nullable
+  because a turn can be recorded without a resolved provider; `unknown` rows are
+  reported as a coverage gap rather than attributed to a default.
+  """
+  provider: String
+  """Model that actually served the turn, after routing overrides."""
+  model: String
   promptTokens: Int!
   completionTokens: Int!
   totalTokens: Int!
-  costUsdCents: Float!
-  costUsd: Float!
+  """
+  Cost in USD cents. NULL when the model has no known price — 'unknown',
+  deliberately distinct from 0, which means a genuinely free model. Reporting an
+  unpriced model as 0 was the previous behaviour and it understated spend
+  invisibly; `coverage.unpricedTurns` now counts those turns instead.
+  """
+  costUsdCents: Float
+  """Cost in USD. NULL when the model has no known price; see costUsdCents."""
+  costUsd: Float
+  """
+  How the token counts were obtained: 'provider' (measured), 'estimated', or
+  'none'. Kept distinct so a fabricated figure is never presented as measured.
+  """
+  usageSource: String
   costCurrency: String!
   durationMs: Int
   timeToFirstTokenMs: Int
@@ -82,6 +104,52 @@ type ReactorUserUsageBreakdown {
   requests: Int!
 }
 
+
+"""
+How much of the requested window the reported figures actually cover.
+
+Present so a caller can tell a complete total from a partial one. A total over
+80% of turns is a different claim from a total over all of them, and the two
+failure modes that used to be silent are counted here instead: a model with no
+known price (excluded from cost, not treated as free) and token counts that were
+estimated rather than reported.
+"""
+type ReactorUsageCoverage {
+  """Assistant turns carrying a usage envelope — the denominator."""
+  turns: Int!
+  """Turns with a resolved provider and model."""
+  attributedTurns: Int!
+  """Turns whose cost could be priced."""
+  pricedTurns: Int!
+  """Turns excluded from the cost total because no price is known."""
+  unpricedTurns: Int!
+  """Turns whose token counts were estimated rather than reported."""
+  estimatedTurns: Int!
+  """Turns that reported a usage envelope of all zeros."""
+  zeroUsageTurns: Int!
+  """Turns whose routed provider differed from the one the session declared."""
+  reroutedTurns: Int!
+}
+
+"""
+Failures grouped by the provider and model that was serving when the turn failed.
+
+The actionable form of the question: "40 errors" says nothing about what to do, whereas
+"6% of gemini-3.7-flash turns failed, all retryable" says where to look.
+"""
+type ReactorUsageFailureBreakdown {
+  provider: String!
+  model: String!
+  failures: Int!
+  """Failures judged retryable at the time — an availability signal."""
+  retryableFailures: Int!
+  """Attempts consumed by these failures, including retries."""
+  totalAttempts: Int!
+  lastErrorCode: String
+  lastErrorMessage: String
+}
+
+
 """
 Aggregated AI usage summary with metrics, time-series trend, and model/provider breakdowns.
 """
@@ -94,10 +162,19 @@ type ReactorAIUsageSummary {
   totalRequests: Int!
   avgDurationMs: Int
   errorCount: Int!
+  """
+  Failed turns as a share of all turns attempted, in 0..1.
+  The rate rather than the count is the actionable figure: a raw count scales with
+  traffic, so it measures how busy the window was rather than how reliable the AI is.
+  """
+  errorRate: Float!
+  """Failures grouped by the provider and model that was serving."""
+  errorBreakdown: [ReactorUsageFailureBreakdown!]!
   timeSeries: [ReactorAIUsageTimeSeriesPoint!]!
   modelBreakdown: [ReactorModelUsageBreakdown!]!
   providerBreakdown: [ReactorProviderUsageBreakdown!]!
   userBreakdown: [ReactorUserUsageBreakdown!]
+  coverage: ReactorUsageCoverage!
 }
 
 """

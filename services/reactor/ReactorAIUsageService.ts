@@ -234,39 +234,172 @@ export class ReactorAIUsageService {
 
   /**
    * Checks if user has exceeded budget limits before executing a turn.
+   *
+   * Consumption is **measured from the message log**, not read from the stored
+   * counters. Those counters were only ever advanced by `updateUserBudgetCounters`,
+   * which ran as a side effect of `recordUsage` — a call that never persisted
+   * anything (the ledger it wrote to was empty). Every budget therefore reported
+   * zero consumed, so `hardStop` could never trigger and every user read as
+   * `ACTIVE` regardless of real spend.
+   *
+   * FAIL-OPEN on a telemetry fault. If Postgres is unreachable the gate allows the
+   * turn and says so in the reason. The alternative — blocking every user because
+   * a counter store hiccuped — converts a reporting outage into a full AI outage,
+   * which is the worse failure. A `hardStop` is an admin guardrail against
+   * overspend, not a safety interlock; degrading it to a no-op is the recoverable
+   * direction, and the log makes the degradation visible.
    */
   async checkUserBudget(
     userId: string | ObjectId
   ): Promise<{ allowed: boolean; reason?: string; status: string; percentageUsed: number }> {
     const userObjectId = typeof userId === "string" ? new ObjectId(userId) : userId;
-    const budget = await ReactorUserBudgetModel.findOne({ userId: userObjectId });
+    const userIdString = userObjectId.toString();
 
+    let budget: ReactorUserBudgetDocument | null = null;
+    try {
+      budget = await ReactorUserBudgetModel.findOne({ userId: userObjectId });
+    } catch (err: any) {
+      this.context.log?.(
+        `Budget lookup failed for user ${userIdString}: ${err.message}`,
+        {},
+        "warning"
+      );
+      return { allowed: true, status: "ACTIVE", percentageUsed: 0 };
+    }
+
+    // No budget, or an explicitly disabled one: nothing to enforce.
     if (!budget || budget.status === "DISABLED") {
       return { allowed: true, status: "ACTIVE", percentageUsed: 0 };
     }
 
-    if (budget.status === "EXCEEDED" && budget.hardStop) {
+    const consumption = await this.measureConsumption(userIdString);
+
+    if (!consumption.measured) {
+      return {
+        allowed: true,
+        status: "ACTIVE",
+        percentageUsed: 0,
+        reason:
+          "Usage could not be measured, so budget enforcement is degraded to allow this turn.",
+      };
+    }
+
+    const { monthTokens, monthCostUsd, dayTokens, dayCostUsd } = consumption;
+
+    // Which limits were actually declared. A limit of 0 or null means unlimited,
+    // and treating it as a limit of zero would block every user with a default row.
+    const limitChecks: Array<{ label: string; used: number; limit: number }> = [];
+    if (budget.monthlyTokenLimit && budget.monthlyTokenLimit > 0) {
+      limitChecks.push({ label: "monthly token", used: monthTokens, limit: budget.monthlyTokenLimit });
+    }
+    if (budget.monthlyCostLimitUsd && budget.monthlyCostLimitUsd > 0) {
+      limitChecks.push({ label: "monthly cost", used: monthCostUsd, limit: budget.monthlyCostLimitUsd });
+    }
+    if (budget.dailyTokenLimit && budget.dailyTokenLimit > 0) {
+      limitChecks.push({ label: "daily token", used: dayTokens, limit: budget.dailyTokenLimit });
+    }
+    if (budget.dailyCostLimitUsd && budget.dailyCostLimitUsd > 0) {
+      limitChecks.push({ label: "daily cost", used: dayCostUsd, limit: budget.dailyCostLimitUsd });
+    }
+
+    // No limits declared at all: nothing enforceable, and definitely not exceeded.
+    if (limitChecks.length === 0) {
+      return { allowed: true, status: "ACTIVE", percentageUsed: 0 };
+    }
+
+    const exceeded = limitChecks.find((c) => c.used >= c.limit);
+    const maxPercent = Math.min(
+      Math.round(
+        Math.max(...limitChecks.map((c) => (c.used / c.limit) * 100))
+      ),
+      100
+    );
+
+    const threshold = (budget.alertThresholdPercent ?? 80) / 100;
+    const warning = limitChecks.some((c) => c.used >= c.limit * threshold);
+
+    if (exceeded && budget.hardStop) {
       return {
         allowed: false,
-        reason: "Monthly or daily AI budget limit has been reached.",
-        status: budget.status,
+        reason:
+          `AI usage budget reached: ${exceeded.used.toLocaleString()} of ` +
+          `${exceeded.limit.toLocaleString()} ${exceeded.label} limit used. ` +
+          `Ask an administrator to raise the limit.`,
+        status: "EXCEEDED",
         percentageUsed: 100,
       };
     }
 
-    let maxPercent = 0;
-    if (budget.monthlyTokenLimit && budget.monthlyTokenLimit > 0) {
-      maxPercent = Math.max(maxPercent, (budget.currentMonthTokens / budget.monthlyTokenLimit) * 100);
-    }
-    if (budget.monthlyCostLimitUsd && budget.monthlyCostLimitUsd > 0) {
-      maxPercent = Math.max(maxPercent, (budget.currentMonthCostUsd / budget.monthlyCostLimitUsd) * 100);
-    }
+    // Exceeded without a hard stop is a warning, not a block: the admin asked to be
+    // told, not to be stopped.
+    const status = exceeded ? "EXCEEDED" : warning ? "WARNING" : "ACTIVE";
 
-    return {
-      allowed: true,
-      status: budget.status,
-      percentageUsed: Math.min(Math.round(maxPercent), 100),
+    return { allowed: true, status, percentageUsed: maxPercent };
+  }
+
+  /**
+   * Measure a user's real consumption for the current month and day.
+   *
+   * `measured` distinguishes "genuinely zero" from "could not read", because
+   * collapsing those two is how a budget gate silently stops working: a zero
+   * caused by a missing data source reads exactly like a user who has spent
+   * nothing.
+   *
+   * Boundaries are computed in UTC and the end is exclusive, so a turn landing
+   * exactly at midnight counts in one period, not both.
+   */
+  private async measureConsumption(userId: string): Promise<{
+    measured: boolean;
+    monthTokens: number;
+    monthCostUsd: number;
+    dayTokens: number;
+    dayCostUsd: number;
+  }> {
+    const empty = {
+      measured: false,
+      monthTokens: 0,
+      monthCostUsd: 0,
+      dayTokens: 0,
+      dayCostUsd: 0,
     };
+
+    try {
+      const analytics = this.context.getService<any>(
+        "reactor.ReactorUsageAnalyticsService@1.0.0"
+      );
+      if (!analytics || typeof analytics.getConsumptionForUser !== "function") {
+        return empty;
+      }
+
+      const now = new Date();
+      const monthFrom = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1, 0, 0, 0, 0)
+      );
+      const dayFrom = new Date(
+        Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), 0, 0, 0, 0)
+      );
+      const to = new Date(now.getTime() + 1);
+
+      const [month, day] = await Promise.all([
+        analytics.getConsumptionForUser(userId, { from: monthFrom, to }),
+        analytics.getConsumptionForUser(userId, { from: dayFrom, to }),
+      ]);
+
+      return {
+        measured: true,
+        monthTokens: Number(month?.tokens ?? 0),
+        monthCostUsd: Number(month?.costUsd ?? 0),
+        dayTokens: Number(day?.tokens ?? 0),
+        dayCostUsd: Number(day?.costUsd ?? 0),
+      };
+    } catch (err: any) {
+      this.context.log?.(
+        `Usage measurement failed for user ${userId}: ${err.message}`,
+        {},
+        "warning"
+      );
+      return empty;
+    }
   }
 
   /**

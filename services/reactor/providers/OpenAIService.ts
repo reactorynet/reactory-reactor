@@ -328,6 +328,10 @@ class OpenAIService extends AIProviderBase {
       content: message as any,
     });
 
+    // Last thing before the payload leaves: guarantee the tool-call closure invariant the provider
+    // enforces. Placed here, not earlier, so it also covers the current turn's appended message.
+    const payloadMessages = this.closeToolCallGaps(messages);
+
     // Augmented per-request config (structured output, sampling, reasoning, tool_choice).
     const augmented = toOpenAIParams(providerConfig);
 
@@ -343,18 +347,190 @@ class OpenAIService extends AIProviderBase {
     const base: OpenAI.Chat.Completions.ChatCompletionCreateParams = attachTools
       ? {
           model: modelId,
-          messages,
+          messages: payloadMessages,
           tools,
           parallel_tool_calls: true,
           tool_choice: "auto",
         }
       : {
           model: modelId,
-          messages,
+          messages: payloadMessages,
         };
 
     // Merge augmented config last so callers can override defaults (e.g. tool_choice).
     return { ...base, ...augmented };
+  }
+
+  /**
+   * Make the payload satisfy the tool-call closure invariant the provider enforces.
+   *
+   * THE INVARIANT IS ABOUT ORDER. THIS IS THE PART THAT IS EASY TO GET WRONG
+   *
+   * OpenAI-compatible endpoints reject a transcript with
+   *
+   *   `400 An assistant message with 'tool_calls' must be followed by tool messages responding to
+   *    each 'tool_call_id'. (insufficient tool messages following tool_calls message)`
+   *
+   * and the error is *not retryable*, so one violation makes every later turn on that conversation
+   * fail identically and permanently. Reading the message suggests the requirement is that each
+   * call is *answered*; it is not. It is that the call is immediately **followed** by its results,
+   * before any other message. A transcript in which every call has a result, but one result sits
+   * later than its call, fails exactly the same way — and looks fine to any check that only counts
+   * matches. That gap was real: the first version of this guard keyed on "is this call answered
+   * anywhere", passed its own test helper (which *did* check adjacency), and left a live session
+   * broken because the result existed four messages too late.
+   *
+   * So the rule here is positional. Tool results are re-emitted **by ownership**: walk the
+   * transcript, and after each assistant message that carries `tool_calls`, emit that message's
+   * results in call order — taking each result from wherever it was, and synthesising one only when
+   * the call genuinely has no result anywhere. Anything left over answers no call and is discarded.
+   *
+   * WHY RELOCATING IS RIGHT, NOT MERELY CONVENIENT
+   *
+   * A result belongs to the call it answers. If the store has it four messages late, the transcript
+   * is already wrong and cannot be sent at all; putting it back with its call is the *more* faithful
+   * reconstruction, and the alternative — synthesising "no result was recorded" for a call that DID
+   * produce a result — would throw away the tool's actual output and mislead the model. Where does
+   * the mis-ordering come from? Concurrent turns appending to one conversation (see
+   * `ReactorConversationService.sendMessage`, which claims the `processing` flag but historically did
+   * not consult it), so the store legitimately holds interleaved appends.
+   *
+   * WHAT IT DELIBERATELY DOES NOT DO
+   *
+   * It does **not** repair the stored transcript. Everything here is in-payload, so the real defect
+   * stays visible to the store's own checks and to the message log. A guard that wrote back would
+   * erase the evidence of the bug that caused the malformation — and, for the ordering case, would
+   * silently rewrite conversation history on every request.
+   */
+  private closeToolCallGaps(
+    messages: ChatCompletionMessageParam[]
+  ): ChatCompletionMessageParam[] {
+    const PLACEHOLDER =
+      "[No result was recorded for this tool call. The tool did not report an output — treat the call as unavailable and continue without its result.]";
+
+    const input = messages as any[];
+
+    // Results are placed by ownership, so index them by the call they answer first. One result per
+    // call is all the provider accepts, so a repeat is not usable and is reported instead of placed.
+    const resultsById = new Map<string, any>();
+    const duplicateResultIds: string[] = [];
+    const unkeyedResultCount = { n: 0 };
+    for (const raw of input) {
+      if (raw?.role !== "tool") continue;
+      const id = raw?.tool_call_id ? String(raw.tool_call_id) : null;
+      if (!id) {
+        unkeyedResultCount.n += 1;
+        continue;
+      }
+      if (resultsById.has(id)) {
+        duplicateResultIds.push(id);
+        continue;
+      }
+      resultsById.set(id, raw);
+    }
+
+    // Which results were ALREADY in the right place? Used only for reporting, so a transcript that
+    // merely needed synthesis is not described as having been reordered (and vice versa).
+    const alreadyAdjacent = new Set<string>();
+    for (let i = 0; i < input.length; i += 1) {
+      const message = input[i];
+      if (message?.role !== "assistant" || !Array.isArray(message.tool_calls)) continue;
+      let cursor = i + 1;
+      for (const call of message.tool_calls) {
+        const following = input[cursor];
+        if (
+          following?.role === "tool" &&
+          call?.id &&
+          String(following.tool_call_id) === String(call.id)
+        ) {
+          alreadyAdjacent.add(String(call.id));
+          cursor += 1;
+        }
+      }
+    }
+
+    const out: ChatCompletionMessageParam[] = [];
+    const synthesised: Array<{ id: string; name: string }> = [];
+    const relocated: string[] = [];
+    const consumed = new Set<string>();
+
+    for (const message of input) {
+      // Tool results are never emitted in place; they are emitted by the loop below, attached to the
+      // call that owns them. Anything still unconsumed at the end answered no call.
+      if (message?.role === "tool") continue;
+
+      out.push(message);
+
+      if (
+        message?.role !== "assistant" ||
+        !Array.isArray(message.tool_calls) ||
+        message.tool_calls.length === 0
+      ) {
+        continue;
+      }
+
+      // Immediately after the call: its results, in the order the model asked for them. This is what
+      // makes the invariant structural rather than something a later pass has to verify.
+      for (const call of message.tool_calls) {
+        const id = call?.id ? String(call.id) : null;
+        if (!id) continue;
+
+        const existing = resultsById.get(id);
+        if (existing) {
+          out.push(existing);
+          consumed.add(id);
+          if (!alreadyAdjacent.has(id)) relocated.push(id);
+        } else {
+          out.push({
+            role: "tool",
+            tool_call_id: id,
+            content: PLACEHOLDER,
+          } as ChatCompletionMessageParam);
+          synthesised.push({ id, name: call?.function?.name || call?.name || "unknown" });
+        }
+      }
+    }
+
+    const orphanedResults = [
+      ...Array.from(resultsById.keys()).filter((id) => !consumed.has(id)),
+      ...duplicateResultIds,
+    ];
+
+    if (synthesised.length > 0) {
+      this.context.warn(
+        "OpenAIService: tool call(s) had no result anywhere in the transcript; sent a synthetic 'no result recorded' result in-payload. The stored transcript was NOT modified — the gap is real and should be investigated.",
+        {
+          count: synthesised.length,
+          toolCalls: synthesised.map((c) => `${c.name}(${c.id})`),
+          sessionId: this.chatState?.id,
+        }
+      );
+    }
+
+    if (relocated.length > 0) {
+      this.context.warn(
+        "OpenAIService: tool result(s) were not adjacent to their tool call; moved them into position in-payload so the request is valid. This is an ORDERING defect (the store holds the results later than their calls — typically interleaved appends from overlapping turns), not a missing result. The stored transcript was NOT modified.",
+        {
+          count: relocated.length,
+          toolCallIds: relocated,
+          sessionId: this.chatState?.id,
+        }
+      );
+    }
+
+    if (orphanedResults.length > 0 || unkeyedResultCount.n > 0) {
+      this.context.warn(
+        "OpenAIService: dropped tool result(s) answering no tool call (including duplicate results for one call, which providers accept only once).",
+        {
+          count: orphanedResults.length + unkeyedResultCount.n,
+          toolCallIds: orphanedResults,
+          unkeyed: unkeyedResultCount.n,
+          sessionId: this.chatState?.id,
+        }
+      );
+    }
+
+    return out;
   }
 
   // --- Streaming request handling ---

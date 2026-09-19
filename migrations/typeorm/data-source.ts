@@ -1,6 +1,7 @@
 import "reflect-metadata";
 import { DataSource } from "typeorm";
 import ReactorConversationMessage from "../../models/ReactorConversationMessage";
+import ReactorAiFailure from "../../models/ReactorAiFailure";
 
 /**
  * Migration-only DataSource for the reactory-reactor module.
@@ -25,7 +26,7 @@ export default new DataSource({
   database: process.env.REACTORY_POSTGRES_DB || process.env.POSTGRES_DB || "reactory",
   synchronize: false,
   migrationsRun: false,
-  entities: [ReactorConversationMessage],
+  entities: [ReactorConversationMessage, ReactorAiFailure],
   migrations: [__dirname + "/[0-9]*-*.ts", __dirname + "/[0-9]*-*.js"],
   migrationsTableName: "reactory_migrations_reactory_reactor",
 });

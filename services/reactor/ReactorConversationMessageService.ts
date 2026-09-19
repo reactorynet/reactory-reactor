@@ -1,6 +1,59 @@
 import { DataSource, Repository } from 'typeorm';
 import { ObjectId } from 'mongodb';
-import ReactorConversationMessage from '../../models/ReactorConversationMessage';
+import ReactorConversationMessage, {
+  UsageSource,
+} from '../../models/ReactorConversationMessage';
+
+/**
+ * Usage attribution for a single turn.
+ *
+ * Supplied by `ReactorConversationService` at append time because it is the only
+ * place that knows which provider and model were *actually* routed to. It cannot
+ * be recovered later: the provider adapters normalise every stored
+ * `provider_response` to the OpenAI `chat.completion` shape — verified across all
+ * 20,710 stored envelopes, whose keys are exactly `choices, created, id, images,
+ * object, __reasoning, usage` — so neither provider nor model survives on the
+ * envelope, and the session document lives in a different store and may hold a
+ * null provider.
+ *
+ * Every field is optional: system, user and tool rows carry no usage, and an
+ * unattributed row is reported as a coverage gap rather than silently billed.
+ */
+export interface IUsageAttribution {
+  /** Owner of the conversation. */
+  userId?: string | null;
+  /** Provider that actually served the turn, after routing overrides. */
+  providerId?: string | null;
+  /** Model that actually served the turn, after routing overrides. */
+  modelId?: string | null;
+  personaId?: string | null;
+  useCase?: string | null;
+  /** Wall-clock duration of the provider call. */
+  durationMs?: number | null;
+  /** Priced at append time; `null` means "unknown", never "free". */
+  costUsdCents?: number | null;
+  /** How the token counts were obtained. */
+  usageSource?: UsageSource | null;
+  /** Provider declared on the session, for divergence detection. */
+  sessionProviderId?: string | null;
+  /** Model declared on the session, for divergence detection. */
+  sessionModelId?: string | null;
+}
+
+/** Trim a string-ish value to a nullable, length-bounded column value. */
+const asColumnText = (value: unknown, maxLength: number): string | null => {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim();
+  if (!text) return null;
+  return text.length > maxLength ? text.slice(0, maxLength) : text;
+};
+
+/** Coerce a numeric column value, returning null for anything non-finite. */
+const asColumnNumber = (value: unknown): number | null => {
+  if (value === null || value === undefined) return null;
+  const parsed = typeof value === 'number' ? value : Number(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+};
 
 /**
  * Bounds on the message window returned to a caller.
@@ -231,6 +284,32 @@ export const buildMessageSearchText = (message: any): string | null => {
 };
 
 /**
+ * Whether two `tool_results` entries describe the same outcome.
+ *
+ * `timestamp` is excluded deliberately. It records when the tool ran, and a replay
+ * replays the *same* call — so including it would make every replay look like a
+ * change and force a needless rewrite of the whole JSONB column, which is the very
+ * amplification this comparison exists to prevent.
+ *
+ * Keys are compared in sorted order so the answer does not depend on the order a
+ * particular writer happened to build the object in.
+ */
+export const isSameToolResult = (a: any, b: any): boolean => {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object') return false;
+
+  const canonical = (entry: Record<string, unknown>): string =>
+    JSON.stringify(
+      Object.keys(entry)
+        .filter((key) => key !== 'timestamp')
+        .sort()
+        .map((key) => [key, entry[key]])
+    );
+
+  return canonical(a) === canonical(b);
+};
+
+/**
  * Repository wrapper over the Postgres conversation message log.
  *
  * This is the only place that reads or writes `reactor_conversation_messages`.
@@ -299,7 +378,8 @@ export default class ReactorConversationMessageService {
   private toRow(
     conversationId: string,
     message: any,
-    seq: number
+    seq: number,
+    attribution?: IUsageAttribution
   ): Partial<ReactorConversationMessage> {
     // Every value is sanitised on the way in: Postgres rejects NUL bytes in
     // text and jsonb, and real conversations contain binary payloads that
@@ -332,6 +412,20 @@ export default class ReactorConversationMessageService {
       archivedAt: message?.archivedAt ?? null,
       archivedReason: message?.archivedReason ?? null,
       messageTs: message?.timestamp ? new Date(message.timestamp) : null,
+
+      // Usage attribution. Written only from the explicit attribution argument,
+      // never inferred from the message body — the body carries no routing
+      // information, and guessing it is what produced mis-attributed cost.
+      userId: asColumnText(attribution?.userId, 24),
+      providerId: asColumnText(attribution?.providerId, 128),
+      modelId: asColumnText(attribution?.modelId, 255),
+      personaId: asColumnText(attribution?.personaId, 128),
+      useCase: asColumnText(attribution?.useCase, 64),
+      durationMs: asColumnNumber(attribution?.durationMs),
+      costUsdCents: asColumnNumber(attribution?.costUsdCents),
+      usageSource: asColumnText(attribution?.usageSource, 16),
+      sessionProviderId: asColumnText(attribution?.sessionProviderId, 128),
+      sessionModelId: asColumnText(attribution?.sessionModelId, 255),
     };
   }
 
@@ -351,6 +445,20 @@ export default class ReactorConversationMessageService {
     delete row.archived;
     delete row.archivedAt;
     delete row.archivedReason;
+    // Attribution is written once, at append, from the routing decision. An
+    // in-place mutation (rating, tool-call status, system-prompt patch) has no
+    // routing information to offer, so including these keys would blank the
+    // turn's cost and provider on every unrelated edit.
+    delete row.userId;
+    delete row.providerId;
+    delete row.modelId;
+    delete row.personaId;
+    delete row.useCase;
+    delete row.durationMs;
+    delete row.costUsdCents;
+    delete row.usageSource;
+    delete row.sessionProviderId;
+    delete row.sessionModelId;
     return row;
   }
 
@@ -395,14 +503,15 @@ export default class ReactorConversationMessageService {
    */
   async appendMessage(
     conversationId: string,
-    message: any
+    message: any,
+    attribution?: IUsageAttribution
   ): Promise<{ seq: number; id: string | null } | null> {
     const repo = this.getRepository();
     if (!repo) return null;
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const seq = await this.nextSeq(conversationId);
-      const row = this.toRow(conversationId, message, seq);
+      const row = this.toRow(conversationId, message, seq, attribution);
       try {
         await repo.insert(row as ReactorConversationMessage);
         return { seq, id: row.mongoId ?? null };
@@ -873,21 +982,7 @@ export default class ReactorConversationMessageService {
           : Number(lastSystem[0].seq)) + 1;
       }
 
-      const offset = max + 1;
-
-      await manager.query(
-        `UPDATE reactor_conversation_messages
-            SET seq = seq + $1
-          WHERE conversation_id = $2 AND seq >= $3`,
-        [offset, conversationId, targetSeq]
-      );
-
-      await manager.query(
-        `UPDATE reactor_conversation_messages
-            SET seq = seq - $1 + 1
-          WHERE conversation_id = $2 AND seq > $3`,
-        [offset, conversationId, max]
-      );
+      await this.openSeqGap(manager, conversationId, targetSeq, max, 1);
 
       const row = this.toRow(conversationId, message, targetSeq);
       if (!row.mongoId) {
@@ -899,6 +994,208 @@ export default class ReactorConversationMessageService {
       await manager.insert(ReactorConversationMessage, row as ReactorConversationMessage);
 
       return { seq: targetSeq, id: row.mongoId ?? null };
+    });
+  }
+
+  /**
+   * Shift every row at or after `targetSeq` up by `count`, opening a gap for `count` inserts.
+   *
+   * The shift is deliberately two-phase, and the reason is worth keeping: a single
+   * `UPDATE … SET seq = seq + n` is **not safe** against `IDX_rcm_conv_seq`. Postgres checks the
+   * unique index row by row, so if it moves the lower row first the two collide, and it does not
+   * promise an order. Moving the range clear of the table's maximum first (every target exceeding
+   * it) and then bringing it back down by `n` makes each phase collision-free whatever order the
+   * planner picks. §39.2 records why `max + 1` and `n - min + 1` were both wrong; this helper is
+   * the single copy of the pattern that survived, so the note lives here rather than in each
+   * caller.
+   *
+   * Must be called inside a transaction: a half-applied shift would leave the transcript with a
+   * hole or a collision.
+   */
+  private async openSeqGap(
+    manager: { query: (sql: string, params: any[]) => Promise<any> },
+    conversationId: string,
+    targetSeq: number,
+    max: number,
+    count: number
+  ): Promise<void> {
+    if (!count || count < 1) return;
+
+    const offset = max + count;
+
+    await manager.query(
+      `UPDATE reactor_conversation_messages
+          SET seq = seq + $1
+        WHERE conversation_id = $2 AND seq >= $3`,
+      [offset, conversationId, targetSeq]
+    );
+
+    await manager.query(
+      `UPDATE reactor_conversation_messages
+          SET seq = seq - $1 + $4
+        WHERE conversation_id = $2 AND seq > $3`,
+      [offset, conversationId, max, count]
+    );
+  }
+
+  /**
+   * Insert a message at an arbitrary `seq`, shifting the tail up to make room.
+   *
+   * Needed because `seq` is dense and unique per conversation, so "the transcript must read
+   * `assistant(tool_calls)` → `tool` …" cannot be expressed as an append when something already
+   * sits behind the tool_call. That case is not hypothetical: `sendMessage` appends the user's
+   * next message before the provider has validated the transcript, so a turn that failed with an
+   * unanswered tool call leaves `[…, assistant(tool_calls), user]` — and appending the results
+   * would place them *after* the user message, which providers reject just as firmly as the
+   * missing results they were meant to fix (tool messages must follow the assistant message that
+   * requested them, before any later user/assistant turn).
+   *
+   * Read paths are unaffected: they order by `seq`, so an inserted row is simply the earlier
+   * message — which is what it chronologically was.
+   *
+   * Returns the assigned `seq` and `mongo_id`, or null when the store is unavailable.
+   */
+  async insertMessageAtSeq(
+    conversationId: string,
+    message: any,
+    targetSeq: number
+  ): Promise<{ seq: number; id: string | null } | null> {
+    if (!conversationId || !Number.isFinite(targetSeq) || targetSeq < 1) return null;
+
+    const dataSource = (() => {
+      try {
+        return this.dataSource;
+      } catch {
+        return null;
+      }
+    })();
+    if (!dataSource?.isInitialized) return null;
+
+    return await dataSource.transaction(async (manager) => {
+      const bounds = await manager.query(
+        `SELECT COALESCE(MAX(seq), 0) AS max
+           FROM reactor_conversation_messages
+          WHERE conversation_id = $1`,
+        [conversationId]
+      );
+      const max = Number(bounds?.[0]?.max ?? 0);
+
+      await this.openSeqGap(manager, conversationId, targetSeq, max, 1);
+
+      const row = this.toRow(conversationId, message, targetSeq);
+      if (!row.mongoId) {
+        row.mongoId = new ObjectId().toString();
+      }
+
+      await manager.insert(ReactorConversationMessage, row as ReactorConversationMessage);
+
+      return { seq: targetSeq, id: row.mongoId ?? null };
+    });
+  }
+
+  /**
+   * Move an existing message to a different position in its conversation.
+   *
+   * WHY "MOVE" AND NOT "DELETE + RE-INSERT"
+   *
+   * `seq` is the transcript's order, and providers require an assistant message carrying
+   * `tool_calls` to be **immediately followed** by that call's results. A transcript can violate
+   * that while every call is answered — the result exists, but sits later than its call. That is what
+   * overlapping turns produce: two turns appending to one conversation interleave, so a slow tool's
+   * result lands several messages after the call it answers.
+   *
+   * Repairing that is a reorder, not a rewrite. Delete-and-re-insert would also change the row's
+   * identity (`mongo_id`) and leave a hole in `seq`; this keeps both, and moves only the rows between
+   * the two positions.
+   *
+   * The shift is two-phase for the same reason `openSeqGap` is: a single `UPDATE … SET seq = …` over
+   * a range is not safe against `IDX_rcm_conv_seq`, because Postgres checks the unique index row by
+   * row and does not promise an order. The rows in the affected range are parked clear of the range
+   * (every destination exceeding the table's maximum), then written back in their new order — so no
+   * statement can ever see two rows claiming one slot.
+   *
+   * Returns the row's new `seq`, or null when it does not exist or the store is unavailable.
+   */
+  async moveMessageToSeq(
+    conversationId: string,
+    mongoId: string,
+    targetSeq: number
+  ): Promise<number | null> {
+    if (!conversationId || !mongoId || !Number.isFinite(targetSeq) || targetSeq < 1) return null;
+
+    const dataSource = (() => {
+      try {
+        return this.dataSource;
+      } catch {
+        return null;
+      }
+    })();
+    if (!dataSource?.isInitialized) return null;
+
+    return await dataSource.transaction(async (manager) => {
+      const bounds = await manager.query(
+        `SELECT COALESCE(MAX(seq), 0) AS max
+           FROM reactor_conversation_messages
+          WHERE conversation_id = $1`,
+        [conversationId]
+      );
+      const max = Number(bounds?.[0]?.max ?? 0);
+      if (max === 0) return null;
+
+      const current = await manager.query(
+        `SELECT seq FROM reactor_conversation_messages
+          WHERE conversation_id = $1 AND mongo_id = $2`,
+        [conversationId, mongoId]
+      );
+      if (!current?.length) return null;
+
+      const fromSeq = Number(current[0].seq);
+      // Clamp into the conversation's own range: a caller computing a target from a stale read can
+      // overshoot the end, and silently writing a `seq` beyond the transcript would look like a hole.
+      const toSeq = Math.min(Math.max(1, Math.trunc(targetSeq)), max);
+      if (fromSeq === toSeq) return fromSeq;
+
+      const lo = Math.min(fromSeq, toSeq);
+      const hi = Math.max(fromSeq, toSeq);
+
+      const range = await manager.query(
+        `SELECT mongo_id FROM reactor_conversation_messages
+          WHERE conversation_id = $1 AND seq BETWEEN $2 AND $3
+          ORDER BY seq`,
+        [conversationId, lo, hi]
+      );
+
+      const ordered: string[] = range.map((r: any) => String(r.mongo_id));
+      const fromIdx = ordered.findIndex((id) => id === String(mongoId));
+      if (fromIdx < 0) return null;
+
+      // Reorder: the moved row leaves its slot and re-enters at the target index. Splitting the
+      // removal and the insert in the SAME array models the shift exactly for both directions —
+      // moving later pushes the rows in between one place earlier, and moving earlier pulls them one
+      // place later — so one expression covers both.
+      const reordered = [...ordered];
+      const [moved] = reordered.splice(fromIdx, 1);
+      reordered.splice(toSeq - lo, 0, moved);
+
+      const offset = max + 1;
+
+      await manager.query(
+        `UPDATE reactor_conversation_messages
+            SET seq = seq + $1
+          WHERE conversation_id = $2 AND seq BETWEEN $3 AND $4`,
+        [offset, conversationId, lo, hi]
+      );
+
+      for (let index = 0; index < reordered.length; index += 1) {
+        await manager.query(
+          `UPDATE reactor_conversation_messages
+              SET seq = $1
+            WHERE conversation_id = $2 AND mongo_id = $3`,
+          [lo + index, conversationId, reordered[index]]
+        );
+      }
+
+      return toSeq;
     });
   }
 
@@ -1025,13 +1322,20 @@ export default class ReactorConversationMessageService {
   }
 
   /**
-   * Append a tool result onto the message that owns a given tool call.
+   * Upsert a tool result onto the message that owns a given tool call.
    *
-   * Two paths push `tool_results` onto the assistant message that carries the call: the server macro
+   * Two paths record `tool_results` on the assistant message that carries the call: the server macro
    * tool result and the client tool result. The tool-call id is not a row key, so rows are matched by
    * JSONB containment — the same technique as `updateToolCallStatusByToolCallId`.
    *
-   * Existing results are appended to rather than replaced, matching `$push` semantics.
+   * **Upsert, not append.** Entries are keyed on their own `id` (the tool-call id) and replaced in
+   * place. Appending was wrong twice over: a replay of the same completion duplicated the entry, and
+   * because the array lives in a JSONB column each duplicate cost a full rewrite of that column plus
+   * another copy of the payload. The client-tool replay path re-reports completions by design, so
+   * repeated reports are expected rather than exceptional.
+   *
+   * A no-op report — same content, same call — writes nothing at all, so idempotent replay costs one
+   * SELECT rather than a column rewrite.
    */
   async appendToolResultToOwningMessage(
     conversationId: string,
@@ -1051,9 +1355,48 @@ export default class ReactorConversationMessageService {
     let affected = 0;
     for (const match of matches ?? []) {
       const existing = Array.isArray(match?.tool_results) ? match.tool_results : [];
+
+      // Upsert keyed on the result's own `id`, which is the tool-call id.
+      //
+      // This was a bare append, so a second report for the same call added a
+      // second copy instead of replacing the first. That is not a cosmetic
+      // duplicate: the array lives in a JSONB column, so every replay rewrote the
+      // column in full and grew it by another complete copy of the result payload
+      // — kilobytes apiece for an image or a chart spec. A client that reconnects
+      // repeatedly would inflate the row without bound.
+      const incomingId = toolResult?.id != null ? String(toolResult.id) : null;
+      const existingIndex =
+        incomingId !== null
+          ? existing.findIndex(
+              (entry: any) => entry?.id != null && String(entry.id) === incomingId
+            )
+          : -1;
+
+      // A replay must not move the timeline. The entry records when the tool call
+      // happened, not when it was last reported, so the original timestamp wins.
+      const merged =
+        existingIndex >= 0
+          ? {
+              ...toolResult,
+              timestamp: existing[existingIndex]?.timestamp ?? toolResult?.timestamp,
+            }
+          : toolResult;
+
+      // A redundant replay should cost one SELECT, not a full column rewrite.
+      if (existingIndex >= 0 && isSameToolResult(existing[existingIndex], merged)) {
+        continue;
+      }
+
+      const next =
+        existingIndex >= 0
+          ? existing.map((entry: any, index: number) =>
+              index === existingIndex ? merged : entry
+            )
+          : [...existing, toolResult];
+
       await repo.update(
         { id: match.id } as any,
-        { toolResults: [...existing, toolResult] } as any
+        { toolResults: next } as any
       );
       affected += 1;
     }

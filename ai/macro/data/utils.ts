@@ -9,7 +9,7 @@ import {
   OutputFormat,
 } from './types';
 import logger from '@reactory/server-core/logging';
-
+import { validateReadOnlySql } from '@reactory/server-core/database/sqlGuard';
 /**
  * Get database connection from partner settings
  */
@@ -223,45 +223,22 @@ export const generateCacheKey = (
 };
 
 /**
- * Validate SQL query for security
+ * Validate SQL query for security.
+ *
+ * Delegates to the core read-only SQL guard so the AI data macros and the SQL
+ * Query Editor enforce the same rule from one implementation. The core guard is
+ * a superset of this module's original checks (it additionally rejects
+ * multi-statement input, DML such as INSERT/UPDATE/DELETE, and allow-mapped
+ * file/process functions such as `INTO OUTFILE` / `xp_cmdshell`).
+ *
+ * The original contract is preserved for callers: a success returns exactly
+ * `{ valid: true }`, and a rejection message mentions that only SELECT queries
+ * are allowed.
  */
 export const validateQuery = (query: string): { valid: boolean; error?: string } => {
-  const trimmedQuery = query.trim().toLowerCase();
-  
-  // Check for dangerous operations
-  const dangerousPatterns = [
-    /drop\s+table/i,
-    /drop\s+database/i,
-    /truncate\s+table/i,
-    /delete\s+from\s+.*\s+where\s+1\s*=\s*1/i,
-    /update\s+.*\s+set\s+.*\s+where\s+1\s*=\s*1/i,
-    /alter\s+table/i,
-    /create\s+table/i,
-    /create\s+database/i,
-    /grant\s+/i,
-    /revoke\s+/i,
-    /backup\s+database/i,
-    /restore\s+database/i
-  ];
+  const result = validateReadOnlySql(query);
 
-  for (const pattern of dangerousPatterns) {
-    if (pattern.test(trimmedQuery)) {
-      return { 
-        valid: false, 
-        error: `Query contains potentially dangerous operation: ${pattern.source}` 
-      };
-    }
-  }
-
-  // Ensure query starts with SELECT
-  if (!trimmedQuery.startsWith('select ')) {
-    return { 
-      valid: false, 
-      error: 'Only SELECT queries are allowed for security reasons' 
-    };
-  }
-
-  return { valid: true };
+  return result.valid ? { valid: true } : { valid: false, error: result.error };
 };
 
 /**

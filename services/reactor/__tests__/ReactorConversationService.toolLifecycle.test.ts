@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, jest } from "@jest/globals
 import { ObjectId } from "mongodb";
 import ReactorConversationService from "../ReactorConversationService";
 import ReactorConversationModel from "../../../models/ReactorChatState";
+import TaskModel from "@reactory/server-modules/reactory-core/models/Task";
 
 describe("ReactorConversationService - Tool Call State Tracking & Lifecycle", () => {
   let service: any;
@@ -22,6 +23,32 @@ describe("ReactorConversationService - Tool Call State Tracking & Lifecycle", ()
       debug: jest.fn(),
       hasAnyRole: jest.fn(() => true),
     };
+
+    service = Object.create(ReactorConversationService.prototype);
+
+    // The same reasoning as `TaskModel` above, for the mirror: `mirrorPersistedAppend`
+    // lazily requires the models barrel and constructs a real message-store client, so
+    // leaving it live made `interruptToolExecution` spend ~1.7 s loading a module
+    // registry and probing an unavailable database. It fails open, so the test passed —
+    // it just did a second of real I/O to assert a synchronous outcome. These tests
+    // assert on model calls, not on mirroring, so it is stubbed wholesale.
+    service.mirrorPersistedAppend = jest.fn(async () => {});
+
+    // `continueToolExecution` and `interruptToolExecution` both settle pending
+    // workflow-approval tasks before doing anything else:
+    //
+    //   await TaskModel.updateMany({ ... }, { ... }).exec();
+    //
+    // That call is best-effort in production — its failure is caught and warned —
+    // so leaving it unstubbed does not *fail* these tests. It does something worse:
+    // the model has no connection, so mongoose buffers the operation until its
+    // default `bufferTimeoutMS` of 10_000 ms before rejecting. Two tests therefore
+    // took 10.0 s and 11.4 s of real wall-clock to assert a handful of synchronous
+    // outcomes, and only passed because a timeout was raised. A unit test must not
+    // reach a real database at all.
+    jest.spyOn(TaskModel, "updateMany").mockReturnValue({
+      exec: jest.fn(async () => ({ modifiedCount: 0 })),
+    } as any);
 
     service = Object.create(ReactorConversationService.prototype);
     service.context = mockContext;

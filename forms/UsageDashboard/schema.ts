@@ -29,6 +29,12 @@ const schema: Reactory.Schema.ISchema = {
       title: "Persona",
       description: "Filter by agent persona identifier",
     },
+    userId: {
+      type: "string",
+      title: "User",
+      description:
+        "Scope the report to a single user. Bound by the /admin/ai/usage/:userId and /profile/usage routes. A caller without an admin role is always scoped to themselves, whatever this holds.",
+    },
     use_case: {
       type: "string",
       title: "Use Case",
@@ -111,6 +117,22 @@ const schema: Reactory.Schema.ISchema = {
           costUsd: { type: "number", title: "Cost ($)" },
           requests: { type: "number", title: "Turns" },
         },
+      },
+    },
+    coverage: {
+      type: "object",
+      title: "Data Coverage",
+      description:
+        "How much of the requested window these figures actually cover. A total over 80% of turns is a different claim from a total over all of them.",
+      readOnly: true,
+      properties: {
+        turns: { type: "number", title: "Turns" },
+        attributedTurns: { type: "number", title: "Attributed" },
+        pricedTurns: { type: "number", title: "Priced" },
+        unpricedTurns: { type: "number", title: "Unpriced (excluded from cost)" },
+        estimatedTurns: { type: "number", title: "Estimated-token Turns" },
+        zeroUsageTurns: { type: "number", title: "Zero-usage Turns" },
+        reroutedTurns: { type: "number", title: "Re-routed Turns" },
       },
     },
     records: {

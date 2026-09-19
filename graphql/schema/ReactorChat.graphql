@@ -989,7 +989,50 @@ type ReactorVoiceChatMessage {
 union ReactorVoiceSessionResult = ReactorVoiceSession | ReactorErrorResponse
 union ReactorVoiceChatResult = ReactorVoiceChatMessage | ReactorErrorResponse
 
+"""
+Result of reconciling a client's advertised capabilities onto a session.
+
+A client advertises its macros and tools once, when a session is created. Every
+other way a session becomes active — reload, new tab, reconnect, navigating back
+into it — loads the transcript and never re-advertises, so the recorded set can
+be stale and a tool the browser can run goes unrecognised. Syncing on every
+establish makes the recorded set converge on reality.
+"""
+type ReactorClientCapabilitiesSync {
+  synced: Boolean!
+  """Macro aliases now recorded as client-routed."""
+  clientMacros: [String!]!
+  """Tool names now recorded as client-routed."""
+  clientTools: [String!]!
+  macrosTotal: Int!
+  toolsTotal: Int!
+}
+
+"""
+A client-routed tool call in an active transcript that has no result yet.
+
+Exposed so a client that reconnects can replay a completion it failed to send.
+Without this a dropped connection leaves a tool call nothing ever answers, and
+the transcript stays permanently malformed.
+"""
+type ReactorPendingClientToolCall {
+  toolCallId: String!
+  toolName: String!
+  """Raw arguments as the model produced them; a JSON string unless the provider sent an object."""
+  args: Any
+  status: String!
+  createdAt: Date
+}
+
 extend type Query {
+
+  """
+  Client-routed tool calls in a conversation that still have no result.
+
+  The replay surface: a client that reconnects can ask what is outstanding and
+  re-report it, healing a transcript that a failed completion call left broken.
+  """
+  ReactorPendingClientToolCalls(chatSessionId: String!): [ReactorPendingClientToolCall!]!
 
   """
   Retrieves all chat conversations for the currently authenticated user,
@@ -1161,11 +1204,33 @@ extend type Mutation {
     """Streaming mode for the AI continuation response"""
     streamingMode: StreamingMode
   ): ReactorChatResponse
-  
+
+  """
+  Reconciles the client's advertised macros and tools onto an existing session.
+
+  Call this on **every** session establish, not just creation. A client's
+  capabilities are otherwise recorded only once, at creation, so a reload or a
+  reconnect leaves a stale set behind and a tool the browser can run goes
+  unrecognised — the model calls it and the turn dies on a macro error.
+
+  Idempotent. Client-reported entries replace the previously reported ones; macros
+  and tools the persona owns (runat: 'server') are never touched, since the client
+  has no authority over what may run server-side. Omitting `macros` or `tools`
+  means "no change" — only an explicit empty array clears the client set.
+  """
+  ReactorSyncClientCapabilities(
+    chatSessionId: String!
+    """Client-side macros as the browser currently declares them."""
+    macros: Any
+    """Client-side tool definitions as the browser currently declares them."""
+    tools: Any
+  ): ReactorClientCapabilitiesSync!
+
   """
   Adds an image to the current chat conversation for analysis by the persona.
   """
   ReactorAttachFile(file: Upload!, chatSessionId: String!): ReactorChatResponse
+  
 
   """
   Attaches an existing user file to a chat session.

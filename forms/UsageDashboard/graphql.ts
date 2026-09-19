@@ -1,5 +1,22 @@
 import Reactory from '@reactorynet/reactory-core';
 
+/**
+ * GraphQL bindings for the usage dashboard.
+ *
+ * Reads are served by `ReactorUsageAnalyticsService`, which derives everything
+ * from the Postgres conversation message log.
+ *
+ * `userId` is bound here so the `/admin/ai/usage/:userId` drill-down and the
+ * `/profile/usage` self-service view actually scope. It was previously passed as
+ * a component prop that no schema or query declared, so it was silently dropped
+ * and both routes rendered the global view.
+ *
+ * `coverage` is surfaced deliberately: it is what lets the dashboard distinguish
+ * a complete total from a partial one, and it is the only place the two formerly
+ * silent failure modes become visible — a model with no known price (excluded
+ * from cost rather than counted as free) and token counts that were estimated
+ * rather than reported.
+ */
 const graphql: Reactory.Forms.IFormGraphDefinition = {
   queries: {
     summary: {
@@ -50,6 +67,15 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
             costUsd
             requests
           }
+          coverage {
+            turns
+            attributedTurns
+            pricedTurns
+            unpricedTurns
+            estimatedTurns
+            zeroUsageTurns
+            reroutedTurns
+          }
         }
       }`,
       variables: {
@@ -59,6 +85,7 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
         'formData.model': 'filter.model',
         'formData.personaId': 'filter.personaId',
         'formData.use_case': 'filter.use_case',
+        'formData.userId': 'filter.userId',
       },
       resultType: 'object',
       resultMap: {
@@ -74,6 +101,7 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
         'modelBreakdown': 'modelBreakdown',
         'providerBreakdown': 'providerBreakdown',
         'userBreakdown': 'userBreakdown',
+        'coverage': 'coverage',
       },
     },
     userStatus: {
@@ -128,6 +156,7 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
             costUsd
             durationMs
             use_case
+            usageSource
             status
             createdAt
           }
@@ -144,6 +173,7 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
         'formData.model': 'filter.model',
         'formData.personaId': 'filter.personaId',
         'formData.use_case': 'filter.use_case',
+        'formData.userId': 'filter.userId',
       },
       resultType: 'object',
       resultMap: {
