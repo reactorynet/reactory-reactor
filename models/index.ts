@@ -1,4 +1,6 @@
 import { DataSource } from 'typeorm';
+import { REACTOR_ENTITIES, REACTOR_MIGRATIONS } from "../migrations/typeorm/schema";
+import { prepareSchemaOrExit, resolveSynchronize } from "@reactory/server-core/database/migrationGovernance";
 import Reactory from '@reactorynet/reactory-core';
 import { ReactoryPersonaComponentRegistryEntry } from "../ai/persona/reactor";
 import { BookTutorPersonaComponentRegistryEntry } from '../ai/persona/booktutor';
@@ -38,9 +40,9 @@ const {
   NODE_ENV,
 } = process.env;
 
-const synchronize = REACTOR_POSTGRES_SYNCHRONIZE !== undefined
-  ? REACTOR_POSTGRES_SYNCHRONIZE === "true"
-  : NODE_ENV !== "production";
+// Development-only unless REACTOR_POSTGRES_SYNCHRONIZE says otherwise; see
+// src/database/migrationGovernance.ts.
+const synchronize = resolveSynchronize(REACTOR_POSTGRES_SYNCHRONIZE, NODE_ENV);
 
 export const ReactorPostgresDataSource = new DataSource({
   type: "postgres",
@@ -49,13 +51,9 @@ export const ReactorPostgresDataSource = new DataSource({
   username: REACTORY_POSTGRES_USER || POSTGRES_USER || "reactory",
   password: REACTORY_POSTGRES_PASSWORD || POSTGRES_PASSWORD || "reactory",
   database: REACTORY_POSTGRES_DB || POSTGRES_DB || "reactory",
-  synchronize,
-  entities: [
-    ReactoryAiProvider,
-    ReactoryAiModel,
-    ReactorConversationMessage,
-    ReactorAiFailure,
-  ],
+  synchronize: false,
+  entities: REACTOR_ENTITIES,
+  ...REACTOR_MIGRATIONS,
 });
 
 /**
@@ -73,9 +71,7 @@ export const initializeReactorDataSource = async (
   }
 
   await ReactorPostgresDataSource.initialize();
-  if (synchronize === true) {
-    await ReactorPostgresDataSource.synchronize();
-  }
+  await prepareSchemaOrExit(ReactorPostgresDataSource, { label: 'reactory-reactor Postgres', synchronize, log });
   log(`Reactor PostgreSQL DataSource initialized (${ReactorPostgresDataSource.options.database}, synchronize: ${synchronize})`);
 
   // Verify and seed baseline providers from providers.yaml if not already present

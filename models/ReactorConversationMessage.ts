@@ -49,6 +49,14 @@ export type UsageSource = 'provider' | 'estimated' | 'none';
  * cannot express and which is therefore migration-only (production runs with
  * `synchronize: false`, so it survives there).
  */
+// Trigram index for ILIKE search over search_text. TypeORM cannot express a
+// gin_trgm_ops index, so migrations own it; synchronize: false stops schema
+// sync and migration:generate from dropping it as unknown. The unquoted name in
+// the migration folds to lower case.
+@Index('idx_rcm_search_text_trgm', { synchronize: false })
+// Partial index for usage analytics (assistant turns with a usage envelope);
+// the predicate reads JSONB, which TypeORM cannot express. Migration-owned.
+@Index('idx_rcm_usage_turns', { synchronize: false })
 @Index('IDX_rcm_conv_archived_seq', ['conversationId', 'archived', 'seq'])
 @Index('IDX_rcm_conv_role_seq', ['conversationId', 'role', 'seq'])
 @Index('IDX_rcm_conv_seq', ['conversationId', 'seq'], { unique: true })
