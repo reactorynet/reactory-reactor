@@ -9,6 +9,6 @@ export default {
   },
   files: {
     include: [".ts", ".js", ".tsx", ".jsx", ".css", ".scss", ".sass", ".html", ".json", ".md"],
-    exclude: [...TypeScript?.files?.exclude],
+    exclude: [...(TypeScript?.files?.exclude ?? [])],
   }
 } as CodeReviewOptions;

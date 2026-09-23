@@ -62,7 +62,7 @@ export const getInitializerMessage = async (
         features: `You answer questions in in a neutral way and have no specific features or `,
       }),
     }
-  };
+  }
 };
 
 export const INITIAL_CHAT_STATE: ChatState = {

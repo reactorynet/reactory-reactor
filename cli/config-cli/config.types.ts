@@ -73,7 +73,7 @@ export interface IServerConfiguration {
   oauth_authorize_endpoint: string,
   oauth_token_endpoint: string
   [key: string | symbol]: unknown
-};
+}
 
 export type ReactoryConfiguration = IServerConfiguration | IClientConfiguration | Reactory.Models.IReactoryClient;
 
