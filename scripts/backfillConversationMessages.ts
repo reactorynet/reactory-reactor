@@ -52,6 +52,7 @@ const createDataSource = (): DataSource => {
     username: pg.user,
     password: pg.password,
     database: pg.database,
+    ssl: pg.ssl,
     synchronize: false,
     entities: [ReactorConversationMessage],
   });

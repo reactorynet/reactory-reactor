@@ -1,5 +1,6 @@
 import { DataSource } from 'typeorm';
 import { registerTenantDataSource } from "@reactory/server-core/database/tenant/TenantRepository";
+import { typeormPostgresOptions } from "@reactory/server-core/database/connectionOptions";
 import { REACTOR_ENTITIES, REACTOR_MIGRATIONS } from "../migrations/typeorm/schema";
 import { prepareSchemaOrExit, resolveSynchronize } from "@reactory/server-core/database/migrationGovernance";
 import Reactory from '@reactorynet/reactory-core';
@@ -27,16 +28,6 @@ import ReactorAiFailure from './ReactorAiFailure';
 import seedAiProviders from './seedAiProviders';
 
 const {
-  REACTORY_POSTGRES_HOST,
-  REACTORY_POSTGRES_PORT,
-  REACTORY_POSTGRES_USER,
-  REACTORY_POSTGRES_PASSWORD,
-  REACTORY_POSTGRES_DB,
-  POSTGRES_DB_HOST,
-  POSTGRES_DB_PORT,
-  POSTGRES_USER,
-  POSTGRES_PASSWORD,
-  POSTGRES_DB,
   REACTOR_POSTGRES_SYNCHRONIZE,
   NODE_ENV,
 } = process.env;
@@ -47,11 +38,8 @@ const synchronize = resolveSynchronize(REACTOR_POSTGRES_SYNCHRONIZE, NODE_ENV);
 
 export const ReactorPostgresDataSource = new DataSource({
   type: "postgres",
-  host: REACTORY_POSTGRES_HOST || POSTGRES_DB_HOST || "localhost",
-  port: parseInt(REACTORY_POSTGRES_PORT || POSTGRES_DB_PORT || "5432", 10),
-  username: REACTORY_POSTGRES_USER || POSTGRES_USER || "reactory",
-  password: REACTORY_POSTGRES_PASSWORD || POSTGRES_PASSWORD || "reactory",
-  database: REACTORY_POSTGRES_DB || POSTGRES_DB || "reactory",
+  // Host, credentials and TLS: src/database/connectionOptions.ts (WP-B4).
+  ...typeormPostgresOptions(),
   synchronize: false,
   entities: REACTOR_ENTITIES,
   ...REACTOR_MIGRATIONS,
