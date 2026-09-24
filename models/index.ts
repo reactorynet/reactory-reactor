@@ -1,4 +1,5 @@
 import { DataSource } from 'typeorm';
+import { registerTenantDataSource } from "@reactory/server-core/database/tenant/TenantRepository";
 import { REACTOR_ENTITIES, REACTOR_MIGRATIONS } from "../migrations/typeorm/schema";
 import { prepareSchemaOrExit, resolveSynchronize } from "@reactory/server-core/database/migrationGovernance";
 import Reactory from '@reactorynet/reactory-core';
@@ -55,6 +56,9 @@ export const ReactorPostgresDataSource = new DataSource({
   entities: REACTOR_ENTITIES,
   ...REACTOR_MIGRATIONS,
 });
+
+// Lets getTenantRepository(context, Entity) find this DataSource (WP-B2).
+registerTenantDataSource(ReactorPostgresDataSource);
 
 /**
  * Initializes the Reactor PostgreSQL DataSource and seeds baseline providers if empty.
