@@ -1,4 +1,5 @@
 import { DataSource } from 'typeorm';
+import { TenantScopeError } from '@reactory/server-core/database/tenant/TenantRepository';
 import Reactory from '@reactorynet/reactory-core';
 import { service } from '@reactory/server-core/application/decorators/service';
 
@@ -317,15 +318,29 @@ export class ReactorUsageAnalyticsService {
    * Values are bound, never interpolated: the filter reaches this method from a
    * GraphQL query, so `userId` and `model` are attacker-influenced strings.
    */
+  /**
+   * The request's ReactoryClient key (WP-B2). Usage and failures are
+   * tenant-scoped: every query filters on it and every failure row carries
+   * it. A context without a partner cannot read or write tenant data.
+   */
+  private get clientKey(): string {
+    const key = (this.context?.partner as { key?: string } | undefined)?.key;
+    if (!key) {
+      throw new TenantScopeError('Usage analytics require a request context with a partner (ReactoryClient)');
+    }
+    return key;
+  }
+
   private buildWhere(filter: UsageAnalyticsFilter): {
     clause: string;
     params: unknown[];
   } {
+    const params: unknown[] = [this.clientKey];
     const conditions: string[] = [
+      `m.client_key = $1`,
       `m.role = 'assistant'`,
       HAS_USAGE,
     ];
-    const params: unknown[] = [];
 
     const push = (column: string, value: unknown) => {
       if (value === null || value === undefined) return;
@@ -393,8 +408,8 @@ export class ReactorUsageAnalyticsService {
   } {
     // No role or usage predicate here: every row in the failures table is a failed
     // turn, so the table is already the filter.
-    const conditions: string[] = ['1 = 1'];
-    const params: unknown[] = [];
+    const params: unknown[] = [this.clientKey];
+    const conditions: string[] = ['f.client_key = $1'];
 
     const push = (column: string, value: unknown) => {
       if (value === null || value === undefined) return;
@@ -874,8 +889,9 @@ export class ReactorUsageAnalyticsService {
         AND ${HAS_USAGE}
         AND m.user_id = $1
         AND m.created_at >= $2
-        AND m.created_at < $3`,
-      [String(userId).trim(), window.from, window.to]
+        AND m.created_at < $3
+        AND m.client_key = $4`,
+      [String(userId).trim(), window.from, window.to, this.clientKey]
     );
 
     const row = rows?.[0] ?? {};
@@ -926,8 +942,8 @@ export class ReactorUsageAnalyticsService {
       await dataSource.query(
         `INSERT INTO reactor_ai_failures
            (user_id, conversation_id, persona_id, provider_id, model_id, use_case,
-            error_code, error_message, retryable, attempts, duration_ms, turn_kind)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+            error_code, error_message, retryable, attempts, duration_ms, turn_kind, client_key)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
         [
           bounded(input.userId, 24),
           bounded(input.conversationId, 24),
@@ -943,6 +959,7 @@ export class ReactorUsageAnalyticsService {
           boundedInt(input.attempts),
           boundedInt(input.durationMs, true),
           bounded(input.turnKind, 32),
+          this.clientKey,
         ]
       );
       return true;

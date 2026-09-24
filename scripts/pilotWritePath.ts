@@ -102,7 +102,7 @@ const run = async () => {
     const { ReactorPostgresDataSource } = require("../models");
     if (!ReactorPostgresDataSource.isInitialized) await ReactorPostgresDataSource.initialize();
   }
-  const store = new ReactorConversationMessageService();
+  const store = new ReactorConversationMessageService(undefined, { clientKey: process.env.REACTOR_SCRIPT_CLIENT_KEY || 'reactory' });
   const storeAvailable = probe.store.tableExists && store.isAvailable();
 
   const collection = mongoose.connection.collection(CONVERSATIONS_COLLECTION);

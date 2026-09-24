@@ -1,3 +1,4 @@
+import { ClientKeyColumn } from '../../../database/tenant/ClientKeyColumn';
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -72,6 +73,10 @@ export default class ReactorConversationMessage {
   /** Internal row identity. Not exposed to clients; `mongoId` is. */
   @PrimaryGeneratedColumn({ type: 'bigint' })
   id: string;
+
+  /** Owning ReactoryClient key (WP-B2); stamped by the message store / analytics service. */
+  @ClientKeyColumn()
+  clientKey: string;
 
   /**
    * The Mongo subdocument `_id` this row originated from, or a freshly minted

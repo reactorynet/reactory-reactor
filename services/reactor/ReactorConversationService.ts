@@ -3633,7 +3633,7 @@ export default class ReactorConversationService
 
     try {
       if (!this.messageMirror) {
-        this.messageMirror = new ReactorConversationMessageService();
+        this.messageMirror = new ReactorConversationMessageService(undefined, { clientKey: () => this.context?.partner?.key });
       }
       if (!this.messageMirror.isAvailable()) return;
       await this.messageMirror.appendMessage(conversationId, message, attribution);
@@ -3996,7 +3996,7 @@ export default class ReactorConversationService
 
     try {
       if (!this.messageMirror) {
-        this.messageMirror = new ReactorConversationMessageService();
+        this.messageMirror = new ReactorConversationMessageService(undefined, { clientKey: () => this.context?.partner?.key });
       }
       if (!this.messageMirror.isAvailable()) return;
       await this.messageMirror.updateMessageByMongoId(mongoId, message);
@@ -4016,7 +4016,7 @@ export default class ReactorConversationService
 
     try {
       if (!this.messageMirror) {
-        this.messageMirror = new ReactorConversationMessageService();
+        this.messageMirror = new ReactorConversationMessageService(undefined, { clientKey: () => this.context?.partner?.key });
       }
       if (!this.messageMirror.isAvailable()) return;
       await this.messageMirror.deleteByMongoId(messageId);
@@ -4046,7 +4046,7 @@ export default class ReactorConversationService
 
     try {
       if (!this.messageMirror) {
-        this.messageMirror = new ReactorConversationMessageService();
+        this.messageMirror = new ReactorConversationMessageService(undefined, { clientKey: () => this.context?.partner?.key });
       }
       if (!this.messageMirror.isAvailable()) return 0;
       const deleted = await this.messageMirror.deleteForConversation(conversationId);
@@ -4080,7 +4080,7 @@ export default class ReactorConversationService
 
     try {
       if (!this.messageMirror) {
-        this.messageMirror = new ReactorConversationMessageService();
+        this.messageMirror = new ReactorConversationMessageService(undefined, { clientKey: () => this.context?.partner?.key });
       }
       if (!this.messageMirror.isAvailable()) return;
       await this.messageMirror.updateToolCallStatusByToolCallId(conversationId, toolCallId, status);
@@ -4213,7 +4213,7 @@ export default class ReactorConversationService
   private getMessageStore(): ReactorConversationMessageService | null {
     try {
       if (!this.messageMirror) {
-        this.messageMirror = new ReactorConversationMessageService();
+        this.messageMirror = new ReactorConversationMessageService(undefined, { clientKey: () => this.context?.partner?.key });
       }
       return this.messageMirror.isAvailable() ? this.messageMirror : null;
     } catch {

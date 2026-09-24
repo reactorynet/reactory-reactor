@@ -18,6 +18,8 @@ const MONGO_ID = 'a'.repeat(24);
 const CONVERSATION_ID = 'c'.repeat(24);
 
 const makeRepo = (overrides: Record<string, unknown> = {}) => ({
+  // Entity metadata the tenant repository wrapper reads (WP-B2).
+  metadata: (global as any).testHelpers.tenantMetadata('ReactorConversationMessage'),
   update: jest.fn(async () => ({ affected: 1 })),
   delete: jest.fn(async () => ({ affected: 1 })),
   query: jest.fn(async () => [] as unknown[]),
@@ -26,7 +28,7 @@ const makeRepo = (overrides: Record<string, unknown> = {}) => ({
 
 const makeService = (repo: any) => {
   const dataSource: any = { isInitialized: true, getRepository: () => repo };
-  return new ReactorConversationMessageService(dataSource);
+  return new ReactorConversationMessageService(dataSource, { clientKey: 'reactory' });
 };
 
 const makeUnavailableService = () => {
@@ -36,7 +38,7 @@ const makeUnavailableService = () => {
       throw new Error('not initialised');
     },
   };
-  return new ReactorConversationMessageService(dataSource);
+  return new ReactorConversationMessageService(dataSource, { clientKey: 'reactory' });
 };
 
 describe('ReactorConversationMessageService mutation mirror', () => {
@@ -56,7 +58,8 @@ describe('ReactorConversationMessageService mutation mirror', () => {
       expect(updated).toBe(true);
       expect(repo.update).toHaveBeenCalledTimes(1);
       const [criteria] = repo.update.mock.calls[0] as any[];
-      expect(criteria).toEqual({ mongoId: MONGO_ID });
+      // Scoped to the store's client (WP-B2).
+      expect(criteria).toEqual({ mongoId: MONGO_ID, clientKey: 'reactory' });
     });
 
     it('never writes identity or archival lifecycle columns', async () => {
@@ -138,7 +141,7 @@ describe('ReactorConversationMessageService mutation mirror', () => {
       expect(affected).toBe(1);
       expect(repo.update).toHaveBeenCalledTimes(1);
       const [criteria, patch] = repo.update.mock.calls[0] as any[];
-      expect(criteria).toEqual({ id: '1' });
+      expect(criteria).toEqual({ id: '1', clientKey: 'reactory' });
       expect(patch.toolCalls).toEqual([
         { id: 'tc1', status: 'success' },
         { id: 'tc2', status: 'success' },
@@ -153,7 +156,8 @@ describe('ReactorConversationMessageService mutation mirror', () => {
 
       expect(repo.query).toHaveBeenCalledTimes(1);
       const [, params] = repo.query.mock.calls[0] as any[];
-      expect(params).toEqual([CONVERSATION_ID, JSON.stringify([{ id: 'tc1' }])]);
+      // The tenant condition is the last parameter (WP-B2).
+      expect(params).toEqual([CONVERSATION_ID, JSON.stringify([{ id: 'tc1' }]), 'reactory']);
     });
 
     it('does not write when the status already matches', async () => {
