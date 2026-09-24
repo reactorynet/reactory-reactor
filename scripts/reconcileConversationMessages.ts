@@ -254,7 +254,7 @@ const insertMessage = async (
      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8::jsonb,
              $9,$10,$11,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,
              $16::jsonb,$17,$18,$19::jsonb,$20::jsonb,$21,$22,
-             $23,$24,$25,$26)`,
+             $23,$24,COALESCE($25, now()),$26)`,
     [
       readMongoId(message),
       conversationId,

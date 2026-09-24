@@ -364,7 +364,7 @@ export class ReactorUsageAnalyticsService {
 
     if (filter.startDate) {
       params.push(new Date(filter.startDate));
-      conditions.push(`m.created_at >= $${params.length}`);
+      conditions.push(`m.message_ts >= $${params.length}`);
     }
 
     if (filter.endDate) {
@@ -378,10 +378,10 @@ export class ReactorUsageAnalyticsService {
       if (isDateOnly) {
         end.setUTCDate(end.getUTCDate() + 1);
         params.push(end);
-        conditions.push(`m.created_at < $${params.length}`);
+        conditions.push(`m.message_ts < $${params.length}`);
       } else {
         params.push(end);
-        conditions.push(`m.created_at <= $${params.length}`);
+        conditions.push(`m.message_ts <= $${params.length}`);
       }
     }
 
@@ -497,6 +497,7 @@ export class ReactorUsageAnalyticsService {
     // concept of.
     const { clause: failureClause, params: failureParams } = this.buildFailureWhere(filter);
     const proms = promptTokensSql();
+    const comps = completionTokensSql();
     const [
       totalsRows, timeSeriesRows, modelRows, providerRows, userRows, coverageRows,
       failureTotalsRows, failureBreakdownRows, failureDailyRows,
@@ -516,7 +517,7 @@ export class ReactorUsageAnalyticsService {
         ),
         dataSource.query(
           `SELECT
-             to_char(date_trunc('day', m.created_at), 'YYYY-MM-DD')            AS date,
+             to_char(date_trunc('day', m.message_ts), 'YYYY-MM-DD')            AS date,
              COALESCE(SUM(${proms}), 0)                                        AS prompt_tokens,
              COALESCE(SUM(${comps}), 0)                                        AS completion_tokens,
              COALESCE(SUM(${proms} + ${comps}), 0)                             AS total_tokens,
@@ -813,10 +814,10 @@ export class ReactorUsageAnalyticsService {
            m.duration_ms,
            m.use_case,
            m.usage_source,
-           m.created_at
+           m.message_ts
          FROM reactor_conversation_messages m
         WHERE ${clause}
-        ORDER BY m.created_at DESC
+        ORDER BY m.message_ts DESC
         LIMIT $${limitIdx} OFFSET $${offsetIdx}`,
         [...params, safeSize, offset]
       ),
@@ -851,7 +852,7 @@ export class ReactorUsageAnalyticsService {
           use_case: row.use_case ?? null,
           usageSource: row.usage_source ?? null,
           status: 'success',
-          createdAt: row.created_at ? new Date(row.created_at).toISOString() : new Date().toISOString(),
+          createdAt: row.message_ts ? new Date(row.message_ts).toISOString() : new Date().toISOString(),
         } as UsageLedgerRecord;
       }),
       total,
@@ -888,8 +889,8 @@ export class ReactorUsageAnalyticsService {
       WHERE m.role = 'assistant'
         AND ${HAS_USAGE}
         AND m.user_id = $1
-        AND m.created_at >= $2
-        AND m.created_at < $3
+        AND m.message_ts >= $2
+        AND m.message_ts < $3
         AND m.client_key = $4`,
       [String(userId).trim(), window.from, window.to, this.clientKey]
     );

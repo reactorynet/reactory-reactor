@@ -77,6 +77,39 @@ describe('ReactorUsageAnalyticsService tenancy', () => {
     expect(failures.params).toEqual(['tenant-a']);
   });
 
+  it('reports usage by message time, not by when the row was written', async () => {
+    // The Mongo backfill wrote three months of messages with one created_at.
+    const service: any = new Analytics({}, { partner: { key: 'tenant-a' }, log: jest.fn() });
+    const usage = service.buildWhere({ startDate: '2026-08-25', endDate: '2026-09-24' });
+    expect(usage.clause).toMatch(/m\.message_ts >= \$\d+ AND m\.message_ts < \$\d+/);
+    expect(usage.clause).not.toMatch(/created_at/);
+
+    const query = jest.fn(async () => [] as any[]);
+    Object.defineProperty(service, 'dataSource', { get: () => ({ isInitialized: true, query }) });
+    await service.getUsageSummary({});
+    const series = (query.mock.calls as any[]).map(([sql]) => sql).find((sql: string) => /AS date/.test(sql) && /\bm\./.test(sql));
+    expect(series).toMatch(/date_trunc\('day', m\.message_ts\)/);
+
+    // Failures are recorded as they happen, so their created_at is the event time.
+    expect(service.buildFailureWhere({ startDate: '2026-08-25' }).clause).toMatch(/f\.created_at >= /);
+  });
+
+  it('builds and runs every summary query, each scoped to the request client', async () => {
+    // getUsageSummary referenced an undeclared `comps` and had never run: the
+    // resolver failed first, then this threw a ReferenceError.
+    const service: any = new Analytics({}, { partner: { key: 'tenant-a' }, log: jest.fn() });
+    const query = jest.fn(async () => [] as any[]);
+    Object.defineProperty(service, 'dataSource', { get: () => ({ isInitialized: true, query }) });
+
+    await service.getUsageSummary({ startDate: '2026-08-25', endDate: '2026-09-24' });
+
+    expect(query).toHaveBeenCalled();
+    for (const [sql, params] of query.mock.calls as any[]) {
+      expect(sql).toMatch(/client_key = \$1/);
+      expect(params[0]).toBe('tenant-a');
+    }
+  });
+
   it('refuses analytics without a partner, and records no failure', async () => {
     const service: any = new Analytics({}, { log: jest.fn() });
     expect(() => service.buildWhere({})).toThrow(TenantScopeError);

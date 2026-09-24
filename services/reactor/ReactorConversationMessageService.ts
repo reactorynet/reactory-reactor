@@ -489,7 +489,8 @@ export default class ReactorConversationMessageService {
       archived: Boolean(message?.archived),
       archivedAt: message?.archivedAt ?? null,
       archivedReason: message?.archivedReason ?? null,
-      messageTs: message?.timestamp ? new Date(message.timestamp) : null,
+      // Undefined, not null, so the column default (now()) applies.
+      messageTs: message?.timestamp ? new Date(message.timestamp) : undefined,
 
       // Usage attribution. Written only from the explicit attribution argument,
       // never inferred from the message body — the body carries no routing
