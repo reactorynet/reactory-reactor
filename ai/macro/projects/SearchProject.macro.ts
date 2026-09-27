@@ -211,7 +211,6 @@ const SearchProjectMacroDefinition: MacroComponentDefinition<typeof SearchProjec
   component: SearchProjectMacro,
   version: "1.0.0",
   roles: ["USER"],
-  alias: "searchProject",
   icon: "manage_search",
   runat: "server",
   tools: [

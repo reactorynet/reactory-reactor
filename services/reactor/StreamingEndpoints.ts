@@ -362,23 +362,23 @@ export class StreamingEndpoints {
 
       // Build a fully-authenticated SSE URL, mirroring
       // ReactorConversationService.createInitiateSSEResponse. Auth travels as
-      // query params because EventSource cannot set headers, and x-client-pwd
-      // is a server-only secret the browser cannot supply itself.
+      // query params because EventSource cannot set headers. The URL is handed
+      // to the browser, so it carries the tenant's public key (bound to the
+      // request Origin by the tenant middleware), never the tenant secret.
       const sseUrl = new URL(safeUrl([sseUriRoot(), `reactor-chat/streaming/sse/${session.sessionId}`]));
-      const partnerKey = context.partner?.key?.toUpperCase().replace(/-/g, '_') || '';
       sseUrl.searchParams.set('transport', 'sse');
       sseUrl.searchParams.set('no-upgrade', 'true');
       sseUrl.searchParams.set('jwt', Helpers.getJwtTokenForUser(context.user));
       sseUrl.searchParams.set('expiry', new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString());
-      sseUrl.searchParams.set('x-client-key', (process.env[`${partnerKey}_APPLICATION_USERNAME`] as string) || '');
-      sseUrl.searchParams.set('x-client-pwd', (process.env[`${partnerKey}_APPLICATION_PASSWORD`] as string) || '');
+      sseUrl.searchParams.set('x-client-key', context.partner?.key || '');
+      sseUrl.searchParams.set('x-client-public-key', (context.partner as any)?.publicKey || '');
 
       slog(context, "info", `Standalone streaming session created for channel ${channelId}`, {
         channelId,
         sessionId: session.sessionId,
         expiresAt: session.expiresAt,
         hasClientKey: !!sseUrl.searchParams.get('x-client-key'),
-        hasClientPwd: !!sseUrl.searchParams.get('x-client-pwd'),
+        hasClientPublicKey: !!sseUrl.searchParams.get('x-client-public-key'),
       }, channelId);
 
       res.json({

@@ -64,6 +64,7 @@ const createDataSource = (): DataSource => {
     username: pg.user,
     password: pg.password,
     database: pg.database,
+    ssl: pg.ssl,
     synchronize: false,
     entities: [ReactorConversationMessage],
   });
@@ -110,7 +111,7 @@ const run = async () => {
       process.exit(0);
     }
   }
-  const service = new ReactorConversationMessageService(dataSource);
+  const service = new ReactorConversationMessageService(dataSource, { clientKey: process.env.REACTOR_SCRIPT_CLIENT_KEY || 'reactory' });
 
   if (!service.isAvailable()) {
     console.error("Postgres is not available; aborting.");

@@ -184,4 +184,9 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
   },
 };
 
+// The form engine loads a form's data from `graphql.query`; entries in
+// `queries` run only when a caller names one. With `queries` alone the
+// dashboard never loaded and rendered its zero defaults.
+graphql.query = graphql.queries.summary;
+
 export default graphql;

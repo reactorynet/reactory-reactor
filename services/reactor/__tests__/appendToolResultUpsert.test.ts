@@ -28,7 +28,7 @@ describe("ReactorConversationMessageService - appendToolResultToOwningMessage", 
     });
     query = jest.fn<any>(async () => rows);
 
-    service = new ReactorConversationMessageService({} as any);
+    service = new ReactorConversationMessageService({} as any, { clientKey: 'reactory' });
     service.getRepository = () => ({ query, update });
   };
 
@@ -179,7 +179,7 @@ describe("ReactorConversationMessageService - appendToolResultToOwningMessage", 
       return { affected: 1 };
     });
     query = jest.fn<any>(async () => rows);
-    service = new ReactorConversationMessageService({} as any);
+    service = new ReactorConversationMessageService({} as any, { clientKey: 'reactory' });
     service.getRepository = () => ({ query, update });
 
     await service.appendToolResultToOwningMessage("conv-1", "call_1", {
@@ -200,7 +200,7 @@ describe("ReactorConversationMessageService - appendToolResultToOwningMessage", 
   });
 
   it("returns 0 when the store is unavailable", async () => {
-    service = new ReactorConversationMessageService({} as any);
+    service = new ReactorConversationMessageService({} as any, { clientKey: 'reactory' });
     service.getRepository = () => null;
 
     const affected = await service.appendToolResultToOwningMessage("conv-1", "call_1", {
@@ -218,7 +218,7 @@ describe("ReactorConversationMessageService - appendToolResultToOwningMessage", 
     ];
     update = jest.fn<any>(async () => ({ affected: 1 }));
     query = jest.fn<any>(async () => rows);
-    service = new ReactorConversationMessageService({} as any);
+    service = new ReactorConversationMessageService({} as any, { clientKey: 'reactory' });
     service.getRepository = () => ({ query, update });
 
     const affected = await service.appendToolResultToOwningMessage("conv-1", "call_1", {

@@ -25,12 +25,14 @@ import ReactorConversationMessageService from "./ReactorConversationMessageServi
 export const loadHistoryForContext = async (
   conversationId: string | undefined,
   mongoHistory: any[] | undefined,
-  context?: { warn?: (message: string, data?: any) => void }
+  context?: { warn?: (message: string, data?: any) => void; partner?: { key?: string } | null }
 ): Promise<any[] | null> => {
   if (!conversationId) return null;
 
   try {
-    const store = new ReactorConversationMessageService();
+    // Messages are tenant-scoped (WP-B2); no partner, no Postgres history.
+    if (!context?.partner?.key) return null;
+    const store = new ReactorConversationMessageService(undefined, { clientKey: context.partner.key });
     if (!store.isAvailable()) return null;
 
     const rows = await store.getActiveMessages(conversationId);

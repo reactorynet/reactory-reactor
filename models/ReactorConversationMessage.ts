@@ -1,3 +1,4 @@
+import { ClientKeyColumn } from '../../../database/tenant/ClientKeyColumn';
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -49,21 +50,35 @@ export type UsageSource = 'provider' | 'estimated' | 'none';
  * cannot express and which is therefore migration-only (production runs with
  * `synchronize: false`, so it survives there).
  */
+// Trigram index for ILIKE search over search_text. TypeORM cannot express a
+// gin_trgm_ops index, so migrations own it; synchronize: false stops schema
+// sync and migration:generate from dropping it as unknown. The unquoted name in
+// the migration folds to lower case.
+@Index('idx_rcm_search_text_trgm', { synchronize: false })
+// Partial index for usage analytics (assistant turns with a usage envelope);
+// the predicate reads JSONB, which TypeORM cannot express. Migration-owned.
+@Index('idx_rcm_usage_turns_ts', { synchronize: false })
 @Index('IDX_rcm_conv_archived_seq', ['conversationId', 'archived', 'seq'])
 @Index('IDX_rcm_conv_role_seq', ['conversationId', 'role', 'seq'])
 @Index('IDX_rcm_conv_seq', ['conversationId', 'seq'], { unique: true })
 // Usage reporting scans. Declared on the entity rather than only in the migration
 // because `synchronize` reconciles against entity metadata and drops anything it
-// cannot see — the exact failure recorded in the index note above.
-@Index('IDX_rcm_usage_created', ['createdAt'])
-@Index('IDX_rcm_usage_user_created', ['userId', 'createdAt'])
-@Index('IDX_rcm_usage_provider_created', ['providerId', 'createdAt'])
-@Index('IDX_rcm_usage_model_created', ['modelId', 'createdAt'])
+// cannot see — the exact failure recorded in the index note above. Keyed on
+// message_ts, the turn's own time: created_at is when the row was written, and
+// the Mongo backfill wrote three months of history on one day.
+@Index('IDX_rcm_usage_ts', ['messageTs'])
+@Index('IDX_rcm_usage_user_ts', ['userId', 'messageTs'])
+@Index('IDX_rcm_usage_provider_ts', ['providerId', 'messageTs'])
+@Index('IDX_rcm_usage_model_ts', ['modelId', 'messageTs'])
 @Entity({ name: 'reactor_conversation_messages' })
 export default class ReactorConversationMessage {
   /** Internal row identity. Not exposed to clients; `mongoId` is. */
   @PrimaryGeneratedColumn({ type: 'bigint' })
   id: string;
+
+  /** Owning ReactoryClient key (WP-B2); stamped by the message store / analytics service. */
+  @ClientKeyColumn()
+  clientKey: string;
 
   /**
    * The Mongo subdocument `_id` this row originated from, or a freshly minted
@@ -246,9 +261,14 @@ export default class ReactorConversationMessage {
   @Column({ name: 'archived_reason', type: 'varchar', length: 64, nullable: true })
   archivedReason?: string | null;
 
-  /** Original message timestamp. Informational only; never used for ordering. */
-  @Column({ name: 'message_ts', type: 'timestamp with time zone', nullable: true })
-  messageTs?: Date | null;
+  /**
+   * When the message happened. Usage analytics report by this, not by
+   * created_at, which is when the row was written (a backfill writes old
+   * messages today). Never used to order a transcript; `seq` does that.
+   * Defaults to now() when the message carries no timestamp.
+   */
+  @Column({ name: 'message_ts', type: 'timestamp with time zone', default: () => 'now()' })
+  messageTs?: Date;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamp with time zone' })
   createdAt: Date;

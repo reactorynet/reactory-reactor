@@ -82,7 +82,7 @@ const run = async () => {
   const { ReactorPostgresDataSource } = require("../models");
   if (!ReactorPostgresDataSource.isInitialized) await ReactorPostgresDataSource.initialize();
 
-  const store = new ReactorConversationMessageService();
+  const store = new ReactorConversationMessageService(undefined, { clientKey: process.env.REACTOR_SCRIPT_CLIENT_KEY || 'reactory' });
   if (!store.isAvailable()) {
     reporter.notApplicable("new-chat reuse", "the message store is not available in this process");
     process.exit(reporter.finish());

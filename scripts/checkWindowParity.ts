@@ -66,6 +66,7 @@ const createDataSource = (): DataSource => {
     username: pg.user,
     password: pg.password,
     database: pg.database,
+    ssl: pg.ssl,
     synchronize: false,
     entities: [ReactorConversationMessage],
   });
@@ -329,7 +330,7 @@ const run = async () => {
 
   const dataSource = createDataSource();
   await dataSource.initialize();
-  const messageService = new ReactorConversationMessageService(dataSource);
+  const messageService = new ReactorConversationMessageService(dataSource, { clientKey: process.env.REACTOR_SCRIPT_CLIENT_KEY || 'reactory' });
   console.log("Connected to PostgreSQL.");
   console.log("");
 

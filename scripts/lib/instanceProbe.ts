@@ -25,6 +25,8 @@
  */
 import mongoose from "mongoose";
 import { Client } from "pg";
+import type { ConnectionOptions as TlsConnectionOptions } from "tls";
+import { postgresTlsOptions } from "../../../../database/connectionOptions";
 
 export type MessageSource = "mongo" | "postgres";
 
@@ -92,6 +94,8 @@ export interface PgConfig {
   user: string;
   password: string;
   database: string;
+  /** From REACTORY_POSTGRES_SSL / _CA_FILE (src/database/connectionOptions.ts). */
+  ssl?: false | TlsConnectionOptions;
 }
 
 /**
@@ -113,6 +117,7 @@ export const resolvePgConfig = (): PgConfig => ({
       process.env.POSTGRES_DB,
       process.env.POSTGRES_DATABASE
     ) || "reactory",
+  ssl: postgresTlsOptions(),
 });
 
 /**

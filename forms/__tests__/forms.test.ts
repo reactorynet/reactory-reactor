@@ -43,6 +43,10 @@ describe('Reactor Forms Registration', () => {
     expect(queries.summary.variables['formData.personaId']).toBe('filter.personaId');
     expect(queries.summary.variables['formData.use_case']).toBe('filter.use_case');
     expect(queries.recentRecords.variables['formData.startDate']).toBe('filter.startDate');
+
+    // The form engine only auto-loads `graphql.query`; without it the dashboard
+    // rendered its zero defaults.
+    expect((UsageDashboardForm.graphql as any).query).toBe(queries.summary);
   });
 
   it('registers UserBudgetAdminForm with correct properties', () => {
