@@ -114,7 +114,7 @@ const run = async () => {
     dataSource = require("../models").ReactorPostgresDataSource;
     if (!dataSource.isInitialized) await dataSource.initialize();
   }
-  const store = new ReactorConversationMessageService();
+  const store = new ReactorConversationMessageService(undefined, { clientKey: process.env.REACTOR_SCRIPT_CLIENT_KEY || 'reactory' });
   const storeUsable = probe.store.tableExists && store.isAvailable();
   const mode: "store" | "array" = storeUsable ? "store" : "array";
 

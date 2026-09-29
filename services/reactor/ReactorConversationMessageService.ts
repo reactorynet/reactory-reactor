@@ -1,4 +1,5 @@
-import { DataSource, Repository } from 'typeorm';
+import { DataSource, In, IsNull, LessThan, Not, Repository } from 'typeorm';
+import { getTenantRepository, TenantRepository, TenantScopeError } from '@reactory/server-core/database/tenant/TenantRepository';
 import { ObjectId } from 'mongodb';
 import ReactorConversationMessage, {
   UsageSource,
@@ -318,11 +319,77 @@ export const isSameToolResult = (a: any, b: any): boolean => {
  * untouched. That matters in step 3a, where this store is written alongside the
  * existing Mongo history but is not yet authoritative.
  */
+/** The tenant repository plus raw query, which scopedSql() filters itself. */
+type MessageRepository = TenantRepository<ReactorConversationMessage> & {
+  query: (sql: string, params?: any[]) => Promise<any>;
+};
+
+export interface MessageStoreTenancy {
+  /**
+   * ReactoryClient key the messages belong to (WP-B2). A function is read on
+   * every call, so a store cached by a long-lived service follows the current
+   * request's client.
+   */
+  clientKey?: string | null | (() => string | null | undefined);
+  /**
+   * Read and write across tenants. Only for ops scripts (backfill, parity
+   * checks) that operate on the whole table; application code passes the
+   * request's client key.
+   */
+  unscoped?: boolean;
+}
+
 export default class ReactorConversationMessageService {
   private readonly injectedDataSource?: DataSource;
+  private readonly tenancy: MessageStoreTenancy;
 
-  constructor(dataSource?: DataSource) {
+  constructor(dataSource?: DataSource, tenancy: MessageStoreTenancy = {}) {
     this.injectedDataSource = dataSource;
+    this.tenancy = tenancy;
+  }
+
+  /**
+   * The client key every row this store writes is stamped with, and every
+   * query is filtered on. Throws when neither a key nor `unscoped` was given:
+   * a store without a tenant must not read or write tenant data by accident.
+   */
+  private get clientKey(): string | null {
+    const configured = typeof this.tenancy.clientKey === 'function' ? this.tenancy.clientKey() : this.tenancy.clientKey;
+    if (configured) return configured;
+    if (this.tenancy.unscoped === true) return null;
+    throw new TenantScopeError('ReactorConversationMessageService needs a clientKey (or unscoped: true for ops scripts)');
+  }
+
+  /**
+   * Raw SQL helper: appends the tenant condition. `sql` must end in a WHERE
+   * clause that the condition can be ANDed onto (before ORDER BY / LIMIT, pass
+   * those in `tail`).
+   */
+  private scopedSql(sql: string, params: any[], tail = ''): [string, any[]] {
+    const key = this.clientKey;
+    if (key === null) return [`${sql} ${tail}`, params];
+    return [`${sql} AND client_key = $${params.length + 1} ${tail}`, [...params, key]];
+  }
+
+  /**
+   * Inside a transaction keyed by conversation: refuse when the conversation
+   * already holds rows of another tenant. The sequence-shifting SQL below is
+   * keyed by conversation_id, and a conversation belongs to one tenant, so this
+   * one check keeps every statement in the transaction inside the tenant.
+   */
+  private async assertConversationTenant(
+    manager: { query: (sql: string, params: any[]) => Promise<any> },
+    conversationId: string,
+  ): Promise<void> {
+    const key = this.clientKey;
+    if (key === null) return;
+    const foreign = await manager.query(
+      `SELECT 1 FROM reactor_conversation_messages WHERE conversation_id = $1 AND client_key <> $2 LIMIT 1`,
+      [conversationId, key],
+    );
+    if (Array.isArray(foreign) && foreign.length > 0) {
+      throw new TenantScopeError('Conversation belongs to another client', { conversationId });
+    }
   }
 
   private get dataSource(): DataSource {
@@ -348,13 +415,23 @@ export default class ReactorConversationMessageService {
     }
   }
 
-  private getRepository(): Repository<ReactorConversationMessage> | null {
+  /**
+   * Tenant-scoped repository (WP-B2), or the raw one for an unscoped ops
+   * store. `query` is the raw repository's, for the SQL below that adds the
+   * tenant condition itself through scopedSql().
+   */
+  private getRepository(): MessageRepository | null {
     if (!this.isAvailable()) return null;
+    let raw: Repository<ReactorConversationMessage>;
     try {
-      return this.dataSource.getRepository(ReactorConversationMessage);
+      raw = this.dataSource.getRepository(ReactorConversationMessage);
     } catch {
       return null;
     }
+    const key = this.clientKey;
+    if (key === null) return raw as unknown as MessageRepository;
+    const scoped = getTenantRepository({ partner: { key } }, ReactorConversationMessage, raw);
+    return Object.assign(Object.create(scoped), { query: raw.query.bind(raw) }) as MessageRepository;
   }
 
   /** Next `seq` for a conversation: `MAX(seq) + 1`, or 1 for a new conversation. */
@@ -387,6 +464,7 @@ export default class ReactorConversationMessageService {
     const sanitize = sanitizeForPostgres;
 
     return {
+      clientKey: this.clientKey ?? undefined,
       mongoId: readMongoId(message),
       conversationId,
       seq: String(seq),
@@ -411,7 +489,8 @@ export default class ReactorConversationMessageService {
       archived: Boolean(message?.archived),
       archivedAt: message?.archivedAt ?? null,
       archivedReason: message?.archivedReason ?? null,
-      messageTs: message?.timestamp ? new Date(message.timestamp) : null,
+      // Undefined, not null, so the column default (now()) applies.
+      messageTs: message?.timestamp ? new Date(message.timestamp) : undefined,
 
       // Usage attribution. Written only from the explicit attribution argument,
       // never inferred from the message body — the body carries no routing
@@ -848,7 +927,7 @@ export default class ReactorConversationMessageService {
   }
 
   private async getSystemMessages(
-    repo: Repository<ReactorConversationMessage>,
+    repo: MessageRepository,
     conversationId: string,
     includeArchived: boolean
   ): Promise<ReactorConversationMessage[]> {
@@ -878,14 +957,10 @@ export default class ReactorConversationMessageService {
     const repo = this.getRepository();
     if (!repo) return 0;
 
-    const result = await repo
-      .createQueryBuilder()
-      .update(ReactorConversationMessage)
-      .set({ archived: true, archivedAt: new Date(), archivedReason: reason })
-      .where('conversation_id = :conversationId', { conversationId })
-      .andWhere('seq < :boundarySeqExclusive', { boundarySeqExclusive })
-      .andWhere('archived = false')
-      .execute();
+    const result = await repo.update(
+      { conversationId, seq: LessThan(boundarySeqExclusive), archived: false },
+      { archived: true, archivedAt: new Date(), archivedReason: reason },
+    );
 
     return result.affected ?? 0;
   }
@@ -898,13 +973,10 @@ export default class ReactorConversationMessageService {
     const repo = this.getRepository();
     if (!repo || !Array.isArray(mongoIds) || mongoIds.length === 0) return 0;
 
-    const result = await repo
-      .createQueryBuilder()
-      .update(ReactorConversationMessage)
-      .set({ archived: true, archivedAt: new Date(), archivedReason: reason })
-      .where('mongo_id IN (:...mongoIds)', { mongoIds })
-      .andWhere('archived = false')
-      .execute();
+    const result = await repo.update(
+      { mongoId: In(mongoIds), archived: false },
+      { archived: true, archivedAt: new Date(), archivedReason: reason },
+    );
 
     return result.affected ?? 0;
   }
@@ -947,6 +1019,7 @@ export default class ReactorConversationMessageService {
     if (!dataSource?.isInitialized) return null;
 
     return await dataSource.transaction(async (manager) => {
+      await this.assertConversationTenant(manager, conversationId);
       const bounds = await manager.query(
         `SELECT COALESCE(MAX(seq), 0) AS max
            FROM reactor_conversation_messages
@@ -1072,6 +1145,7 @@ export default class ReactorConversationMessageService {
     if (!dataSource?.isInitialized) return null;
 
     return await dataSource.transaction(async (manager) => {
+      await this.assertConversationTenant(manager, conversationId);
       const bounds = await manager.query(
         `SELECT COALESCE(MAX(seq), 0) AS max
            FROM reactor_conversation_messages
@@ -1133,6 +1207,7 @@ export default class ReactorConversationMessageService {
     if (!dataSource?.isInitialized) return null;
 
     return await dataSource.transaction(async (manager) => {
+      await this.assertConversationTenant(manager, conversationId);
       const bounds = await manager.query(
         `SELECT COALESCE(MAX(seq), 0) AS max
            FROM reactor_conversation_messages
@@ -1245,9 +1320,11 @@ export default class ReactorConversationMessageService {
     // of `tool_calls` is a superset of `{ id: toolCallId }`.
     const needle = JSON.stringify([{ id: toolCallId }]);
     const matches: Array<{ id: string; tool_calls: any }> = await repo.query(
-      `SELECT id, tool_calls FROM reactor_conversation_messages
-        WHERE conversation_id = $1 AND tool_calls @> $2::jsonb`,
-      [conversationId, needle]
+      ...this.scopedSql(
+        `SELECT id, tool_calls FROM reactor_conversation_messages
+          WHERE conversation_id = $1 AND tool_calls @> $2::jsonb`,
+        [conversationId, needle],
+      )
     );
 
     let affected = 0;
@@ -1300,11 +1377,12 @@ export default class ReactorConversationMessageService {
     if (!repo || !conversationId) return 0;
 
     const rows: Array<{ id: string }> = await repo.query(
-      `SELECT id FROM reactor_conversation_messages
-        WHERE conversation_id = $1 AND role = 'system' AND archived = false
-        ORDER BY seq ASC
-        LIMIT 1`,
-      [conversationId]
+      ...this.scopedSql(
+        `SELECT id FROM reactor_conversation_messages
+          WHERE conversation_id = $1 AND role = 'system' AND archived = false`,
+        [conversationId],
+        'ORDER BY seq ASC LIMIT 1',
+      )
     );
 
     const target = rows?.[0]?.id;
@@ -1347,9 +1425,11 @@ export default class ReactorConversationMessageService {
 
     const needle = JSON.stringify([{ id: toolCallId }]);
     const matches: Array<{ id: string; tool_results: any }> = await repo.query(
-      `SELECT id, tool_results FROM reactor_conversation_messages
-        WHERE conversation_id = $1 AND tool_calls @> $2::jsonb`,
-      [conversationId, needle]
+      ...this.scopedSql(
+        `SELECT id, tool_results FROM reactor_conversation_messages
+          WHERE conversation_id = $1 AND tool_calls @> $2::jsonb`,
+        [conversationId, needle],
+      )
     );
 
     let affected = 0;
@@ -1423,11 +1503,12 @@ export default class ReactorConversationMessageService {
     if (!repo || !conversationId || !toolCallId) return 0;
 
     const rows: Array<{ id: string }> = await repo.query(
-      `SELECT id FROM reactor_conversation_messages
-        WHERE conversation_id = $1 AND role = 'tool' AND tool_call_id = $2 AND archived = false
-        ORDER BY seq ASC
-        LIMIT 1`,
-      [conversationId, toolCallId]
+      ...this.scopedSql(
+        `SELECT id FROM reactor_conversation_messages
+          WHERE conversation_id = $1 AND role = 'tool' AND tool_call_id = $2 AND archived = false`,
+        [conversationId, toolCallId],
+        'ORDER BY seq ASC LIMIT 1',
+      )
     );
 
     const target = rows?.[0]?.id;
@@ -1461,21 +1542,16 @@ export default class ReactorConversationMessageService {
     const repo = this.getRepository();
     if (!repo) return 0;
 
-    const builder = repo
-      .createQueryBuilder()
-      .delete()
-      .from(ReactorConversationMessage)
-      .where('conversation_id = :conversationId', { conversationId });
-
-    if (knownMongoIds.length > 0) {
-      builder.andWhere(
-        '(mongo_id IS NULL OR mongo_id NOT IN (:...knownMongoIds))',
-        { knownMongoIds }
-      );
+    if (knownMongoIds.length === 0) {
+      const result = await repo.delete({ conversationId });
+      return result.affected ?? 0;
     }
 
-    const result = await builder.execute();
-    return result.affected ?? 0;
+    // `mongo_id IS NULL OR mongo_id NOT IN (...)`, as two scoped deletes
+    // (NOT IN never matches NULL, so the halves are disjoint).
+    const withoutId = await repo.delete({ conversationId, mongoId: IsNull() });
+    const unknownId = await repo.delete({ conversationId, mongoId: Not(In(knownMongoIds)) });
+    return (withoutId.affected ?? 0) + (unknownId.affected ?? 0);
   }
 
   /** Remove every message attached to a conversation (session deletion). */

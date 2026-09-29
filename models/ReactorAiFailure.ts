@@ -1,3 +1,4 @@
+import { ClientKeyColumn } from '../../../database/tenant/ClientKeyColumn';
 import {
   Entity,
   PrimaryGeneratedColumn,
@@ -47,6 +48,10 @@ import {
 export default class ReactorAiFailure {
   @PrimaryGeneratedColumn({ type: 'bigint' })
   id: string;
+
+  /** Owning ReactoryClient key (WP-B2); stamped by the message store / analytics service. */
+  @ClientKeyColumn()
+  clientKey: string;
 
   /** Owner of the conversation the turn belonged to, when known. */
   @Column({ name: 'user_id', type: 'char', length: 24, nullable: true })

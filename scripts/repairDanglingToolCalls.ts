@@ -192,7 +192,7 @@ const main = async () => {
   const dataSource = require("../migrations/typeorm/data-source").default;
   await dataSource.initialize();
 
-  const store = new ReactorConversationMessageService(dataSource);
+  const store = new ReactorConversationMessageService(dataSource, { clientKey: process.env.REACTOR_SCRIPT_CLIENT_KEY || 'reactory' });
 
   let conversationIds: string[];
   if (conversationArg) {

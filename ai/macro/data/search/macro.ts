@@ -788,7 +788,6 @@ const SearchContentMacroDefinition: MacroComponentDefinition<typeof SearchConten
   component: SearchContentMacro,
   version: "1.0.0",
   roles: ["USER"],
-  alias: "searchContent",
   icon: "search",
   runat: "server",
   tools: [
@@ -867,7 +866,6 @@ const IndexContentMacroDefinition: MacroComponentDefinition<typeof IndexContentM
   component: IndexContentMacro,
   version: "1.0.0",
   roles: ["USER"],
-  alias: "indexContent",
   icon: "cloud_upload",
   runat: "server",
   tools: [
@@ -922,7 +920,6 @@ const DeleteIndexMacroDefinition: MacroComponentDefinition<typeof DeleteIndexMac
   component: DeleteIndexMacro,
   version: "1.0.0",
   roles: ["USER"],
-  alias: "deleteIndex",
   icon: "delete_forever",
   runat: "server",
   tools: [

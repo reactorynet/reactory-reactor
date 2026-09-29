@@ -57,9 +57,9 @@ A single day or period data point in an AI usage time series.
 """
 type ReactorAIUsageTimeSeriesPoint {
   date: String!
-  promptTokens: Int!
-  completionTokens: Int!
-  totalTokens: Int!
+  promptTokens: Float!
+  completionTokens: Float!
+  totalTokens: Float!
   costUsdCents: Float!
   costUsd: Float!
   requests: Int!
@@ -71,9 +71,9 @@ Breakdown of token usage and costs per model.
 type ReactorModelUsageBreakdown {
   model: String!
   provider: String!
-  promptTokens: Int!
-  completionTokens: Int!
-  totalTokens: Int!
+  promptTokens: Float!
+  completionTokens: Float!
+  totalTokens: Float!
   costUsdCents: Float!
   costUsd: Float!
   requests: Int!
@@ -84,7 +84,7 @@ Breakdown of token usage and costs per provider.
 """
 type ReactorProviderUsageBreakdown {
   provider: String!
-  totalTokens: Int!
+  totalTokens: Float!
   costUsdCents: Float!
   costUsd: Float!
   requests: Int!
@@ -98,7 +98,7 @@ type ReactorUserUsageBreakdown {
   firstName: String
   lastName: String
   email: String
-  totalTokens: Int!
+  totalTokens: Float!
   costUsdCents: Float!
   costUsd: Float!
   requests: Int!
@@ -153,10 +153,13 @@ type ReactorUsageFailureBreakdown {
 """
 Aggregated AI usage summary with metrics, time-series trend, and model/provider breakdowns.
 """
+# Token totals are Float, not Int: summed over a tenant they pass 2^31 (5.9 billion
+# prompt tokens on the dev tenant), which GraphQL's 32-bit Int cannot represent.
+# Float is exact to 2^53. Per-turn fields and budget limits stay Int.
 type ReactorAIUsageSummary {
-  totalPromptTokens: Int!
-  totalCompletionTokens: Int!
-  totalTokens: Int!
+  totalPromptTokens: Float!
+  totalCompletionTokens: Float!
+  totalTokens: Float!
   totalCostUsdCents: Float!
   totalCostUsd: Float!
   totalRequests: Int!
@@ -200,9 +203,9 @@ type ReactorUserBudget {
   dailyTokenLimit: Int
   monthlyCostLimitUsd: Float
   dailyCostLimitUsd: Float
-  currentMonthTokens: Int!
+  currentMonthTokens: Float!
   currentMonthCostUsd: Float!
-  currentDayTokens: Int!
+  currentDayTokens: Float!
   currentDayCostUsd: Float!
   alertThresholdPercent: Int!
   hardStop: Boolean!

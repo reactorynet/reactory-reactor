@@ -3633,7 +3633,7 @@ export default class ReactorConversationService
 
     try {
       if (!this.messageMirror) {
-        this.messageMirror = new ReactorConversationMessageService();
+        this.messageMirror = new ReactorConversationMessageService(undefined, { clientKey: () => this.context?.partner?.key });
       }
       if (!this.messageMirror.isAvailable()) return;
       await this.messageMirror.appendMessage(conversationId, message, attribution);
@@ -3996,7 +3996,7 @@ export default class ReactorConversationService
 
     try {
       if (!this.messageMirror) {
-        this.messageMirror = new ReactorConversationMessageService();
+        this.messageMirror = new ReactorConversationMessageService(undefined, { clientKey: () => this.context?.partner?.key });
       }
       if (!this.messageMirror.isAvailable()) return;
       await this.messageMirror.updateMessageByMongoId(mongoId, message);
@@ -4016,7 +4016,7 @@ export default class ReactorConversationService
 
     try {
       if (!this.messageMirror) {
-        this.messageMirror = new ReactorConversationMessageService();
+        this.messageMirror = new ReactorConversationMessageService(undefined, { clientKey: () => this.context?.partner?.key });
       }
       if (!this.messageMirror.isAvailable()) return;
       await this.messageMirror.deleteByMongoId(messageId);
@@ -4046,7 +4046,7 @@ export default class ReactorConversationService
 
     try {
       if (!this.messageMirror) {
-        this.messageMirror = new ReactorConversationMessageService();
+        this.messageMirror = new ReactorConversationMessageService(undefined, { clientKey: () => this.context?.partner?.key });
       }
       if (!this.messageMirror.isAvailable()) return 0;
       const deleted = await this.messageMirror.deleteForConversation(conversationId);
@@ -4080,7 +4080,7 @@ export default class ReactorConversationService
 
     try {
       if (!this.messageMirror) {
-        this.messageMirror = new ReactorConversationMessageService();
+        this.messageMirror = new ReactorConversationMessageService(undefined, { clientKey: () => this.context?.partner?.key });
       }
       if (!this.messageMirror.isAvailable()) return;
       await this.messageMirror.updateToolCallStatusByToolCallId(conversationId, toolCallId, status);
@@ -4213,7 +4213,7 @@ export default class ReactorConversationService
   private getMessageStore(): ReactorConversationMessageService | null {
     try {
       if (!this.messageMirror) {
-        this.messageMirror = new ReactorConversationMessageService();
+        this.messageMirror = new ReactorConversationMessageService(undefined, { clientKey: () => this.context?.partner?.key });
       }
       return this.messageMirror.isAvailable() ? this.messageMirror : null;
     } catch {
@@ -9583,14 +9583,14 @@ export default class ReactorConversationService
     });
     
     const sseUrl = new URL(safeUrl([sseUriRoot(), `reactor-chat/streaming/sse/${session.sessionId}`]));
-    const clientKeyString = `${this.context.partner.key.toUpperCase().replace(/-/g, "_")}_APPLICATION_USERNAME`;
-    const clientPasswordString = `${this.context.partner.key.toUpperCase().replace(/-/g, "_")}_APPLICATION_PASSWORD`;
     sseUrl.searchParams.set('transport', 'sse');
     sseUrl.searchParams.set('no-upgrade', 'true');
     sseUrl.searchParams.set('jwt', Helpers.getJwtTokenForUser(this.context.user));
     sseUrl.searchParams.set('expiry', new Date(Date.now() + 1000 * 60 * 60 * 24).toISOString());
-    sseUrl.searchParams.set('x-client-key', process.env[clientKeyString] as string || "");
-    sseUrl.searchParams.set('x-client-pwd', process.env[clientPasswordString] as string || "");
+    // This URL is returned to the browser: carry the tenant public key (bound
+    // to the request Origin by the tenant middleware), never the secret.
+    sseUrl.searchParams.set('x-client-key', this.context.partner.key);
+    sseUrl.searchParams.set('x-client-public-key', (this.context.partner as any).publicKey || "");
     
     console.log(`🔌 [ReactorConversationService] SSE URL constructed:`, {
       baseUrl: sseUrl.toString(),

@@ -287,12 +287,6 @@ export const createQueryResult = (
       if (raw.recordset.length > 0) {
         columns = Object.keys(raw.recordset[0]);
       }
-    } else if (raw && Array.isArray(raw)) {
-      // MySQL format
-      rows = raw;
-      if (raw.length > 0) {
-        columns = Object.keys(raw[0]);
-      }
     }
 
     return {

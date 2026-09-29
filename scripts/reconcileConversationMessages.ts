@@ -250,11 +250,11 @@ const insertMessage = async (
        (mongo_id, conversation_id, seq, role, content, thinking, thinking_blocks, images,
         refusal, tool_call_id, tool_name, tool_args, tool_calls, tool_results, tool_errors,
         provider_response, component, rating, annotations, audio, search_text, archived,
-        archived_at, archived_reason, message_ts)
+        archived_at, archived_reason, message_ts, client_key)
      VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7::jsonb,$8::jsonb,
              $9,$10,$11,$12::jsonb,$13::jsonb,$14::jsonb,$15::jsonb,
              $16::jsonb,$17,$18,$19::jsonb,$20::jsonb,$21,$22,
-             $23,$24,$25)`,
+             $23,$24,COALESCE($25, now()),$26)`,
     [
       readMongoId(message),
       conversationId,
@@ -281,6 +281,8 @@ const insertMessage = async (
       message?.archivedAt ? new Date(message.archivedAt) : null,
       message?.archivedReason ?? null,
       message?.timestamp ? new Date(message.timestamp) : null,
+      // WP-B2: every row carries its tenant; these conversations belong to reactory.
+      process.env.REACTOR_SCRIPT_CLIENT_KEY || "reactory",
     ]
   );
 };

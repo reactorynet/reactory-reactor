@@ -1,7 +1,7 @@
 import "reflect-metadata";
 import { DataSource } from "typeorm";
-import ReactorConversationMessage from "../../models/ReactorConversationMessage";
-import ReactorAiFailure from "../../models/ReactorAiFailure";
+import { REACTOR_ENTITIES, REACTOR_MIGRATIONS } from "./schema";
+import { typeormPostgresOptions } from "../../../../database/connectionOptions";
 
 /**
  * Migration-only DataSource for the reactory-reactor module.
@@ -19,14 +19,9 @@ import ReactorAiFailure from "../../models/ReactorAiFailure";
  */
 export default new DataSource({
   type: "postgres",
-  host: process.env.REACTORY_POSTGRES_HOST || process.env.POSTGRES_DB_HOST || "localhost",
-  port: parseInt(process.env.REACTORY_POSTGRES_PORT || process.env.POSTGRES_DB_PORT || "5432", 10),
-  username: process.env.REACTORY_POSTGRES_USER || process.env.POSTGRES_USER || "reactory",
-  password: process.env.REACTORY_POSTGRES_PASSWORD || process.env.POSTGRES_PASSWORD || "reactory",
-  database: process.env.REACTORY_POSTGRES_DB || process.env.POSTGRES_DB || "reactory",
+  ...typeormPostgresOptions(),
   synchronize: false,
   migrationsRun: false,
-  entities: [ReactorConversationMessage, ReactorAiFailure],
-  migrations: [__dirname + "/[0-9]*-*.ts", __dirname + "/[0-9]*-*.js"],
-  migrationsTableName: "reactory_migrations_reactory_reactor",
+  entities: REACTOR_ENTITIES,
+  ...REACTOR_MIGRATIONS,
 });
