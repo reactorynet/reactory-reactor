@@ -33,7 +33,15 @@ const schema: Reactory.Schema.ISchema = {
       type: "string",
       title: "User",
       description:
-        "Scope the report to a single user. Bound by the /admin/ai/usage/:userId and /profile/usage routes. A caller without an admin role is always scoped to themselves, whatever this holds.",
+        "Scope the report to a single user. Accepts a user id or an email address. Bound by the /admin/ai/usage/:userId and /profile/usage routes. A caller without an admin role is always scoped to themselves, whatever this holds.",
+    },
+    userIds: {
+      type: "array",
+      title: "Users (selection)",
+      description:
+        "Scope the report to a selection of users. Add a user id or email and press Enter. The totals cover the whole selection in a single window rather than the sum of separate per-user windows, and every selected user appears in the breakdown below even when they used nothing.",
+      items: { type: "string" },
+      default: [],
     },
     use_case: {
       type: "string",
@@ -113,6 +121,25 @@ const schema: Reactory.Schema.ISchema = {
         type: "object",
         properties: {
           provider: { type: "string", title: "Provider" },
+          totalTokens: { type: "number", title: "Tokens" },
+          costUsd: { type: "number", title: "Cost ($)" },
+          requests: { type: "number", title: "Turns" },
+        },
+      },
+    },
+    userBreakdown: {
+      type: "array",
+      title: "Token Usage by User",
+      description:
+        "Consumption per user for the selected window. This is what makes a per-user or per-selection view possible; previously the summary carried the rows but nothing rendered them.",
+      readOnly: true,
+      items: {
+        type: "object",
+        properties: {
+          userId: { type: "string", title: "User ID" },
+          firstName: { type: "string", title: "First Name" },
+          lastName: { type: "string", title: "Last Name" },
+          email: { type: "string", title: "Email" },
           totalTokens: { type: "number", title: "Tokens" },
           costUsd: { type: "number", title: "Cost ($)" },
           requests: { type: "number", title: "Turns" },

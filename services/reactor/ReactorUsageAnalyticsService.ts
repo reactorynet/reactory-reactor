@@ -37,6 +37,16 @@ import { service } from '@reactory/server-core/application/decorators/service';
 /** Filter accepted by every read on this service. */
 export interface UsageAnalyticsFilter {
   userId?: string;
+  /**
+   * Report over a *selection* of users.
+   *
+   * An administrator needs "these five people" as often as "one person" or
+   * "everyone", and the single `userId` predicate cannot express it: asking for
+   * five users one at a time and adding the totals up produces per-user rows with
+   * no shared window, and asking for no user at all produces the whole tenant.
+   * When present it takes precedence over `userId`.
+   */
+  userIds?: string[];
   provider?: string;
   model?: string;
   personaId?: string;
@@ -336,6 +346,18 @@ export class ReactorUsageAnalyticsService {
     };
 
     push('m.user_id', filter.userId);
+
+    // A multi-user selection is a set predicate, not an equality. `= ANY($n)` keeps
+    // it a single parameterised condition, so the query stays one round trip and
+    // the ids are never interpolated into SQL.
+    const userIds = Array.isArray(filter.userIds)
+      ? filter.userIds.map((id) => String(id ?? '').trim()).filter((id) => id.length > 0)
+      : [];
+    if (userIds.length > 0) {
+      params.push(userIds);
+      conditions.push(`m.user_id = ANY(${params.length})`);
+    }
+
     push('m.model_id', filter.model);
     push('m.persona_id', filter.personaId);
     push('m.use_case', filter.useCase);
@@ -405,6 +427,18 @@ export class ReactorUsageAnalyticsService {
     };
 
     push('f.user_id', filter.userId);
+
+    // Mirrors `buildWhere`: a failure rate must be scoped to exactly the same
+    // selection as the totals it is divided into, or the ratio compares two
+    // different populations.
+    const failureUserIds = Array.isArray(filter.userIds)
+      ? filter.userIds.map((id) => String(id ?? '').trim()).filter((id) => id.length > 0)
+      : [];
+    if (failureUserIds.length > 0) {
+      params.push(failureUserIds);
+      conditions.push(`f.user_id = ANY(${params.length})`);
+    }
+
     push('f.model_id', filter.model);
     push('f.persona_id', filter.personaId);
     push('f.use_case', filter.useCase);
@@ -482,6 +516,7 @@ export class ReactorUsageAnalyticsService {
     // concept of.
     const { clause: failureClause, params: failureParams } = this.buildFailureWhere(filter);
     const proms = promptTokensSql();
+    const comps = completionTokensSql();
     const [
       totalsRows, timeSeriesRows, modelRows, providerRows, userRows, coverageRows,
       failureTotalsRows, failureBreakdownRows, failureDailyRows,

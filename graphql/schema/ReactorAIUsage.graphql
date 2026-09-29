@@ -230,6 +230,12 @@ Filter for querying AI usage summaries and ledger records.
 """
 input ReactorUsageFilterInput {
   userId: String
+  """
+  Report over a selection of users. Aggregated in a single pass, so the totals
+  cover the whole selection rather than the sum of independent windows. Ignored
+  for a caller without an admin role, who is always scoped to themselves.
+  """
+  userIds: [String!]
   organizationId: String
   businessUnitId: String
   provider: String
@@ -238,6 +244,54 @@ input ReactorUsageFilterInput {
   startDate: String
   endDate: String
   use_case: String
+}
+
+"""
+One row per user, whether or not a budget exists for them.
+
+`hasBudget` is the point: "which users have no budget" is not answerable from a
+list of budgets, and an absent row is indistinguishable from a page that failed
+to load.
+"""
+type ReactorUserBudgetOverviewRow {
+  userId: String!
+  user: User
+  """True when a budget document exists for this user."""
+  hasBudget: Boolean!
+  """
+  The budget record, or null when the user is unbudgeted. Present so a client can
+  read limits and consumption through one shape, and can tell `null` (no budget)
+  from a zero limit (a budget of zero).
+  """
+  budget: ReactorUserBudget
+  monthlyTokenLimit: Int
+  dailyTokenLimit: Int
+  monthlyCostLimitUsd: Float
+  dailyCostLimitUsd: Float
+  alertThresholdPercent: Int
+  hardStop: Boolean
+  notes: String
+  """Month-to-date measured consumption. Zero for an unbudgeted user."""
+  currentMonthTokens: Int
+  currentMonthCostUsd: Float
+  currentDayTokens: Int
+  currentDayCostUsd: Float
+  """
+  Budget status, or `NO_BUDGET` when none is configured. `NO_BUDGET` is a
+  distinct value rather than `ACTIVE` so an unbudgeted user is never mistaken for
+  one who is comfortably within their limit.
+  """
+  status: String
+}
+
+"""Filter for the per-user budget overview."""
+input ReactorBudgetOverviewFilterInput {
+  """Matches first name, last name, email or username."""
+  search: String
+  onlyUnbudgeted: Boolean
+  onlyBudgeted: Boolean
+  """Maximum rows to return. Defaults to 500, capped at 2000."""
+  limit: Int
 }
 
 """
@@ -290,6 +344,12 @@ extend type Query {
   ReactorUserBudgets(filter: ReactorBudgetFilterInput): [ReactorUserBudget!]!
 
   """
+  Every user, with their budget attached when one exists (admin view).
+  Backs "who has a budget and who does not".
+  """
+  ReactorUserBudgetOverview(filter: ReactorBudgetOverviewFilterInput): [ReactorUserBudgetOverviewRow!]!
+
+  """
   Get a specific user's budget settings.
   """
   ReactorUserBudget(userId: String!): ReactorUserBudget
@@ -303,6 +363,11 @@ extend type Mutation {
 
   """
   Delete a user's AI usage budget (admin only).
+
+  The id is optional so a delete aimed at a user who has no budget resolves to
+  `false` rather than failing the whole request on a missing variable. The
+  budget table lists every user, so "remove" is reachable on a row that has
+  nothing to remove — that is a no-op, not an error.
   """
-  ReactorDeleteUserBudget(id: String!): Boolean!
+  ReactorDeleteUserBudget(id: String): Boolean!
 }

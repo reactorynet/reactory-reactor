@@ -86,6 +86,7 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
         'formData.personaId': 'filter.personaId',
         'formData.use_case': 'filter.use_case',
         'formData.userId': 'filter.userId',
+        'formData.userIds': 'filter.userIds',
       },
       resultType: 'object',
       resultMap: {
@@ -174,6 +175,7 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
         'formData.personaId': 'filter.personaId',
         'formData.use_case': 'filter.use_case',
         'formData.userId': 'filter.userId',
+        'formData.userIds': 'filter.userIds',
       },
       resultType: 'object',
       resultMap: {

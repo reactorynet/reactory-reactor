@@ -50,7 +50,11 @@ const UsageDashboardForm: Reactory.Forms.IReactoryForm = {
     use_case: "all",
     // Bound by the /admin/ai/usage/:userId and /profile/usage routes. Previously
     // undeclared, so the per-user drill-down silently rendered the global view.
+    // Accepts a user id or an email; the resolver translates the latter.
     userId: "",
+    // A selection of users, scoped and aggregated together. Empty means "all
+    // users", which is the overall report.
+    userIds: [],
   },
 };
 

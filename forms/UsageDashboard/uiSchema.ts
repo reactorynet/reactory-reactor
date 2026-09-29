@@ -33,6 +33,10 @@ const uiSchema: Reactory.Schema.IFormUISchema = {
       use_case: { xs: 12, sm: 6, md: 2, lg: 2, xl: 2 },
     },
     {
+      userId: { xs: 12, sm: 6, md: 4, lg: 4, xl: 4 },
+      userIds: { xs: 12, sm: 6, md: 8, lg: 8, xl: 8 },
+    },
+    {
       totalTokens: {
         xs: 12,
         sm: 6,
@@ -141,6 +145,24 @@ const uiSchema: Reactory.Schema.IFormUISchema = {
       },
     },
     {
+      userBreakdown: {
+        xs: 12,
+        sm: 12,
+        md: 12,
+        lg: 12,
+        xl: 12,
+        sx: {
+          "& .MuiPaper-root": {
+            borderRadius: "14px",
+            border: "1px solid",
+            borderColor: "divider",
+            boxShadow: "0 2px 12px rgba(0,0,0,0.18)",
+            overflow: "hidden",
+          },
+        },
+      },
+    },
+    {
       records: {
         xs: 12,
         sm: 12,
@@ -215,6 +237,28 @@ const uiSchema: Reactory.Schema.IFormUISchema = {
         { value: "support", label: "Support Ticket" },
         { value: "task", label: "Scheduled Task" },
       ],
+    },
+  },
+
+  // Per-user and per-selection scoping.
+  //
+  // The dashboard could not previously answer "how much did these people use":
+  // the summary carried a `userBreakdown` but no schema property declared it, so
+  // nothing rendered it, and `userId` was a free-text id field fed straight into
+  // a `user_id` comparison — an email matched no row and the report came back
+  // empty, which reads exactly like "they used nothing".
+  userId: {
+    "ui:title": "User (single)",
+    "ui:options": {
+      placeholder: "user id or email",
+    },
+  },
+  userIds: {
+    "ui:widget": "ChipArrayWidget",
+    "ui:title": "Users (selection)",
+    "ui:options": {
+      showLabel: true,
+      placeholder: "Add a user id or email and press Enter...",
     },
   },
 
@@ -628,6 +672,72 @@ const uiSchema: Reactory.Schema.IFormUISchema = {
           title: "Cost ($)",
           field: "costUsd",
           format: "$${cellData != null ? Number(cellData).toFixed(4) : '0.0000'}",
+          headerProps: { align: "right" },
+          sx: { textAlign: "right", fontVariantNumeric: "tabular-nums", fontFamily: "monospace", color: "#fbbf24" },
+        },
+        {
+          title: "Turns",
+          field: "requests",
+          format: "${cellData != null ? Number(cellData).toLocaleString() : '0'}",
+          headerProps: { align: "right" },
+          sx: { textAlign: "right", fontVariantNumeric: "tabular-nums", fontFamily: "monospace" },
+        },
+      ],
+    },
+  },
+
+  // Per-user consumption.
+  //
+  // Rendered from `userBreakdown`, which the summary query has always returned but
+  // nothing displayed — so "consumption per user" was collected and then dropped on
+  // the floor. This is also the table a multi-user selection reports into.
+  userBreakdown: {
+    "ui:widget": "MaterialTableWidget",
+    "ui:title": "Token Usage by User",
+    "ui:options": {
+      showLabel: false,
+      search: true,
+      options: {
+        search: true,
+        showTitle: true,
+        pageSize: 10,
+        pageSizeOptions: [5, 10, 25, 50],
+        headerSx: {
+          backgroundColor: "rgba(255, 255, 255, 0.03)",
+        },
+        rowSx: {
+          "&:hover": {
+            backgroundColor: "rgba(255, 255, 255, 0.04)",
+          },
+        },
+      },
+      columns: [
+        {
+          title: "User",
+          field: "email",
+          // Falls back to the id so a row is never unlabelled: the id is what the
+          // report is keyed on, and a missing name is decoration, not data.
+          format:
+            "${cellData || ((formData && (formData.firstName || formData.lastName)) ? `${formData.firstName || ''} ${formData.lastName || ''}`.trim() : formData?.userId || '-')}",
+          sx: { minWidth: 220 },
+        },
+        {
+          title: "User ID",
+          field: "userId",
+          format: "${cellData || '-'}",
+          sx: { fontFamily: "monospace", fontSize: "0.8rem", opacity: 0.8 },
+        },
+        {
+          title: "Tokens",
+          field: "totalTokens",
+          format: "${cellData != null ? Number(cellData).toLocaleString() : '0'}",
+          headerProps: { align: "right" },
+          sx: { textAlign: "right", fontVariantNumeric: "tabular-nums", fontFamily: "monospace" },
+        },
+        {
+          title: "Cost ($)",
+          field: "costUsd",
+          format: "${cellData != null ? Number(cellData).toFixed(4) : '0.0000'}",
           headerProps: { align: "right" },
           sx: { textAlign: "right", fontVariantNumeric: "tabular-nums", fontFamily: "monospace", color: "#fbbf24" },
         },

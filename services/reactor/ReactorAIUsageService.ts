@@ -29,6 +29,8 @@ export interface RecordUsageInput {
 
 export interface UsageSummaryFilter {
   userId?: string;
+  /** Report over a selection of users; see UsageAnalyticsFilter.userIds. */
+  userIds?: string[];
   organizationId?: string;
   businessUnitId?: string;
   provider?: string;
@@ -661,6 +663,12 @@ export class ReactorAIUsageService {
    * Retrieves a single user's budget settings.
    */
   async getUserBudget(userId: string): Promise<ReactorUserBudgetDocument | null> {
+    // A non-ObjectId here (an email, or a truncated id) used to reach `new
+    // ObjectId()` and throw a BSONError, which surfaced as an opaque server error
+    // on the budget screen. "No budget" is the honest answer for anything that is
+    // not an id.
+    if (!ObjectId.isValid(userId)) return null;
+
     return ReactorUserBudgetModel.findOne({ userId: new ObjectId(userId) })
       .populate('userId', 'firstName lastName email avatar')
       .exec();
@@ -691,6 +699,10 @@ export class ReactorAIUsageService {
       notes,
     } = input;
 
+    if (!ObjectId.isValid(userId)) {
+      throw new Error(`Invalid user id "${userId}" for budget assignment`);
+    }
+
     const userObjectId = new ObjectId(userId);
 
     let budget = await ReactorUserBudgetModel.findOne({ userId: userObjectId });
@@ -718,6 +730,12 @@ export class ReactorAIUsageService {
    * Deletes a user's budget limit.
    */
   async deleteUserBudget(id: string): Promise<boolean> {
+    // Nothing to delete is a `false`, not an exception: the budget table lists
+    // every user, so "remove" is reachable on a row that has no budget, and an
+    // id that is absent or not an ObjectId reached `findByIdAndDelete` and threw
+    // a CastError instead of reporting the no-op it is.
+    if (!id || !ObjectId.isValid(id)) return false;
+
     const result = await ReactorUserBudgetModel.findByIdAndDelete(id);
     return !!result;
   }
