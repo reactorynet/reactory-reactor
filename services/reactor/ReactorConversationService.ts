@@ -1752,6 +1752,9 @@ export default class ReactorConversationService
       _id: tempConversationId,
       personaId: conversation.personaId,
       user: this.context.user,
+      // Owning client (WP-B2) — this throwaway summary session is deleted below,
+      // but it must not read as unowned while it exists.
+      clientKey: this.context?.partner?.key ?? undefined,
       modelId: conversation.modelId,
       providerId: provider,
       history: [
@@ -3449,6 +3452,88 @@ export default class ReactorConversationService
   } 
 
   /**
+   * The owning ReactoryClient (tenant) key for conversation documents (WP-B2).
+   *
+   * Deliberately the same source the message store uses for its rows
+   * (`context.partner.key`), so a conversation and its messages always agree on
+   * their owner. Returns null when the request carries no partner.
+   */
+  private resolveConversationClientKey(): string | null {
+    return this.context?.partner?.key ?? null;
+  }
+
+  /**
+   * Tenant clause for session listing and blank-conversation reuse — the paths
+   * that MUST NOT see another client's conversation.
+   *
+   * When a partner is present the clause is a positive equality, so it can only
+   * widen to this client's documents and never to anyone else's. When there is no
+   * partner (CLI, MCP, ops) it is omitted, preserving the pre-scoping behaviour;
+   * reuse stays safe there regardless, because the message store refuses to answer
+   * without a tenant and the reuse check treats an unanswerable store as
+   * "not provably blank".
+   */
+  private conversationClientScope(): Record<string, any> {
+    const key = this.resolveConversationClientKey();
+    return key ? { clientKey: key } : {};
+  }
+
+  /**
+   * Tenant clause for reading a single conversation by id.
+   *
+   * Tolerant of documents written before `clientKey` existed: an unstamped
+   * conversation remains readable, because the only unstamped documents left after
+   * the backfill are genuinely blank (no messages) and refusing them would break
+   * CLI/MCP callers whose context carries no partner. A conversation stamped with a
+   * *different* client's key is never readable.
+   */
+  private conversationReadScope(): Record<string, any> {
+    const key = this.resolveConversationClientKey();
+    if (!key) return {};
+    return {
+      $or: [{ clientKey: key }, { clientKey: { $in: [null, undefined] } }],
+    };
+  }
+
+  /**
+   * The Mongo query that selects a blank conversation eligible for re-use by
+   * "New chat" for this persona, use case and client.
+   *
+   * Extracted so the scoping rules (tenant, use case, and the "looks blank" array
+   * predicate) can be asserted without a database. The tenant clause is the one
+   * that matters here: without it the client-scoped message store below reports a
+   * conversation used on another client as having no content, and it is reused.
+   */
+  private newConversationReuseFilter(personaId: string, useCase: string): Record<string, any> {
+    return {
+      _id: { $ne: null },
+      personaId,
+      user: this.context.user._id,
+      // Only a conversation owned by THIS client may be reused.
+      ...this.conversationClientScope(),
+      // Only reuse a blank conversation of the same kind. Without this a content
+      // session could silently continue in an empty standalone one, inheriting the
+      // wrong scope and edges.
+      use_case: useCase === 'standalone'
+        ? { $in: ['standalone', null, undefined] }
+        : useCase,
+      // A conversation is a reuse candidate when it carries no message array at all, an empty one, or
+      // a single system message. The `$exists: false` arm is load-bearing: a new document persists
+      // `history: []` (the write-path policy exempts it), but a document whose array was retired
+      // carries no field at all — and `{ $size: 0 }` does NOT match a missing field. Without that
+      // arm, blank conversations that lost their array could never be reused.
+      $or: [
+        { history: { $exists: false } },
+        { history: { $size: 0 } }, // Empty history
+        {
+          history: { $size: 1 },
+          "history.0.role": "system", // Only system message
+        },
+      ],
+    };
+  }
+
+  /**
    * Retrieve conversations based on filter criteria
    *
    * This method allows querying conversations with various filters while ensuring
@@ -3500,6 +3585,12 @@ export default class ReactorConversationService
       return [];
     }
     query.user = this.context.user;
+
+    // Tenant scoping (WP-B2). The message store already filters rows by
+    // ReactoryClient, so without the same filter here a chat opened on one client
+    // appeared in another client's history panel — with none of its messages. Scope
+    // the session list exactly as the messages are scoped.
+    Object.assign(query, this.conversationClientScope());
 
     if (personaId) query.personaId = personaId;
     if (modelId) query.modelId = modelId;
@@ -4341,6 +4432,9 @@ export default class ReactorConversationService
 
     const session: any = await ReactorConversationModel.findOne({
       _id: new ObjectId(id),
+      // Never serve another client's conversation by id (WP-B2). Tolerant of
+      // unstamped legacy documents — see conversationReadScope.
+      ...this.conversationReadScope(),
     })
       .populate("user")
       .populate("files")
@@ -4596,6 +4690,10 @@ export default class ReactorConversationService
     // editor never adopts an empty standalone session and vice versa.
     const useCase = options?.use_case || 'standalone';
     const edges = options?.edges || [];
+    // The owning client (WP-B2). Stamped on the reuse update and the insert below,
+    // and pinned on the reuse filter so a blank-looking conversation belonging to a
+    // different client can never be selected as this client's "new" chat.
+    const clientKey = this.resolveConversationClientKey();
     this.context.debug("Creating new conversation", {
       personaId: persona?.id,
       userId: this.context.user?._id,
@@ -4622,30 +4720,7 @@ export default class ReactorConversationService
 
     // Check if there's an existing empty conversation for this persona and user
     // Use findOneAndUpdate with atomic operation to prevent race conditions
-    const reuseFilter: Record<string, any> = {
-      _id: { $ne: null },
-      personaId: persona.id,
-      user: this.context.user._id,
-      // Only reuse a blank conversation of the same kind. Without this a
-      // content session could silently continue in an empty standalone one,
-      // inheriting the wrong scope and edges.
-      use_case: useCase === 'standalone'
-        ? { $in: ['standalone', null, undefined] }
-        : useCase,
-      // A conversation is a reuse candidate when it carries no message array at all, an empty one, or
-      // a single system message. The `$exists: false` arm is load-bearing: a new document persists
-      // `history: []` (the write-path policy exempts it), but a document whose array was retired
-      // carries no field at all — and `{ $size: 0 }` does NOT match a missing field. Without that
-      // arm, blank conversations that lost their array could never be reused.
-      $or: [
-        { history: { $exists: false } },
-        { history: { $size: 0 } }, // Empty history
-        {
-          history: { $size: 1 },
-          "history.0.role": "system", // Only system message
-        },
-      ],
-    };
+    const reuseFilter = this.newConversationReuseFilter(persona.id, useCase);
 
     // The array above stopped being the record of usage when the write path cut over: it is no longer
     // written, so a conversation with hundreds of messages still reads as blank. The store is the only
@@ -4729,6 +4804,10 @@ export default class ReactorConversationService
           // edges reflect what it is about to be used for.
           use_case: useCase,
           edges,
+          // Stamp (or re-affirm) the owning client. `$set` applies to both the
+          // update and the insert, so a newly created conversation carries the key
+          // too; it must not also appear in `$setOnInsert`, which would collide.
+          ...(clientKey ? { clientKey } : {}),
         },
         $setOnInsert: {
           // These fields will only be set if no document is found and a new one is created
@@ -4818,6 +4897,9 @@ export default class ReactorConversationService
         _id: sessionId, // Set the _id explicitly to avoid multiple saves
         personaId: persona.id,
         user: this.context.user,
+        // Owning client (WP-B2): a new conversation must carry the same tenant key
+        // its message rows will be stamped with.
+        clientKey: clientKey ?? undefined,
         modelId: persona.modelId,
         providerId: persona.providerId,
         history: [],
@@ -5828,6 +5910,9 @@ export default class ReactorConversationService
           conversation = new ReactorConversationModel({
             personaId,
             user,
+            // Owning client (WP-B2): keep the session document and its message
+            // rows on the same tenant key.
+            clientKey: this.context?.partner?.key ?? undefined,
             modelId: modelIdOverride || persona.modelId,
             providerId: provider,
             history: [initialHistoryItem],
@@ -8809,6 +8894,8 @@ export default class ReactorConversationService
       const result = await ReactorConversationModel.deleteOne({
         _id: id,
         user: this.context.user,
+        // Only the owning client may delete its conversation (WP-B2).
+        ...this.conversationClientScope(),
       }).exec();
 
       if (result.deletedCount > 0 && this.context?.telemetry) {

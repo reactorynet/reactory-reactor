@@ -323,6 +323,9 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
               _id: subagentSessionId,
               personaId: persona.id,
               user: state.context.user,
+              // Owning client (WP-B2): a sub-agent session must carry the same
+              // tenant key as the parent that spawned it.
+              clientKey: (state.context as any)?.partner?.key ?? undefined,
               modelId: targetModelId,
               providerId: targetProviderId,
               history: [],

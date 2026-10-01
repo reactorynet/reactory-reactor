@@ -41,6 +41,11 @@ import {
 const args = process.argv.slice(2);
 const KEEP = args.includes("--keep");
 
+/** The client the message store is scoped to, and the one the reuse check runs as. */
+const PARTNER_KEY = process.env.REACTOR_SCRIPT_CLIENT_KEY || 'reactory';
+/** A different client, to prove "New chat" there cannot adopt this client's chat. */
+const FOREIGN_PARTNER_KEY = `${PARTNER_KEY}-foreign`;
+
 /**
  * Exactly the predicate `getNewConversation` starts from when it looks for a reusable conversation,
  * before the message store excludes the ones that already hold a transcript.
@@ -82,7 +87,7 @@ const run = async () => {
   const { ReactorPostgresDataSource } = require("../models");
   if (!ReactorPostgresDataSource.isInitialized) await ReactorPostgresDataSource.initialize();
 
-  const store = new ReactorConversationMessageService(undefined, { clientKey: process.env.REACTOR_SCRIPT_CLIENT_KEY || 'reactory' });
+  const store = new ReactorConversationMessageService(undefined, { clientKey: PARTNER_KEY });
   if (!store.isAvailable()) {
     reporter.notApplicable("new-chat reuse", "the message store is not available in this process");
     process.exit(reporter.finish());
@@ -135,6 +140,9 @@ const run = async () => {
     const noop = (): void => undefined;
     svc.context = {
       user: { _id: candidate.user },
+      // The reuse path now reads the tenant from the request context (WP-B2), so
+      // the guard must supply one or it would exercise the no-tenant path.
+      partner: { key: PARTNER_KEY },
       error: noop,
       warn: noop,
       info: noop,
@@ -177,6 +185,40 @@ const run = async () => {
         : `returned ${returned} (rows=${handedBackRows}${
             handedBackHoldsContent ? " *** HOLDS CONTENT ***" : ""
           })`
+    );
+
+    // ── Cross-client: a conversation with content under THIS client must not be ──
+    // handed back when "New chat" runs on a DIFFERENT client. The message store
+    // scoped to the other client reports no content (the rows carry this client's
+    // key), so only the tenant clause on the conversation document stops the reuse.
+    const foreign: any = Object.create(ReactorConversationService.prototype);
+    foreign.context = {
+      user: { _id: candidate.user },
+      partner: { key: FOREIGN_PARTNER_KEY },
+      error: noop,
+      warn: noop,
+      info: noop,
+      debug: noop,
+      log: noop,
+    };
+    foreign.sessionLog = (): void => undefined;
+
+    let foreignReturned: string | null = null;
+    let foreignFailure = "";
+    try {
+      const conversation = await foreign.getNewConversation(
+        { id: candidate.personaId, name: candidate.personaId },
+        { use_case: candidate.use_case || "standalone" }
+      );
+      foreignReturned = conversation ? String(conversation._id) : null;
+    } catch (error: any) {
+      foreignFailure = error?.message ?? String(error);
+    }
+
+    reporter.check(
+      `${id} (content under ${PARTNER_KEY}) is NOT reused by client ${FOREIGN_PARTNER_KEY}`,
+      !foreignFailure && foreignReturned !== id,
+      foreignFailure ? `threw: ${foreignFailure}` : `returned ${foreignReturned}`
     );
 
     // Reported separately so a reused blank is distinguishable from a freshly created one. Either is

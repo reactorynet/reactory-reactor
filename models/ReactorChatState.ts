@@ -202,6 +202,25 @@ export interface ReactorConversationDocument {
     value: string;
     edge_type: string;
   }[]
+  /**
+   * Owning ReactoryClient (tenant) key (WP-B2).
+   *
+   * Conversation *messages* became tenant-scoped in Postgres
+   * (`reactor_conversation_messages.client_key`) at the message-store cutover,
+   * but the *session document* was left unscoped. "Is this conversation blank?"
+   * was then decided against a client-scoped message store from an unscoped
+   * candidate set, so a chat with content on client A read as an unused blank on
+   * client B — and "New chat" on B adopted A's conversation while showing none of
+   * its messages. Stamping the owning key here restores the invariant that a
+   * conversation belongs to exactly one client, matching its message rows, and
+   * lets listing, resuming and reuse all scope on the same value.
+   *
+   * Undefined on documents written before the field existed. `scripts/backfillConversationClientKeys.ts`
+   * derives it from the message rows; anything still unset is either a genuinely
+   * blank conversation (no messages anywhere) or one that predates the message
+   * store, and is never handed to another client as a reusable blank.
+   */
+  clientKey?: string
   // Virtual: resolved session folder path (not persisted to DB)
   readonly sessionFolder?: string
   // Virtual: child conversations spawned from this session (sub-agent delegations)
@@ -264,6 +283,15 @@ const ReactorConversationSchema = new Schema({
   user: {
     type: ObjectId,
     ref: 'User',
+  },
+  // Owning ReactoryClient (tenant) key (WP-B2) — the `key` of the client that
+  // created the conversation, stamped from `context.partner.key` at creation.
+  // Must match `reactor_conversation_messages.client_key` for the same session.
+  // Indexed as the leading key of the session-list lookup below.
+  clientKey: {
+    type: String,
+    default: null,
+    index: true,
   },
   meta: MetaSchema,
   history: [ReactorConversationHistorySchema],
@@ -400,9 +428,11 @@ const ReactorConversationSchema = new Schema({
   },
 });
 
-// Resuming a conversation looks it up by user, persona and use case together,
-// so the three are indexed as one.
-ReactorConversationSchema.index({ user: 1, personaId: 1, use_case: 1, updated: -1 });
+// Listing and resuming a conversation looks it up by client, user, persona and
+// use case together, so those are indexed as one. `clientKey` leads because every
+// session-list and blank-reuse query now pins it (WP-B2) — the session document
+// must be scoped the same way its message rows are.
+ReactorConversationSchema.index({ clientKey: 1, user: 1, personaId: 1, use_case: 1, updated: -1 });
 // Finding the conversation attached to a given workflow or content item.
 ReactorConversationSchema.index({ 'edges.edge_type': 1, 'edges.value': 1 });
 
@@ -699,7 +729,13 @@ ReactorConversationSchema.pre("save", function (next) {
 const ReactorConversationModelName = 'ReactorConversation';
 const ReactorConversationModel = mongoose.model<ReactorConversationDocument>(ReactorConversationModelName, ReactorConversationSchema, 'reactor_conversations');
 
-// Add unique indexes to prevent duplicate conversations
+// Add unique indexes to prevent duplicate conversations.
+//
+// Deliberately NOT prefixed with `clientKey`: `started` is a millisecond
+// timestamp, so two conversations can only collide if created in the exact same
+// millisecond for the same persona and user — and adding `clientKey` here would
+// require dropping and rebuilding an existing unique index for no practical
+// benefit. The cross-client gap this fix closes is in the *queries*, not here.
 ReactorConversationSchema.index(
   { personaId: 1, user: 1, started: 1 }, 
   { 

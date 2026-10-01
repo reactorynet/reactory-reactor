@@ -113,6 +113,9 @@ export const persistChatState = async (state: ChatState): Promise<void> => {
       started,
       history,
       user,
+      // Owning client (WP-B2): stamp the tenant key so this legacy write path
+      // produces the same scoped document as the main service.
+      clientKey: (context as any)?.partner?.key ?? undefined,
       meta,
     });
     await chat.save();
