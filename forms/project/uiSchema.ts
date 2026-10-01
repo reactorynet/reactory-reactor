@@ -55,7 +55,7 @@ const uiSchema: Reactory.Schema.IFormUISchema = {
   },
   "ui:tab-options": {
     useRouter: true,
-    path: "/reactor/service/${formContext.props.serviceId}?tab=${tab_id}",
+    path: "/reactor/project/${formContext.props.serviceId}?tab=${tab_id}",
   },
   overview: {
     "ui:widget": "ProjectOverviewPanel",     

@@ -4,7 +4,7 @@ export const ProviderTableUIOptions: Reactory.Client.Components.IMaterialTableWi
   showLabel: false,
   allowAdd: true,
   allowDelete: true,
-  search: true,
+  search: false,
   dense: true,
   remoteData: true,
   query: 'providers',
@@ -16,6 +16,8 @@ export const ProviderTableUIOptions: Reactory.Client.Components.IMaterialTableWi
   },
   variables: {
     'query.search': 'filter.searchString',
+    'query.isEnabled': 'filter.isEnabled',
+    'query.providerType': 'filter.providerType',
     'query.page': 'paging.page',
     'query.pageSize': 'paging.pageSize',
   },
@@ -31,8 +33,14 @@ export const ProviderTableUIOptions: Reactory.Client.Components.IMaterialTableWi
   },
   deleteButtonProps: {
     icon: 'delete',
-    tooltip: 'Delete AI Provider',
+    tooltip: 'Delete selected AI providers',
     onClick: 'reactor.AiProviderWorkflow@1.0.0/delete',
+    // The grid passes the full page (rows) plus per-row state; the workflow
+    // narrows this to the selected rows.
+    onClickPropsMap: {
+      rows: 'rows',
+      rowsState: 'rowsState',
+    },
   },
   columns: [
     {
@@ -132,6 +140,33 @@ export const ProviderTableUIOptions: Reactory.Client.Components.IMaterialTableWi
       },
     },
   ],
+  componentMap: {
+    DetailsPanel: 'reactor.AiProviderDetailPanel@1.0.0',
+    Toolbar: 'reactor.AiProvidersToolbar@1.0.0',
+  },
+  detailPanelProps: {
+    useCase: 'grid',
+  },
+  detailPanelPropsMap: {
+    'props.rowData': 'provider',
+  },
+  /**
+   * Re-run the query whenever the providers workflow publishes a change, so an
+   * add/edit/delete/test performed anywhere (toolbar, detail panel) refreshes
+   * the grid without a page reload.
+   */
+  refreshEvents: [{ name: 'reactor.AiProviderChanged' }],
+  conditionalRowStyling: [
+    {
+      field: 'isEnabled',
+      condition: 'false',
+      style: { opacity: 0.6 },
+    },
+  ],
+  headerStyle: {
+    fontWeight: 600,
+    fontSize: '0.875rem',
+  },
 };
 
 const uiSchema: any = {

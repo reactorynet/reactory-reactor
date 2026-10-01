@@ -237,7 +237,7 @@ class ReactorProvidersResolver {
     }
 
     const providerService = context.getService<IReactorProviderService>("reactor.ReactorProviderService@1.0.0");
-    return await providerService.deleteModel(args.id);
+    return await providerService.deleteModel(args.id, args.providerId);
   }
 
   @mutation("ReactorTestAiProvider")

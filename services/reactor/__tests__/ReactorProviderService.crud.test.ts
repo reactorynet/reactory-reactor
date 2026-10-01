@@ -211,6 +211,90 @@ describe('ReactorProviderService CRUD & DB Integration', () => {
       expect(mockModelRepo.remove).toHaveBeenCalledWith(modelEntity);
       expect(result).toBe(true);
     });
+
+    /**
+     * The model table's id column is a uuid while the GraphQL API identifies a
+     * model by its model key (ReactorModelDefinition.id === modelKey). These
+     * tests reproduce Postgres semantics - a query against the uuid column with
+     * a model key raises `invalid input syntax for type uuid` rather than
+     * returning no rows - which previously broke every model edit and delete.
+     */
+    it('updates a model addressed by its (non-uuid) model key', async () => {
+      const modelEntity = new ReactoryAiModel();
+      modelEntity.id = '11111111-1111-4111-8111-111111111111';
+      modelEntity.modelKey = 'claude-3-haiku-aws';
+      modelEntity.providerId = 'bedrock';
+      modelEntity.name = 'Claude 3 Haiku';
+
+      const providerEntity = new ReactoryAiProvider();
+      providerEntity.id = 'bedrock';
+      providerEntity.name = 'AWS Bedrock';
+      providerEntity.models = [modelEntity];
+      inMemoryDb.push(providerEntity);
+
+      mockModelRepo.findOne.mockImplementation(({ where }: any) => {
+        if (where?.id !== undefined) {
+          throw new Error(`invalid input syntax for type uuid: "${where.id}"`);
+        }
+        if (where?.providerId === 'bedrock' && where?.modelKey === 'claude-3-haiku-aws') {
+          return Promise.resolve(modelEntity);
+        }
+        return Promise.resolve(null);
+      });
+      mockModelRepo.save.mockImplementation((m: any) => Promise.resolve(m));
+
+      const updated = await service.updateModel('claude-3-haiku-aws', {
+        providerId: 'bedrock',
+        name: 'Claude 3 Haiku (AWS)',
+      });
+
+      expect(mockModelRepo.save).toHaveBeenCalledWith(
+        expect.objectContaining({ modelKey: 'claude-3-haiku-aws', name: 'Claude 3 Haiku (AWS)' })
+      );
+      // The uuid column must never be queried with a model key.
+      expect(
+        mockModelRepo.findOne.mock.calls.some(([arg]: any) => arg?.where?.id === 'claude-3-haiku-aws')
+      ).toBe(false);
+      expect(updated).toBeDefined();
+      expect(updated.name).toBe('Claude 3 Haiku (AWS)');
+    });
+
+    it('deletes a model addressed by its (non-uuid) model key', async () => {
+      const modelEntity = new ReactoryAiModel();
+      modelEntity.id = '22222222-2222-4222-8222-222222222222';
+      modelEntity.modelKey = 'claude-3-haiku-aws';
+      modelEntity.providerId = 'bedrock';
+
+      mockModelRepo.findOne.mockImplementation(({ where }: any) => {
+        if (where?.id !== undefined) {
+          throw new Error(`invalid input syntax for type uuid: "${where.id}"`);
+        }
+        if (where?.providerId === 'bedrock' && where?.modelKey === 'claude-3-haiku-aws') {
+          return Promise.resolve(modelEntity);
+        }
+        return Promise.resolve(null);
+      });
+
+      const result = await service.deleteModel('claude-3-haiku-aws', 'bedrock');
+
+      expect(result).toBe(true);
+      expect(mockModelRepo.remove).toHaveBeenCalledWith(modelEntity);
+    });
+
+    it('still resolves a model by uuid when a uuid is supplied', async () => {
+      const uuid = '33333333-3333-4333-8333-333333333333';
+      const modelEntity = new ReactoryAiModel();
+      modelEntity.id = uuid;
+      modelEntity.modelKey = 'some-model';
+      modelEntity.providerId = 'openai';
+
+      mockModelRepo.findOne.mockImplementation(({ where }: any) =>
+        Promise.resolve(where?.id === uuid ? modelEntity : null)
+      );
+
+      expect(await service.deleteModel(uuid)).toBe(true);
+      expect(mockModelRepo.remove).toHaveBeenCalledWith(modelEntity);
+    });
   });
 
   describe('testProviderConnection', () => {

@@ -1764,6 +1764,9 @@ export interface IReactorProviderService extends Reactory.Service.IReactoryServi
   /**
    * Delete an AI model entity
    */
+  /**
+   * Delete an AI model entity and its models
+   */
   deleteModel(modelId: string): Promise<boolean>;
 
   /**

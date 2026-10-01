@@ -196,9 +196,19 @@ describe('ReactorProvidersResolver CRUD & Admin Queries/Mutations', () => {
       expect(result.name).toBe('Updated GPT-4o');
     });
 
-    it('deletes an AI model', async () => {
+    it('deletes an AI model, forwarding the providerId for disambiguation', async () => {
+      const result = await resolver.ReactorDeleteAiModel(
+        {},
+        { id: 'gpt-4o', providerId: 'openai' },
+        mockContext
+      );
+      expect(mockProviderService.deleteModel).toHaveBeenCalledWith('gpt-4o', 'openai');
+      expect(result).toBe(true);
+    });
+
+    it('deletes an AI model without a providerId', async () => {
       const result = await resolver.ReactorDeleteAiModel({}, { id: 'gpt-4o' }, mockContext);
-      expect(mockProviderService.deleteModel).toHaveBeenCalledWith('gpt-4o');
+      expect(mockProviderService.deleteModel).toHaveBeenCalledWith('gpt-4o', undefined);
       expect(result).toBe(true);
     });
 

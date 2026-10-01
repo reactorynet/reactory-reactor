@@ -4,7 +4,7 @@ export const ModelTableUIOptions: Reactory.Client.Components.IMaterialTableWidge
   showLabel: false,
   allowAdd: true,
   allowDelete: true,
-  search: true,
+  search: false,
   dense: true,
   remoteData: true,
   query: 'models',
@@ -31,8 +31,14 @@ export const ModelTableUIOptions: Reactory.Client.Components.IMaterialTableWidge
   },
   deleteButtonProps: {
     icon: 'delete',
-    tooltip: 'Delete AI Model',
+    tooltip: 'Delete selected AI models',
     onClick: 'reactor.AiModelWorkflow@1.0.0/delete',
+    // The grid passes the full page (rows) plus per-row state; the workflow
+    // narrows this to the selected rows.
+    onClickPropsMap: {
+      rows: 'rows',
+      rowsState: 'rowsState',
+    },
   },
   columns: [
     {
@@ -146,7 +152,48 @@ export const ModelTableUIOptions: Reactory.Client.Components.IMaterialTableWidge
         },
       },
     },
+    {
+      title: 'Enabled',
+      field: 'isEnabled',
+      width: '90px',
+      component: 'core.LabelComponent@1.0.0',
+      props: {
+        uiSchema: {
+          'ui:options': {
+            variant: 'caption',
+            format: '${rowData.isEnabled !== false ? "Enabled" : "Disabled"}',
+          },
+        },
+      },
+    },
   ],
+  componentMap: {
+    DetailsPanel: 'reactor.AiModelDetailPanel@1.0.0',
+    Toolbar: 'reactor.AiModelsToolbar@1.0.0',
+  },
+  detailPanelProps: {
+    useCase: 'grid',
+  },
+  detailPanelPropsMap: {
+    'props.rowData': 'model',
+  },
+  /**
+   * Re-run the query whenever the models workflow publishes a change, so an
+   * add/edit/delete performed anywhere (toolbar, detail panel) refreshes the
+   * grid without a page reload.
+   */
+  refreshEvents: [{ name: 'reactor.AiModelChanged' }],
+  conditionalRowStyling: [
+    {
+      field: 'isEnabled',
+      condition: 'false',
+      style: { opacity: 0.6 },
+    },
+  ],
+  headerStyle: {
+    fontWeight: 600,
+    fontSize: '0.875rem',
+  },
 };
 
 const uiSchema: any = {

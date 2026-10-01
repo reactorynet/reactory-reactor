@@ -27,6 +27,7 @@ type ReactorModelDefinition {
   version: String
   capabilities: [String!]!
   contextLength: Int
+  maxOutputTokens: Int
   costPerToken: Float
   inputCostPerToken: Float
   outputCostPerToken: Float
@@ -41,6 +42,8 @@ type ReactorModelDefinition {
   supportedMediaTypes: [String]
   sampling: ReactorModelSamplingSupport
   thinking: ReactorModelThinkingSupport
+  isEnabled: Boolean
+  sortOrder: Int
 }
 
 """

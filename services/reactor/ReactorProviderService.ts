@@ -28,6 +28,44 @@ export const DEFAULT_CONTEXT_LENGTH = 200000;
  */
 const CONFIGURED_CONTEXT_LENGTH_ENV = "REACTORY_DEFAULT_CONTEXT_LENGTH";
 
+/**
+ * The AI model table's primary key is a uuid, but the public GraphQL API
+ * identifies a model by its *model key* (e.g. `claude-3-haiku-aws`) - the value
+ * exposed as `ReactorModelDefinition.id`. Querying the uuid column with a model
+ * key makes Postgres raise `invalid input syntax for type uuid`, so the id
+ * lookup is only attempted when the value is genuinely a uuid.
+ */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function looksLikeUuid(value: unknown): boolean {
+  return typeof value === 'string' && UUID_PATTERN.test(value.trim());
+}
+
+/**
+ * Resolves a ReactoryAiModel entity from either its uuid (internal callers) or
+ * its model key (GraphQL callers). When `providerId` is supplied the key lookup
+ * is scoped to that provider, matching the (providerId, modelKey) unique index.
+ */
+async function findModelEntity(
+  modelRepo: any,
+  modelId: string,
+  providerId?: string
+): Promise<ReactoryAiModel | null> {
+  const lookupId = `${modelId ?? ''}`.trim();
+  if (!lookupId) return null;
+
+  if (looksLikeUuid(lookupId)) {
+    const byId = await modelRepo.findOne({ where: { id: lookupId } });
+    if (byId) return byId;
+  }
+
+  if (providerId) {
+    return modelRepo.findOne({ where: { providerId, modelKey: lookupId } });
+  }
+
+  return modelRepo.findOne({ where: { modelKey: lookupId } });
+}
+
 export interface ResolvedCredentials {
   apiKey?: string;
   endpoint?: string;
@@ -56,9 +94,12 @@ function entityToProviderConfig(entity: ReactoryAiProvider): ProviderConfig {
     itpm: m.itpm,
     otpm: m.otpm,
     maxParallelRequests: m.maxParallelRequests,
+    maxOutputTokens: m.maxOutputTokens,
     supportsStreaming: m.supportsStreaming,
     supportedTools: m.supportedTools,
     supportedMediaTypes: m.supportedMediaTypes,
+    isEnabled: m.isEnabled,
+    sortOrder: m.sortOrder,
     sampling: m.samplingConfig,
     thinking: m.thinkingConfig,
   }));
@@ -66,8 +107,11 @@ function entityToProviderConfig(entity: ReactoryAiProvider): ProviderConfig {
   return {
     id: entity.id,
     name: entity.name,
+    description: entity.description,
+    providerType: entity.providerType,
     endpointUrl: entity.endpointUrl,
     apiVersion: entity.apiVersion,
+    isEnabled: entity.isEnabled,
     models,
     defaultModel: entity.defaultModelId,
     capabilities: entity.capabilities || [],
@@ -650,6 +694,8 @@ class ReactorProviderService implements IReactorProviderService {
     const config: ProviderConfig = {
       id,
       name: input.name,
+      description: input.description,
+      providerType: input.providerType || id.toLowerCase(),
       endpointUrl: input.endpointUrl,
       apiVersion: input.apiVersion,
       authComponentFqn: input.authComponentFqn,
@@ -659,6 +705,7 @@ class ReactorProviderService implements IReactorProviderService {
       credentialEnvVars: input.credentialEnvVars || {},
       roles: input.roles || ['USER'],
       rateLimits: input.rateLimits,
+      isEnabled: input.isEnabled !== false,
       models: [],
       status: {
         available: false,
@@ -704,6 +751,9 @@ class ReactorProviderService implements IReactorProviderService {
     const provider = this.providers.get(id);
     if (!provider) throw new Error(`Provider '${id}' not found`);
     if (input.name !== undefined) provider.name = input.name;
+    if (input.description !== undefined) provider.description = input.description;
+    if (input.providerType !== undefined) provider.providerType = input.providerType;
+    if (input.isEnabled !== undefined) provider.isEnabled = input.isEnabled;
     if (input.endpointUrl !== undefined) provider.endpointUrl = input.endpointUrl;
     if (input.apiVersion !== undefined) provider.apiVersion = input.apiVersion;
     if (input.authComponentFqn !== undefined) provider.authComponentFqn = input.authComponentFqn;
@@ -783,6 +833,7 @@ class ReactorProviderService implements IReactorProviderService {
       version: input.version,
       capabilities: input.capabilities || [],
       contextLength: input.contextLength,
+      maxOutputTokens: input.maxOutputTokens,
       supportsStreaming: input.supportsStreaming !== false,
       supportedTools: input.supportedTools || ['function-calling'],
       supportedMediaTypes: input.supportedMediaTypes || ['text'],
@@ -792,6 +843,9 @@ class ReactorProviderService implements IReactorProviderService {
       rpm: input.rpm,
       itpm: input.itpm,
       otpm: input.otpm,
+      maxParallelRequests: input.maxParallelRequests,
+      isEnabled: input.isEnabled !== false,
+      sortOrder: input.sortOrder || 0,
       sampling: input.sampling,
       thinking: input.thinking,
     };
@@ -805,10 +859,9 @@ class ReactorProviderService implements IReactorProviderService {
   async updateModel(modelId: string, input: any): Promise<ProviderModelConfig> {
     if (ReactorPostgresDataSource.isInitialized) {
       const modelRepo = ReactorPostgresDataSource.getRepository(ReactoryAiModel);
-      let model = await modelRepo.findOne({ where: { id: modelId } });
-      if (!model && input.providerId) {
-        model = await modelRepo.findOne({ where: { providerId: input.providerId, modelKey: modelId } });
-      }
+      // `modelId` is the model key when called from GraphQL, so it must not be
+      // used verbatim against the uuid primary key column.
+      const model = await findModelEntity(modelRepo, modelId, input?.providerId);
       if (!model) throw new Error(`Model '${modelId}' not found`);
       if (input.name !== undefined) model.name = input.name;
       if (input.version !== undefined) model.version = input.version;
@@ -841,8 +894,22 @@ class ReactorProviderService implements IReactorProviderService {
         if (input.name !== undefined) m.name = input.name;
         if (input.version !== undefined) m.version = input.version;
         if (input.contextLength !== undefined) m.contextLength = input.contextLength;
+        if (input.maxOutputTokens !== undefined) m.maxOutputTokens = input.maxOutputTokens;
         if (input.capabilities !== undefined) m.capabilities = input.capabilities;
         if (input.supportsStreaming !== undefined) m.supportsStreaming = input.supportsStreaming;
+        if (input.supportedTools !== undefined) m.supportedTools = input.supportedTools;
+        if (input.supportedMediaTypes !== undefined) m.supportedMediaTypes = input.supportedMediaTypes;
+        if (input.inputCostPerTokenUsdCents !== undefined) m.inputCostPerTokenUsdCents = input.inputCostPerTokenUsdCents;
+        if (input.outputCostPerTokenUsdCents !== undefined) m.outputCostPerTokenUsdCents = input.outputCostPerTokenUsdCents;
+        if (input.costPerToken !== undefined) m.costPerToken = input.costPerToken;
+        if (input.rpm !== undefined) m.rpm = input.rpm;
+        if (input.itpm !== undefined) m.itpm = input.itpm;
+        if (input.otpm !== undefined) m.otpm = input.otpm;
+        if (input.maxParallelRequests !== undefined) m.maxParallelRequests = input.maxParallelRequests;
+        if (input.isEnabled !== undefined) m.isEnabled = input.isEnabled;
+        if (input.sortOrder !== undefined) m.sortOrder = input.sortOrder;
+        if (input.sampling !== undefined) m.sampling = input.sampling;
+        if (input.thinking !== undefined) m.thinking = input.thinking;
         return m;
       }
     }
@@ -852,13 +919,10 @@ class ReactorProviderService implements IReactorProviderService {
   /**
    * Delete an AI model entity
    */
-  async deleteModel(modelId: string): Promise<boolean> {
+  async deleteModel(modelId: string, providerId?: string): Promise<boolean> {
     if (ReactorPostgresDataSource.isInitialized) {
       const modelRepo = ReactorPostgresDataSource.getRepository(ReactoryAiModel);
-      let model = await modelRepo.findOne({ where: { id: modelId } });
-      if (!model) {
-        model = await modelRepo.findOne({ where: { modelKey: modelId } });
-      }
+      const model = await findModelEntity(modelRepo, modelId, providerId);
       if (!model) return false;
       await modelRepo.remove(model);
       await this.ensureLoaded(true);

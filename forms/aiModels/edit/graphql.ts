@@ -1,73 +1,21 @@
 import Reactory from '@reactorynet/reactory-core';
 
-const modelsQuery: Reactory.Forms.IReactoryFormQuery = {
-  name: 'ReactorAiModelsAdmin',
-  text: `query ReactorAiModelsAdmin($providerId: String, $searchString: String, $paging: PagingRequest) {
-    ReactorAiModelsAdmin(providerId: $providerId, searchString: $searchString, paging: $paging) {
-      paging {
-        page
-        pageSize
-        hasNext
-        total
-      }
-      models {
-        id
-        providerId
-        name
-        version
-        capabilities
-        contextLength
-        maxOutputTokens
-        costPerToken
-        inputCostPerToken
-        outputCostPerToken
-        inputCostPerTokenUsdCents
-        outputCostPerTokenUsdCents
-        rpm
-        itpm
-        otpm
-        maxParallelRequests
-        supportsStreaming
-        supportedTools
-        supportedMediaTypes
-        isEnabled
-        sortOrder
-        sampling {
-          temperature
-          topP
-          topK
-        }
-        thinking {
-          mode
-          effort
-          display
-        }
-      }
-    }
-  }`,
-  variables: {
-    'query.search': 'searchString',
-    'query.page': 'paging.page',
-    'query.pageSize': 'paging.pageSize',
-  },
-  resultType: 'object',
-  resultMap: {
-    'paging': 'paging',
-    'models': 'data',
-  },
-};
-
+/**
+ * GraphQL definition for the AI Model editor form.
+ *
+ * The toolbar submits through its custom `onSubmit` handler
+ * (AiModelWorkflow.saveModel) so create vs. update and the change event are
+ * handled explicitly. These definitions remain so the form is self-describing
+ * and usable without a custom handler.
+ */
 const graphql: Reactory.Forms.IFormGraphDefinition = {
-  query: modelsQuery,
-  queries: {
-    models: modelsQuery,
-  },
   mutation: {
     new: {
       name: 'ReactorCreateAiModel',
       text: `mutation ReactorCreateAiModel($input: ReactorCreateAiModelInput!) {
         ReactorCreateAiModel(input: $input) {
           id
+          providerId
           name
           version
           contextLength
@@ -81,17 +29,27 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
         'formData.name': 'input.name',
         'formData.version': 'input.version',
         'formData.contextLength': 'input.contextLength',
+        'formData.maxOutputTokens': 'input.maxOutputTokens',
         'formData.capabilities': 'input.capabilities',
         'formData.supportsStreaming': 'input.supportsStreaming',
+        'formData.supportedTools': 'input.supportedTools',
+        'formData.supportedMediaTypes': 'input.supportedMediaTypes',
         'formData.inputCostPerTokenUsdCents': 'input.inputCostPerTokenUsdCents',
         'formData.outputCostPerTokenUsdCents': 'input.outputCostPerTokenUsdCents',
+        'formData.costPerToken': 'input.costPerToken',
         'formData.rpm': 'input.rpm',
         'formData.itpm': 'input.itpm',
         'formData.otpm': 'input.otpm',
+        'formData.maxParallelRequests': 'input.maxParallelRequests',
+        'formData.sampling': 'input.sampling',
+        'formData.thinking': 'input.thinking',
+        'formData.isEnabled': 'input.isEnabled',
+        'formData.sortOrder': 'input.sortOrder',
       },
       resultType: 'object',
       resultMap: {
         id: 'id',
+        name: 'name',
       },
     },
     edit: {
@@ -99,6 +57,7 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
       text: `mutation ReactorUpdateAiModel($id: String!, $input: ReactorUpdateAiModelInput!, $providerId: String) {
         ReactorUpdateAiModel(id: $id, input: $input, providerId: $providerId) {
           id
+          providerId
           name
           version
           contextLength
@@ -107,22 +66,32 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
         }
       }`,
       variables: {
-        'formData.id': 'id',
+        'formData.modelKey': 'id',
         'formData.providerId': 'providerId',
         'formData.name': 'input.name',
         'formData.version': 'input.version',
         'formData.contextLength': 'input.contextLength',
+        'formData.maxOutputTokens': 'input.maxOutputTokens',
         'formData.capabilities': 'input.capabilities',
         'formData.supportsStreaming': 'input.supportsStreaming',
+        'formData.supportedTools': 'input.supportedTools',
+        'formData.supportedMediaTypes': 'input.supportedMediaTypes',
         'formData.inputCostPerTokenUsdCents': 'input.inputCostPerTokenUsdCents',
         'formData.outputCostPerTokenUsdCents': 'input.outputCostPerTokenUsdCents',
+        'formData.costPerToken': 'input.costPerToken',
         'formData.rpm': 'input.rpm',
         'formData.itpm': 'input.itpm',
         'formData.otpm': 'input.otpm',
+        'formData.maxParallelRequests': 'input.maxParallelRequests',
+        'formData.sampling': 'input.sampling',
+        'formData.thinking': 'input.thinking',
+        'formData.isEnabled': 'input.isEnabled',
+        'formData.sortOrder': 'input.sortOrder',
       },
       resultType: 'object',
       resultMap: {
         id: 'id',
+        name: 'name',
       },
     },
   },

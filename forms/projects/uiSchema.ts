@@ -356,7 +356,7 @@ export const ProjectTableUIOptions: Reactory.Client.Components.IMaterialTableWid
           uiSchema: {
             "ui:options": {
               format:
-                "/reactor/service/${rowData?.name?.toLowerCase()}?tab=overview",
+                "/reactor/project/${rowData?.name?.toLowerCase()}?tab=overview",
               title: "${rowData.name}",
               icon: "navigate_next",
               sx: {

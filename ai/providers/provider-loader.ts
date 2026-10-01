@@ -54,9 +54,14 @@ export interface ProviderModelConfig {
   itpm?: number | null;
   otpm?: number | null;
   maxParallelRequests?: number;
+  maxOutputTokens?: number;
   supportsStreaming?: boolean;
   supportedTools?: string[];
   supportedMediaTypes?: string[];
+  /** Persisted enable flag. Only present for DB-backed providers. */
+  isEnabled?: boolean;
+  /** Display/sort ordering within a provider. Only present for DB-backed providers. */
+  sortOrder?: number;
   /**
    * Per-model sampling capability overrides. Absent → all sampling params
    * supported. See {@link resolveSamplingSupport} for how this is read.
@@ -81,6 +86,14 @@ export interface ProviderStatusConfig {
 export interface ProviderConfig {
   id: string;
   name: string;
+  /** Free-form description. Only present for DB-backed providers. */
+  description?: string;
+  /**
+   * Provider integration type (e.g. `openai`, `azure-openai`). Distinct from the
+   * display name and, for DB-backed providers, stored on the entity. Falls back to
+   * the id when absent.
+   */
+  providerType?: string;
   endpointUrl?: string;
   apiVersion?: string;
   models: ProviderModelConfig[];
@@ -91,6 +104,8 @@ export interface ProviderConfig {
   credentialEnvVars?: Record<string, string>;
   authComponentFqn?: string;
   roles?: string[];
+  /** Persisted enable flag. Only present for DB-backed providers. */
+  isEnabled?: boolean;
   rateLimits?: {
     requestsPerMinute?: number;
     tokensPerMinute?: number;

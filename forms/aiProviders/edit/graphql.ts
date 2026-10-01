@@ -1,94 +1,15 @@
 import Reactory from '@reactorynet/reactory-core';
 
-const providersQuery: Reactory.Forms.IReactoryFormQuery = {
-  name: 'ReactorAiProvidersAdmin',
-  text: `query ReactorAiProvidersAdmin($filter: ReactorAiProviderFilterInput, $paging: PagingRequest) {
-    ReactorAiProvidersAdmin(filter: $filter, paging: $paging) {
-      paging {
-        page
-        pageSize
-        hasNext
-        total
-      }
-      providers {
-        id
-        name
-        description
-        providerType
-        endpointUrl
-        apiVersion
-        defaultModel
-        authComponentFqn
-        isEnabled
-        capabilities
-        roles
-        credentialRequirements
-        rateLimits {
-          requestsPerMinute
-          tokensPerMinute
-          concurrentRequests
-        }
-        status {
-          available
-          lastChecked
-          uptime
-          responseTime
-          errorRate
-          quotaRemaining
-        }
-        models {
-          id
-          providerId
-          name
-          version
-          contextLength
-          maxOutputTokens
-          supportsStreaming
-          supportedTools
-          supportedMediaTypes
-          capabilities
-          inputCostPerTokenUsdCents
-          outputCostPerTokenUsdCents
-          costPerToken
-          rpm
-          itpm
-          otpm
-          maxParallelRequests
-          isEnabled
-          sortOrder
-          sampling {
-            temperature
-            topP
-            topK
-          }
-          thinking {
-            mode
-            effort
-            display
-          }
-        }
-      }
-    }
-  }`,
-  variables: {
-    'query.search': 'filter.searchString',
-    'query.isEnabled': 'filter.isEnabled',
-    'query.providerType': 'filter.providerType',
-    'query.page': 'paging.page',
-    'query.pageSize': 'paging.pageSize',
-  },
-  resultType: 'object',
-  resultMap: {
-    'paging': 'paging',
-    'providers': 'data',
-  },
-};
-
+/**
+ * GraphQL definition for the AI Provider editor form.
+ *
+ * The toolbar submits through its custom `onSubmit` handler (which runs
+ * `AiProviderWorkflow.saveProvider`) so that create vs. update and the change
+ * event are handled explicitly. These definitions remain on the form so the
+ * form is self-describing and usable without a custom handler (the ReactoryForm
+ * data manager falls back to `mutation.new` / `mutation.edit`).
+ */
 const graphql: Reactory.Forms.IFormGraphDefinition = {
-  query: providersQuery,
-  queries: {
-    providers: providersQuery,
-  },
   mutation: {
     new: {
       name: 'ReactorCreateAiProvider',
@@ -96,9 +17,12 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
         ReactorCreateAiProvider(input: $input) {
           id
           name
+          description
+          providerType
           endpointUrl
           apiVersion
           defaultModel
+          authComponentFqn
           isEnabled
         }
       }`,
@@ -111,11 +35,16 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
         'formData.apiVersion': 'input.apiVersion',
         'formData.defaultModel': 'input.defaultModelId',
         'formData.authComponentFqn': 'input.authComponentFqn',
+        'formData.capabilities': 'input.capabilities',
+        'formData.roles': 'input.roles',
+        'formData.credentialRequirements': 'input.credentialRequirements',
+        'formData.rateLimits': 'input.rateLimits',
         'formData.isEnabled': 'input.isEnabled',
       },
       resultType: 'object',
       resultMap: {
         id: 'id',
+        name: 'name',
       },
     },
     edit: {
@@ -124,9 +53,12 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
         ReactorUpdateAiProvider(id: $id, input: $input) {
           id
           name
+          description
+          providerType
           endpointUrl
           apiVersion
           defaultModel
+          authComponentFqn
           isEnabled
         }
       }`,
@@ -139,11 +71,16 @@ const graphql: Reactory.Forms.IFormGraphDefinition = {
         'formData.apiVersion': 'input.apiVersion',
         'formData.defaultModel': 'input.defaultModelId',
         'formData.authComponentFqn': 'input.authComponentFqn',
+        'formData.capabilities': 'input.capabilities',
+        'formData.roles': 'input.roles',
+        'formData.credentialRequirements': 'input.credentialRequirements',
+        'formData.rateLimits': 'input.rateLimits',
         'formData.isEnabled': 'input.isEnabled',
       },
       resultType: 'object',
       resultMap: {
         id: 'id',
+        name: 'name',
       },
     },
   },

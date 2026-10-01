@@ -15,7 +15,11 @@ import ReactorProjectTeamForm from "./projectTeamPanel";
 import ReactorProjectDeploymentsForm from "./projectDeployments";
 import ProviderConfigForm from "./providerConfig";
 import AiProvidersGridForm from "./aiProviders";
+import AiProviderEditForm from "./aiProviders/edit";
+import AiProviderCreateForm from "./aiProviders/create";
 import AiModelsGridForm from "./aiModels";
+import AiModelEditForm from "./aiModels/edit";
+import AiModelCreateForm from "./aiModels/create";
 import ReactorAgentGitCommitForm from "./AgentGitCommit";
 import UsageDashboardForm from "./UsageDashboard";
 import UserBudgetAdminForm from "./UserBudgetAdmin";
@@ -38,7 +42,11 @@ export default [
   ReactorProjectDeploymentsForm,
   ProviderConfigForm,
   AiProvidersGridForm,
+  AiProviderEditForm,
+  AiProviderCreateForm,
   AiModelsGridForm,
+  AiModelEditForm,
+  AiModelCreateForm,
   UsageDashboardForm,
   UserBudgetAdminForm,
   ExternalSourcesForm,
