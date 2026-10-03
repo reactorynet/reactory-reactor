@@ -116,13 +116,65 @@ describe("ReactorConversationService - provider resolution", () => {
       expect(result.config.apiKey).toBe("ds-key");
       expect(result.config.apiBaseURL).toBe("https://api.deepseek.com/v1");
       expect(result.config.project).toBeUndefined();
+      // The foreign config must NOT be forwarded: the credential resolver's
+      // `persona` rung is provider-agnostic and would hand the Google key back
+      // for a DeepSeek request (the client-tool mis-route).
       expect(service.providerService.resolveProviderCredentials).toHaveBeenCalledWith(
-        "deepseek",
-        persona.config
+        "deepseek"
       );
       // The original persona object must not be mutated.
       expect(persona.providerId).toBe("google");
       expect(persona.config.apiKey).toBe("AIzaSy-google-key");
+    });
+
+    it("does not forward a foreign provider's config to the credential resolver", async () => {
+      const resolveProviderCredentials = jest.fn(async () => ({
+        apiKey: "ds-key",
+        endpoint: "https://api.deepseek.com/v1",
+        source: "user" as const,
+      }));
+      service.providerService = { resolveProviderCredentials };
+
+      const persona: any = {
+        providerId: "google",
+        config: {
+          apiKey: "AIzaSy-google-key",
+          apiBaseURL: "https://generativelanguage.googleapis.com",
+        },
+      };
+
+      const result = await service.resolveRoutedPersona("deepseek", persona);
+
+      // Called for the routed provider only — never with the foreign config.
+      expect(resolveProviderCredentials).toHaveBeenCalledWith("deepseek");
+      expect((resolveProviderCredentials as any).mock.calls[0][1]).toBeUndefined();
+      // The routed credential wins; the Google key never survives.
+      expect(result.config.apiKey).toBe("ds-key");
+      expect(result.config.apiKey).not.toBe("AIzaSy-google-key");
+      expect(result.config.apiBaseURL).toBe("https://api.deepseek.com/v1");
+    });
+
+    it("never adopts a persona-sourced credential for a routed provider", async () => {
+      service.providerService = {
+        resolveProviderCredentials: jest.fn(async () => ({
+          source: "persona" as const,
+          apiKey: "AIzaSy-google-key",
+          endpoint: "https://generativelanguage.googleapis.com",
+        })),
+      };
+
+      const persona: any = {
+        providerId: "google",
+        config: { apiKey: "AIzaSy-google-key" },
+      };
+
+      const result = await service.resolveRoutedPersona("deepseek", persona);
+
+      // Regression: a DeepSeek conversation with a Google persona key used to
+      // send the Google key to DeepSeek and fail with a 401.
+      expect(result.providerId).toBe("deepseek");
+      expect(result.config.apiKey).toBeUndefined();
+      expect(result.config.apiBaseURL).toBeUndefined();
     });
 
     it("keeps the persona's own credentials when the routed provider is the same", async () => {

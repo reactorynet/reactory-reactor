@@ -2999,7 +2999,8 @@ export default class ReactorConversationService
    */
   private async resolveRoutedPersona(
     provider: string,
-    persona: IAIPersona
+    persona: IAIPersona,
+    chatSessionId?: string
   ): Promise<IAIPersona> {
     if (!persona) return persona;
 
@@ -3025,12 +3026,26 @@ export default class ReactorConversationService
       config: carriedConfig as any,
     };
 
+    // Resolve credentials for the ROUTED provider only.
+    //
+    // `persona.config` is foreign by construction at this point: we only reach
+    // here when `persona.providerId !== provider`, so every credential it carries
+    // belongs to the *other* provider. Forwarding it let
+    // `resolveProviderCredentials` hand back that foreign key — its `persona` rung
+    // is provider-agnostic — which was then written onto the routed persona and
+    // used as the apiKey for the routed endpoint. That is exactly how a DeepSeek
+    // request ended up authenticated with a Google key:
+    //   `401 Authentication Fails, Your api key: ****MUFM is invalid`.
+    // The two other call sites (`sendMessage`, `generateCompactionSummary`) already
+    // discard a `persona`-sourced result; this one — reached by every client-tool
+    // continuation — did not.
+    let credentialSource = "none";
     try {
       const creds = await this.providerService?.resolveProviderCredentials?.(
-        normalized,
-        persona.config as any
+        normalized
       );
-      if (creds && creds.source !== "none") {
+      credentialSource = creds?.source ?? "none";
+      if (creds && creds.source !== "none" && creds.source !== "persona") {
         routedPersona.config = {
           ...carriedConfig,
           ...(creds.apiKey ? { apiKey: creds.apiKey } : {}),
@@ -3043,10 +3058,32 @@ export default class ReactorConversationService
       // to their own environment defaults.
     }
 
-    this.sessionLog("debug", "Routed persona normalised to provider", {
-      fromProvider: personaProvider || null,
-      toProvider: normalized,
-    });
+    // A routed provider that resolved no credentials of its own will be called
+    // with whatever the provider service finds in the environment. That is
+    // recoverable (and correct) — but it must never be silent, because the
+    // failure mode it replaces was a foreign key sent to the wrong endpoint.
+    if (credentialSource === "none") {
+      this.sessionLog(
+        "warn",
+        "Routed provider has no configured credentials; relying on environment defaults",
+        {
+          provider: normalized,
+          personaProvider: personaProvider || null,
+        },
+        chatSessionId
+      );
+    }
+
+    this.sessionLog(
+      "debug",
+      "Routed persona normalised to provider",
+      {
+        fromProvider: personaProvider || null,
+        toProvider: normalized,
+        credentialSource,
+      },
+      chatSessionId
+    );
 
     return routedPersona;
   }
