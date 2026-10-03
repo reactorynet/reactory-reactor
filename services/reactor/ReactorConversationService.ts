@@ -6888,13 +6888,23 @@ export default class ReactorConversationService
   ): Promise<any> {
     // Add AI response if available
     if (response?.choices && response?.choices?.length > 0) {
+      // The assistant message for THIS turn, hoisted to the block scope.
+      //
+      // The telemetry and usage blocks below also need it. They previously
+      // referenced `aiMessage`, which is declared *inside* the `__persisted`
+      // guard further down and is therefore out of scope here — so every turn
+      // threw `ReferenceError: aiMessage is not defined`. The surrounding catch
+      // swallowed it and logged "Failed to record AI usage telemetry", but the
+      // throw aborted the whole `try` **before `usageService.recordUsage` ran**,
+      // which silently switched usage recording off for every turn.
+      const responseMessage = response?.choices?.[0]?.message;
+
       // When the provider streamed tool_calls, it may have already persisted
       // the assistant message to avoid a race condition with executeMacro
       // (the client starts executing tools as soon as the SSE completion event
       // arrives, which can happen before this method runs). Skip the duplicate
       // persist in that case.
       if (!(response as any).__persisted) {
-        const aiMessage = response.choices[0].message;
         // Extract reasoning/thinking from provider response
         const thinking = response.reasoning || response.__reasoning || undefined;
         // Extract generated images from provider response
@@ -6917,7 +6927,7 @@ export default class ReactorConversationService
         }
 
         // Use findOneAndUpdate for atomic update
-        const toolCallsWithStatus = (aiMessage.tool_calls || []).map((tc: any) => ({
+        const toolCallsWithStatus = (responseMessage?.tool_calls || []).map((tc: any) => ({
           ...tc,
           status: tc.status || 'pending',
         }));
@@ -6926,8 +6936,8 @@ export default class ReactorConversationService
         const assistantHistoryItem = {
           id: new ObjectId(),
           response, // add the original response for debugging
-          role: aiMessage.role,
-          content: aiMessage.content,
+          role: responseMessage?.role,
+          content: responseMessage?.content,
           thinking,
           images,
           timestamp: new Date(),
@@ -6991,8 +7001,8 @@ export default class ReactorConversationService
           }
           const turnDurationSec = (Date.now() - turnStartTime) / 1000;
           this.context.telemetry.recordHistogram('reactor_conversation_turn_duration_seconds', turnDurationSec, telemetryAttr);
-          if (aiMessage?.tool_calls?.length) {
-            this.context.telemetry.recordHistogram('reactor_tool_calls_per_turn', aiMessage.tool_calls.length, telemetryAttr);
+          if (responseMessage?.tool_calls?.length) {
+            this.context.telemetry.recordHistogram('reactor_tool_calls_per_turn', responseMessage.tool_calls.length, telemetryAttr);
           }
         }
 
@@ -7012,8 +7022,8 @@ export default class ReactorConversationService
             totalTokens,
             use_case: conversation.use_case || 'standalone',
             status: 'success',
-            toolCallsCount: aiMessage?.tool_calls?.length || 0,
-            toolsUsed: aiMessage?.tool_calls?.map((tc: any) => tc.function?.name || tc.name).filter(Boolean) || [],
+            toolCallsCount: responseMessage?.tool_calls?.length || 0,
+            toolsUsed: responseMessage?.tool_calls?.map((tc: any) => tc.function?.name || tc.name).filter(Boolean) || [],
           });
         }
       } catch (usageErr: any) {
