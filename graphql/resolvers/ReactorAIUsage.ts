@@ -9,6 +9,8 @@ import {
 import ReactorAIUsageService, {
   UsageSummaryFilter,
   SetUserBudgetInput,
+  SetUserBudgetPatch,
+  BulkBudgetResult,
 } from '../../services/reactor/ReactorAIUsageService';
 import ReactorUsageAnalyticsService, {
   UsageAnalyticsFilter,
@@ -76,6 +78,28 @@ function analytics(context: Reactory.Server.IReactoryContext): ReactorUsageAnaly
   return context.getService<ReactorUsageAnalyticsService>(
     'reactor.ReactorUsageAnalyticsService@1.0.0'
   );
+}
+
+/**
+ * Upper bound on one bulk budget request.
+ *
+ * Matches the overview resolver's cap so a single console selection can always be
+ * acted on in one request. Larger directories need server-side paging first.
+ */
+const MAX_BULK_BUDGET_USERS = 2000;
+
+/** A zeroed bulk result, so every return path has the same shape. */
+function emptyBulkResult(requested: number): BulkBudgetResult {
+  return {
+    requested,
+    applied: 0,
+    created: 0,
+    updated: 0,
+    deleted: 0,
+    skipped: 0,
+    failed: 0,
+    errors: [],
+  };
 }
 
 function usageService(context: Reactory.Server.IReactoryContext): ReactorAIUsageService {
@@ -656,6 +680,114 @@ class ReactorAIUsageResolver {
     if (!args?.id) return false;
 
     return usageService(context).deleteUserBudget(args.id);
+  }
+
+  /**
+   * Set or update budgets for many users in one request (admin only).
+   *
+   * One `bulkWrite` on the server rather than N single mutations from the
+   * client: an admin applying a patch to a whole selection should not pay N round
+   * trips, and the created/updated/failed breakdown is only reportable when the
+   * batch is applied as one.
+   */
+  @mutation('ReactorSetUserBudgetsBulk')
+  async ReactorSetUserBudgetsBulk(
+    _: any,
+    args: { input: { userIds?: string[] } & SetUserBudgetPatch },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!context.user) throw new Error('Authentication required');
+    if (!isAdmin(context)) {
+      throw new Error('Only administrators can set user budgets');
+    }
+
+    const input = (args?.input ?? {}) as any;
+    const rawUserIds: string[] = Array.isArray(input.userIds)
+      ? input.userIds.map((value: any) => String(value))
+      : [];
+
+    if (rawUserIds.length === 0) return emptyBulkResult(0);
+    if (rawUserIds.length > MAX_BULK_BUDGET_USERS) {
+      throw new Error(
+        `Too many users for one bulk request (${rawUserIds.length}); the maximum is ${MAX_BULK_BUDGET_USERS}.`
+      );
+    }
+
+    // Resolve non-id references (emails/usernames) to ids. A valid id
+    // short-circuits inside resolveUserId without touching the database, so the
+    // console's id-based selection costs no extra queries.
+    const resolved: string[] = [];
+    const resolveErrors: Array<{ userId: string; message: string }> = [];
+    for (const raw of rawUserIds) {
+      const resolvedId = await resolveUserId(raw);
+      if (resolvedId) resolved.push(resolvedId);
+      else resolveErrors.push({ userId: raw, message: 'No user found for this reference' });
+    }
+
+    const patch: SetUserBudgetPatch = {
+      monthlyTokenLimit: input.monthlyTokenLimit,
+      dailyTokenLimit: input.dailyTokenLimit,
+      monthlyCostLimitUsd: input.monthlyCostLimitUsd,
+      dailyCostLimitUsd: input.dailyCostLimitUsd,
+      alertThresholdPercent: input.alertThresholdPercent,
+      hardStop: input.hardStop,
+      notes: input.notes,
+    };
+
+    const serviceResult = await usageService(context).setUserBudgetsBulk(resolved, patch);
+
+    return {
+      ...serviceResult,
+      requested: rawUserIds.length,
+      failed: serviceResult.failed + resolveErrors.length,
+      errors: [...resolveErrors, ...serviceResult.errors],
+    };
+  }
+
+  /**
+   * Remove budgets for many users in one request (admin only).
+   *
+   * Keyed on user ids (not budget ids) because the console selects users; a user
+   * with no budget is `skipped`, not an error.
+   */
+  @mutation('ReactorDeleteUserBudgetsBulk')
+  async ReactorDeleteUserBudgetsBulk(
+    _: any,
+    args: { userIds?: string[] },
+    context: Reactory.Server.IReactoryContext
+  ) {
+    if (!context.user) throw new Error('Authentication required');
+    if (!isAdmin(context)) {
+      throw new Error('Only administrators can delete user budgets');
+    }
+
+    const rawUserIds: string[] = Array.isArray(args?.userIds)
+      ? args.userIds.map((value: any) => String(value))
+      : [];
+
+    if (rawUserIds.length === 0) return emptyBulkResult(0);
+    if (rawUserIds.length > MAX_BULK_BUDGET_USERS) {
+      throw new Error(
+        `Too many users for one bulk request (${rawUserIds.length}); the maximum is ${MAX_BULK_BUDGET_USERS}.`
+      );
+    }
+
+    const resolved: string[] = [];
+    const resolveErrors: Array<{ userId: string; message: string }> = [];
+    for (const raw of rawUserIds) {
+      const resolvedId = await resolveUserId(raw);
+      if (resolvedId) resolved.push(resolvedId);
+      else resolveErrors.push({ userId: raw, message: 'No user found for this reference' });
+    }
+
+    const serviceResult = await usageService(context).deleteUserBudgetsBulk(resolved);
+
+    return {
+      ...serviceResult,
+      requested: rawUserIds.length,
+      failed: serviceResult.failed + resolveErrors.length,
+      errors: [...resolveErrors, ...serviceResult.errors],
+    };
   }
 
   /**

@@ -1385,10 +1385,17 @@ class GoogleAIService extends AIProviderBase {
   private extractUsageFromResponse(result: GoogleGenAI.GenerateContentResponse | null): AIChatCompletionUsage | undefined {
     const meta = (result as any)?.__usageMetadata || result?.usageMetadata;
     if (!meta) return undefined;
+    // `promptTokenCount` is the *total* prompt; `cachedContentTokenCount` is the
+    // slice served from cached content, billed at a steep discount. Capturing
+    // the split is what stops every cached turn reading ~10x over its real cost.
+    const promptTokens = meta.promptTokenCount || 0;
+    const cachedTokens = meta.cachedContentTokenCount || 0;
     return {
-      promptTokens: meta.promptTokenCount || 0,
+      promptTokens,
       completionTokens: meta.candidatesTokenCount || 0,
       totalTokens: meta.totalTokenCount || 0,
+      cacheHitTokens: cachedTokens,
+      cacheMissTokens: Math.max(promptTokens - cachedTokens, 0),
     };
   }
 

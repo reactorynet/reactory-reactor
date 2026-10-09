@@ -63,6 +63,17 @@ type ReactorAIUsageTimeSeriesPoint {
   costUsdCents: Float!
   costUsd: Float!
   requests: Int!
+  """
+  Failed turns on this day, counted from `reactor_ai_failures`.
+
+  Carried on the trend so a spike in failures is visible *beside* the token
+  volume rather than only in a window aggregate — the two correlate, and seeing
+  them together is what makes a degraded provider legible. A day on which
+  *everything* failed has no successful turns and so is absent from the
+  message-derived series; such failure-only days are emitted as zero-token
+  points, which is why this field can exceed `requests` on a given day.
+  """
+  failures: Int!
 }
 
 """
@@ -312,6 +323,56 @@ input ReactorSetUserBudgetInput {
 }
 
 """
+Set or update the budgets of many users in one request.
+
+Every limit field is optional and only the fields supplied are written, so an
+omitted limit is left unchanged for each user — a blank must never wipe an
+existing limit when the same patch is applied across a selection.
+"""
+input ReactorSetUserBudgetsBulkInput {
+  """User ids, emails or usernames. Duplicates are collapsed."""
+  userIds: [String!]!
+  monthlyTokenLimit: Int
+  dailyTokenLimit: Int
+  monthlyCostLimitUsd: Float
+  dailyCostLimitUsd: Float
+  alertThresholdPercent: Int
+  hardStop: Boolean
+  notes: String
+}
+
+"""A single user a bulk budget operation could not apply, and why."""
+type ReactorBulkBudgetError {
+  userId: String!
+  message: String!
+}
+
+"""
+Outcome of a bulk budget operation.
+
+Returned rather than thrown so one unresolvable user or one failed write does
+not discard the work done for the rest of the batch — the caller can report
+"applied 8, created 2, updated 6, failed 2" honestly.
+"""
+type ReactorBulkBudgetResult {
+  """Distinct users the request asked to act on."""
+  requested: Int!
+  """Users the operation successfully wrote (created + updated) or deleted."""
+  applied: Int!
+  """Budgets that did not exist and were created."""
+  created: Int!
+  """Budgets that already existed and were updated."""
+  updated: Int!
+  """Budgets removed (delete operations only)."""
+  deleted: Int!
+  """Users skipped because there was nothing to act on (e.g. no budget to remove)."""
+  skipped: Int!
+  """Users that could not be applied; see `errors`."""
+  failed: Int!
+  errors: [ReactorBulkBudgetError!]!
+}
+
+"""
 Filter for querying user budgets.
 """
 input ReactorBudgetFilterInput {
@@ -373,4 +434,21 @@ extend type Mutation {
   nothing to remove — that is a no-op, not an error.
   """
   ReactorDeleteUserBudget(id: String): Boolean!
+
+  """
+  Set or update budgets for many users in one request (admin only).
+
+  A convenience and a performance win over calling `ReactorSetUserBudget` once
+  per user: the console applies one patch to a whole selection, and doing it as a
+  single request keeps that fast and makes the created/updated split reportable.
+  """
+  ReactorSetUserBudgetsBulk(input: ReactorSetUserBudgetsBulkInput!): ReactorBulkBudgetResult!
+
+  """
+  Remove budgets for many users in one request (admin only).
+
+  Keyed on user ids, not budget ids: the console selects users, and a selected
+  user may have no budget. That is a `skipped` count, not an error.
+  """
+  ReactorDeleteUserBudgetsBulk(userIds: [String!]!): ReactorBulkBudgetResult!
 }

@@ -239,6 +239,37 @@ export default class ReactorConversationMessage {
   sessionModelId?: string | null;
 
   /**
+   * Prompt tokens the provider served from its cache.
+   *
+   * Captured because prompt caching changes the price by an order of magnitude:
+   * charging a token the provider billed at its (cheap) cache-hit rate at the
+   * full miss rate is what made cache-heavy turns read ~10x over their real
+   * cost. NULL means "not reported" — distinct from 0, which says the provider
+   * reported a genuine cache miss.
+   */
+  @Column({ name: 'cache_hit_tokens', type: 'integer', nullable: true })
+  cacheHitTokens?: number | null;
+
+  /** Prompt tokens NOT served from cache (billed at the full input rate). */
+  @Column({ name: 'cache_miss_tokens', type: 'integer', nullable: true })
+  cacheMissTokens?: number | null;
+
+  /**
+   * The `reactory_ai_model_pricing` row this turn was priced with.
+   *
+   * Provenance, so a stored cost is always reconcilable against the exact rate
+   * in force when the turn completed — even after the price list changes. NULL
+   * for an unpriced turn (unknown model) or a legacy row written before pricing
+   * was versioned.
+   */
+  @Column({ name: 'pricing_id', type: 'uuid', nullable: true })
+  pricingId?: string | null;
+
+  /** When the turn was priced. See {@link pricingId}. */
+  @Column({ name: 'priced_at', type: 'timestamp with time zone', nullable: true })
+  pricedAt?: Date | null;
+
+  /**
    * Flattened, searchable text derived from content (and thinking). Maintained
    * on write so session-list search is an indexed predicate rather than a
    * regex scan.

@@ -223,4 +223,85 @@ describe('ReactorAIUsageService', () => {
       expect(budget).toBeDefined();
     });
   });
+
+  describe('bulk budget operations', () => {
+    /** `find(...).select(...).lean().exec()` chain used to preload existing budgets. */
+    const findChain = (rows: any[]) => ({
+      select: jest.fn().mockReturnValue({
+        lean: jest.fn().mockReturnValue({
+          exec: jest.fn().mockResolvedValue(rows),
+        }),
+      }),
+    });
+
+    it('classifies created vs updated and writes only the supplied fields', async () => {
+      const existingId = new ObjectId();
+      const newId = new ObjectId();
+
+      jest
+        .spyOn(ReactorUserBudgetModel, 'find')
+        .mockReturnValue(findChain([{ userId: existingId }]) as any);
+      const bulkSpy = jest
+        .spyOn(ReactorUserBudgetModel, 'bulkWrite')
+        .mockResolvedValue({} as any);
+
+      const result = await service.setUserBudgetsBulk(
+        [existingId.toString(), newId.toString()],
+        { monthlyTokenLimit: 1234, hardStop: true }
+      );
+
+      expect(result.requested).toBe(2);
+      expect(result.applied).toBe(2);
+      expect(result.updated).toBe(1);
+      expect(result.created).toBe(1);
+      expect(result.failed).toBe(0);
+
+      const operations: any[] = bulkSpy.mock.calls[0][0] as any;
+      expect(operations).toHaveLength(2);
+      expect(operations[0].updateOne.upsert).toBe(true);
+      // Only the supplied fields are set — an omitted limit is left unchanged.
+      expect(operations[0].updateOne.update.$set).toEqual({
+        monthlyTokenLimit: 1234,
+        hardStop: true,
+      });
+      // A field in `$set` must not also appear in `$setOnInsert` (Mongo rejects it).
+      expect(operations[0].updateOne.update.$setOnInsert.hardStop).toBeUndefined();
+      // bulkWrite bypasses schema defaults, so the insert defaults must be explicit.
+      expect(operations[0].updateOne.update.$setOnInsert.status).toBe('ACTIVE');
+    });
+
+    it('reports an invalid user id as failed without writing anything', async () => {
+      const bulkSpy = jest
+        .spyOn(ReactorUserBudgetModel, 'bulkWrite')
+        .mockResolvedValue({} as any);
+
+      const result = await service.setUserBudgetsBulk(['not-an-id'], { hardStop: true });
+
+      expect(result.failed).toBe(1);
+      expect(result.applied).toBe(0);
+      expect(result.errors[0].userId).toBe('not-an-id');
+      expect(bulkSpy).not.toHaveBeenCalled();
+    });
+
+    it('counts deleted and skipped users when removing budgets in bulk', async () => {
+      const withBudget = new ObjectId();
+      const withoutBudget = new ObjectId();
+
+      jest
+        .spyOn(ReactorUserBudgetModel, 'deleteMany')
+        .mockResolvedValue({ deletedCount: 1 } as any);
+
+      const result = await service.deleteUserBudgetsBulk([
+        withBudget.toString(),
+        withoutBudget.toString(),
+      ]);
+
+      expect(result.requested).toBe(2);
+      expect(result.deleted).toBe(1);
+      expect(result.applied).toBe(1);
+      // A user with no budget is skipped, not failed.
+      expect(result.skipped).toBe(1);
+      expect(result.failed).toBe(0);
+    });
+  });
 });

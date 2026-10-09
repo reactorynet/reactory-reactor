@@ -1,5 +1,6 @@
 import {
   calculateCostUsdCents,
+  effectiveRates,
   isLocalProvider,
   isSuspectZeroRate,
   extractUsage,
@@ -139,6 +140,8 @@ describe('usagePricing', () => {
         promptTokens: 100,
         completionTokens: 50,
         totalTokens: 150,
+        cacheHitTokens: null,
+        cacheMissTokens: null,
         source: 'provider',
       });
     });
@@ -172,6 +175,8 @@ describe('usagePricing', () => {
         promptTokens: 0,
         completionTokens: 0,
         totalTokens: 0,
+        cacheHitTokens: null,
+        cacheMissTokens: null,
         source: 'none',
       });
       expect(extractUsage({}).source).toBe('none');
@@ -182,6 +187,86 @@ describe('usagePricing', () => {
       const result = extractUsage({ usage: JSON.parse('null') });
       expect(result.source).toBe('none');
       expect(result.totalTokens).toBe(0);
+    });
+  });
+
+  describe('cache-aware usage and pricing', () => {
+    it('reads OpenAI cached_tokens from prompt_tokens_details', () => {
+      const result = extractUsage({
+        usage: {
+          promptTokens: 1000,
+          completionTokens: 100,
+          prompt_tokens_details: { cached_tokens: 900 },
+        },
+      });
+      expect(result.cacheHitTokens).toBe(900);
+      // The missed half is inferred against the reported prompt total.
+      expect(result.cacheMissTokens).toBe(100);
+    });
+
+    it('reads the normalised cache split the Anthropic/Google adapters emit', () => {
+      // Anthropic (`cache_read_input_tokens`) and Google
+      // (`cachedContentTokenCount`) normalise their split onto these camelCase
+      // fields before the envelope is stored.
+      const result = extractUsage({
+        usage: {
+          promptTokens: 1000,
+          completionTokens: 100,
+          totalTokens: 1100,
+          cacheHitTokens: 850,
+          cacheMissTokens: 150,
+        },
+      });
+      expect(result.cacheHitTokens).toBe(850);
+      expect(result.cacheMissTokens).toBe(150);
+    });
+
+    it('reads DeepSeek cache hit/miss counts', () => {
+      const result = extractUsage({
+        usage: {
+          prompt_tokens: 1000,
+          completion_tokens: 100,
+          prompt_cache_hit_tokens: 800,
+          prompt_cache_miss_tokens: 200,
+        },
+      });
+      expect(result.cacheHitTokens).toBe(800);
+      expect(result.cacheMissTokens).toBe(200);
+    });
+
+    it('bills cache-hit tokens at the hit rate and the rest at the miss rate', () => {
+      // DeepSeek Flash off-peak: $0.003/1M hit, $0.14/1M miss, $0.60/1M output.
+      const pricing: ModelPricing = {
+        inputCostPerTokenUsdCents: 0.000014,
+        outputCostPerTokenUsdCents: 0.00006,
+        cacheHitCostPerTokenUsdCents: 0.0000003,
+        cacheMissCostPerTokenUsdCents: 0.000014,
+        source: 'history',
+      };
+      const expected = 900 * 0.0000003 + 100 * 0.000014 + 100 * 0.00006;
+      expect(
+        calculateCostUsdCents(pricing, 1000, 100, { hitTokens: 900, missTokens: 100 })
+      ).toBeCloseTo(expected, 6);
+    });
+
+    it('charges every prompt token at the miss rate when no split is reported', () => {
+      const pricing: ModelPricing = {
+        inputCostPerTokenUsdCents: 0.000014,
+        outputCostPerTokenUsdCents: 0.00006,
+        cacheHitCostPerTokenUsdCents: 0.0000003,
+        source: 'history',
+      };
+      // No split -> the conservative choice, never a silent discount.
+      expect(calculateCostUsdCents(pricing, 1000, 0)).toBeCloseTo(1000 * 0.000014, 6);
+    });
+
+    it('falls back to the miss rate for a model with no cache-hit rate', () => {
+      const pricing: ModelPricing = {
+        inputCostPerTokenUsdCents: 0.0002,
+        outputCostPerTokenUsdCents: 0.0012,
+        source: 'database',
+      };
+      expect(effectiveRates(pricing).cacheHitCents).toBe(0.0002);
     });
   });
 

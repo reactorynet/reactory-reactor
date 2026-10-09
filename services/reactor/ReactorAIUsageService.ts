@@ -52,6 +52,35 @@ export interface SetUserBudgetInput {
   notes?: string;
 }
 
+/**
+ * A budget patch applied to one or many users.
+ *
+ * Only the fields present are written, so an omitted limit is left unchanged —
+ * the distinction that lets one bulk patch be applied across a selection without
+ * wiping limits the operator did not touch.
+ */
+export interface SetUserBudgetPatch {
+  monthlyTokenLimit?: number;
+  dailyTokenLimit?: number;
+  monthlyCostLimitUsd?: number;
+  dailyCostLimitUsd?: number;
+  alertThresholdPercent?: number;
+  hardStop?: boolean;
+  notes?: string;
+}
+
+/** Outcome of a bulk budget operation, with per-user errors rather than a throw. */
+export interface BulkBudgetResult {
+  requested: number;
+  applied: number;
+  created: number;
+  updated: number;
+  deleted: number;
+  skipped: number;
+  failed: number;
+  errors: Array<{ userId: string; message: string }>;
+}
+
 @service({
   id: "reactor.ReactorAIUsageService@1.0.0",
   name: "Reactor AI Usage Service",
@@ -738,6 +767,171 @@ export class ReactorAIUsageService {
 
     const result = await ReactorUserBudgetModel.findByIdAndDelete(id);
     return !!result;
+  }
+
+  /**
+   * Set or update budgets for many users in one round trip.
+   *
+   * Implemented with a single `bulkWrite` rather than N `setUserBudget` calls:
+   * the console applies one patch to a whole selection, and doing that as one
+   * statement keeps it fast and makes the created/updated split reportable.
+   *
+   * Failures are reported per user (`errors`) and never abort the batch — a
+   * single bad entry must not discard the work done for the rest.
+   */
+  async setUserBudgetsBulk(
+    userIds: string[],
+    patch: SetUserBudgetPatch
+  ): Promise<BulkBudgetResult> {
+    const requestedIds = Array.from(
+      new Set((userIds ?? []).map((id) => String(id ?? '').trim()).filter(Boolean))
+    );
+
+    const result: BulkBudgetResult = {
+      requested: requestedIds.length,
+      applied: 0,
+      created: 0,
+      updated: 0,
+      deleted: 0,
+      skipped: 0,
+      failed: 0,
+      errors: [],
+    };
+
+    const validIds: ObjectId[] = [];
+    for (const id of requestedIds) {
+      if (ObjectId.isValid(id)) validIds.push(new ObjectId(id));
+      else {
+        result.failed += 1;
+        result.errors.push({ userId: id, message: 'Not a valid user id' });
+      }
+    }
+    if (validIds.length === 0) return result;
+
+    // Only the supplied fields are written. `undefined` means "not supplied"; a
+    // deliberate `null` (e.g. clearing notes) is kept, matching setUserBudget.
+    const set: Record<string, unknown> = {};
+    if (patch.monthlyTokenLimit !== undefined) set.monthlyTokenLimit = patch.monthlyTokenLimit;
+    if (patch.dailyTokenLimit !== undefined) set.dailyTokenLimit = patch.dailyTokenLimit;
+    if (patch.monthlyCostLimitUsd !== undefined) set.monthlyCostLimitUsd = patch.monthlyCostLimitUsd;
+    if (patch.dailyCostLimitUsd !== undefined) set.dailyCostLimitUsd = patch.dailyCostLimitUsd;
+    if (patch.alertThresholdPercent !== undefined) set.alertThresholdPercent = patch.alertThresholdPercent;
+    if (patch.hardStop !== undefined) set.hardStop = patch.hardStop;
+    if (patch.notes !== undefined) set.notes = patch.notes;
+
+    // `bulkWrite` bypasses Mongoose schema defaults, so the insert defaults must
+    // be stated explicitly or an upsert would create a budget missing its
+    // counters/status. Fields already in `$set` are removed here — MongoDB rejects
+    // the same path appearing in both `$set` and `$setOnInsert`.
+    const insertDefaults: Record<string, unknown> = {
+      currentMonthTokens: 0,
+      currentMonthCostUsd: 0,
+      currentDayTokens: 0,
+      currentDayCostUsd: 0,
+      alertThresholdPercent: 80,
+      hardStop: false,
+      status: 'ACTIVE',
+      organizationId: null,
+      lastResetDate: new Date(),
+      lastDailyResetDate: new Date(),
+    };
+    for (const key of Object.keys(set)) delete insertDefaults[key];
+
+    // Which of these already have a budget — the created/updated split. One query
+    // for the whole batch rather than one per user.
+    const existing = await ReactorUserBudgetModel.find({ userId: { $in: validIds } })
+      .select('userId')
+      .lean()
+      .exec();
+    const existingSet = new Set(existing.map((b: any) => String(b.userId)));
+
+    const operations = validIds.map((userId) => ({
+      updateOne: {
+        filter: { userId },
+        update: { $set: set, $setOnInsert: insertDefaults },
+        upsert: true,
+      },
+    }));
+
+    const creditApplied = (userId: ObjectId) => {
+      result.applied += 1;
+      if (existingSet.has(String(userId))) result.updated += 1;
+      else result.created += 1;
+    };
+
+    try {
+      await ReactorUserBudgetModel.bulkWrite(operations as any, { ordered: false });
+      validIds.forEach(creditApplied);
+    } catch (error: any) {
+      // A partially-applied batch. `ordered: false` means the writes that could
+      // succeed did; report the failures instead of throwing the batch away.
+      const rawErrors =
+        error?.writeErrors ?? error?.result?.getWriteErrors?.() ?? [];
+      const failedIndexes = new Set<number>();
+      for (const writeError of rawErrors) {
+        const index =
+          typeof writeError?.index === 'number'
+            ? writeError.index
+            : writeError?.err?.index;
+        if (typeof index === 'number' && index >= 0) failedIndexes.add(index);
+      }
+
+      validIds.forEach((userId, index) => {
+        if (failedIndexes.has(index)) {
+          result.failed += 1;
+          result.errors.push({ userId: String(userId), message: 'Write failed' });
+        } else {
+          creditApplied(userId);
+        }
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Remove the budgets of many users in one round trip.
+   *
+   * Keyed on user ids because the console selects users, not budgets, and a
+   * selected user may have no budget — that is `skipped`, not a failure.
+   */
+  async deleteUserBudgetsBulk(userIds: string[]): Promise<BulkBudgetResult> {
+    const requestedIds = Array.from(
+      new Set((userIds ?? []).map((id) => String(id ?? '').trim()).filter(Boolean))
+    );
+
+    const result: BulkBudgetResult = {
+      requested: requestedIds.length,
+      applied: 0,
+      created: 0,
+      updated: 0,
+      deleted: 0,
+      skipped: 0,
+      failed: 0,
+      errors: [],
+    };
+
+    const validIds: ObjectId[] = [];
+    for (const id of requestedIds) {
+      if (ObjectId.isValid(id)) validIds.push(new ObjectId(id));
+      else {
+        result.failed += 1;
+        result.errors.push({ userId: id, message: 'Not a valid user id' });
+      }
+    }
+    if (validIds.length === 0) return result;
+
+    const deleteResult = await ReactorUserBudgetModel.deleteMany({
+      userId: { $in: validIds },
+    });
+
+    result.deleted = deleteResult.deletedCount ?? 0;
+    result.applied = result.deleted;
+    // Users that had no budget are skipped, not failed: "remove" is reachable on
+    // a row with nothing to remove, which is a no-op.
+    result.skipped = validIds.length - result.deleted;
+
+    return result;
   }
 
   toString?(includeVersion?: boolean): string {

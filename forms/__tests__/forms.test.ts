@@ -6,7 +6,7 @@ import AiProvidersGridForm from '../aiProviders';
 import AiModelsGridForm from '../aiModels';
 
 describe('Reactor Forms Registration', () => {
-  it('registers UsageDashboardForm with correct properties and dynamic filters', () => {
+  it('registers UsageDashboardForm as a single custom widget dashboard', () => {
     expect(UsageDashboardForm.id).toBe('reactor.UsageDashboardForm@1.0.0');
     expect(UsageDashboardForm.name).toBe('UsageDashboardForm');
     expect(UsageDashboardForm.nameSpace).toBe('reactor');
@@ -16,40 +16,37 @@ describe('Reactor Forms Registration', () => {
     expect(UsageDashboardForm.uiSchema).toBeDefined();
     expect(UsageDashboardForm.graphql).toBeDefined();
 
-    // Verify filter schema properties
+    // The dashboard is a single custom widget mounted on the `dashboard`
+    // property, replacing the old form-engine uiSchema wiring.
     const schemaProps = (UsageDashboardForm.schema as any).properties;
-    expect(schemaProps.startDate).toBeDefined();
-    expect(schemaProps.endDate).toBeDefined();
-    expect(schemaProps.provider).toBeDefined();
-    expect(schemaProps.model).toBeDefined();
-    expect(schemaProps.personaId).toBeDefined();
-    expect(schemaProps.use_case).toBeDefined();
+    expect(schemaProps.dashboard).toBeDefined();
 
-    // Verify filter uiSchema widgets
     const uiSchema = UsageDashboardForm.uiSchema as any;
-    expect(uiSchema.startDate['ui:widget']).toBe('DateWidget');
-    expect(uiSchema.endDate['ui:widget']).toBe('DateWidget');
-    expect(uiSchema.provider['ui:widget']).toBe('SelectWidget');
-    expect(uiSchema.model['ui:options']).toBeDefined();
-    expect(uiSchema.personaId['ui:options']).toBeDefined();
-    expect(uiSchema.use_case['ui:widget']).toBe('SelectWidget');
+    expect(uiSchema.dashboard['ui:widget']).toBe('reactor.UsageDashboardWidget@1.0.0');
+    expect(uiSchema['ui:field']).toBe('GridLayout');
 
-    // Verify GraphQL query variables mapping
-    const queries = (UsageDashboardForm.graphql as any).queries;
-    expect(queries.summary.variables['formData.startDate']).toBe('filter.startDate');
-    expect(queries.summary.variables['formData.endDate']).toBe('filter.endDate');
-    expect(queries.summary.variables['formData.provider']).toBe('filter.provider');
-    expect(queries.summary.variables['formData.model']).toBe('filter.model');
-    expect(queries.summary.variables['formData.personaId']).toBe('filter.personaId');
-    expect(queries.summary.variables['formData.use_case']).toBe('filter.use_case');
-    expect(queries.recentRecords.variables['formData.startDate']).toBe('filter.startDate');
+    // The widget is contributed through widgetMap + modules (rollup/tsx).
+    const widgetMap = (UsageDashboardForm as any).widgetMap as any[];
+    expect(Array.isArray(widgetMap)).toBe(true);
+    expect(widgetMap.some((w) => w.componentFqn === 'reactor.UsageDashboardWidget@1.0.0')).toBe(true);
 
-    // The form engine only auto-loads `graphql.query`; without it the dashboard
-    // rendered its zero defaults.
-    expect((UsageDashboardForm.graphql as any).query).toBe(queries.summary);
+    const modules = (UsageDashboardForm as any).modules as any[];
+    expect(Array.isArray(modules)).toBe(true);
+    expect(modules.some((m) => m.id === 'reactor.UsageDashboardWidget@1.0.0')).toBe(true);
+
+    // The widget owns its data lifecycle: no engine-bound GraphQL remains.
+    expect((UsageDashboardForm.graphql as any).queries).toEqual({});
+    expect((UsageDashboardForm.graphql as any).query).toBeUndefined();
+
+    // No metric may live in form state — only the widget's own local state
+    // holds numbers, and empty data reads zero rather than a plausible fiction.
+    const defaultFormValue = (UsageDashboardForm as any).defaultFormValue || {};
+    ['totalTokens', 'totalCostUsd', 'modelBreakdown', 'timeSeries', 'records'].forEach((key) => {
+      expect(defaultFormValue[key]).toBeUndefined();
+    });
   });
 
-  it('registers UserBudgetAdminForm with correct properties', () => {
+  it('registers UserBudgetAdminForm as a single custom widget screen', () => {
     expect(UserBudgetAdminForm.id).toBe('reactor.UserBudgetAdminForm@1.0.0');
     expect(UserBudgetAdminForm.name).toBe('UserBudgetAdminForm');
     expect(UserBudgetAdminForm.nameSpace).toBe('reactor');
@@ -58,6 +55,27 @@ describe('Reactor Forms Registration', () => {
     expect(UserBudgetAdminForm.schema).toBeDefined();
     expect(UserBudgetAdminForm.uiSchema).toBeDefined();
     expect(UserBudgetAdminForm.graphql).toBeDefined();
+
+    // Single custom widget on the `dashboard` property — same pattern as the
+    // usage dashboard; the form engine owns no data bindings here.
+    const schemaProps = (UserBudgetAdminForm.schema as any).properties;
+    expect(schemaProps.dashboard).toBeDefined();
+
+    const uiSchema = UserBudgetAdminForm.uiSchema as any;
+    expect(uiSchema.dashboard['ui:widget']).toBe('reactor.UserBudgetAdminWidget@1.0.0');
+    expect(uiSchema['ui:field']).toBe('GridLayout');
+
+    const widgetMap = (UserBudgetAdminForm as any).widgetMap as any[];
+    expect(Array.isArray(widgetMap)).toBe(true);
+    expect(widgetMap.some((w) => w.componentFqn === 'reactor.UserBudgetAdminWidget@1.0.0')).toBe(true);
+
+    const modules = (UserBudgetAdminForm as any).modules as any[];
+    expect(Array.isArray(modules)).toBe(true);
+    expect(modules.some((m) => m.id === 'reactor.UserBudgetAdminWidget@1.0.0')).toBe(true);
+
+    // The widget owns its data lifecycle: no engine-bound GraphQL remains.
+    expect((UserBudgetAdminForm.graphql as any).queries).toEqual({});
+    expect((UserBudgetAdminForm.graphql as any).query).toBeUndefined();
   });
 
   it('exports UsageDashboardForm and UserBudgetAdminForm in the module forms list', () => {

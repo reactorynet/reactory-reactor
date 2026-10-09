@@ -815,9 +815,12 @@ class ReactorProviderService implements IReactorProviderService {
       model.maxParallelRequests = input.maxParallelRequests;
       model.samplingConfig = input.sampling;
       model.thinkingConfig = input.thinking;
+      model.cacheHitCostPerTokenUsdCents = input.cacheHitCostPerTokenUsdCents;
+      model.cacheMissCostPerTokenUsdCents = input.cacheMissCostPerTokenUsdCents;
       model.isEnabled = input.isEnabled !== false;
       model.sortOrder = input.sortOrder || 0;
       await modelRepo.save(model);
+      await this.appendPriceHistory(model);
       await this.ensureLoaded(true);
       const provider = await this.getProvider(input.providerId);
       const found = provider?.models.find((m) => m.id === input.modelKey);
@@ -856,6 +859,53 @@ class ReactorProviderService implements IReactorProviderService {
   /**
    * Update an existing AI model entity
    */
+  /**
+   * Append a price-list entry for a model whose rates were just written.
+   *
+   * The price list is append-only: the current price is the latest
+   * `effective_from`, and every earlier entry remains as history. Nothing is
+   * appended for a model carrying no rates at all (a local model, or one whose
+   * prices simply were not set) — a row of NULLs is not a price.
+   *
+   * Never throws: a price write must not fail the admin edit, and a missing
+   * history entry is survivable (the turn's own `cost_usd_cents` snapshot is
+   * authoritative for reporting).
+   */
+  private async appendPriceHistory(model: ReactoryAiModel): Promise<void> {
+    if (!ReactorPostgresDataSource.isInitialized) return;
+
+    const rates = [
+      model.inputCostPerTokenUsdCents,
+      model.outputCostPerTokenUsdCents,
+      model.cacheHitCostPerTokenUsdCents,
+      model.cacheMissCostPerTokenUsdCents,
+    ];
+    if (!rates.some((value) => value !== null && value !== undefined)) return;
+
+    try {
+      await ReactorPostgresDataSource.query(
+        `INSERT INTO reactory_ai_model_pricing
+           ("modelKey", "providerId", currency,
+            "inputCostPerTokenUsdCents", "outputCostPerTokenUsdCents",
+            "cacheHitCostPerTokenUsdCents", "cacheMissCostPerTokenUsdCents",
+            effective_from, created_at, updated_at)
+         VALUES ($1, $2, 'USD', $3, $4, $5, $6, now(), now(), now())`,
+        [
+          model.modelKey,
+          String(model.providerId).toLowerCase(),
+          model.inputCostPerTokenUsdCents ?? null,
+          model.outputCostPerTokenUsdCents ?? null,
+          model.cacheHitCostPerTokenUsdCents ?? null,
+          model.cacheMissCostPerTokenUsdCents ?? null,
+        ]
+      );
+    } catch (err: any) {
+      this.context?.warn?.(
+        `[pricing] failed to append price history for ${model.providerId}/${model.modelKey}: ${err?.message}`
+      );
+    }
+  }
+
   async updateModel(modelId: string, input: any): Promise<ProviderModelConfig> {
     if (ReactorPostgresDataSource.isInitialized) {
       const modelRepo = ReactorPostgresDataSource.getRepository(ReactoryAiModel);
@@ -873,6 +923,8 @@ class ReactorProviderService implements IReactorProviderService {
       if (input.supportedMediaTypes !== undefined) model.supportedMediaTypes = input.supportedMediaTypes;
       if (input.inputCostPerTokenUsdCents !== undefined) model.inputCostPerTokenUsdCents = input.inputCostPerTokenUsdCents;
       if (input.outputCostPerTokenUsdCents !== undefined) model.outputCostPerTokenUsdCents = input.outputCostPerTokenUsdCents;
+      if (input.cacheHitCostPerTokenUsdCents !== undefined) model.cacheHitCostPerTokenUsdCents = input.cacheHitCostPerTokenUsdCents;
+      if (input.cacheMissCostPerTokenUsdCents !== undefined) model.cacheMissCostPerTokenUsdCents = input.cacheMissCostPerTokenUsdCents;
       if (input.costPerToken !== undefined) model.costPerToken = input.costPerToken;
       if (input.rpm !== undefined) model.rpm = input.rpm;
       if (input.itpm !== undefined) model.itpm = input.itpm;
@@ -882,6 +934,13 @@ class ReactorProviderService implements IReactorProviderService {
       if (input.isEnabled !== undefined) model.isEnabled = input.isEnabled;
       if (input.sortOrder !== undefined) model.sortOrder = input.sortOrder;
       await modelRepo.save(model);
+      const ratesTouched = [
+        'inputCostPerTokenUsdCents',
+        'outputCostPerTokenUsdCents',
+        'cacheHitCostPerTokenUsdCents',
+        'cacheMissCostPerTokenUsdCents',
+      ].some((key) => (input as any)[key] !== undefined);
+      if (ratesTouched) await this.appendPriceHistory(model);
       await this.ensureLoaded(true);
       const provider = await this.getProvider(model.providerId);
       const found = provider?.models.find((m) => m.id === model?.modelKey);
@@ -1203,6 +1262,52 @@ class ReactorProviderService implements IReactorProviderService {
     }
 
     return unresolved("builtin-default", DEFAULT_CONTEXT_LENGTH);
+  }
+
+  /**
+   * Resolve the provider a model is registered under.
+   *
+   * The model registry owns the model→provider relationship — a provider and a
+   * model can otherwise be set independently (see `setChatModelProvider`), which
+   * lets a conversation declare provider `deepseek` with model
+   * `gemini-3.7-flash`. Such a pair matches nothing in the registry, so pricing
+   * and any provider-scoped lookup miss silently.
+   *
+   * `preferredProviderId` is honoured first: when that provider owns the model,
+   * it is returned unchanged (the common, already-coherent case). Otherwise the
+   * first provider declaring the model wins. Returns `null` when no provider
+   * declares it, so the caller can keep its own value rather than guess.
+   */
+  async resolveProviderForModel(
+    modelId?: string,
+    preferredProviderId?: string
+  ): Promise<string | null> {
+    await this.ensureLoaded();
+
+    const requestedModel = modelId ? String(modelId).trim() : null;
+    if (!requestedModel) return null;
+
+    const preferred = preferredProviderId
+      ? String(preferredProviderId).trim().toLowerCase()
+      : null;
+
+    // Preferred provider first: if it owns the model, that is the answer and no
+    // reconciliation is needed.
+    if (preferred) {
+      const declared = await this.getProvider(preferred);
+      if (declared?.models?.some((m) => m.id === requestedModel)) {
+        return String(declared.id ?? preferred).toLowerCase();
+      }
+    }
+
+    // Otherwise the first provider that declares the model.
+    for (const provider of this.providers.values()) {
+      if (provider?.models?.some((m) => m.id === requestedModel)) {
+        return String(provider.id).toLowerCase();
+      }
+    }
+
+    return null;
   }
 
   /**

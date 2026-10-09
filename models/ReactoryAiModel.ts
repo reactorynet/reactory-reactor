@@ -71,6 +71,17 @@ export default class ReactoryAiModel {
   @Column({ type: 'numeric', precision: 12, scale: 8, nullable: true })
   outputCostPerTokenUsdCents?: number;
 
+  /**
+   * Prompt-cache rates, cents/token. Optional: a model whose rates are absent
+   * prices every prompt token at the plain input rate (the cache-miss rate),
+   * which is the honest upper bound rather than an understated discount.
+   */
+  @Column({ type: 'numeric', precision: 18, scale: 10, nullable: true })
+  cacheHitCostPerTokenUsdCents?: number;
+
+  @Column({ type: 'numeric', precision: 18, scale: 10, nullable: true })
+  cacheMissCostPerTokenUsdCents?: number;
+
   @Column({ type: 'numeric', precision: 12, scale: 8, nullable: true })
   costPerToken?: number;
 

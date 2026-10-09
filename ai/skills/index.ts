@@ -136,6 +136,38 @@ export const ReactorSkills: ISkillDefinition[] = [
       '@readSkill(id: "reactory.managingPhonetics@1.0.0")',
     ],
   },
+  {
+    id: 'reactory.awsHostingCostEstimation@1.0.0',
+    name: 'awsHostingCostEstimation',
+    nameSpace: 'reactory',
+    version: '1.0.0',
+    description:
+      'Produces verifiable AWS hosting cost estimates for the Reactory platform by extracting real unit prices from the AWS Price List API instead of estimating them. Covers platform component inventory, region-specific usagetype prefixes, canonical SKU filter predicates, commitment and discount mechanics, region latency and POPIA considerations, and validation discipline for Mermaid and interactive HTML deliverables.',
+    filePath: require.resolve('./aws-cost-estimation/aws-hosting-cost-estimation.md'),
+    tags: [
+      'aws',
+      'cost',
+      'estimation',
+      'pricing',
+      'eks',
+      'hosting',
+      'budget',
+      'proposal',
+      'documentdb',
+      'aurora',
+      'opensearch',
+      'meilisearch',
+      'elasticache',
+      'finops',
+    ],
+    roles: ['USER', 'DEVELOPER', 'ADMIN'],
+    examples: [
+      '@searchSkills(query: "aws cost")',
+      '@searchSkills(query: "hosting estimate")',
+      '@searchSkills(query: "pricing")',
+      '@readSkill(id: "reactory.awsHostingCostEstimation@1.0.0")',
+    ],
+  },
 ];
 
 export default ReactorSkills;

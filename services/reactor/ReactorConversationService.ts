@@ -3176,9 +3176,48 @@ export default class ReactorConversationService
       throw new Error("At least one of modelId or providerId must be provided.");
     }
 
+    // The model registry owns the model→provider relationship, so derive the
+    // provider from the model whenever a model is set. Setting the two
+    // independently is how a conversation ends up declaring provider `deepseek`
+    // with model `gemini-3.7-flash` — an incoherent pair that no registry entry
+    // matches, so pricing and provider-scoped lookups miss silently (the turn is
+    // costed at the wrong provider's rates, or not at all).
+    let effectiveProviderId: string | undefined = providerId
+      ? String(providerId).trim().toLowerCase()
+      : undefined;
+
+    if (modelId && this.providerService) {
+      try {
+        const owningProvider = await this.providerService.resolveProviderForModel(
+          modelId,
+          effectiveProviderId
+        );
+        if (owningProvider) {
+          if (effectiveProviderId && owningProvider !== effectiveProviderId) {
+            this.sessionLog(
+              "warn",
+              "[setChatModelProvider] model is not registered under the given provider; using the model's registered provider",
+              { chatSessionId, modelId, requestedProviderId: effectiveProviderId, resolvedProviderId: owningProvider },
+              chatSessionId
+            );
+          }
+          effectiveProviderId = owningProvider;
+        } else if (effectiveProviderId) {
+          this.sessionLog(
+            "warn",
+            "[setChatModelProvider] model not found under any provider; keeping the requested provider",
+            { chatSessionId, modelId, providerId: effectiveProviderId },
+            chatSessionId
+          );
+        }
+      } catch (_) {
+        // Best-effort: never block a model switch on a registry lookup.
+      }
+    }
+
     const update: Record<string, any> = { updated: new Date() };
     if (modelId) update.modelId = modelId;
-    if (providerId) update.providerId = providerId;
+    if (effectiveProviderId) update.providerId = effectiveProviderId;
 
     // Look up the model's contextLength from the provider registry
     // and update maxTokens so the conversation reflects the new model's capacity.
@@ -3200,8 +3239,10 @@ export default class ReactorConversationService
           .lean()
           .exec();
 
-        const effectiveProviderId =
-          providerId || (existing as any)?.providerId || undefined;
+        // Prefer the provider resolved from the model above; fall back to the
+        // conversation's stored provider for a pure-provider (no-model) update.
+        effectiveProviderId =
+          effectiveProviderId || (existing as any)?.providerId || undefined;
 
         // The limit comes from the provider registry — never from the persona
         // (`IAIPersona.maxTokens` is deprecated).
@@ -3809,12 +3850,45 @@ export default class ReactorConversationService
     // What was *routed to*. Preferring the caller's value is the whole point of
     // this parameter: when the two differ, the routed one is what incurred the
     // cost, and the session one is retained only as a divergence marker.
-    const providerId = routing?.providerId
+    let providerId = routing?.providerId
       ? String(routing.providerId).trim().toLowerCase()
       : sessionProviderId;
-    const modelId = routing?.modelId
+    let modelId = routing?.modelId
       ? String(routing.modelId).trim()
       : sessionModelId;
+
+    // Coherence guard — the model registry owns the model→provider relationship.
+    //
+    // Provider and model can be set independently on a conversation, so a session
+    // can declare provider `deepseek` with model `gemini-3.7-flash`. Left alone,
+    // the turn is priced against a non-existent (provider, model) pair: the
+    // lookup misses and the cost is recorded as NULL. Reconcile to the provider
+    // the model is actually registered under. A genuine re-route is unaffected —
+    // if the model belongs to the attributed provider, this is a no-op.
+    if (modelId && this.providerService) {
+      try {
+        const owningProvider = await this.providerService.resolveProviderForModel(
+          modelId,
+          providerId ?? undefined
+        );
+        if (owningProvider && owningProvider !== (providerId || "").toLowerCase()) {
+          this.sessionLog(
+            "warn",
+            "Usage attribution: model is not registered under the attributed provider; reconciling to the model's provider",
+            {
+              conversationId: conversation?._id?.toString(),
+              modelId,
+              attributedProviderId: providerId ?? null,
+              resolvedProviderId: owningProvider,
+            },
+            conversation?._id?.toString()
+          );
+          providerId = owningProvider;
+        }
+      } catch (_) {
+        // Best-effort: fall through with the attributed values.
+      }
+    }
 
     // `conversation.user` is populated on the SSE path and a raw ObjectId on
     // others, so both shapes have to be read.
@@ -3845,6 +3919,10 @@ export default class ReactorConversationService
       // than only visible in a warning log.
       sessionProviderId,
       sessionModelId,
+      // Prompt-cache split, so cost is priced at the hit/miss rates rather than
+      // charging every prompt token at the full (miss) rate.
+      cacheHitTokens: usage.cacheHitTokens,
+      cacheMissTokens: usage.cacheMissTokens,
     };
 
     if (!providerId || !modelId || usage.source === 'none') {
@@ -3867,9 +3945,14 @@ export default class ReactorConversationService
         ? calculateCostUsdCents(
             resolved.pricing,
             usage.promptTokens,
-            usage.completionTokens
+            usage.completionTokens,
+            { hitTokens: usage.cacheHitTokens, missTokens: usage.cacheMissTokens }
           )
         : null;
+      // Provenance: the exact price-list entry that produced the figure above,
+      // so a stored cost stays reconcilable after the price list changes.
+      attribution.pricingId = resolved.pricing ? resolved.pricingId ?? null : null;
+      attribution.pricedAt = resolved.pricing ? new Date() : null;
     } catch (error: any) {
       this.sessionLog(
         'warn',
@@ -7015,8 +7098,10 @@ export default class ReactorConversationService
             chatSessionId: conversation._id.toString(),
             parentSessionId: conversation.parentSessionId,
             personaId: conversation.personaId,
-            provider: conversation.providerId || (conversation as any).provider || 'default',
-            model: conversation.modelId,
+            // Prefer the routed provider/model over the session's declared values,
+            // so the ledger agrees with the message attribution.
+            provider: routing?.providerId || conversation.providerId || (conversation as any).provider || 'default',
+            model: routing?.modelId || conversation.modelId,
             promptTokens,
             completionTokens,
             totalTokens,
@@ -7783,10 +7868,6 @@ export default class ReactorConversationService
       conversationId: chatSessionId,
     }, chatSessionId, personaId);
 
-    // Tracks the duration of this continuation turn (from receipt of client
-    // tool results through to the AI's follow-up response) for telemetry.
-    const turnStartTime = Date.now();
-
     // Persist each tool result: replace the placeholder history entry (if one
     // exists from the AUTO+SSE path) or insert a new tool message (for
     // PROMPT/SAFE_AUTO paths where no placeholder was created).
@@ -7987,48 +8068,38 @@ export default class ReactorConversationService
       return continuationRefusal;
     }
 
-    const persona = await this.context
-      .getService<AIPersonaProvider>("reactor.AIPersonaProvider@1.0.0", { chatSessionId })
-      .getPersona(personaId);
-    const storedConv = await ReactorConversationModel.findById(chatSessionId).select('providerId').lean().exec();
-    const provider = await this.resolveConversationProvider(
-      chatSessionId,
-      persona,
-      undefined,
-      storedConv?.providerId || undefined
-    );
-    const adapter = await this.providerService.getAdapter(provider);
-
+    // Re-enter the provider loop through `sendMessage`.
+    //
+    // The continuation must behave exactly like any other tool-result turn, and
+    // `sendMessage` is the only path that owns the server-side AUTO tool loop.
+    // This method previously called `executeProviderChat` / `processAIResponse`
+    // directly — a *single* provider turn — so when the model answered the tool
+    // results with a server-side tool call, nothing executed it: the turn ended
+    // with that call unanswered and the UI sat in a pending/approval state until
+    // the user explicitly resumed. Routing the continuation through `sendMessage`
+    // (the same mechanism `continueToolExecution` uses) makes it run the AUTO
+    // loop, so server tools execute immediately after a client-tool result.
+    //
+    // `continueAfterTools: true` is the flag built for this: the tool results are
+    // already persisted above, so `sendMessage` loads the conversation and calls
+    // the provider without appending a duplicate message.
     if (streamingMode === StreamingMode.SSE) {
-      // Initiate SSE and run the continuation in the background
+      // The browser keeps its transport open for this conversation, so the turn
+      // streams to it. Return the initiate-SSE shape the client expects and run
+      // the continuation in the background, exactly as before.
       const updatedConversation = await ReactorConversationModel.findById(chatSessionId)
         .populate("user").exec();
 
-      // Fire-and-forget: execute the provider chat and stream results
       (async () => {
         try {
-          let response = await this.executeProviderChat(
-            provider,
+          await this.sendMessage({
+            personaId,
             chatSessionId,
-            persona,
-            {
-              personaId,
-              chatSessionId,
-              message: '',
-              role: 'tool',
-              streamingMode,
-            }
-          );
-          response = await this.processAIResponse(
-            response,
-            updatedConversation,
-            '',
+            message: '',
+            role: 'tool',
             streamingMode,
-            turnStartTime,
-            // The continuation re-resolved the provider above; attribute the turn
-            // to that, not to the session, so a re-route is priced correctly.
-            { providerId: provider, modelId: (persona as any)?.modelId }
-          );
+            continueAfterTools: true,
+          });
         } catch (err: any) {
           this.sessionLog("error", `[completeClientToolCalls] SSE continuation failed: ${err.message}`, {
             conversationId: chatSessionId,
@@ -8042,34 +8113,15 @@ export default class ReactorConversationService
       );
     }
 
-    // Non-streaming: execute provider chat synchronously
-    let response = await this.executeProviderChat(
-      provider,
+    // Non-streaming: run the continuation and return its (normalised) response.
+    return this.sendMessage({
+      personaId,
       chatSessionId,
-      persona,
-      {
-        personaId,
-        chatSessionId,
-        message: '',
-        role: 'tool',
-        streamingMode: StreamingMode.NONE,
-      }
-    );
-
-    // Reload conversation to get the updated history
-    const updatedConversation = await ReactorConversationModel.findById(chatSessionId)
-      .populate("user").exec();
-
-    response = await this.processAIResponse(
-      response,
-      updatedConversation,
-      '',
-      StreamingMode.NONE,
-      turnStartTime,
-      { providerId: provider, modelId: (persona as any)?.modelId }
-    );
-
-    return adapter.adaptResponse(response);
+      message: '',
+      role: 'tool',
+      streamingMode: StreamingMode.NONE,
+      continueAfterTools: true,
+    });
   }
 
   async attachImage(args: {
@@ -10324,22 +10376,50 @@ export default class ReactorConversationService
   private isRetryableError(error: any): boolean {
     if (!error) return false;
 
-    const errorMessage = error.message?.toLowerCase() || "";
-    const errorCode = String(error.code || "").toLowerCase();
+    // Gather the FULL error surface: message + top-level code/errno, plus every
+    // nested `cause`. Node/undici and the OpenAI SDK frequently wrap transport
+    // failures so that the socket code (e.g. `ECONNRESET`) lives on
+    // `error.cause.code`, NOT `error.code` — inspecting only the top level missed
+    // exactly the transient network errors we want to retry.
+    const messages: string[] = [];
+    const codes: string[] = [];
+    const seen = new Set<any>();
+    let current: any = error;
+    let depth = 0;
+    while (current && depth < 5 && !seen.has(current)) {
+      seen.add(current);
+      if (current.message) messages.push(String(current.message));
+      if (current.code !== undefined && current.code !== null) codes.push(String(current.code));
+      if (current.errno !== undefined && current.errno !== null) codes.push(String(current.errno));
+      current = current.cause;
+      depth += 1;
+    }
 
-    // Retryable errors
+    const errorMessage = messages.join(" | ").toLowerCase();
+    const errorCode = codes.join(" | ").toLowerCase();
+    const haystack = `${errorMessage} | ${errorCode}`;
+
+    // Retryable errors — provider/transport conditions worth another attempt.
     const retryablePatterns = [
-      "unexpected_tool_call",
-      "malformed_function_call",
-      "missing_content_field",
-      "malformed_content",
-      "empty_response",
-      "other_finish_reason",
-      "rate limit",
-      "timeout",
+      // --- transport / socket (transient network failures) ---
+      "econnreset",
+      "econnrefused",
+      "econnaborted",
+      "econnnotconnected",
+      "epipe",
+      "etimedout",
+      "eai_again",
+      "enotfound",
+      "err_socket",
+      "socket hang up",
+      "stream interrupted",
+      "connection reset",
       "network",
       "connection",
+      "timeout",
       "temporary",
+      // --- provider / service conditions ---
+      "rate limit",
       "service unavailable",
       "internal server error",
       "bad gateway",
@@ -10349,11 +10429,16 @@ export default class ReactorConversationService
       "overloaded",
       "throttled",
       "throttling",
+      // --- model-output anomalies a fresh turn often resolves ---
+      "unexpected_tool_call",
+      "malformed_function_call",
+      "missing_content_field",
+      "malformed_content",
+      "empty_response",
+      "other_finish_reason",
     ];
 
-    return retryablePatterns.some(
-      (pattern) => errorMessage.includes(pattern) || errorCode.includes(pattern)
-    );
+    return retryablePatterns.some((pattern) => haystack.includes(pattern));
   }
 
   /**

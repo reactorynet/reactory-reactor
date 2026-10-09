@@ -22,15 +22,38 @@ import { loadProviders, findModelById } from '../../ai/providers/provider-loader
  * visible instead of flattering the bill.
  */
 
-export type PricingSource = 'database' | 'static';
+export type PricingSource = 'history' | 'database' | 'static';
 
 export interface ModelPricing {
-  /** USD cents per input (prompt) token. */
+  /** USD cents per cache-miss (plain) input token. */
   inputCostPerTokenUsdCents: number;
   /** USD cents per output (completion) token. */
   outputCostPerTokenUsdCents: number;
+  /**
+   * USD cents per cache-hit input token. Absent for a model with no cache rate:
+   * the cost of a hit then falls back to the miss rate, which is the honest
+   * upper bound rather than an invented discount.
+   */
+  cacheHitCostPerTokenUsdCents?: number | null;
+  /** USD cents per cache-miss input token; defaults to the input rate. */
+  cacheMissCostPerTokenUsdCents?: number | null;
   /** Where the rates came from, for diagnostics. */
   source: PricingSource;
+  /** `reactory_ai_model_pricing.id` when resolved from the price list. */
+  pricingId?: string | null;
+}
+
+/** The rates actually applied to a turn, resolved and ready to compute with. */
+export interface EffectiveRates {
+  cacheHitCents: number;
+  cacheMissCents: number;
+  outputCents: number;
+}
+
+/** A prompt-token cache split, as reported by the provider. */
+export interface CacheTokenSplit {
+  hitTokens?: number | null;
+  missTokens?: number | null;
 }
 
 /**
@@ -64,7 +87,28 @@ export const isLocalProvider = (providerId?: string | null): boolean =>
 export const FREE_PRICING: ModelPricing = {
   inputCostPerTokenUsdCents: 0,
   outputCostPerTokenUsdCents: 0,
+  cacheHitCostPerTokenUsdCents: 0,
+  cacheMissCostPerTokenUsdCents: 0,
   source: 'static',
+  pricingId: null,
+};
+
+/**
+ * Collapse a pricing record into the three rates a turn is billed at.
+ * A missing cache-hit rate falls back to the miss rate; a missing miss rate
+ * falls back to the plain input rate.
+ */
+export const effectiveRates = (pricing: ModelPricing): EffectiveRates => {
+  const miss =
+    pricing.cacheMissCostPerTokenUsdCents ??
+    pricing.inputCostPerTokenUsdCents ??
+    0;
+  const hit = pricing.cacheHitCostPerTokenUsdCents ?? miss;
+  return {
+    cacheHitCents: hit,
+    cacheMissCents: miss,
+    outputCents: pricing.outputCostPerTokenUsdCents ?? 0,
+  };
 };
 
 /**
@@ -76,16 +120,47 @@ export const FREE_PRICING: ModelPricing = {
 export const calculateCostUsdCents = (
   pricing: ModelPricing,
   promptTokens: number,
-  completionTokens: number
+  completionTokens: number,
+  cache?: CacheTokenSplit
 ): number => {
   const prompt = Number.isFinite(promptTokens) ? Math.max(promptTokens, 0) : 0;
   const completion = Number.isFinite(completionTokens)
     ? Math.max(completionTokens, 0)
     : 0;
 
+  const rates = effectiveRates(pricing);
+
+  const hitRaw = cache?.hitTokens;
+  const missRaw = cache?.missTokens;
+
+  let hitTokens = Number.isFinite(hitRaw as number)
+    ? Math.max(hitRaw as number, 0)
+    : null;
+  let missTokens = Number.isFinite(missRaw as number)
+    ? Math.max(missRaw as number, 0)
+    : null;
+
+  // Reconcile the split against the reported prompt total. A provider that
+  // reports only a hit count would otherwise double-count the cached tokens as
+  // miss tokens too; the split must sum to the prompt count.
+  if (hitTokens !== null && missTokens === null) {
+    missTokens = Math.max(prompt - hitTokens, 0);
+  } else if (hitTokens === null && missTokens !== null) {
+    hitTokens = Math.max(prompt - missTokens, 0);
+  } else if (
+    hitTokens !== null &&
+    missTokens !== null &&
+    hitTokens + missTokens !== prompt
+  ) {
+    missTokens = Math.max(prompt - hitTokens, 0);
+  }
+
   const raw =
-    prompt * pricing.inputCostPerTokenUsdCents +
-    completion * pricing.outputCostPerTokenUsdCents;
+    hitTokens !== null && missTokens !== null
+      ? hitTokens * rates.cacheHitCents +
+        missTokens * rates.cacheMissCents +
+        completion * rates.outputCents
+      : prompt * rates.cacheMissCents + completion * rates.outputCents;
 
   return Math.round(raw * 1_000_000) / 1_000_000;
 };
@@ -101,7 +176,10 @@ const toNumber = (value: unknown): number | null => {
 const pricingFromRates = (
   input: unknown,
   output: unknown,
-  source: PricingSource
+  source: PricingSource,
+  cacheHit?: unknown,
+  cacheMiss?: unknown,
+  pricingId?: string | null
 ): ModelPricing | null => {
   const inputRate = toNumber(input);
   const outputRate = toNumber(output);
@@ -114,8 +192,58 @@ const pricingFromRates = (
   return {
     inputCostPerTokenUsdCents: inputRate ?? 0,
     outputCostPerTokenUsdCents: outputRate ?? 0,
+    cacheHitCostPerTokenUsdCents: toNumber(cacheHit),
+    cacheMissCostPerTokenUsdCents: toNumber(cacheMiss),
     source,
+    pricingId: pricingId ?? null,
   };
+};
+
+/**
+ * Pricing from the append-only price list — the primary source.
+ *
+ * The current price is the latest `effectiveFrom` for `(providerId, modelKey)`;
+ * `created_at` breaks ties within the same instant. Provider-scoped: rates for
+ * another provider's endpoint are not this model's rates.
+ */
+export const resolvePricingFromHistory = async (
+  dataSource: DataSource | null | undefined,
+  modelId?: string | null,
+  providerId?: string | null
+): Promise<ModelPricing | null> => {
+  const model = normaliseModel(modelId);
+  const provider = normaliseProvider(providerId);
+  if (!model || !provider || !dataSource?.isInitialized) return null;
+
+  try {
+    const rows: Array<Record<string, unknown>> = await dataSource.query(
+      `SELECT id,
+              "inputCostPerTokenUsdCents"     AS input,
+              "outputCostPerTokenUsdCents"    AS output,
+              "cacheHitCostPerTokenUsdCents"  AS cache_hit,
+              "cacheMissCostPerTokenUsdCents" AS cache_miss
+         FROM reactory_ai_model_pricing
+        WHERE "modelKey" = $1
+          AND lower("providerId") = $2
+        ORDER BY effective_from DESC, created_at DESC
+        LIMIT 1`,
+      [model, provider]
+    );
+
+    const row = rows?.[0];
+    if (!row) return null;
+
+    return pricingFromRates(
+      row.input,
+      row.output,
+      'history',
+      row.cache_hit,
+      row.cache_miss,
+      row.id ? String(row.id) : null
+    );
+  } catch {
+    return null;
+  }
 };
 
 /**
@@ -182,8 +310,10 @@ export const resolvePricingFromDatabase = async (
     // ordering keeps the result deterministic rather than whichever row the
     // planner happens to return first.
     const rows: Array<Record<string, unknown>> = await dataSource.query(
-      `SELECT "inputCostPerTokenUsdCents" AS input,
-              "outputCostPerTokenUsdCents" AS output
+      `SELECT "inputCostPerTokenUsdCents"     AS input,
+              "outputCostPerTokenUsdCents"    AS output,
+              "cacheHitCostPerTokenUsdCents"  AS cache_hit,
+              "cacheMissCostPerTokenUsdCents" AS cache_miss
          FROM reactory_ai_models
         WHERE "modelKey" = $1
           AND ("isEnabled" IS NULL OR "isEnabled" = true)
@@ -196,7 +326,7 @@ export const resolvePricingFromDatabase = async (
     const row = rows?.[0];
     if (!row) return null;
 
-    return pricingFromRates(row.input, row.output, 'database');
+    return pricingFromRates(row.input, row.output, 'database', row.cache_hit, row.cache_miss);
   } catch {
     // A pricing lookup must never break a turn; the caller treats null as
     // "unpriced" and reporting surfaces the gap.
@@ -212,6 +342,8 @@ export interface ResolvedPricing {
    * Distinguishes an Ollama turn from an unrecognised paid model.
    */
   freeByDefinition: boolean;
+  /** The price-list row used, when resolved from history. */
+  pricingId?: string | null;
 }
 
 /**
@@ -226,7 +358,16 @@ export const resolveModelPricing = async (
   providerId?: string | null
 ): Promise<ResolvedPricing> => {
   if (isLocalProvider(providerId)) {
-    return { pricing: FREE_PRICING, freeByDefinition: true };
+    return { pricing: FREE_PRICING, freeByDefinition: true, pricingId: null };
+  }
+
+  const fromHistory = await resolvePricingFromHistory(dataSource, modelId, providerId);
+  if (fromHistory) {
+    return {
+      pricing: isSuspectZeroRate(fromHistory, providerId) ? null : fromHistory,
+      freeByDefinition: false,
+      pricingId: fromHistory.pricingId ?? null,
+    };
   }
 
   const fromDatabase = await resolvePricingFromDatabase(
@@ -238,6 +379,7 @@ export const resolveModelPricing = async (
     return {
       pricing: isSuspectZeroRate(fromDatabase, providerId) ? null : fromDatabase,
       freeByDefinition: false,
+      pricingId: null,
     };
   }
 
@@ -246,10 +388,11 @@ export const resolveModelPricing = async (
     return {
       pricing: isSuspectZeroRate(fromStatic, providerId) ? null : fromStatic,
       freeByDefinition: false,
+      pricingId: null,
     };
   }
 
-  return { pricing: null, freeByDefinition: false };
+  return { pricing: null, freeByDefinition: false, pricingId: null };
 };
 
 /**
@@ -269,7 +412,7 @@ export const isSuspectZeroRate = (
   providerId?: string | null
 ): boolean =>
   !isLocalProvider(providerId) &&
-  pricing.inputCostPerTokenUsdCents === 0 &&
+  (pricing.cacheMissCostPerTokenUsdCents ?? pricing.inputCostPerTokenUsdCents) === 0 &&
   pricing.outputCostPerTokenUsdCents === 0;
 
 /**
@@ -287,10 +430,24 @@ export const isSuspectZeroRate = (
  */
 export const extractUsage = (
   providerResponse: unknown
-): { promptTokens: number; completionTokens: number; totalTokens: number; source: 'provider' | 'none' } => {
+): {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  cacheHitTokens: number | null;
+  cacheMissTokens: number | null;
+  source: 'provider' | 'none';
+} => {
   const usage = (providerResponse as any)?.usage;
   if (!usage || typeof usage !== 'object') {
-    return { promptTokens: 0, completionTokens: 0, totalTokens: 0, source: 'none' };
+    return {
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      cacheHitTokens: null,
+      cacheMissTokens: null,
+      source: 'none',
+    };
   }
 
   const readNumber = (...candidates: unknown[]): number => {
@@ -299,6 +456,14 @@ export const extractUsage = (
       if (parsed !== null) return parsed;
     }
     return 0;
+  };
+
+  const readOptional = (...candidates: unknown[]): number | null => {
+    for (const candidate of candidates) {
+      const parsed = toNumber(candidate);
+      if (parsed !== null) return parsed;
+    }
+    return null;
   };
 
   const promptTokens = readNumber(
@@ -317,11 +482,40 @@ export const extractUsage = (
     promptTokens + completionTokens
   );
 
+  // Cache split. OpenAI reports it under `prompt_tokens_details.cached_tokens`;
+  // DeepSeek reports `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`.
+  const details = usage.prompt_tokens_details || usage.promptTokensDetails || {};
+  const cacheHitExplicit = readOptional(
+    usage.prompt_cache_hit_tokens,
+    usage.cacheHitTokens,
+    usage.cache_hit_tokens,
+    usage.promptCacheHitTokens,
+    details?.cached_tokens,
+    details?.cachedTokens
+  );
+  const cacheMissExplicit = readOptional(
+    usage.prompt_cache_miss_tokens,
+    usage.cacheMissTokens,
+    usage.cache_miss_tokens,
+    usage.promptCacheMissTokens
+  );
+
+  let cacheHitTokens = cacheHitExplicit;
+  let cacheMissTokens = cacheMissExplicit;
+
+  if (cacheHitTokens !== null && cacheMissTokens === null) {
+    cacheMissTokens = Math.max(promptTokens - cacheHitTokens, 0);
+  } else if (cacheHitTokens === null && cacheMissTokens !== null) {
+    cacheHitTokens = Math.max(promptTokens - cacheMissTokens, 0);
+  }
+
   const hasAny = promptTokens > 0 || completionTokens > 0 || totalTokens > 0;
   return {
     promptTokens,
     completionTokens,
     totalTokens: totalTokens || promptTokens + completionTokens,
+    cacheHitTokens,
+    cacheMissTokens,
     source: hasAny ? 'provider' : 'none',
   };
 };

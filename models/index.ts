@@ -23,6 +23,7 @@ import ReactorAIUsageModel, { ReactorAIUsageModelComponentRegistryEntry } from '
 import ReactorUserBudgetModel, { ReactorUserBudgetModelComponentRegistryEntry } from './ReactorUserBudget';
 import ReactoryAiProvider from './ReactoryAiProvider';
 import ReactoryAiModel from './ReactoryAiModel';
+import ReactoryAiModelPricing from './ReactoryAiModelPricing';
 import ReactorConversationMessage from './ReactorConversationMessage';
 import ReactorAiFailure from './ReactorAiFailure';
 import seedAiProviders from './seedAiProviders';
@@ -117,6 +118,7 @@ export {
   ReactorUserBudgetModelComponentRegistryEntry,
   ReactoryAiProvider,
   ReactoryAiModel,
+  ReactoryAiModelPricing,
   ReactorConversationMessage,
   seedAiProviders,
 };

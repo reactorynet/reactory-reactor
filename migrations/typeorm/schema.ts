@@ -5,12 +5,14 @@
  */
 import ReactoryAiProvider from "../../models/ReactoryAiProvider";
 import ReactoryAiModel from "../../models/ReactoryAiModel";
+import ReactoryAiModelPricing from "../../models/ReactoryAiModelPricing";
 import ReactorConversationMessage from "../../models/ReactorConversationMessage";
 import ReactorAiFailure from "../../models/ReactorAiFailure";
 
 export const REACTOR_ENTITIES = [
   ReactoryAiProvider,
   ReactoryAiModel,
+  ReactoryAiModelPricing,
   ReactorConversationMessage,
   ReactorAiFailure,
 ];

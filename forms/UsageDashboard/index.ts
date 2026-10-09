@@ -1,61 +1,61 @@
-import schema from "./schema";
-import uiSchema from "./uiSchema";
-import graphql from "./graphql";
-import type { Reactory } from "@reactorynet/reactory-core";
+import Reactory from '@reactorynet/reactory-core';
+import schema from './schema';
+import uiSchema from './uiSchema';
+import graphql from './graphql';
+import modules from './modules';
+
+const name = 'UsageDashboardForm';
+const nameSpace = 'reactor';
+const version = '1.0.0';
 
 /**
- * Default window for the dashboard: the trailing 30 days.
+ * AI Usage & Telemetry Dashboard.
  *
- * Computed at module load rather than hardcoded. The previous default named a
- * fixed two-month window that had already passed, and — more damaging — the same
- * object carried a full set of fabricated metrics (1,934,056 tokens, $8.1710,
- * 7,625 requests, invented per-model rows). Because the backing ledger was empty,
- * every query returned zeros and the form silently rendered those fixtures
- * instead: the dashboard reported numbers that had never happened.
+ * Rebuilt as a single custom widget (`reactor.UsageDashboardWidget@1.0.0`) on the
+ * same pattern as the compute planner dashboard. The previous implementation
+ * drove the whole page through the form engine — `ui:grid-layout` + ~27KB of
+ * `uiSchema` wiring `LabelWidgetV2` / `LineChartWidget` / `MaterialTableWidget`
+ * and a `graphql.queries.summary` bound to `formData.*` — and had drifted: the
+ * KPI data depended on `graphql.query` being set, several schema/uiSchema/query
+ * bindings were silently dropped, and the per-user drill-down rendered the
+ * global view.
  *
- * `defaultFormValue` now carries **only** the filter inputs. No metric may live
- * here. A KPI with no data should read zero or empty, never a plausible fiction —
- * a wrong number that looks right is worse than a blank, because nobody
- * investigates a blank.
+ * The widget owns its own state, filters, pagination and GraphQL calls, which
+ * removes that whole class of failure. Consequences to be aware of:
+ *
+ *   - The filter inputs (date range, provider, model, persona, use case, user
+ *     and user-selection) live in the widget, not in `defaultFormValue`. There
+ *     is deliberately no metric in form state — a KPI with no data reads zero,
+ *     never a plausible fiction.
+ *   - `componentProps` bound by the routes (`/admin/ai/usage/:userId` and
+ *     `/profile/usage`) arrive on the form props; the widget reads the scope
+ *     from `formContext.props.userId` and never forwards it as a query variable
+ *     the schema does not declare.
  */
-const defaultEndDate = new Date();
-const defaultStartDate = new Date(
-  defaultEndDate.getTime() - 30 * 24 * 60 * 60 * 1000
-);
-
-const toIsoDate = (value: Date): string => value.toISOString().slice(0, 10);
-
 const UsageDashboardForm: Reactory.Forms.IReactoryForm = {
-  id: "reactor.UsageDashboardForm@1.0.0",
-  uiFramework: "material",
-  uiSupport: ["material"],
-  title: "AI Usage & Telemetry Dashboard",
+  id: `${nameSpace}.${name}@${version}`,
+  uiFramework: 'material',
+  uiSupport: ['material'],
+  title: 'AI Usage & Telemetry Dashboard',
   description:
-    "Monitor and analyze AI token consumption, provider activity, and spending metrics, derived from the conversation message log",
-  icon: "analytics",
-  tags: ["reactor", "ai", "usage", "telemetry", "tokens", "dashboard"],
-  nameSpace: "reactor",
-  name: "UsageDashboardForm",
-  version: "1.0.0",
+    'Monitor and analyze AI token consumption, provider activity, and spending metrics, derived from the conversation message log',
+  icon: 'analytics',
+  tags: ['reactor', 'ai', 'usage', 'telemetry', 'tokens', 'dashboard'],
+  nameSpace,
+  name,
+  version,
   registerAsComponent: true,
   schema,
   uiSchema,
   graphql,
-  defaultFormValue: {
-    startDate: toIsoDate(defaultStartDate),
-    endDate: toIsoDate(defaultEndDate),
-    provider: "all",
-    model: "",
-    personaId: "",
-    use_case: "all",
-    // Bound by the /admin/ai/usage/:userId and /profile/usage routes. Previously
-    // undeclared, so the per-user drill-down silently rendered the global view.
-    // Accepts a user id or an email; the resolver translates the latter.
-    userId: "",
-    // A selection of users, scoped and aggregated together. Empty means "all
-    // users", which is the overall report.
-    userIds: [],
-  },
+  modules,
+  widgetMap: [
+    {
+      componentFqn: 'reactor.UsageDashboardWidget@1.0.0',
+      widget: 'UsageDashboardWidget',
+    },
+  ],
+  roles: ['USER', 'ADMIN', 'SUPERADMIN', 'DEVELOPER', 'SYSADMIN'],
 };
 
 export default UsageDashboardForm;

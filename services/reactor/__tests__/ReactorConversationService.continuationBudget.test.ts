@@ -86,13 +86,18 @@ describe("ReactorConversationService - client-tool continuation budget gate", ()
     // The subject of the test: the gate's verdict.
     service.enforceUsageBudget = jest.fn(async () => overrides.refusal ?? null);
 
-    // Anything reaching the provider proves the gate let it through. Throwing a
-    // sentinel rather than returning a real response keeps the assertion explicit.
+    // Anything reaching the provider proves the gate let it through. The
+    // continuation delegates to `sendMessage` (which owns the server-side AUTO
+    // tool loop), so that is where the sentinel is thrown: reaching it proves the
+    // gate allowed the turn through.
     service.providerService = {
       getAdapter: jest.fn(async () => {
         throw new Error("REACHED_PROVIDER");
       }),
     };
+    service.sendMessage = jest.fn(async () => {
+      throw new Error("REACHED_PROVIDER");
+    });
 
     return {
       chatSessionId: conversation._id.toString(),
@@ -184,6 +189,14 @@ describe("ReactorConversationService - client-tool continuation budget gate", ()
 
     await expect(service.completeClientToolCalls(args)).rejects.toThrow("REACHED_PROVIDER");
     expect(service.enforceUsageBudget).toHaveBeenCalledTimes(1);
+    // The continuation must re-enter the provider loop through `sendMessage` with
+    // `continueAfterTools`, so it runs the server-side AUTO tool loop rather than
+    // a single provider turn. Without this, a server tool the model requested
+    // after a client-tool result was never executed — the turn stalled pending
+    // approval.
+    expect(service.sendMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ role: "tool", continueAfterTools: true }),
+    );
   });
 
   it("does not consult the gate at all for a report-only call", async () => {

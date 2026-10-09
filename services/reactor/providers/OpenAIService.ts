@@ -762,6 +762,18 @@ class OpenAIService extends AIProviderBase {
             prompt_tokens: streamUsage.prompt_tokens,
             completion_tokens: streamUsage.completion_tokens,
             total_tokens: streamUsage.total_tokens,
+            // Prompt-cache split, carried through verbatim so cost is priced at
+            // the hit/miss rates. OpenAI reports cached tokens under
+            // `prompt_tokens_details.cached_tokens`; DeepSeek reports
+            // `prompt_cache_hit_tokens` / `prompt_cache_miss_tokens`. Reading
+            // only the token totals here is what made every cache-heavy turn
+            // look ~10x over the provider's own bill.
+            prompt_tokens_details: (streamUsage as any).prompt_tokens_details,
+            promptTokensDetails: (streamUsage as any).prompt_tokens_details,
+            prompt_cache_hit_tokens: (streamUsage as any).prompt_cache_hit_tokens,
+            prompt_cache_miss_tokens: (streamUsage as any).prompt_cache_miss_tokens,
+            promptCacheHitTokens: (streamUsage as any).prompt_cache_hit_tokens,
+            promptCacheMissTokens: (streamUsage as any).prompt_cache_miss_tokens,
           }
         : undefined,
       // Carry reasoning through for persistence by the conversation service
@@ -873,6 +885,13 @@ class OpenAIService extends AIProviderBase {
         promptTokens: response.usage.prompt_tokens,
         completionTokens: response.usage.completion_tokens,
         totalTokens: response.usage.total_tokens,
+        // Prompt-cache split; see the streaming path for why these are carried.
+        prompt_tokens_details: (response.usage as any).prompt_tokens_details,
+        promptTokensDetails: (response.usage as any).prompt_tokens_details,
+        prompt_cache_hit_tokens: (response.usage as any).prompt_cache_hit_tokens,
+        prompt_cache_miss_tokens: (response.usage as any).prompt_cache_miss_tokens,
+        promptCacheHitTokens: (response.usage as any).prompt_cache_hit_tokens,
+        promptCacheMissTokens: (response.usage as any).prompt_cache_miss_tokens,
       };
     }
     return completion;

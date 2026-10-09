@@ -1106,7 +1106,7 @@ class AnthropicService extends AIProviderBase {
     history: ReactorConversationHistory;
     messageId?: string;
     providerConfig?: ReactorProviderConfig;
-  }): Promise<{ content: string; finishReason: string; toolCalls: any[]; reasoning?: string; assistantPersisted?: boolean; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
+  }): Promise<{ content: string; finishReason: string; toolCalls: any[]; reasoning?: string; assistantPersisted?: boolean; usage?: AIChatCompletionUsage }> {
     const { sessionId, message, persona, history, messageId, providerConfig } = args;
     const structuredToolName = toAnthropicParams(providerConfig).structuredToolName;
 
@@ -1127,6 +1127,14 @@ class AnthropicService extends AIProviderBase {
     let promptTokens = 0;
     let completionTokens = 0;
     let finishReason = "stop";
+    // Anthropic bills prompt tokens in three buckets: plain input, cache reads
+    // (cheap) and cache writes. Reads map to the cache-hit rate; input and
+    // writes are billed at the full input rate (a documented approximation —
+    // cache writes carry a small premium). Anthropic's `input_tokens` excludes
+    // both cache buckets, so the full prompt is their sum.
+    let nonCachedInputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheCreationTokens = 0;
     const collectedToolCalls: any[] = [];
     // Reasoning blocks captured verbatim (text + signature). Anthropic rejects a
     // tool-result turn whose assistant message dropped these, so they are
@@ -1150,9 +1158,13 @@ class AnthropicService extends AIProviderBase {
     for await (const chunk of stream as AsyncIterable<any>) {
       switch (chunk.type) {
         case "message_start": {
-          // Extract input token usage from message_start
+          // Extract prompt usage from message_start, including the prompt-cache
+          // buckets. Reading only `input_tokens` both dropped the cached tokens
+          // from the total and made every cached turn look full-price.
           if (chunk.message?.usage) {
-            promptTokens = chunk.message.usage.input_tokens || 0;
+            nonCachedInputTokens = chunk.message.usage.input_tokens || 0;
+            cacheReadTokens = chunk.message.usage.cache_read_input_tokens || 0;
+            cacheCreationTokens = chunk.message.usage.cache_creation_input_tokens || 0;
           }
           break;
         }
@@ -1304,9 +1316,20 @@ class AnthropicService extends AIProviderBase {
           break;
         }
         case "message_delta": {
-          // Extract output token usage and stop reason
+          // Extract output token usage and stop reason. The final `usage` block
+          // sometimes also carries the prompt-cache split, so it is read
+          // defensively when present.
           if (chunk.usage) {
             completionTokens = chunk.usage.output_tokens || 0;
+            if (typeof chunk.usage.cache_read_input_tokens === "number") {
+              cacheReadTokens = chunk.usage.cache_read_input_tokens;
+            }
+            if (typeof chunk.usage.cache_creation_input_tokens === "number") {
+              cacheCreationTokens = chunk.usage.cache_creation_input_tokens;
+            }
+            if (typeof chunk.usage.input_tokens === "number") {
+              nonCachedInputTokens = chunk.usage.input_tokens;
+            }
           }
           if (chunk.delta?.stop_reason) {
             finishReason = chunk.delta.stop_reason;
@@ -1320,6 +1343,9 @@ class AnthropicService extends AIProviderBase {
       }
     }
 
+    // The full prompt is input + cache read + cache write; Anthropic's
+    // `input_tokens` alone excludes both cache buckets.
+    promptTokens = nonCachedInputTokens + cacheReadTokens + cacheCreationTokens;
     totalTokens = promptTokens + completionTokens;
 
     // When tool_calls are present, the client will receive the completion SSE event
@@ -1369,7 +1395,13 @@ class AnthropicService extends AIProviderBase {
       toolCalls: collectedToolCalls,
       reasoning: accumulatedReasoning || undefined,
       assistantPersisted,
-      usage: { promptTokens, completionTokens, totalTokens },
+      usage: {
+        promptTokens,
+        completionTokens,
+        totalTokens,
+        cacheHitTokens: cacheReadTokens,
+        cacheMissTokens: nonCachedInputTokens + cacheCreationTokens,
+      },
     };
   }
 
@@ -1388,10 +1420,12 @@ class AnthropicService extends AIProviderBase {
     finishReason: string;
     toolCalls: any[];
     toolResults: any[];
-    usage: { promptTokens: number; completionTokens: number };
+    usage: { promptTokens: number; completionTokens: number; cacheHitTokens?: number | null; cacheMissTokens?: number | null };
   }> {
     let totalPromptTokens = 0;
     let totalCompletionTokens = 0;
+    let totalCacheHitTokens = 0;
+    let totalCacheMissTokens = 0;
     const allToolCalls: any[] = [];
     const allToolResults: any[] = [];
     // When structured output is requested we force a synthetic schema tool. Its
@@ -1402,10 +1436,17 @@ class AnthropicService extends AIProviderBase {
       const params = this.buildRequestParams(messages, persona, { providerConfig });
       const response = await this.anthropic.messages.create(params);
 
-      // Accumulate usage
+      // Accumulate usage, including the prompt-cache buckets. `input_tokens`
+      // excludes both cache reads and writes, so the full prompt is the sum.
       if (response.usage) {
-        totalPromptTokens += response.usage.input_tokens;
-        totalCompletionTokens += response.usage.output_tokens;
+        const rawUsage = response.usage as any;
+        const nonCachedInput = rawUsage.input_tokens || 0;
+        const cacheRead = rawUsage.cache_read_input_tokens || 0;
+        const cacheCreation = rawUsage.cache_creation_input_tokens || 0;
+        totalPromptTokens += nonCachedInput + cacheRead + cacheCreation;
+        totalCompletionTokens += rawUsage.output_tokens || 0;
+        totalCacheHitTokens += cacheRead;
+        totalCacheMissTokens += nonCachedInput + cacheCreation;
       }
 
       const responseText = this.extractResponseText(response);
@@ -1431,7 +1472,12 @@ class AnthropicService extends AIProviderBase {
             finishReason: "end_turn",
             toolCalls: allToolCalls,
             toolResults: allToolResults,
-            usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens },
+            usage: {
+              promptTokens: totalPromptTokens,
+              completionTokens: totalCompletionTokens,
+              cacheHitTokens: totalCacheHitTokens,
+              cacheMissTokens: totalCacheMissTokens,
+            },
           };
         }
       }
@@ -1443,7 +1489,12 @@ class AnthropicService extends AIProviderBase {
           finishReason: response.stop_reason || "end_turn",
           toolCalls: allToolCalls,
           toolResults: allToolResults,
-          usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens },
+          usage: {
+            promptTokens: totalPromptTokens,
+            completionTokens: totalCompletionTokens,
+            cacheHitTokens: totalCacheHitTokens,
+            cacheMissTokens: totalCacheMissTokens,
+          },
         };
       }
 
@@ -1510,7 +1561,12 @@ class AnthropicService extends AIProviderBase {
       finishReason: "max_tool_iterations",
       toolCalls: allToolCalls,
       toolResults: allToolResults,
-      usage: { promptTokens: totalPromptTokens, completionTokens: totalCompletionTokens },
+      usage: {
+        promptTokens: totalPromptTokens,
+        completionTokens: totalCompletionTokens,
+        cacheHitTokens: totalCacheHitTokens,
+        cacheMissTokens: totalCacheMissTokens,
+      },
     };
   }
 
@@ -1539,6 +1595,8 @@ class AnthropicService extends AIProviderBase {
           promptTokens: result.usage.promptTokens,
           completionTokens: result.usage.completionTokens,
           totalTokens: result.usage.promptTokens + result.usage.completionTokens,
+          cacheHitTokens: result.usage.cacheHitTokens,
+          cacheMissTokens: result.usage.cacheMissTokens,
         } : undefined;
         return this.buildCompletion(result.content, result.finishReason, result.toolCalls, toolLoopUsage);
       }
@@ -1576,6 +1634,8 @@ class AnthropicService extends AIProviderBase {
             promptTokens: streamResult.usage.promptTokens,
             completionTokens: streamResult.usage.completionTokens,
             totalTokens: streamResult.usage.totalTokens,
+            cacheHitTokens: streamResult.usage.cacheHitTokens,
+            cacheMissTokens: streamResult.usage.cacheMissTokens,
           } : undefined;
           const completion = this.buildCompletion(streamResult.content, streamResult.finishReason, streamResult.toolCalls, streamUsage);
           // If the assistant message was already persisted before the SSE completion event
@@ -1593,6 +1653,8 @@ class AnthropicService extends AIProviderBase {
           promptTokens: result.usage.promptTokens,
           completionTokens: result.usage.completionTokens,
           totalTokens: result.usage.promptTokens + result.usage.completionTokens,
+          cacheHitTokens: result.usage.cacheHitTokens,
+          cacheMissTokens: result.usage.cacheMissTokens,
         } : undefined;
         return this.buildCompletion(result.content, result.finishReason, result.toolCalls, loopUsage);
       }

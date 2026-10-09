@@ -565,6 +565,25 @@ export interface AIChatCompletionUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /**
+   * Prompt tokens the provider served from its prompt cache.
+   *
+   * Anthropic: `cache_read_input_tokens`. Google: `cachedContentTokenCount`.
+   * Absent when the provider reports no cache split, which prices every prompt
+   * token at the full input rate — the honest upper bound, never an invented
+   * discount.
+   */
+  cacheHitTokens?: number | null;
+  /**
+   * Prompt tokens billed at the full input rate (anything that was not a cache
+   * read).
+   *
+   * For Anthropic this deliberately includes `cache_creation_input_tokens`
+   * (tokens written into the cache) — those are billed at the base input rate
+   * here. That is a documented approximation: cache writes actually carry a
+   * small premium, and only turns that build the cache are affected.
+   */
+  cacheMissTokens?: number | null;
 }
 
 /**

@@ -39,6 +39,14 @@ export interface IUsageAttribution {
   sessionProviderId?: string | null;
   /** Model declared on the session, for divergence detection. */
   sessionModelId?: string | null;
+  /** Prompt tokens served from the provider's prompt cache. */
+  cacheHitTokens?: number | null;
+  /** Prompt tokens billed at the full input rate. */
+  cacheMissTokens?: number | null;
+  /** The `reactory_ai_model_pricing` row this turn was priced with. */
+  pricingId?: string | null;
+  /** When the turn was priced. */
+  pricedAt?: Date | string | null;
 }
 
 /** Trim a string-ish value to a nullable, length-bounded column value. */
@@ -505,6 +513,10 @@ export default class ReactorConversationMessageService {
       usageSource: asColumnText(attribution?.usageSource, 16),
       sessionProviderId: asColumnText(attribution?.sessionProviderId, 128),
       sessionModelId: asColumnText(attribution?.sessionModelId, 255),
+      cacheHitTokens: asColumnNumber(attribution?.cacheHitTokens),
+      cacheMissTokens: asColumnNumber(attribution?.cacheMissTokens),
+      pricingId: asColumnText(attribution?.pricingId, 36),
+      pricedAt: attribution?.pricedAt ? new Date(attribution.pricedAt) : null,
     };
   }
 
@@ -538,6 +550,10 @@ export default class ReactorConversationMessageService {
     delete row.usageSource;
     delete row.sessionProviderId;
     delete row.sessionModelId;
+    delete row.cacheHitTokens;
+    delete row.cacheMissTokens;
+    delete row.pricingId;
+    delete row.pricedAt;
     return row;
   }
 
