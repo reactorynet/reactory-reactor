@@ -1659,6 +1659,9 @@ providers:
           - text-generation
           - code-generation
           - reasoning
+        # Declared so ReactorProviderService does not fall back to an invented
+        # context window (Qwen3 9B native window is 32k).
+        contextLength: 32768
         rpm: null
         itpm: null
         otpm: null
