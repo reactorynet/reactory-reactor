@@ -295,7 +295,14 @@ const ReactorConversationSchema = new Schema({
   },
   meta: MetaSchema,
   history: [ReactorConversationHistorySchema],
-  vars: {},
+  // Free-form per-conversation variables (delegation records, todo lists, user
+  // variables, …). MUST be Mixed. A bare `{}` declares a nested path with no
+  // sub-fields, which Mongoose does not track: arbitrary keys written into `vars`
+  // were fragile under save/normalisation. Mixed stores them verbatim.
+  vars: {
+    type: Schema.Types.Mixed,
+    default: {},
+  },
   sseSessionId: {
     type: String,
     default: null,

@@ -10,6 +10,7 @@ import { IReactorConversationsService } from "../../../types/service.types";
 import { StreamingMode } from "@reactory/server-modules/reactory-reactor/services/reactor/types/streaming.types";
 import { ChatsMacroProps } from './types';
 import { loadHistoryForContext } from '@reactory/server-modules/reactory-reactor/services/reactor/conversationHistoryLoader';
+import { serverOnly } from '@reactory/server-modules/reactory-reactor/ai/orchestration/toolScope';
 import { v4 } from "uuid";
 import logger from "@reactory/server-core/logging";
 
@@ -92,6 +93,78 @@ async function resolveModelAndProvider(
   return { modelId: resolvedModelId, providerId: resolvedProviderId };
 }
 
+
+/**
+ * A Reactory conversation id is a 24-char hex ObjectId. Used to decide whether an id can
+ * be queried as `_id` directly, so a delegationId (a uuid) is never fed to an ObjectId
+ * field — which Mongoose rejects with a CastError before any "not found" handling runs.
+ */
+const isConversationId = (value: unknown): value is string =>
+  typeof value === "string" && /^[a-f0-9]{24}$/i.test(value);
+
+/**
+ * Resolve a delegationId to the sub-agent conversation it belongs to.
+ *
+ * Two independent sources, tried in order:
+ *   1. the parent conversation's `vars.subagent_delegations.<id>.subagentSessionId`
+ *      (the fast, expected path); and
+ *   2. the delegationId stamped on the sub-agent session itself (`vars.delegationId`),
+ *      which is durable and independent of whether the parent's record survived — the
+ *      whole reason it is stamped at dispatch.
+ *
+ * Best-effort: a query failure returns `undefined` so callers fall through to their own
+ * not-found handling rather than surfacing a raw database error.
+ */
+async function resolveDelegationSessionId(
+  state: ChatState,
+  id: string,
+): Promise<string | undefined> {
+  try {
+    const parent = await ReactorConversationModel.findOne(
+      { _id: state.id },
+      { vars: 1 },
+    ).lean().exec();
+    const record = (parent?.vars as any)?.subagent_delegations?.[id];
+    if (record?.subagentSessionId) return String(record.subagentSessionId);
+  } catch { /* best-effort: fall through to the durable lookup */ }
+
+  try {
+    const sub = await ReactorConversationModel.findOne(
+      { "vars.delegationId": id, user: state.context?.user },
+      { _id: 1 },
+    ).lean().exec();
+    if (sub?._id) return String(sub._id);
+  } catch { /* best-effort: unresolved */ }
+
+  return undefined;
+}
+
+/**
+ * Resolve a conversation's transcript for return purposes.
+ *
+ * Phase 3 moved the message log to Postgres: for an existing conversation the embedded
+ * Mongo `history` array is stripped, so reading it directly yields an EMPTY list. Every
+ * other reader in this module (`list`, `cont`) goes through `loadHistoryForContext`; the
+ * delegation readers did not — which is why `followup` on a delegated sub-agent reported
+ * "0 messages" even though the run had produced a reply.
+ *
+ * Returns the authoritative transcript, falling back to the embedded array when the loader
+ * declines (store unavailable, mirror gap, or a read error).
+ */
+const resolveConversationHistory = async (conv: any, context: any): Promise<any[]> => {
+  if (!conv) return [];
+  const mongoHistory = conv.history || [];
+  try {
+    const resolved = await loadHistoryForContext(
+      String(conv._id ?? conv.id ?? ""),
+      mongoHistory,
+      context
+    );
+    return resolved ?? mongoHistory;
+  } catch {
+    return mongoHistory;
+  }
+};
 
 export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
   props: ChatsMacroProps,
@@ -315,6 +388,9 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
           if (isAsync) {
             const delegationId = v4();
             const subagentSessionId = new ObjectId().toString();
+            // One timestamp for the whole delegation lifecycle, so the completion and
+            // error records carry the same `startedAt` as the dispatch record.
+            const dispatchedAt = new Date().toISOString();
 
             // Pre-create the sub-agent conversation with a known _id so the
             // delegationId ↔ sessionId mapping is available at dispatch time and the
@@ -329,13 +405,22 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
               modelId: targetModelId,
               providerId: targetProviderId,
               history: [],
-              vars: {},
+              // Stamp the delegationId onto the sub-agent session itself. This is the
+              // durable delegationId -> session mapping: even if the parent's delegation
+              // record is ever lost, `followup`/`respond` can still resolve a
+              // delegationId by querying for this key.
+              vars: { delegationId },
               meta: {
                 summary: `Sub-agent delegation ${delegationId} to ${persona.name}`,
                 title: `Delegation to ${persona.name}`,
               },
-              macros: persona.macros || [],
-              tools: persona.tools || [],
+              // A sub-agent runs headless: no browser is attached, so client-side
+              // tools (charts, image galleries, side-panel mounts, …) can never be
+              // executed. Advertising them is what let the AUTO loop pick one, forward
+              // it to a client that does not exist, and pause forever. Restrict the
+              // delegated session to the persona's server-runnable tools.
+              macros: serverOnly(persona.macros),
+              tools: serverOnly(persona.tools),
               started: new Date(),
               sseSessionId: subagentSessionId,
               toolApprovalMode: subagentToolMode,
@@ -357,7 +442,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
                     subagentSessionId,
                     parentSessionId: state.id,
                     message,
-                    startedAt: new Date().toISOString(),
+                    startedAt: dispatchedAt,
                   },
                   [`vars.subagent_chat_${persona.id}`]: subagentSessionId,
                   updated: new Date(),
@@ -384,13 +469,30 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
                   providerConfig: parsedProviderConfig,
                 });
                 const content = response?.content || response?.message || JSON.stringify(response);
+                // Write the WHOLE record, not just the changed leaves.
+                //
+                // A leaf-level `$set` (`...status`, `...response`, `...completedAt`) only
+                // works when the record already exists. If the parent has lost it, those
+                // dotted paths RECREATE the sub-document with just those three fields —
+                // which is exactly how `personaId`, `agentName` and `subagentSessionId`
+                // vanished and `followup` by delegationId stopped resolving. Re-writing
+                // the full record makes completion self-healing regardless of what the
+                // parent's `vars` looks like at this moment.
                 await ReactorConversationModel.findOneAndUpdate(
                   { _id: state.id },
                   {
                     $set: {
-                      [`vars.subagent_delegations.${delegationId}.status`]: "complete",
-                      [`vars.subagent_delegations.${delegationId}.response`]: content,
-                      [`vars.subagent_delegations.${delegationId}.completedAt`]: new Date().toISOString(),
+                      [`vars.subagent_delegations.${delegationId}`]: {
+                        status: "complete",
+                        personaId: persona.id,
+                        agentName: persona.name,
+                        subagentSessionId,
+                        parentSessionId: state.id,
+                        message,
+                        startedAt: dispatchedAt,
+                        response: content,
+                        completedAt: new Date().toISOString(),
+                      },
                       updated: new Date(),
                     },
                   }
@@ -424,10 +526,21 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
                   await ReactorConversationModel.findOneAndUpdate(
                     { _id: state.id },
                     {
+                      // Whole record for the same reason as the completion branch above:
+                      // the identifying fields must survive even if the parent record was
+                      // lost, so an errored delegation is still inspectable and resolvable.
                       $set: {
-                        [`vars.subagent_delegations.${delegationId}.status`]: "error",
-                        [`vars.subagent_delegations.${delegationId}.error`]: err?.message || String(err),
-                        [`vars.subagent_delegations.${delegationId}.completedAt`]: new Date().toISOString(),
+                        [`vars.subagent_delegations.${delegationId}`]: {
+                          status: "error",
+                          personaId: persona.id,
+                          agentName: persona.name,
+                          subagentSessionId,
+                          parentSessionId: state.id,
+                          message,
+                          startedAt: dispatchedAt,
+                          error: err?.message || String(err),
+                          completedAt: new Date().toISOString(),
+                        },
                         updated: new Date(),
                       },
                     }
@@ -506,11 +619,23 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
 
         const historyCount = props.historyCount || 2;
 
-        // Resolve conversation ID: check if id is a persona ID with a stored conversation
+        // Resolve the target sub-agent conversation, most specific first:
+        //   1. a persona id with a stored conversation var (legacy in-memory path)
+        //   2. an async delegationId -> the parent's delegation record
+        //   3. a sub-agent session stamped with this delegationId (durable fallback)
+        //   4. the id taken literally as a conversation id
         let conversationId = state.vars?.[`subagent_chat_${id}`] as string | undefined;
-        if (!conversationId) {
-          // Treat id as a direct conversation ID
-          conversationId = id;
+        if (!conversationId) conversationId = await resolveDelegationSessionId(state, id);
+        if (!conversationId) conversationId = id;
+
+        // A delegationId that could not be resolved — or any non-ObjectId id — must
+        // produce a clear answer rather than a CastError thrown out of the query below.
+        if (!isConversationId(conversationId)) {
+          return {
+            success: false,
+            error: `Could not resolve "${id}" to a sub-agent conversation.`,
+            instructions: `## Not Found\n\n"${id}" is not a known persona with a stored sub-agent conversation, a resolvable delegationId, or a conversation id.\n\n### Recovery Options:\n- Use \`chats\` with action="personas" and speakto (async=true) to start a new delegation\n- Use the delegationId returned by a previous async speakto\n- Use the sub-agent conversation id directly`
+          };
         }
 
         if (message) {
@@ -547,7 +672,8 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
 
           // Reload conversation to get updated history including the new response
           const reloadedConv = await ReactorConversationModel.findById(conversationId);
-          const recentHistory = (reloadedConv?.history || [])
+          const reloadedHistory = await resolveConversationHistory(reloadedConv, state.context);
+          const recentHistory = reloadedHistory
             .slice(-historyCount)
             .map(item => ({
               role: item.role,
@@ -582,7 +708,9 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
           };
         }
 
-        const recentHistory = (existingConv.history || [])
+        // Read through the authoritative store, not the (stripped) embedded array.
+        const history = await resolveConversationHistory(existingConv, state.context);
+        const recentHistory = history
           .slice(-historyCount)
           .map(item => ({
             role: item.role,
@@ -597,10 +725,10 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
           data: {
             conversationId,
             personaId: existingConv.personaId,
-            messageCount: existingConv.history?.length || 0,
+            messageCount: history.length,
             recentHistory,
           },
-          instructions: `## Sub-Agent Conversation Status\n\n**Agent**: ${existingConv.personaId}\n**Conversation**: ${conversationId}\n**Total Messages**: ${existingConv.history?.length || 0}\n\n### Recent History (${recentHistory.length} items)\nAvailable in data.recentHistory\n\n### Suggested Next Steps:\n- Use action="followup", id="${id}", message="..." to send a follow-up\n- Use action="followup", id="${id}", historyCount=ToolApprovalMode.AUTO0 for more history`
+          instructions: `## Sub-Agent Conversation Status\n\n**Agent**: ${existingConv.personaId}\n**Conversation**: ${conversationId}\n**Total Messages**: ${history.length}\n\n### Recent History (${recentHistory.length} items)\nAvailable in data.recentHistory\n\n### Suggested Next Steps:\n- Use action="followup", id="${id}", message="..." to send a follow-up\n- Use action="followup", id="${id}", historyCount=ToolApprovalMode.AUTO0 for more history`
         };
       }
       case "respond": {
@@ -621,9 +749,16 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
         const delegationId = id;
 
         if (!record) {
-          // 2. Otherwise treat id as a sub-agent conversation id (mirror followup)
-          //    and build an implicit record from it.
-          const subConv = await ReactorConversationModel.findOne({ _id: id, user: state.context.user }).lean().exec();
+          // 2. Otherwise treat id as either a sub-agent conversation id, or a
+          //    delegationId stamped on a sub-agent session (durable fallback for a
+          //    delegation whose parent record was lost). Resolve BEFORE querying so a
+          //    uuid is never handed to an `_id` lookup as-is.
+          const resolvedSessionId = isConversationId(id)
+            ? id
+            : await resolveDelegationSessionId(state, id);
+          const subConv = resolvedSessionId
+            ? await ReactorConversationModel.findOne({ _id: resolvedSessionId, user: state.context.user }).lean().exec()
+            : null;
           if (!subConv) {
             return {
               success: false,
@@ -632,10 +767,10 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
             };
           }
           record = {
-            status: (subConv.history || []).some((h: any) => h.role === "assistant" && h.content) ? "complete" : "dispatched",
+            status: (await resolveConversationHistory(subConv, state.context)).some((h: any) => h.role === "assistant" && h.content) ? "complete" : "dispatched",
             personaId: subConv.personaId,
             agentName: subConv.personaId,
-            subagentSessionId: id,
+            subagentSessionId: resolvedSessionId,
             startedAt: subConv.started ? new Date(subConv.started).toISOString() : undefined,
           };
         }
@@ -659,7 +794,8 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
         let finalResponse: string | undefined = rec.response;
         if (!finalResponse) {
           const subConv = await ReactorConversationModel.findOne({ _id: subagentSessionId }).lean().exec();
-          const lastAssistant = [...(subConv?.history || [])].reverse().find((h: any) => h.role === "assistant" && h.content);
+          const subHistory = await resolveConversationHistory(subConv, state.context);
+          const lastAssistant = [...subHistory].reverse().find((h: any) => h.role === "assistant" && h.content);
           finalResponse = lastAssistant?.content;
           // A stale "dispatched" that actually finished becomes complete.
           if (rec.status === "dispatched" && finalResponse) rec = { ...rec, status: "complete" };
@@ -713,7 +849,8 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
 
         // 7. Still running — return recent history so the caller can decide.
         const runSubConv = await ReactorConversationModel.findOne({ _id: subagentSessionId }).lean().exec();
-        const recentHistory = (runSubConv?.history || []).slice(-3).map((item: any) => ({
+        const runHistory = await resolveConversationHistory(runSubConv, state.context);
+        const recentHistory = runHistory.slice(-3).map((item: any) => ({
           role: item.role,
           content: item.content,
           tool_calls: item.tool_calls,

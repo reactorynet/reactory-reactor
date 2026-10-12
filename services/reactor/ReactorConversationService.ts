@@ -52,6 +52,14 @@ import { StreamingTransportManager } from "./StreamingTransportManager";
 import { StreamingEventFactory } from "./streaming/StreamingEventFactory";
 import { ChatSessionResourceManager } from "./ChatSessionResourceManager";
 import { loadSessionMcpConfig } from "../../ai/macro/mcp/session-config";
+import {
+  getToolScope,
+  inheritToolScopes,
+  isHeadlessTurn,
+  serverOnly,
+  toolNameOf,
+} from "../../ai/orchestration/toolScope";
+import { applyChangedKeys, buildVarsUpdate, snapshotVars } from "./sessionVars";
 import { resolvePromptDirectives } from "../../ai/persona/loader/system-prompt";
 /**
  * Enhanced error response interface with correlation tracking
@@ -6041,8 +6049,12 @@ export default class ReactorConversationService
               summary: "Reactor Chat Session with agent " + persona.name,
               title: "Chat with " + persona.name,
             },
-            macros: persona.macros || [],
-            tools: persona.tools || [],
+            // A delegated (headless) session must never be handed client-side tools:
+            // there is no browser to run them, and advertising one is what let the
+            // AUTO loop pause on a tool that could never be answered. Interactive
+            // sessions keep every tool — the browser is exactly where they run.
+            macros: parentSessionId ? serverOnly(persona.macros) : (persona.macros || []),
+            tools: parentSessionId ? serverOnly(persona.tools) : (persona.tools || []),
             started: new Date(),
             sseSessionId: sessionId,
             toolApprovalMode: toolApprovalModeOverride || ToolApprovalMode.PROMPT,
@@ -6246,6 +6258,13 @@ export default class ReactorConversationService
             // the browser that could actually run it.
             const clientToolNames = this.collectClientRoutedToolNames(conversation);
 
+            // Whether this turn has a client able to execute browser-side tools.
+            // A delegated sub-agent never does; neither does any non-SSE turn.
+            // Client tools are REFUSED (and the loop continues) on a headless turn
+            // rather than forwarded-and-paused — the pause is what silently stalled
+            // delegated agents after a call or two, because no browser ever answers.
+            const headlessTurn = isHeadlessTurn(conversation, streamingMode);
+
             // Every tool this conversation actually declares, server or client.
             //
             // A model can ask for a tool that is not in here at all — most often a
@@ -6299,6 +6318,19 @@ export default class ReactorConversationService
                 // than failing it merely because this session never recorded the
                 // capability.
                 if (verdict.forwardToClient) {
+                  // A browser could run this, but only an interactive turn has one.
+                  // On a headless turn there is nobody to forward to, so refusing
+                  // — rather than pausing — is what keeps the delegated agent moving.
+                  if (headlessTurn) {
+                    await this.persistHeadlessClientToolRefusal({
+                      conversationId: effectiveConversationId,
+                      toolCall,
+                      toolName,
+                      personaId,
+                    });
+                    continue; // Skip to next tool call
+                  }
+
                   hasClientToolsPending = true;
 
                   // The plumbing — placeholder persistence, mirror, SSE forward —
@@ -6362,6 +6394,19 @@ export default class ReactorConversationService
               // Store a placeholder tool result so the AI provider receives a
               // response for this tool_call_id and the conversation can proceed.
               if (clientToolNames.has(toolName)) {
+                // Headless turns have no browser to run this in. Answer the call
+                // with an explicit refusal and continue, instead of forwarding and
+                // pausing for a result that will never arrive.
+                if (headlessTurn) {
+                  await this.persistHeadlessClientToolRefusal({
+                    conversationId: effectiveConversationId,
+                    toolCall,
+                    toolName,
+                    personaId,
+                  });
+                  continue; // Skip to next tool call
+                }
+
                 hasClientToolsPending = true;
                 this.sessionLog("info", `[sendMessage] AUTO mode: skipping client-side tool "${toolName}" — will be forwarded to client`, {
                   toolName,
@@ -7507,6 +7552,15 @@ export default class ReactorConversationService
       if (!macroFunction) {
         throw new Error(`Macro ${macro} not found in macro registry`);
       }
+
+      // Snapshot `vars` BEFORE the macro runs. Macros receive `conversation` as their
+      // ChatState, so they mutate `conversation.vars` in place; the difference between
+      // this snapshot and the post-run state is exactly what this call changed, and is
+      // what we persist below (see `buildVarsUpdate`). Capturing it here — rather than
+      // writing the whole object — is what stops an unrelated concurrent write (an
+      // out-of-band async delegation record) from being clobbered.
+      const varsBefore = snapshotVars(conversation.vars);
+
       // @ts-ignore
       let result: any = await macroFunction(
         args.args,
@@ -7632,23 +7686,44 @@ export default class ReactorConversationService
       };
 
       // Use atomic update to add macro result to conversation history.
-      // Persist conversation.vars — macros (e.g. todoMacro, variableMacro) mutate
-      // state.vars in-memory. A JSON round-trip strips any Mongoose Mixed-type
-      // internal wrappers and produces a plain POJO that BSON serializes correctly,
-      // including nested arrays such as TodoList.items[].
-      let persistedVars: Record<string, unknown>;
-      try {
-        persistedVars = JSON.parse(JSON.stringify(conversation.vars ?? {}));
-      } catch {
-        persistedVars = {};
+      //
+      // Persist only the `vars` DELTA this call changed, never the whole object.
+      // Writing the whole object used to destroy anything written to `vars` by another
+      // writer during the call — which is how the async delegation record was silently
+      // stripped to `{status, response, completedAt}` and `followup` by delegationId
+      // broke (`buildVarsUpdate` documents the full mechanism). A key that existed
+      // before and is gone now is a deletion, so it becomes an `$unset` and the `var`
+      // macro's delete still works. Keys this call never saw are not referenced at all.
+      const varsUpdate = buildVarsUpdate(varsBefore, conversation.vars);
+
+      const persistUpdate: Record<string, any> = {
+        $push: { history: toolResult },
+        $set: { updated: new Date() },
+      };
+
+      if (varsUpdate.requiresMerge && varsUpdate.changedKeys.length > 0) {
+        // A changed key contains a `.` (e.g. `reactor.todos`), which cannot be addressed as
+        // a leaf path — `$set: { 'vars.reactor.todos': X }` would create NESTED fields rather
+        // than the literal key the todo/variable macros use. Re-read the CURRENT `vars` and
+        // apply only the changed keys on top, so an out-of-band write made during the tool
+        // call (an async delegation record) survives the unavoidable whole-object write.
+        const current = await ReactorConversationModel.findOne(
+          { _id: chatSessionId },
+          { vars: 1 }
+        ).lean().exec();
+        persistUpdate.$set.vars = applyChangedKeys(
+          (current as any)?.vars,
+          conversation.vars,
+          varsUpdate.changedKeys
+        );
+      } else {
+        Object.assign(persistUpdate.$set, varsUpdate.$set || {});
+        if (varsUpdate.$unset) persistUpdate.$unset = varsUpdate.$unset;
       }
 
       const toolResultConversation = await ReactorConversationModel.findOneAndUpdate(
         { _id: chatSessionId },
-        {
-          $push: { history: toolResult },
-          $set: { updated: new Date(), vars: persistedVars },
-        },
+        persistUpdate,
         { new: true }
       ).exec();
 
@@ -9251,7 +9326,12 @@ export default class ReactorConversationService
           nameSpace: macro.nameSpace,
           description: macro.description,
           version: macro.version,
-          runat: "server", // these are server side macros
+          // Preserve the macro's own scope. This previously hardcoded "server", which
+          // silently relabelled a persona's client-only macros (e.g. `image`) as
+          // server-side — and a mislabelled client tool is exactly what wedges a
+          // headless sub-agent. Anything that does not declare `runat: 'client'`
+          // resolves to 'server' via getToolScope, preserving the old default.
+          runat: getToolScope(macro),
           roles: macro.roles ?? [],
           alias: macro.alias || macro.name,
           enabled: macro.enabled ?? true,
@@ -9275,13 +9355,20 @@ export default class ReactorConversationService
       });
     }
 
-    // 4. Add server-side tools defined on the persona (if not already added)
-    args.persona.tools?.forEach((tool) => {
+    // 4. Add persona tools (if not already added).
+    //
+    // Scope is inherited from the owning macro. Persona tools are flattened from
+    // `persona.macros[].tools` in most persona definitions, which drops the macro's
+    // `runat`; without re-applying it a tool advertised by a client macro (e.g. the
+    // `image` macro's `image` tool) looks server-side and is handed to a headless
+    // agent that has no browser to run it. `inheritToolScopes` only *adds* a scope
+    // where one is missing, so an explicit `runat` on the tool still wins.
+    inheritToolScopes(args.persona?.macros, args.persona?.tools).forEach((tool) => {
       const toolName = tool.function?.name || (tool as any).name;
       if (toolName && !toolMap.has(toolName)) {
         toolMap.set(toolName, {
           type: tool.type ?? "function",
-          runat: tool.runat ?? "server", // these are server side tools
+          runat: (tool as any).runat ?? "server",
           enabled: tool.enabled ?? true,
           roles: tool.roles ?? [],
           function: tool.function,
@@ -9664,6 +9751,62 @@ export default class ReactorConversationService
     }
   }
 
+  /**
+   * Close a client-routed tool call that a headless turn can never execute.
+   *
+   * A delegated sub-agent (or any non-SSE turn) has no browser. The interactive path
+   * — persist a placeholder, forward over SSE, pause for `ReactorCompleteClientToolCalls`
+   * — would wedge the loop forever, because nothing can ever answer. Instead the call is
+   * answered immediately with a `tool` result that explains why, so the provider receives
+   * a structurally valid transcript and the loop continues to the next iteration.
+   *
+   * The message is written for the model: it names the tool, states that it is
+   * browser-only, tells the agent not to retry it in this session, and points at the
+   * server-side alternative. A silent refusal would just invite a retry.
+   */
+  private async persistHeadlessClientToolRefusal(args: {
+    conversationId: string;
+    toolCall: any;
+    toolName: string;
+    personaId?: string;
+  }): Promise<void> {
+    const { conversationId, toolCall, toolName, personaId } = args;
+
+    const message =
+      `The tool "${toolName}" runs in the user's browser and cannot execute in this ` +
+      `session: this agent is running headless (it was delegated to, so no browser is ` +
+      `attached and client-side tools are unavailable). Do not call "${toolName}" again ` +
+      `here. Continue using the server-side tools available to you, or tell the caller ` +
+      `that this capability requires an interactive client session.`;
+
+    this.sessionLog(
+      "info",
+      `[sendMessage] AUTO mode: refusing client-side tool "${toolName}" — headless session has no browser`,
+      { toolName, conversationId },
+      conversationId,
+      personaId
+    );
+
+    const refusalEntry = {
+      id: new ObjectId(),
+      role: 'tool' as const,
+      content: message,
+      tool_call_id: toolCall.id,
+      tool_name: toolName,
+      timestamp: new Date(),
+      tool_results: [] as any[],
+      tool_errors: [{ code: 'CLIENT_TOOL_UNAVAILABLE_HEADLESS', message }],
+    };
+
+    const refusalUpdated = await ReactorConversationModel.findOneAndUpdate(
+      { _id: conversationId },
+      { $push: { history: refusalEntry }, $set: { updated: new Date() } },
+      { new: true }
+    ).exec();
+
+    await this.mirrorPersistedAppend(conversationId, refusalUpdated, refusalEntry);
+  }
+
   private classifyUndeclaredToolCall(
     toolName: string,
     conversation: any
@@ -9724,15 +9867,28 @@ export default class ReactorConversationService
     }
 
     for (const macro of (conversation?.macros || []) as any[]) {
-      if (macro?.runat === "client") {
+      // A macro's scope decides the scope of the tools it declares.
+      const macroIsClient = getToolScope(macro) === "client";
+
+      if (macroIsClient) {
         const name = macro?.alias || macro?.name;
         if (name) names.add(String(name));
       }
-      // A client macro may also declare tools of its own, which are client-run by
-      // virtue of belonging to it.
+
+      // A *client* macro's tools are client-run by virtue of belonging to it. A
+      // *server* macro's tools run on the server and must NOT be swept in here.
+      //
+      // This loop previously ran for EVERY macro, unconditionally, so every tool
+      // declared by any macro — server workflow/fs/graph macros included — was
+      // classified as client-routed. For an interactive session that mostly went
+      // unnoticed (the browser is a valid executor for the handful of genuinely
+      // client tools), but a delegated sub-agent has no browser: its first macro
+      // tool call was forwarded-and-paused and the turn stalled. A tool may still
+      // opt into the client explicitly via its own `runat`.
       for (const tool of (macro?.tools || []) as any[]) {
-        const name = tool?.function?.name || tool?.name;
-        if (name) names.add(String(name));
+        const name = toolNameOf(tool);
+        if (!name) continue;
+        if (macroIsClient || getToolScope(tool) === "client") names.add(name);
       }
     }
 
