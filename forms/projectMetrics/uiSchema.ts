@@ -33,8 +33,14 @@ const uiSchema: Reactory.Schema.IFormUISchema = {
     {
       incidents: { xs: 12, sm: 12, md: 4, lg: 4, xl: 4 },
       openPullRequests: { xs: 12, sm: 12, md: 4, lg: 4, xl: 4 },
+      // `closedPullRequests` and `activeDeployments` have widgets configured
+      // below but were absent from the layout, which is the render list — so
+      // they never appeared on either engine.
+      // See REACTORY-302016408/20261014/2327145804.
+      closedPullRequests: { xs: 12, sm: 12, md: 4, lg: 4, xl: 4 },
       errors: { xs: 12, sm: 12, md: 4, lg: 4, xl: 4 },
       deployments: { xs: 12, sm: 12, md: 4, lg: 4, xl: 4 },
+      activeDeployments: { xs: 12, sm: 12, md: 4, lg: 4, xl: 4 },
       activeTasks: { xs: 12, sm: 12, md: 4, lg: 4, xl: 4 },
       closedTasks: { xs: 12, sm: 12, md: 4, lg: 4, xl: 4 },
       openedTasks: { xs: 12, sm: 12, md: 4, lg: 4, xl: 4 },

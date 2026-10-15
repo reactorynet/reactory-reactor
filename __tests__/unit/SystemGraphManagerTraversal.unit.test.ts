@@ -18,6 +18,7 @@ const makeQuery = (result: () => any[]) => {
     }),
     skip: jest.fn(() => q),
     sort: jest.fn(() => q),
+    select: jest.fn(() => q),
     lean: jest.fn(async () => {
       const rows = result();
       return limitValue !== undefined ? rows.slice(0, limitValue) : rows;

@@ -124,6 +124,7 @@ const DeletePerspectiveMacroDefinition: MacroComponentDefinition<typeof DeletePe
     {
       type: "function",
       roles: ["USER"],
+      safeForAutoExecution: false,
       function: {
         icon: "delete_sweep",
         name: "deletePerspective",

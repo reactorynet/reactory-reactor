@@ -61,8 +61,8 @@ function makeChatState(service: any) {
 
 describe('Graph macros', () => {
   describe('registration', () => {
-    it('exposes six macros, spread into the MacroRegistry', () => {
-      expect(GraphMacros).toHaveLength(6);
+    it('exposes seven macros, spread into the MacroRegistry', () => {
+      expect(GraphMacros).toHaveLength(7);
       // Importing ../../ai/macro here would pull the entire macro dependency
       // tree (OpenAI SDK, playwright, ...) through ts-jest and exhaust the
       // heap — assert the registration site textually instead.
@@ -77,10 +77,14 @@ describe('Graph macros', () => {
     it('read tools are auto-safe; the write tool (createNodeEdge) is not', () => {
       for (const macro of GraphMacros) {
         expect(macro.runat).toBe('server');
-        const isWrite = macro.alias === 'createNodeEdge';
+        const isWrite = macro.alias === 'createNodeEdge' || macro.alias === 'deletePerspective';
         for (const tool of macro.tools ?? []) {
           expect(tool.safeForAutoExecution).toBe(!isWrite);
-          expect(tool.function.parameters.required?.length).toBeGreaterThan(0);
+          // deletePerspective accepts any one of id/name/projectId, so it has no
+          // single "required" list; every other graph tool requires parameters.
+          if (macro.alias !== 'deletePerspective') {
+            expect(tool.function.parameters.required?.length).toBeGreaterThan(0);
+          }
         }
       }
     });
@@ -88,7 +92,7 @@ describe('Graph macros', () => {
     it('aliases match the persona allowlist names', () => {
       const aliases = GraphMacros.map((m) => m.alias).sort();
       expect(aliases).toEqual(
-        ['createNodeEdge', 'exploreGraph', 'getGraphNode', 'graphChildren', 'graphLinks', 'searchGraph'].sort()
+        ['createNodeEdge', 'deletePerspective', 'exploreGraph', 'getGraphNode', 'graphChildren', 'graphLinks', 'searchGraph'].sort()
       );
     });
   });
