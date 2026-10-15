@@ -3,12 +3,22 @@ import ReactorConversationService from '../ReactorConversationService';
 import ReactorConversationModel from '../../../models/ReactorChatState';
 
 describe('Image Tool & Provider Resolution', () => {
-  it('registers the ImageMacro in MacroRegistry with alias image', () => {
+  it('keeps the image macro client-side: defined as runat client and absent from the server registry', () => {
+    // The image macro is owned by the CLIENT (reactory-pwa-client,
+    // ReactorChat/hooks/macros/image.macro.tsx, registered in that folder's
+    // index.ts) and executes there. The server deliberately refuses to run
+    // client-declared macros - see ReactorConversationService: "Macro X is a
+    // client-side macro (runat: 'client') and cannot be executed on the
+    // server" - so ImageMacro must NOT appear in the server MacroRegistry.
+    //
+    // This assertion previously required the opposite (toHaveBeenDefined plus
+    // alias/runat/tool-name checks against the registry entry). It was wrong:
+    // the server-side registration was added, dropped, re-added and dropped
+    // again across a523647/4fc4b9f/133bf07/13a94ee because it was never part of
+    // the design. Asserting absence states the real contract and guards the
+    // invariant that caused that churn.
     const imageMacro = MacroRegistry.find(m => m.name === 'ImageMacro' || m.alias === 'image');
-    expect(imageMacro).toBeDefined();
-    expect(imageMacro?.alias).toBe('image');
-    expect(imageMacro?.runat).toBe('client');
-    expect(imageMacro?.tools?.[0]?.function?.name).toBe('image');
+    expect(imageMacro).toBeUndefined();
   });
 
   it('attachImage respects conversation.providerId', async () => {

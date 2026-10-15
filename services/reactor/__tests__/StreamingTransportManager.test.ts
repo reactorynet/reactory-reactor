@@ -131,12 +131,23 @@ describe('StreamingTransportManager', () => {
       expect(manager.hasTransport(SSE_ID)).toBe(false);
     });
 
-    it('should throw and buffer when a connected transport send fails', async () => {
+    it('should log and buffer (not throw) when a connected transport send fails', async () => {
       mockTransport.sendEvent.mockRejectedValue(new Error('Send failed'));
       const event = makeEvent();
 
-      await expect(manager.sendEventToSession(CHAT_ID, event))
-        .rejects.toThrow('Send failed');
+      // sendEventToSession never rejects. deliverLocal catches per-transport send
+      // failures, so a dropped write degrades to a buffered event instead of
+      // propagating up into the provider's per-token loop - the same
+      // "buffer, do not throw" contract the sibling cases assert for a missing
+      // mapping and for a disconnected transport. The previous expectation
+      // (rejects.toThrow) described the pre-fanout implementation.
+      await expect(manager.sendEventToSession(CHAT_ID, event)).resolves.toBeUndefined();
+
+      // The failure is not silent, though: it is reported at error level.
+      expect(mockContext.error).toHaveBeenCalledWith(
+        expect.stringContaining('Error sending event to SSE session'),
+        expect.any(Object),
+      );
     });
 
     it('should update session last activity after a successful send', async () => {
