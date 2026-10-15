@@ -64,8 +64,31 @@ describe('PostgresMacro', () => {
     it('should reject non-SELECT queries', async () => {
       const state = createMockState({ connections: [pgConnection()] });
       const result = await PostgresMacro({ ...validProps, query: 'DROP TABLE users' }, state);
+
+      // The guard lives in @reactory/server-core/database/sqlGuard
+      // (validateReadOnlySql, reached via utils.validateQuery) and rejects this on
+      // the "must start with SELECT/WITH" rule. Its wording no longer includes
+      // "dangerous", which is all this assertion used to look for; the guard
+      // itself is intact.
       expect(result.success).toBe(false);
-      expect(result.error).toContain('dangerous');
+      expect(result.error).toContain('SELECT');
+
+      // The property that actually matters: the statement never reached the
+      // driver. Previously this test passed on a word in the message and would
+      // have kept passing even if validation had started running the query.
+      expect(mockPgQuery).not.toHaveBeenCalled();
+      expect(mockPgConnect).not.toHaveBeenCalled();
+    });
+
+    it('should reject a write smuggled in as a read-only CTE', async () => {
+      const state = createMockState({ connections: [pgConnection()] });
+      const result = await PostgresMacro(
+        { ...validProps, query: 'WITH moved AS (SELECT 1) DELETE FROM users' },
+        state,
+      );
+
+      expect(result.success).toBe(false);
+      expect(mockPgQuery).not.toHaveBeenCalled();
     });
   });
 
