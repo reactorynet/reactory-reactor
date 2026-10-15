@@ -39,15 +39,17 @@ describe("Support Ticket Macros", () => {
   });
 
   describe("GetSupportTicket", () => {
+    const OBJECT_ID = "507f1f77bcf86cd799439011";
+
     it("should return error if no id provided", async () => {
       const result = await GetSupportTicket({ id: "" }, mockState);
       expect(result.success).toBe(false);
       expect(result.error).toContain("No ticket ID provided");
     });
 
-    it("should retrieve a ticket successfully", async () => {
-      const mockTicket = {
-        id: "ticket-1",
+    it("should retrieve a ticket by ObjectId successfully", async () => {
+      const mockTicket: any = {
+        id: OBJECT_ID,
         reference: "REF-001",
         request: "Login issue",
         status: "open",
@@ -60,12 +62,58 @@ describe("Support Ticket Macros", () => {
 
       mockSupportService.getTicket.mockResolvedValue(mockTicket);
 
-      const result = await GetSupportTicket({ id: "ticket-1" }, mockState);
+      const result = await GetSupportTicket({ id: OBJECT_ID }, mockState);
 
       expect(result.success).toBe(true);
       expect(result.data).toEqual(mockTicket);
-      expect(mockSupportService.getTicket).toHaveBeenCalledWith("ticket-1");
+      expect(mockSupportService.getTicket).toHaveBeenCalledWith(OBJECT_ID);
+      expect(mockSupportService.pagedRequest).not.toHaveBeenCalled();
       expect(mockState.vars.lastSupportTicket).toEqual(mockTicket);
+    });
+
+    it("should fall back to a reference lookup when the id is not an ObjectId", async () => {
+      const reference = "ACME-1A2B/20260101/9F8E";
+      const mockTicket: any = {
+        id: OBJECT_ID,
+        reference,
+        request: "Login issue",
+        status: "open",
+        priority: "high",
+        requestType: "bug",
+        description: "Cannot login with Google auth",
+        createdBy: { firstName: "Alice", lastName: "Smith", email: "alice@example.com" },
+        assignedTo: null,
+      };
+
+      mockSupportService.pagedRequest.mockResolvedValue({
+        paging: { page: 1, pageSize: 1, total: 1, hasNext: false },
+        tickets: [mockTicket],
+      });
+
+      const result = await GetSupportTicket({ id: reference.toLowerCase() }, mockState);
+
+      expect(result.success).toBe(true);
+      expect(result.data).toEqual(mockTicket);
+      expect(mockSupportService.getTicket).not.toHaveBeenCalled();
+      // The reference is queried in both its raw and upper-cased form.
+      expect(mockSupportService.pagedRequest).toHaveBeenCalledWith(
+        { reference: [reference.toLowerCase(), reference] },
+        { page: 1, pageSize: 1 }
+      );
+      expect(mockState.vars.lastSupportTicket).toEqual(mockTicket);
+    });
+
+    it("should report not found when a reference does not resolve", async () => {
+      mockSupportService.pagedRequest.mockResolvedValue({
+        paging: { page: 1, pageSize: 1, total: 0, hasNext: false },
+        tickets: [],
+      });
+
+      const result = await GetSupportTicket({ id: "NO-SUCH-REF" }, mockState);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("reference NO-SUCH-REF");
+      expect(mockSupportService.getTicket).not.toHaveBeenCalled();
     });
   });
 

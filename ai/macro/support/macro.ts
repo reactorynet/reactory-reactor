@@ -9,9 +9,26 @@ import {
   SupportMacroResult,
 } from "./types";
 import logger from "@reactory/server-core/logging";
+import { ObjectId } from "mongodb";
 
 /**
- * Retrieves a single support ticket by its ID
+ * Guard that determines whether a supplied ticket identifier is a MongoDB ObjectId.
+ *
+ * `ObjectId.isValid` alone is not sufficient: it returns true for ANY 12 byte string
+ * (e.g. "ticket-1abcde"), which would send a reference down the `findById` path and
+ * resurface the very CastError this guard is here to avoid. Requiring the canonical
+ * 24 character hex representation (round-tripping through `new ObjectId(...)`) keeps
+ * the two lookup paths unambiguous.
+ */
+const isObjectIdString = (value: string): boolean =>
+  ObjectId.isValid(value) && String(new ObjectId(value)) === value;
+
+/**
+ * Retrieves a single support ticket by its ObjectId or human readable reference number.
+ *
+ * When the supplied identifier is a valid ObjectId the ticket is fetched directly;
+ * otherwise it is resolved against the ticket reference index. This guards against
+ * the CastError that `findById` raises when a reference number is passed through.
  */
 export const GetSupportTicket: Macro<SupportMacroResult, GetSupportTicketProps> = async (
   props: GetSupportTicketProps,
@@ -48,19 +65,39 @@ export const GetSupportTicket: Macro<SupportMacroResult, GetSupportTicketProps> 
   }
 
   try {
-    const ticket = await supportService.getTicket(id.trim());
+    const ticketId = id.trim();
+    const isObjectId = isObjectIdString(ticketId);
+
+    let ticket: Reactory.Models.ReactorySupportDocument | null = null;
+
+    if (isObjectId) {
+      ticket = await supportService.getTicket(ticketId);
+    } else {
+      // The identifier is not a MongoDB ObjectId, so treat it as the human readable
+      // ticket reference and resolve it through the reference index. References are
+      // stored upper-cased, so query both the raw and upper-cased variants to remain
+      // forgiving about how the caller typed it.
+      const references = Array.from(new Set([ticketId, ticketId.toUpperCase()]));
+      const paged = await supportService.pagedRequest(
+        { reference: references },
+        { page: 1, pageSize: 1 }
+      );
+      ticket = (paged?.tickets?.[0] as unknown as Reactory.Models.ReactorySupportDocument) ?? null;
+    }
+
     const executionTime = Date.now() - startTime;
 
     if (!ticket) {
       return {
         success: false,
-        error: `Ticket with ID ${id} not found`,
+        error: `Ticket with ${isObjectId ? "ID" : "reference"} ${ticketId} not found`,
         tool: "getSupportTicket",
         params: props,
         metadata: {
           executionTime,
           timestamp: new Date(),
           user: state.user?.id,
+          lookup: isObjectId ? "id" : "reference",
         },
       };
     }
@@ -117,7 +154,7 @@ export const GetSupportTicketRegistry: MacroComponentDefinition<typeof GetSuppor
   name: "getSupportTicket",
   version: "1.0.0",
   component: GetSupportTicket,
-  description: "Retrieve a support ticket by ID with full details, comments, and assignee metadata",
+  description: "Retrieve a support ticket by ObjectId or human-readable reference number with full details, comments, and assignee metadata",
   roles: ["ADMIN", "USER", "SUPPORT_ADMIN", "SUPPORT"],
   stem: "support",
   tags: ["support", "ticket", "get", "inquiry"],
@@ -127,13 +164,13 @@ export const GetSupportTicketRegistry: MacroComponentDefinition<typeof GetSuppor
       safeForAutoExecution: true,
       function: {
         name: "getSupportTicket",
-        description: "Retrieve a support ticket by ID with full details, comments, and metadata",
+        description: "Retrieve a support ticket by ObjectId or human-readable reference number. Pass either the ticket's ObjectId or its reference (e.g. 'ACME-1A2B/20260101/9F8E'); non-ObjectId values are resolved against the ticket reference index.",
         parameters: {
           type: "object",
           properties: {
             id: {
               type: "string",
-              description: "The unique ID of the support ticket",
+              description: "The support ticket's ObjectId (24 char hex) or its human-readable reference number",
             },
           },
           required: ["id"],
