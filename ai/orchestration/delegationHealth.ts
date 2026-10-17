@@ -21,6 +21,9 @@
  *             followed by `AUTO mode: pausing — client-side tool(s) pending`
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
+
 export interface IDelegationHealth {
   /** True when the transcript shows no stall (safe to treat the result as real). */
   healthy: boolean;
@@ -97,5 +100,73 @@ export const analyzeDelegationTranscript = (logText: string): IDelegationHealth 
 /** Convenience predicate for assertions / guards. */
 export const isDelegationHealthy = (logText: string): boolean =>
   analyzeDelegationTranscript(logText).healthy;
+
+/**
+ * Sanitise a path segment the same way `ChatSessionResourceManager` does when it
+ * creates the session directory, so a transcript lookup lands on the real file.
+ */
+export const sanitizeSessionPathSegment = (value: unknown): string =>
+  String(value ?? '').replace(/[^a-zA-Z0-9_\-]/g, '_');
+
+/**
+ * Absolute path of a conversation's `session.log`, or `null` when the data root is
+ * unknown or any segment is missing.
+ *
+ * Mirrors `REACTORY_DATA/profiles/{userId}/chats/{personaId}/{conversationId}/session.log`.
+ */
+export const sessionLogPathFor = (args: {
+  dataRoot?: string;
+  userId?: string;
+  personaId?: string;
+  conversationId?: string;
+}): string | null => {
+  const dataRoot = args.dataRoot || process.env.REACTORY_DATA || process.env.APP_DATA_ROOT;
+  if (!dataRoot || !args.userId || !args.personaId || !args.conversationId) return null;
+
+  return path.join(
+    dataRoot,
+    'profiles',
+    sanitizeSessionPathSegment(args.userId),
+    'chats',
+    sanitizeSessionPathSegment(args.personaId),
+    sanitizeSessionPathSegment(args.conversationId),
+    'session.log'
+  );
+};
+
+/**
+ * Read a conversation's session transcript.
+ *
+ * Returns `''` — never throws — when the file is absent or unreadable. An empty
+ * transcript analyses as healthy, so a missing log can never turn a working
+ * delegation into a reported stall. Failure here must stay invisible.
+ */
+export const readDelegationTranscript = (args: {
+  dataRoot?: string;
+  userId?: string;
+  personaId?: string;
+  conversationId?: string;
+}): string => {
+  const file = sessionLogPathFor(args);
+  if (!file) return '';
+
+  try {
+    return fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  } catch {
+    return '';
+  }
+};
+
+/**
+ * Caller-facing warning text for a stalled delegation.
+ *
+ * Deliberately blunt: the whole defect this guards against is a caller that reads a
+ * partial opening line as a completed result.
+ */
+export const describeDelegationStall = (health: IDelegationHealth): string =>
+  `Delegation DID NOT COMPLETE: the turn paused awaiting client-side tool(s) ` +
+  `(${Array.from(new Set(health.pendingClientTools)).join(', ') || 'unknown'}) that a ` +
+  `headless session can never answer. Any text returned is the agent's partial ` +
+  `output, not a result. Do not treat it as completed work.`;
 
 export default analyzeDelegationTranscript;

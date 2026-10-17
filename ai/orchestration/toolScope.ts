@@ -1,3 +1,5 @@
+import { ToolApprovalMode } from '../openai/types/chat';
+
 /**
  * Tool scope — the one place that answers "does this tool run here, or in the browser?"
  *
@@ -83,6 +85,28 @@ export const isHeadlessTurn = (
   conversation: any,
   streamingMode?: string
 ): boolean => isHeadlessConversation(conversation) || streamingMode !== 'SSE';
+
+/**
+ * Tool-approval mode for a conversation that is about to be created.
+ *
+ * Only `AUTO` executes tool calls on the server. `PROMPT`, `PLAN` and `SAFE_AUTO` all
+ * assume a browser is present to approve or run the call: the provider emits the
+ * `tool_call` event and the turn ends there. A delegated sub-agent has no browser and
+ * no human, so inheriting one of those modes turns a working delegation into a silent
+ * no-op — the model's opening line is returned as the result and the caller is told the
+ * delegation completed.
+ *
+ * Delegated (headless) sessions are therefore pinned to `AUTO`; interactive sessions
+ * keep whatever was requested, falling back to the historical `PROMPT` default.
+ */
+export const resolveToolApprovalMode = (args: {
+  parentSessionId?: string | null;
+  requested?: ToolApprovalMode | string | null;
+  interactiveDefault?: ToolApprovalMode;
+}): ToolApprovalMode =>
+  isHeadlessConversation({ parentSessionId: args.parentSessionId })
+    ? ToolApprovalMode.AUTO
+    : ((args.requested as ToolApprovalMode) || args.interactiveDefault || ToolApprovalMode.PROMPT);
 
 /**
  * Split definitions into their server-runnable and browser-only halves, preserving order.

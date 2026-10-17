@@ -109,6 +109,30 @@ describe('ChatsMacro - delegation lifecycle', () => {
       expect(record.message).toBe('do work');
       expect(record.startedAt).toBeDefined();
     });
+
+    it('forces the delegated session to AUTO even when the parent is in PROMPT (headless has no approver)', async () => {
+      // Regression: a delegation launched from a PROMPT-mode conversation created the
+      // sub-agent in SAFE_AUTO. No browser is attached to a delegated session, so its
+      // tool calls were emitted to nobody, the turn ended on the assistant's opening
+      // line, and the caller was told the delegation completed. AUTO is the only mode
+      // that executes the tools server-side, so delegated runs must be pinned to it.
+      chatState.toolApprovalMode = ToolApprovalMode.PROMPT;
+
+      const createSpy = jest.spyOn(ReactorConversationModel, 'create').mockResolvedValue({} as any);
+      jest.spyOn(ReactorConversationModel, 'findOneAndUpdate').mockImplementation(
+        () => ({ exec: async () => ({}) } as any),
+      );
+      mockSendMessage.mockImplementation(() => new Promise(() => {}));
+
+      await ChatsMacro(
+        { action: 'speakto', id: 'daan', message: 'do work', async: true, wakeParent: false },
+        chatState,
+      );
+
+      const created = createSpy.mock.calls[0][0] as any;
+      expect(created.parentSessionId).toBe(chatState.id);
+      expect(created.toolApprovalMode).toBe(ToolApprovalMode.AUTO);
+    });
   });
 
   describe('async completion', () => {

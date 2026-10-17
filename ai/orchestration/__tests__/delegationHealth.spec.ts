@@ -10,10 +10,14 @@
  */
 
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import {
   analyzeDelegationTranscript,
+  describeDelegationStall,
   isDelegationHealthy,
+  readDelegationTranscript,
+  sessionLogPathFor,
 } from '../delegationHealth';
 
 // ---------------------------------------------------------------------------
@@ -80,6 +84,92 @@ describe('delegationHealth', () => {
     it('exposes a convenience predicate', () => {
       expect(isDelegationHealthy(STALLED_LOG)).toBe(false);
       expect(isDelegationHealthy(HEALTHY_LOG)).toBe(true);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Transcript lookup — how the delegation result surfaces a stall. The path must
+  // match the one ChatSessionResourceManager writes, and an unreadable log must
+  // degrade to "healthy" rather than downgrade a real result.
+  // -------------------------------------------------------------------------
+  describe('transcript lookup', () => {
+    let dataRoot: string;
+
+    beforeEach(() => {
+      dataRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'delegation-health-'));
+    });
+
+    afterEach(() => {
+      try { (fs as any).rmSync(dataRoot, { recursive: true, force: true }); } catch { /* best effort */ }
+    });
+
+    it('builds the session.log path the resource manager writes', () => {
+      expect(sessionLogPathFor({
+        dataRoot,
+        userId: 'user1',
+        personaId: 'QualityQuinn',
+        conversationId: 'conv1',
+      })).toBe(path.join(dataRoot, 'profiles', 'user1', 'chats', 'QualityQuinn', 'conv1', 'session.log'));
+    });
+
+    it('sanitises segments the same way the session directory does', () => {
+      expect(sessionLogPathFor({
+        dataRoot,
+        userId: 'a/b',
+        personaId: 'x y',
+        conversationId: 'z:w',
+      })).toBe(path.join(dataRoot, 'profiles', 'a_b', 'chats', 'x_y', 'z_w', 'session.log'));
+    });
+
+    it('returns null when any required segment is missing', () => {
+      expect(sessionLogPathFor({ dataRoot, userId: '', personaId: 'p', conversationId: 'c' })).toBeNull();
+      expect(sessionLogPathFor({ dataRoot, userId: 'u', personaId: '', conversationId: 'c' })).toBeNull();
+      expect(sessionLogPathFor({ dataRoot, userId: 'u', personaId: 'p', conversationId: '' })).toBeNull();
+      expect(sessionLogPathFor({})).toBeNull();
+    });
+
+    it('falls back to the configured data root when none is passed', () => {
+      // An unspecified root is not an error: REACTORY_DATA is the process-wide default,
+      // which is how every other session-log reader locates it.
+      const previous = process.env.REACTORY_DATA;
+      process.env.REACTORY_DATA = dataRoot;
+      try {
+        expect(sessionLogPathFor({ userId: 'u', personaId: 'p', conversationId: 'c' }))
+          .toBe(path.join(dataRoot, 'profiles', 'u', 'chats', 'p', 'c', 'session.log'));
+      } finally {
+        if (previous === undefined) delete process.env.REACTORY_DATA;
+        else process.env.REACTORY_DATA = previous;
+      }
+    });
+
+    it('reads a transcript that exists and returns empty for one that does not', () => {
+      const file = sessionLogPathFor({
+        dataRoot,
+        userId: 'u',
+        personaId: 'QualityQuinn',
+        conversationId: 'conv1',
+      }) as string;
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, STALLED_LOG, 'utf8');
+
+      expect(analyzeDelegationTranscript(readDelegationTranscript({
+        dataRoot, userId: 'u', personaId: 'QualityQuinn', conversationId: 'conv1',
+      })).stalled).toBe(true);
+
+      // Missing log -> empty text -> healthy. A missing log must never invent a stall.
+      expect(readDelegationTranscript({
+        dataRoot, userId: 'u', personaId: 'QualityQuinn', conversationId: 'nope',
+      })).toBe('');
+    });
+  });
+
+  describe('describeDelegationStall', () => {
+    it('states plainly that the delegation did not complete and names the pending tools', () => {
+      const message = describeDelegationStall(analyzeDelegationTranscript(STALLED_LOG));
+
+      expect(message).toMatch(/DID NOT COMPLETE/);
+      expect(message).toMatch(/readFile/);
+      expect(message).toMatch(/not a result/i);
     });
   });
 
