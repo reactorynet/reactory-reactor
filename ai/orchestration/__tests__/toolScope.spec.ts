@@ -9,7 +9,9 @@ import {
   partitionByScope,
   serverOnly,
   inheritToolScopes,
+  resolveToolApprovalMode,
 } from "../toolScope";
+import { ToolApprovalMode } from "../../openai/types/chat";
 
 /**
  * The server/client distinction is what decides whether a tool call can run in-process or
@@ -76,6 +78,33 @@ describe("toolScope", () => {
 
     it("is only interactive for a top-level SSE turn", () => {
       expect(isHeadlessTurn({ parentSessionId: null }, "SSE")).toBe(false);
+    });
+  });
+
+  describe("resolveToolApprovalMode", () => {
+    it("pins a delegated/headless session to AUTO, whatever the parent requested", () => {
+      // Only AUTO executes tool calls server-side. PROMPT/PLAN/SAFE_AUTO hand the
+      // call to a browser that a delegated session does not have, so the turn ends
+      // on the assistant's opening line and the caller is told it completed.
+      expect(resolveToolApprovalMode({ parentSessionId: "parent", requested: ToolApprovalMode.PROMPT }))
+        .toBe(ToolApprovalMode.AUTO);
+      expect(resolveToolApprovalMode({ parentSessionId: "parent", requested: ToolApprovalMode.SAFE_AUTO }))
+        .toBe(ToolApprovalMode.AUTO);
+      expect(resolveToolApprovalMode({ parentSessionId: "parent", requested: ToolApprovalMode.PLAN }))
+        .toBe(ToolApprovalMode.AUTO);
+      expect(resolveToolApprovalMode({ parentSessionId: "parent" })).toBe(ToolApprovalMode.AUTO);
+    });
+
+    it("keeps the requested mode for an interactive session", () => {
+      expect(resolveToolApprovalMode({ parentSessionId: null, requested: ToolApprovalMode.AUTO }))
+        .toBe(ToolApprovalMode.AUTO);
+      expect(resolveToolApprovalMode({ parentSessionId: null, requested: ToolApprovalMode.SAFE_AUTO }))
+        .toBe(ToolApprovalMode.SAFE_AUTO);
+    });
+
+    it("falls back to the historical PROMPT default when an interactive session requests nothing", () => {
+      expect(resolveToolApprovalMode({ parentSessionId: null })).toBe(ToolApprovalMode.PROMPT);
+      expect(resolveToolApprovalMode({})).toBe(ToolApprovalMode.PROMPT);
     });
   });
 

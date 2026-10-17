@@ -56,9 +56,14 @@ import {
   getToolScope,
   inheritToolScopes,
   isHeadlessTurn,
+  resolveToolApprovalMode,
   serverOnly,
   toolNameOf,
 } from "../../ai/orchestration/toolScope";
+import {
+  createAutoToolBatch,
+  describeAutoToolBatch,
+} from "../../ai/orchestration/toolBatchReport";
 import { applyChangedKeys, buildVarsUpdate, snapshotVars } from "./sessionVars";
 import { resolvePromptDirectives } from "../../ai/persona/loader/system-prompt";
 /**
@@ -6057,7 +6062,18 @@ export default class ReactorConversationService
             tools: parentSessionId ? serverOnly(persona.tools) : (persona.tools || []),
             started: new Date(),
             sseSessionId: sessionId,
-            toolApprovalMode: toolApprovalModeOverride || ToolApprovalMode.PROMPT,
+            // A delegated conversation is headless: nothing can approve or execute
+            // a tool call in the browser, so PROMPT/PLAN/SAFE_AUTO would leave the
+            // model's tool_calls unexecuted and the turn would end on its opening
+            // line while the caller was told the delegation completed. `AUTO` is
+            // the only mode that runs the tools on the server, so headless
+            // sessions are pinned to it; interactive sessions keep the requested
+            // mode (default PROMPT).
+            toolApprovalMode: resolveToolApprovalMode({
+              parentSessionId,
+              requested: toolApprovalModeOverride,
+              interactiveDefault: ToolApprovalMode.PROMPT,
+            }),
             parentSessionId: parentSessionId || null,
           });
 
@@ -6238,10 +6254,13 @@ export default class ReactorConversationService
             iteration++;
             const toolCalls = response.tool_calls || response.choices[0].message.tool_calls;
 
-            this.sessionLog("info", `[sendMessage] AUTO mode: executing ${toolCalls.length} tool(s) server-side (iteration ${iteration})`, {
-              tools: toolCalls.map((tc: any) => tc.function?.name),
-              conversationId: effectiveConversationId,
-            }, effectiveConversationId, personaId);
+            // Classified as we go, so the summary line written after the batch
+            // reports what actually happened. It used to be written *before*
+            // classification and counted every call as "executing N tool(s)
+            // server-side", then skipped one of those same tools as client-side —
+            // two classification paths disagreeing inside a single iteration, and
+            // a transcript that misreported a client tool as server-executed.
+            const batch = createAutoToolBatch();
 
             // Partition tool calls into server-executable and client-only.
             // Client tools (runat: 'client') cannot be executed on the server —
@@ -6328,10 +6347,12 @@ export default class ReactorConversationService
                       toolName,
                       personaId,
                     });
+                    batch.deferredClientTools.push(toolName);
                     continue; // Skip to next tool call
                   }
 
                   hasClientToolsPending = true;
+                  batch.deferredClientTools.push(toolName);
 
                   // The plumbing — placeholder persistence, mirror, SSE forward —
                   // lives in its own method so it can be exercised directly. It was
@@ -6387,6 +6408,7 @@ export default class ReactorConversationService
                   undeclaredEntry
                 );
 
+                batch.refusedTools.push(toolName);
                 continue; // Skip to next tool call
               }
 
@@ -6404,10 +6426,12 @@ export default class ReactorConversationService
                     toolName,
                     personaId,
                   });
+                  batch.deferredClientTools.push(toolName);
                   continue; // Skip to next tool call
                 }
 
                 hasClientToolsPending = true;
+                batch.deferredClientTools.push(toolName);
                 this.sessionLog("info", `[sendMessage] AUTO mode: skipping client-side tool "${toolName}" — will be forwarded to client`, {
                   toolName,
                   conversationId: effectiveConversationId,
@@ -6501,6 +6525,8 @@ export default class ReactorConversationService
               // Atomically mark this tool call as 'running' in MongoDB
               await this.updateToolCallStatus(effectiveConversationId, toolCall.id, 'running');
 
+              batch.executedServerTools.push(toolName);
+
               try {
                 const macroResult = await this.executeMacro({
                   macro: toolName,
@@ -6579,6 +6605,19 @@ export default class ReactorConversationService
                 );
               }
             }
+
+            // One truthful line per iteration, after classification. `tools` is
+            // exactly the set the server ran; client-routed and refused calls are
+            // reported separately so a transcript can never claim a client tool
+            // was executed server-side.
+            const batchSummary = describeAutoToolBatch(batch, iteration);
+            this.sessionLog(
+              "info",
+              batchSummary.message,
+              { ...batchSummary.meta, conversationId: effectiveConversationId },
+              effectiveConversationId,
+              personaId
+            );
 
             // If any client tools are pending, pause the AUTO loop.
             // The client will execute these tools and call

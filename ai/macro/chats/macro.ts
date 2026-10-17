@@ -10,7 +10,12 @@ import { IReactorConversationsService } from "../../../types/service.types";
 import { StreamingMode } from "@reactory/server-modules/reactory-reactor/services/reactor/types/streaming.types";
 import { ChatsMacroProps } from './types';
 import { loadHistoryForContext } from '@reactory/server-modules/reactory-reactor/services/reactor/conversationHistoryLoader';
-import { serverOnly } from '@reactory/server-modules/reactory-reactor/ai/orchestration/toolScope';
+import { resolveToolApprovalMode, serverOnly } from '@reactory/server-modules/reactory-reactor/ai/orchestration/toolScope';
+import {
+  analyzeDelegationTranscript,
+  describeDelegationStall,
+  readDelegationTranscript,
+} from '@reactory/server-modules/reactory-reactor/ai/orchestration/delegationHealth';
 import { v4 } from "uuid";
 import logger from "@reactory/server-core/logging";
 
@@ -362,10 +367,19 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
           if (!state.vars) state.vars = {};
           const existingChatId = state.vars[`subagent_chat_${persona.id}`] as string | undefined;
 
-          // Inherit tool approval mode: auto if primary is auto, otherwise safe_auto
-          const subagentToolMode = state.toolApprovalMode === ToolApprovalMode.AUTO
-            ? ToolApprovalMode.AUTO
-            : ToolApprovalMode.SAFE_AUTO;
+          // A delegated sub-agent is headless: there is no browser to forward a tool
+          // call to and no human to approve one. PROMPT / PLAN / SAFE_AUTO all depend
+          // on that missing client — the provider emits tool_call events to nobody and
+          // the turn ends on the assistant's opening line, which the caller then reads
+          // as the completed delegation result. Only AUTO executes tools server-side,
+          // so delegated runs are pinned to it regardless of the parent's mode.
+          // `resolveToolApprovalMode` is the shared policy (also applied by
+          // `sendMessage` when it creates a conversation with a parentSessionId).
+          const subagentToolMode = resolveToolApprovalMode({
+            parentSessionId: state.id || 'delegated-session',
+            requested: state.toolApprovalMode,
+            interactiveDefault: ToolApprovalMode.SAFE_AUTO,
+          });
 
           // The agent often passes a model display name (e.g. "GPT-5.4")
           // rather than the model id. Resolve to the canonical id before
@@ -584,6 +598,38 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
 
           const content = response?.content || response?.message || JSON.stringify(response);
           const isResumed = !!existingChatId;
+
+          // A blocking delegation is synchronous, but it can still have stopped on a
+          // paused turn — the sub-agent's transcript is the only place that shows it.
+          // Reporting the assistant's opening line as the answer is the exact silent
+          // failure this ticket is about, so a positive stall signature is surfaced
+          // as a hard failure rather than a result.
+          const health = analyzeDelegationTranscript(
+            readDelegationTranscript({
+              userId: (state.context?.user as any)?._id?.toString(),
+              personaId: persona.id,
+              conversationId: subagentConversationId,
+            }),
+          );
+
+          if (health.stalled) {
+            return {
+              success: false,
+              error: describeDelegationStall(health),
+              data: {
+                agentId: persona.id,
+                agentName: persona.name,
+                conversationId: subagentConversationId,
+                resumed: isResumed,
+                status: "stalled",
+                stalled: true,
+                pendingClientToolCalls: Array.from(new Set(health.pendingClientTools)),
+                partialResponse: content,
+              },
+              instructions: `## Delegation Stalled\n\n**Agent**: ${persona.name} (${persona.id})\n**Sub-Agent Session**: ${subagentConversationId}\n\nThe sub-agent's turn paused awaiting client-side tool calls (${Array.from(new Set(health.pendingClientTools)).join(', ') || 'unknown'}). A delegated session has no client to answer them, so no work was completed.\n\n### Suggested Next Steps:\n- Do NOT use data.partialResponse as a result — it is only the opening text\n- Re-dispatch with action="speakto", id="${persona.id}", message="..." (a fresh turn) \n- If the task needs a browser-only capability, run it in an interactive session`
+            };
+          }
+
           return {
             success: true,
             data: {
@@ -803,6 +849,38 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
 
         // 5. Complete branch.
         if (rec.status === "complete") {
+          // "Complete" means the runner returned. It does NOT mean the turn finished:
+          // a paused turn returns the assistant's pre-tool text and completes too.
+          // The transcript is the authority, so check it before handing the text to
+          // the caller as a result.
+          const health = analyzeDelegationTranscript(
+            readDelegationTranscript({
+              userId: (state.context?.user as any)?._id?.toString(),
+              personaId: rec.personaId,
+              conversationId: subagentSessionId,
+            }),
+          );
+
+          const content = finalResponse || "";
+
+          if (health.stalled) {
+            return {
+              success: false,
+              error: describeDelegationStall(health),
+              data: {
+                status: "stalled",
+                delegationId,
+                subagentSessionId,
+                personaId: rec.personaId,
+                stalled: true,
+                pendingClientToolCalls: Array.from(new Set(health.pendingClientTools)),
+                partialResponse: content,
+                completedAt: rec.completedAt,
+              },
+              instructions: `## Delegation Stalled (NOT complete)\n\n**Agent**: ${rec.agentName || rec.personaId}\n**Delegation**: ${delegationId}\n**Pending client tool(s)**: ${Array.from(new Set(health.pendingClientTools)).join(', ') || 'unknown'}\n\nThe sub-agent's turn paused awaiting client-side tool results. A headless session cannot answer them, so the task was not completed. data.partialResponse is the agent's opening text only — do not use it as a result.\n\n### Suggested Next Steps:\n- Re-dispatch the task with a fresh action="speakto", id="${rec.personaId}", message=...\n- Inspect the transcript with action="followup", id="${subagentSessionId}" before retrying\n- If the capability is browser-only, it cannot run in a delegation`
+            };
+          }
+
           try {
             await ReactorConversationModel.findOneAndUpdate(
               { _id: state.id },
@@ -816,7 +894,6 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
             ).exec();
           } catch (_) { /* best-effort collected flag */ }
 
-          const content = finalResponse || "";
           return {
             success: true,
             data: {
@@ -825,6 +902,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
               subagentSessionId,
               personaId: rec.personaId,
               response: content,
+              stalled: false,
               completedAt: rec.completedAt,
             },
             instructions: `## Delegation Result (complete)\n\n**Agent**: ${rec.agentName || rec.personaId}\n**Delegation**: ${delegationId}\n\n${content}\n\n### Suggested Next Steps:\n- Use this result to continue your task\n- For the full sub-agent transcript use action="followup", id="${subagentSessionId}"`
