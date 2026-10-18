@@ -1,0 +1,69 @@
+nameSpace: core
+name: DispatchAITickets
+version: 1.0.0
+description: >-
+  AI engineering intake dispatcher. Finds opt-in tickets, resolves the AI agent
+  and repository from ~/.reactor/ai-engineering-routing.yaml, and starts one
+  core.ProcessAITicket run per dispatchable ticket. Tickets that cannot be routed
+  (no mapping, system-owner, or a different owner) are raised as human routing
+  tasks instead of being guessed at.
+author: Reactor
+tags: [ai, engineering, dispatch, ticket, core, automation]
+metadata:
+  timeout: 900000
+  retryPolicy:
+    maxAttempts: 1
+    backoffStrategy: linear
+    initialDelay: 3000
+
+inputs:
+  tags:
+    type: string
+    required: false
+    description: Override the opt-in tags to look for (comma separated). Defaults to the policy in ai-engineering-routing.yaml.
+  statuses:
+    type: string
+    required: false
+    description: Override the eligible ticket statuses (comma separated).
+  limit:
+    type: number
+    required: false
+    description: Max tickets to dispatch this run. Defaults to the policy maxPerRun.
+  dryRun:
+    type: boolean
+    required: false
+    default: false
+    description: When true, build and report the plan but start NOTHING.
+
+steps:
+  # The whole routing + identity + safety decision, and the child runs it
+  # authorises, are executed in the integration service. That is deliberate:
+  # a workflow cannot map per-item fields (${item.field} does not resolve), so
+  # doing this in YAML would silently pass literal tokens to child runs.
+  - id: dispatchAiTickets
+    name: Plan and dispatch AI runs
+    type: service_invoke
+    config:
+      service: core.ReactorySupportWorkflowService@1.0.0
+      method: dispatchAiTickets
+      params:
+        tags: "${input.tags}"
+        statuses: "${input.statuses}"
+        limit: "${input.limit}"
+        dryRun: "${input.dryRun}"
+
+  - id: reportPlan
+    name: Report dispatch plan
+    type: log
+    dependsOn: dispatchAiTickets
+    config:
+      level: info
+      message: "AI dispatch - candidates=${steps.dispatchAiTickets.result.plan.counts.candidates} dispatched=${steps.dispatchAiTickets.result.plan.counts.dispatch} needsHuman=${steps.dispatchAiTickets.result.plan.counts.needsHuman} skipped=${steps.dispatchAiTickets.result.plan.counts.skipped} dryRun=${steps.dispatchAiTickets.result.dryRun}"
+
+  - id: reportOutcome
+    name: Report dispatch outcome
+    type: log
+    dependsOn: reportPlan
+    config:
+      level: info
+      message: "AI dispatch outcome - started=${steps.dispatchAiTickets.result.started} humanTasks=${steps.dispatchAiTickets.result.humanTasks}"

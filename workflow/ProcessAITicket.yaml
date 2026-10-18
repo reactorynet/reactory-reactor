@@ -1,0 +1,1294 @@
+nameSpace: core
+name: ProcessAITicket
+version: 1.3.0
+description: Autonomous AI engineering run for a SINGLE support ticket. Loads the ticket,
+  prepares an isolated git worktree, has the nominated AI engineer agent perform
+  the work, captures a structured completion report, has QualityQuinn review it,
+  loops the engineer back in on rejection within a hard cycle bound, then
+  records the audit trail and raises a human sign-off task.
+author: Reactor
+tags:
+  - ai
+  - engineering
+  - ticket
+  - agent
+  - review
+  - signoff
+  - core
+  - automation
+metadata:
+  timeout: 7200000
+  retryPolicy:
+    maxAttempts: 1
+    backoffStrategy: linear
+    initialDelay: 5000
+
+inputs:
+  ticketId:
+    type: string
+    required: false
+    description: The support ticket id to work on (one of ticketId / ticketReference).
+  ticketReference:
+    type: string
+    required: false
+    description: The human-readable ticket reference (alternative lookup key).
+  agentId:
+    type: string
+    required: true
+    description: The AI agent/persona id that will perform the engineering work
+      (e.g. ReactorAIPersona).
+  provider:
+    type: string
+    required: false
+    description: Optional provider override for the engineer session.
+  model:
+    type: string
+    required: false
+    description: Optional model override for the engineer session.
+  reviewerId:
+    type: string
+    required: false
+    default: QualityQuinn
+    description: The AI agent/persona id that reviews the engineering work.
+  context:
+    type: string
+    required: false
+    description: Optional additional context or instruction for the engineering agent.
+  workdir:
+    type: string
+    required: false
+    description: Absolute path of the git repository to work in. Defaults to the
+      server process cwd.
+  taskType:
+    type: string
+    required: false
+    default: feature
+    description: Branch prefix for the isolated worktree - feature, bug or chore.
+  oversightMode:
+    type: string
+    required: false
+    default: auto
+    description: auto (tools execute unattended) or supervised (risky tools raise
+      approval tasks).
+  maxReviewCycles:
+    type: number
+    required: false
+    default: 3
+    description: Hard bound on engineer/reviewer hand-back cycles before a human is asked.
+  requireSignoff:
+    type: boolean
+    required: false
+    default: true
+    description: Raise a human sign-off task before the run is considered complete.
+
+steps:
+  # ── 0. Guard the inputs ─────────────────────────────────────────────────
+  - id: guardInputs
+    name: Guard inputs
+    type: cli_command
+    config:
+      command: node
+      args:
+        - -e
+        - >
+          const TOK = '$' + '{';
+
+          const unresolved = (v) => !v || String(v).includes(TOK);
+
+          const id = String(process.env.TICKET_ID || '').trim();
+
+          const ref = String(process.env.TICKET_REF || '').trim();
+
+          const agent = String(process.env.AGENT_ID || '').trim();
+
+          if (unresolved(agent)) {
+            process.stderr.write('agentId is required: supply the AI agent/persona id (e.g. ReactorAIPersona).\n');
+            process.exit(1);
+          }
+
+          if (unresolved(id) && unresolved(ref)) {
+            process.stderr.write('One of ticketId or ticketReference is required.\n');
+            process.exit(1);
+          }
+
+          process.stdout.write(JSON.stringify({ agentId: agent, ticketId: unresolved(id) ? null : id, ticketReference: unresolved(ref) ? null : ref }));
+      env:
+        TICKET_ID: ${input.ticketId}
+        TICKET_REF: ${input.ticketReference}
+        AGENT_ID: ${input.agentId}
+      failOnError: true
+      output:
+        captureStdout: true
+        captureStderr: true
+
+  # ── 1. Load the ticket ──────────────────────────────────────────────────
+  - id: loadTicket
+    name: Load ticket
+    type: service_invoke
+    dependsOn: guardInputs
+    config:
+      service: core.ReactorySupportWorkflowService@1.0.0
+      method: loadTicket
+      params:
+        id: ${input.ticketId}
+        reference: ${input.ticketReference}
+
+  # ── 2. Resolve run configuration ────────────────────────────────────────
+  - id: resolveProvider
+    name: Resolve provider override
+    type: cli_command
+    dependsOn: loadTicket
+    config:
+      command: node
+      args:
+        - -e
+        - |
+          const TOK = '$' + '{';
+          const v = String(process.env.VALUE || '').trim();
+          process.stdout.write(v.includes(TOK) ? '' : v);
+      env:
+        VALUE: ${input.provider}
+      output:
+        captureStdout: true
+
+  - id: resolveModel
+    name: Resolve model override
+    type: cli_command
+    dependsOn: resolveProvider
+    config:
+      command: node
+      args:
+        - -e
+        - |
+          const TOK = '$' + '{';
+          const v = String(process.env.VALUE || '').trim();
+          process.stdout.write(v.includes(TOK) ? '' : v);
+      env:
+        VALUE: ${input.model}
+      output:
+        captureStdout: true
+
+  - id: resolveOversight
+    name: Resolve oversight mode
+    type: cli_command
+    dependsOn: resolveModel
+    config:
+      command: node
+      args:
+        - -e
+        - >
+          const TOK = '$' + '{';
+
+          const raw = String(process.env.MODE || '').trim().toLowerCase();
+
+          const mode = raw.includes(TOK) ? 'auto' : raw;
+
+          const toolApprovalMode = (mode === 'supervised' || mode === 'prompt') ? 'prompt' : 'auto';
+
+          process.stdout.write(toolApprovalMode);
+      env:
+        MODE: ${input.oversightMode}
+      output:
+        captureStdout: true
+
+  - id: resolveWorkdir
+    name: Resolve working directory
+    type: cli_command
+    dependsOn: resolveOversight
+    config:
+      command: node
+      args:
+        - -e
+        - |
+          const TOK = '$' + '{';
+          const wd = String(process.env.WD || '').trim();
+          const effective = (wd && !wd.includes(TOK)) ? wd : process.cwd();
+          process.stdout.write(effective);
+      env:
+        WD: ${input.workdir}
+      output:
+        captureStdout: true
+
+  - id: resolveCycleBound
+    name: Resolve review cycle bound
+    type: cli_command
+    dependsOn: resolveWorkdir
+    config:
+      command: node
+      args:
+        - -e
+        - |
+          const TOK = '$' + '{';
+          const raw = String(process.env.BOUND || '').trim();
+          const n = (raw && !raw.includes(TOK)) ? Number(raw) : NaN;
+          const bound = Number.isFinite(n) && n > 0 ? Math.floor(n) : 3;
+          process.stdout.write(String(bound));
+      env:
+        BOUND: ${input.maxReviewCycles}
+      output:
+        captureStdout: true
+
+  - id: resolveSignoff
+    name: Resolve signoff requirement
+    type: cli_command
+    dependsOn: resolveCycleBound
+    config:
+      command: node
+      args:
+        - -e
+        - >
+          const TOK = '$' + '{';
+
+          const raw = String(process.env.REQ || '').trim().toLowerCase();
+
+          const required = raw.includes(TOK) ? true : (raw === 'false' ? false : true);
+
+          process.stdout.write(required ? 'true' : 'false');
+      env:
+        REQ: ${input.requireSignoff}
+      output:
+        captureStdout: true
+
+  # ── 3. Seed per-run variables ───────────────────────────────────────────
+  - id: setCycleBound
+    name: Record review cycle bound
+    type: set_variable
+    dependsOn: resolveSignoff
+    config:
+      action: set
+      key: reviewCycleBound
+      source: step_output
+      sourcePath: resolveCycleBound.outputs.stdout
+
+  - id: seedSession
+    name: Seed session variable
+    type: set_variable
+    dependsOn: setCycleBound
+    config:
+      action: set
+      key: engineerSessionId
+      value: ""
+
+  - id: seedCycle
+    name: Seed review cycle
+    type: set_variable
+    dependsOn: seedSession
+    config:
+      action: set
+      key: reviewCycle
+      value: 0
+
+  - id: seedVerdict
+    name: Seed review verdict
+    type: set_variable
+    dependsOn: seedCycle
+    config:
+      action: set
+      key: reviewVerdict
+      value: pending
+
+  # ── 4. Guard the ticket ─────────────────────────────────────────────────
+  - id: ticketGuard
+    name: Ticket exists
+    type: condition
+    dependsOn: seedVerdict
+    config:
+      condition: steps.loadTicket.result && steps.loadTicket.result.id
+      thenSteps:
+        - id: prepareWorktree
+          name: Prepare isolated worktree
+          type: cli_command
+          config:
+            command: node
+            args:
+              - -e
+              - >
+                const { execSync } = require('child_process');
+
+                const fs = require('fs');
+
+                const path = require('path');
+
+                const TOK = '$' + '{';
+
+                const cwd = String(process.env.CWD || '').trim();
+
+                const ref = String(process.env.REF || '').trim();
+
+                const taskType = (String(process.env.TASK_TYPE || 'feature').trim().toLowerCase() || 'feature');
+
+                const clean = (ref && !ref.includes(TOK) ? ref : 'ticket').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'ticket';
+
+                const branch = taskType + '/ai-' + clean;
+
+                const worktreePath = path.resolve(cwd, '..', 'reactory-worktrees', 'ai-' + clean);
+
+                if (fs.existsSync(worktreePath)) {
+                  fs.mkdirSync(path.join(worktreePath, '.ai-agent'), { recursive: true });
+                  process.stdout.write(JSON.stringify({ branch: branch, worktreePath: worktreePath, reused: true }));
+                  process.exit(0);
+                }
+
+                fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+
+                try {
+                  execSync('git worktree add "' + worktreePath + '" -b "' + branch + '"', { cwd: cwd, stdio: 'pipe' });
+                } catch (e) {
+                  process.stderr.write('Failed to create worktree: ' + (e && e.message ? e.message : String(e)) + '\n');
+                  if (e && e.stderr) process.stderr.write(String(e.stderr) + '\n');
+                  process.exit(1);
+                }
+
+                fs.mkdirSync(path.join(worktreePath, '.ai-agent'), { recursive: true });
+
+                process.stdout.write(JSON.stringify({ branch: branch, worktreePath: worktreePath, reused: false }));
+            env:
+              CWD: ${steps.resolveWorkdir.outputs.stdout}
+              REF: ${input.ticketReference || input.ticketId}
+              TASK_TYPE: ${input.taskType}
+            failOnError: true
+            output:
+              captureStdout: true
+              captureStderr: true
+        - id: readBranch
+          name: Read branch name
+          type: cli_command
+          dependsOn: prepareWorktree
+          config:
+            command: node
+            args:
+              - -e
+              - |
+                const d = JSON.parse(process.env.WT || '{}');
+                process.stdout.write(String(d.branch || ''));
+            env:
+              WT: ${steps.prepareWorktree.outputs.stdout}
+            failOnError: true
+            output:
+              captureStdout: true
+        - id: readWorktreePath
+          name: Read worktree path
+          type: cli_command
+          dependsOn: readBranch
+          config:
+            command: node
+            args:
+              - -e
+              - |
+                const d = JSON.parse(process.env.WT || '{}');
+                process.stdout.write(String(d.worktreePath || ''));
+            env:
+              WT: ${steps.prepareWorktree.outputs.stdout}
+            failOnError: true
+            output:
+              captureStdout: true
+        - id: logPickup
+          name: Log pickup
+          type: log
+          dependsOn: readWorktreePath
+          config:
+            level: info
+            message: AI agent '${input.agentId}' picking up
+              ${steps.loadTicket.result.reference} in
+              ${steps.readWorktreePath.outputs.stdout} on branch
+              ${steps.readBranch.outputs.stdout}
+        - id: pickupComment
+          name: Comment pickup on ticket
+          type: service_invoke
+          dependsOn: logPickup
+          config:
+            service: core.ReactorySupportWorkflowService@1.0.0
+            method: addComment
+            params:
+              ticketId: ${steps.loadTicket.result.id}
+              comment: "AI engineering run started by agent '${input.agentId}' (reviewer:
+                '${input.reviewerId}'). Working in an isolated worktree on
+                branch ${steps.readBranch.outputs.stdout}. This ticket will be
+                reviewed and returned for human sign-off before any status
+                change."
+        - id: engineer
+          name: Engineering agent run
+          type: agent_conversation
+          dependsOn: pickupComment
+          config:
+            personaId: ${input.agentId}
+            provider: ${steps.resolveProvider.outputs.stdout}
+            model: ${steps.resolveModel.outputs.stdout}
+            sessionId: ${variables.engineerSessionId}
+            toolApprovalMode: auto
+            maxToolIterations: 60
+            promptMergeStrategy: append
+            instructions: >-
+              You are an autonomous software engineer working a real support
+              ticket.
+
+              You operate inside an ISOLATED git worktree that has been prepared for this ticket.
+
+              The branch is throwaway and the work WILL be reviewed by a QA agent before it is
+
+              accepted, so correctness and evidence matter more than speed.
+
+
+              NON-NEGOTIABLE RULES
+
+              1. Work ONLY inside the worktree directory given to you. Never touch any other checkout.
+
+              2. Never push. Never touch main, master or any protected branch.
+
+              3. Read the relevant code before changing it, and match the surrounding conventions.
+
+              4. After making a change you MUST run whatever verification exists (the project test
+                 runner, a type check, or a targeted repro) and record the exact command and result.
+                 A claim without a recorded command is not verification.
+              5. You MUST finish by writing the completion report described below. This is how the
+                 pipeline knows you are done. A run without a report is a failed run.
+
+              COMPLETION CONTRACT
+
+              Write a single JSON file to the exact path given to you as "REPORT PATH". REQUIREMENT: this object MUST have a TOP-LEVEL "status" field whose value is exactly one of "completed", "blocked" or "failed". It is the RUN status, NOT the ticket status - do not rename it, nest it, or omit it. The pipeline cannot proceed without it. Include every field below:
+
+              {
+                "status": "completed" | "blocked" | "failed",
+                "summary": "one paragraph describing what you did and why",
+                "changes": [{ "file": "path/relative/to/worktree", "description": "what changed" }],
+                "testsRun": [{ "command": "exact command", "result": "passed" | "failed", "output": "trimmed output" }],
+                "verification": "how you proved the change works",
+                "risks": ["anything a reviewer should watch"],
+                "followUps": ["work you deliberately left out of scope"],
+                "branch": "the branch you worked on"
+              }
+
+
+              Use "completed" ONLY if you made the change and verified it.
+
+              Use "blocked" if you cannot proceed without human input or missing information -
+
+              stop immediately and say precisely what you need.
+
+              Use "failed" if you attempted the work and could not make it pass.
+
+              Do NOT keep retrying indefinitely; when you are stuck, write the report with the
+
+              honest status and stop.
+
+
+              If you are asked to revise (a reviewer sent findings back), address EVERY required
+
+              change, re-run your verification, and REWRITE the report file with the updated evidence.
+
+
+              Finish with a short plain-text summary of the outcome. Do not wrap your whole reply
+
+              in a code fence.
+            message: >-
+              Work the following support ticket.
+
+
+              ## Ticket
+
+              - Reference: ${steps.loadTicket.result.reference}
+
+              - Request: ${steps.loadTicket.result.request}
+
+              - Type: ${steps.loadTicket.result.requestType}
+
+              - Priority: ${steps.loadTicket.result.priority}
+
+              - Status: ${steps.loadTicket.result.status}
+
+              - Description:
+
+              ${steps.loadTicket.result.description}
+
+
+              ## Your working environment
+
+              - WORKTREE (do all work here): ${steps.readWorktreePath.outputs.stdout}
+
+              - BRANCH: ${steps.readBranch.outputs.stdout}
+
+              - REPORT PATH (write your completion report here): ${steps.readWorktreePath.outputs.stdout}/.ai-agent/report.json
+
+
+              ## Additional context / instruction
+
+              ${input.context || 'No additional context or instruction supplied.'}
+
+
+              Now: inspect the repository, implement the fix or feature the ticket describes,
+
+              verify it, and write the completion report to REPORT PATH. Then summarise the outcome.
+        - id: setEngineerSession
+          name: Capture engineer session id
+          type: set_variable
+          dependsOn: engineer
+          config:
+            action: set
+            key: engineerSessionId
+            source: step_output
+            sourcePath: engineer.outputs.sessionId
+        - id: captureReport
+          name: Capture completion report
+          type: cli_command
+          dependsOn: setEngineerSession
+          config:
+            command: node
+            args:
+              - -e
+              - >
+                const fs = require('fs');
+
+                const path = require('path');
+
+                const wt = String(process.env.WT || '').trim();
+
+                const p = path.join(wt, '.ai-agent', 'report.json');
+
+                const warnings = [];
+
+                // Never hard-fail: a non-zero exit hides the cause (the engine records only
+
+                // 'Command failed with exit code 1') and burns a retry. Emit a structured
+
+                // result and let the workflow branch on it instead.
+
+                if (!fs.existsSync(p)) {
+                  process.stdout.write(JSON.stringify({ usable: false, missing: true, path: p, warnings: ['report.json not found'] }));
+                  process.exit(0);
+                }
+
+                let report;
+
+                try { report = JSON.parse(fs.readFileSync(p, 'utf8')); }
+
+                catch (e) {
+                  process.stdout.write(JSON.stringify({ usable: false, parseError: String(e && e.message), path: p, warnings: ['report is not valid JSON'] }));
+                  process.exit(0);
+                }
+
+                if (!report || typeof report !== 'object' || Array.isArray(report)) {
+                  process.stdout.write(JSON.stringify({ usable: false, parseError: 'not an object', path: p, warnings: ['report is not an object'] }));
+                  process.exit(0);
+                }
+
+                // The agent's report shape DRIFTS between runs, so no field may be a hard
+
+                // requirement; only presence + parseability are fatal-equivalent.
+
+                const pick = (...names) => { for (const n of names) { const v = report[n]; if (typeof v === 'string' && v.trim()) return v.trim(); } return null; };
+
+                let summary = pick('summary', 'resolution', 'outcome', 'description', 'result', 'overview', 'conclusion');
+
+                if (!summary && Array.isArray(report.changes) && report.changes.length > 0) summary = 'No summary field supplied; report lists ' + report.changes.length + ' change(s).';
+
+                if (!summary) { summary = 'No summary field supplied and no changes listed.'; warnings.push('no summary-like field'); }
+
+                const allowed = ['completed', 'blocked', 'failed'];
+
+                let status = allowed.indexOf(String(report.status)) !== -1 ? String(report.status) : null;
+
+                let statusSource = status ? 'report.status' : null;
+
+                if (!status) {
+                  const t = String((report.ticket && (report.ticket.status || report.ticket.status_after)) || '').toLowerCase();
+                  const m = { resolved: 'completed', complete: 'completed', completed: 'completed', done: 'completed', blocked: 'blocked', failed: 'failed', open: 'in_progress', in_progress: 'in_progress', new: 'in_progress' };
+                  if (m[t]) { status = m[t]; statusSource = 'report.ticket.status=' + t; }
+                }
+
+                if (!status && Array.isArray(report.changes) && report.changes.length > 0) { status = 'completed'; statusSource = 'inferred:non-empty changes'; }
+
+                if (!status) { status = 'blocked'; statusSource = 'default:no signal'; }
+
+                const out = Object.assign({}, report, { summary: summary, status: status, statusSource: statusSource, usable: true });
+
+                if (warnings.length) out.contractWarnings = warnings;
+
+                process.stdout.write(JSON.stringify(out));
+
+                process.exit(0);
+            env:
+              WT: ${steps.readWorktreePath.outputs.stdout}
+            failOnError: false
+            output:
+              captureStdout: true
+              captureStderr: true
+        - id: readReportStatus
+          name: Read report status
+          type: cli_command
+          dependsOn: captureReport
+          config:
+            command: node
+            args:
+              - -e
+              - >
+                const fs = require('fs');
+
+                const path = require('path');
+
+                const wt = String(process.env.WT || '').trim();
+
+                const p = path.join(wt, '.ai-agent', 'report.json');
+
+                // Read the report FILE directly. Chaining the full report through the previous
+
+                // step's stdout (a multi-KB env var) proved brittle; the file is the source of truth.
+
+                let status = '';
+
+                try {
+                  const r = JSON.parse(fs.readFileSync(p, 'utf8'));
+                  const allowed = ['completed', 'blocked', 'failed'];
+                  if (allowed.indexOf(String(r.status)) !== -1) { status = String(r.status); }
+                  else {
+                    const t = String((r.ticket && (r.ticket.status || r.ticket.status_after)) || '').toLowerCase();
+                    const m = { resolved: 'completed', complete: 'completed', completed: 'completed', done: 'completed', blocked: 'blocked', failed: 'failed', open: 'in_progress', in_progress: 'in_progress', new: 'in_progress' };
+                    status = m[t] || (Array.isArray(r.changes) && r.changes.length > 0 ? 'completed' : '');
+                  }
+                } catch (e) { status = ''; }
+
+                process.stdout.write(status);
+            env:
+              WT: ${steps.readWorktreePath.outputs.stdout}
+            failOnError: false
+            output:
+              captureStdout: true
+              captureStderr: true
+        - id: reportBranch
+          name: Report outcome
+          type: condition
+          dependsOn: readReportStatus
+          config:
+            condition: steps.readReportStatus.stdout === 'completed'
+            thenSteps:
+              - id: diffstat
+                name: Collect change evidence
+                type: cli_command
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - >
+                      const { execSync } = require('child_process');
+
+                      const wt = String(process.env.WT || '').trim();
+
+                      let out = '';
+
+                      try {
+                        out = execSync('git diff --stat HEAD', { cwd: wt, stdio: 'pipe' }).toString().trim();
+                      } catch (e) {
+                        out = 'unable to compute diffstat: ' + (e && e.message ? e.message : String(e));
+                      }
+
+                      process.stdout.write(out || 'no changes detected in the worktree');
+                  env:
+                    WT: ${steps.readWorktreePath.outputs.stdout}
+                  failOnError: false
+                  output:
+                    captureStdout: true
+              - id: reviewLoop
+                name: Review loop
+                type: while
+                dependsOn: diffstat
+                config:
+                  condition: variables.reviewVerdict !== 'approved' &&
+                    Number(variables.reviewCycle) <
+                    Number(variables.reviewCycleBound)
+                  steps:
+                    - id: review
+                      name: Reviewer agent run
+                      type: agent_conversation
+                      config:
+                        personaId: ${input.reviewerId}
+                        toolApprovalMode: auto
+                        maxToolIterations: 40
+                        promptMergeStrategy: append
+                        instructions: >-
+                          You are the independent quality reviewer for an AI
+                          engineering run.
+
+                          You did NOT write this code. Your job is to falsify it, not to approve it.
+
+
+                          You have the engineer's self-reported completion report and the change
+
+                          evidence. Treat the report as a CLAIM, never as proof.
+
+
+                          METHOD
+
+                          1. Read the actual changed files in the worktree. Confirm the changes exist
+                             and match what the report claims.
+                          2. Independently decide whether the change actually addresses the ticket.
+
+                          3. Run the relevant tests / type checks YOURSELF and observe the real result.
+                             Do not accept the engineer's recorded output at face value.
+                          4. Look specifically for: silently weakened or skipped assertions,
+                             tests that pass without exercising the change, hardcoded values that
+                             fake a fix, unhandled error paths, and regressions elsewhere.
+                          5. Approve ONLY if you independently verified the change works and the
+                             ticket's requirement is genuinely met.
+
+                          You MUST finish by writing your verdict as a JSON file to the exact path
+
+                          given to you as "REVIEW PATH":
+
+                          {
+                            "verdict": "approved" | "rejected",
+                            "confidence": 0.0,
+                            "findings": ["what you actually observed"],
+                            "requiredChanges": ["precise, actionable changes the engineer must make"],
+                            "evidence": "the exact commands you ran and what they returned"
+                          }
+
+
+                          If you reject, every entry in requiredChanges must be specific enough that
+
+                          the engineer can act on it without asking you a question.
+
+                          Finish with a short plain-text summary. Do not wrap your whole reply in a
+
+                          code fence.
+                        message: >-
+                          Review the following AI engineering run.
+
+
+                          ## Ticket under work
+
+                          - Reference: ${steps.loadTicket.result.reference}
+
+                          - Request: ${steps.loadTicket.result.request}
+
+                          - Type: ${steps.loadTicket.result.requestType}
+
+                          - Description:
+
+                          ${steps.loadTicket.result.description}
+
+
+                          ## Worktree to inspect
+
+                          ${steps.readWorktreePath.outputs.stdout}
+
+
+                          ## Change evidence (diffstat)
+
+                          ${steps.diffstat.outputs.stdout}
+
+
+                          ## Engineer's completion report (a CLAIM - verify it)
+
+                          Read the CURRENT report yourself - it is rewritten after each revision, so
+
+                          always read it from disk rather than trusting a cached copy:
+
+                          ${steps.readWorktreePath.outputs.stdout}/.ai-agent/report.json
+
+
+                          ## Review cycle
+
+                          This is review cycle ${variables.reviewCycle} of at most ${steps.resolveCycleBound.outputs.stdout}.
+
+
+                          ## Your output
+
+                          Write your verdict JSON to REVIEW PATH:
+
+                          ${steps.readWorktreePath.outputs.stdout}/.ai-agent/review.json
+                    - id: captureReview
+                      name: Capture review verdict
+                      type: cli_command
+                      dependsOn: review
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - >
+                            const fs = require('fs');
+
+                            const path = require('path');
+
+                            const wt = String(process.env.WT || '').trim();
+
+                            const p = path.join(wt, '.ai-agent', 'review.json');
+
+                            // The reviewer's verdict shape DRIFTS: it may be top-level or nested under
+
+                            // 'review', and the verdict may be spelled verdict/decision with PASS/FAIL.
+
+                            // Accept all of them rather than hard-failing on one expected shape.
+
+                            if (!fs.existsSync(p)) { process.stdout.write(JSON.stringify({ verdict: 'rejected', parseError: 'review.json not found', requiredChanges: ['The reviewer produced no verdict file.'] })); process.exit(0); }
+
+                            let raw; try { raw = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { process.stdout.write(JSON.stringify({ verdict: 'rejected', parseError: String(e && e.message), requiredChanges: ['The reviewer verdict file is not valid JSON.'] })); process.exit(0); }
+
+                            const rv = (raw && typeof raw.review === 'object' && raw.review) ? raw.review : raw;
+
+                            const norm = String((rv && (rv.verdict || rv.decision)) || raw.verdict || '').trim().toLowerCase();
+
+                            let verdict = '';
+
+                            if (['approved', 'approve', 'pass', 'passed', 'accept', 'accepted', 'ok'].indexOf(norm) !== -1) verdict = 'approved';
+
+                            else if (['rejected', 'reject', 'fail', 'failed', 'declined'].indexOf(norm) !== -1) verdict = 'rejected';
+
+                            let changes = (rv && rv.requiredChanges) || raw.requiredChanges || [];
+
+                            if (!Array.isArray(changes)) changes = [String(changes)];
+
+                            if (!verdict) { verdict = 'rejected'; changes = changes.concat(['The reviewer verdict was not recognisable (raw: ' + norm + '). Treating as rejected.']); }
+
+                            if (verdict === 'rejected' && changes.length === 0) changes = ['The reviewer rejected the work but listed no specific required changes; re-check the review report at .ai-agent/review.json.'];
+
+                            const summary = String((rv && (rv.verdictSummary || rv.summary || rv.reason)) || raw.verdictSummary || raw.summary || '').slice(0, 4000);
+
+                            process.stdout.write(JSON.stringify({ verdict: verdict, verdictSource: norm, requiredChanges: changes, summary: summary, reviewPath: p }));
+
+                            process.exit(0);
+                        env:
+                          WT: ${steps.readWorktreePath.outputs.stdout}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+                          captureStderr: true
+                    - id: readVerdict
+                      name: Read verdict
+                      type: cli_command
+                      dependsOn: captureReview
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - >
+                            const v = JSON.parse(process.env.REVIEW || '{}');
+
+                            process.stdout.write(String(v.verdict || 'rejected'));
+                        env:
+                          REVIEW: ${steps.captureReview.outputs.stdout}
+                        failOnError: true
+                        output:
+                          captureStdout: true
+                    - id: setVerdict
+                      name: Record verdict
+                      type: set_variable
+                      dependsOn: readVerdict
+                      config:
+                        action: set
+                        key: reviewVerdict
+                        source: step_output
+                        sourcePath: readVerdict.outputs.stdout
+                    - id: bumpCycle
+                      name: Increment review cycle
+                      type: cli_command
+                      dependsOn: setVerdict
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - >
+                            const n = Number(String(process.env.CYCLE ||
+                            '0').trim());
+
+                            process.stdout.write(String((Number.isFinite(n) ? n : 0) + 1));
+                        env:
+                          CYCLE: ${variables.reviewCycle}
+                        failOnError: true
+                        output:
+                          captureStdout: true
+                    - id: setCycle
+                      name: Record review cycle
+                      type: set_variable
+                      dependsOn: bumpCycle
+                      config:
+                        action: set
+                        key: reviewCycle
+                        source: step_output
+                        sourcePath: bumpCycle.outputs.stdout
+                    - id: verdictBranch
+                      name: Act on verdict
+                      type: condition
+                      dependsOn: setCycle
+                      config:
+                        condition: variables.reviewVerdict === 'rejected'
+                        thenSteps:
+                          - id: handBack
+                            name: Hand findings back to engineer
+                            type: agent_conversation
+                            config:
+                              personaId: ${input.agentId}
+                              provider: ${steps.resolveProvider.outputs.stdout}
+                              model: ${steps.resolveModel.outputs.stdout}
+                              sessionId: ${variables.engineerSessionId}
+                              toolApprovalMode: auto
+                              maxToolIterations: 60
+                              promptMergeStrategy: append
+                              message: >-
+                                The reviewer REJECTED your work. You must fix
+                                it.
+
+
+                                ## Reviewer verdict
+
+                                ${steps.captureReview.outputs.stdout}
+
+
+                                ## Instructions
+
+                                1. Address EVERY required change listed above. Do not cherry-pick.
+
+                                2. Re-run your verification after the changes.
+
+                                3. REWRITE the completion report at:
+                                   ${steps.readWorktreePath.outputs.stdout}/.ai-agent/report.json
+                                   with the updated evidence (real command output, not a summary).
+                                4. If a required change is genuinely wrong or impossible, say so explicitly in
+                                   the report's risks and explain why - do not silently ignore it.
+
+                                Work only inside the worktree. Never push.
+                          - id: reCaptureReport
+                            name: Re-capture completion report
+                            type: cli_command
+                            dependsOn: handBack
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - >
+                                  const fs = require('fs');
+
+                                  const path = require('path');
+
+                                  const wt = String(process.env.WT || '').trim();
+
+                                  const p = path.join(wt, '.ai-agent', 'report.json');
+
+                                  const warnings = [];
+
+                                  // Never hard-fail: a non-zero exit hides the cause (the engine records only
+
+                                  // 'Command failed with exit code 1') and burns a retry. Emit a structured
+
+                                  // result and let the workflow branch on it instead.
+
+                                  if (!fs.existsSync(p)) {
+                                    process.stdout.write(JSON.stringify({ usable: false, missing: true, path: p, warnings: ['report.json not found'] }));
+                                    process.exit(0);
+                                  }
+
+                                  let report;
+
+                                  try { report = JSON.parse(fs.readFileSync(p, 'utf8')); }
+
+                                  catch (e) {
+                                    process.stdout.write(JSON.stringify({ usable: false, parseError: String(e && e.message), path: p, warnings: ['report is not valid JSON'] }));
+                                    process.exit(0);
+                                  }
+
+                                  if (!report || typeof report !== 'object' || Array.isArray(report)) {
+                                    process.stdout.write(JSON.stringify({ usable: false, parseError: 'not an object', path: p, warnings: ['report is not an object'] }));
+                                    process.exit(0);
+                                  }
+
+                                  // The agent's report shape DRIFTS between runs, so no field may be a hard
+
+                                  // requirement; only presence + parseability are fatal-equivalent.
+
+                                  const pick = (...names) => { for (const n of names) { const v = report[n]; if (typeof v === 'string' && v.trim()) return v.trim(); } return null; };
+
+                                  let summary = pick('summary', 'resolution', 'outcome', 'description', 'result', 'overview', 'conclusion');
+
+                                  if (!summary && Array.isArray(report.changes) && report.changes.length > 0) summary = 'No summary field supplied; report lists ' + report.changes.length + ' change(s).';
+
+                                  if (!summary) { summary = 'No summary field supplied and no changes listed.'; warnings.push('no summary-like field'); }
+
+                                  const allowed = ['completed', 'blocked', 'failed'];
+
+                                  let status = allowed.indexOf(String(report.status)) !== -1 ? String(report.status) : null;
+
+                                  let statusSource = status ? 'report.status' : null;
+
+                                  if (!status) {
+                                    const t = String((report.ticket && (report.ticket.status || report.ticket.status_after)) || '').toLowerCase();
+                                    const m = { resolved: 'completed', complete: 'completed', completed: 'completed', done: 'completed', blocked: 'blocked', failed: 'failed', open: 'in_progress', in_progress: 'in_progress', new: 'in_progress' };
+                                    if (m[t]) { status = m[t]; statusSource = 'report.ticket.status=' + t; }
+                                  }
+
+                                  if (!status && Array.isArray(report.changes) && report.changes.length > 0) { status = 'completed'; statusSource = 'inferred:non-empty changes'; }
+
+                                  if (!status) { status = 'blocked'; statusSource = 'default:no signal'; }
+
+                                  const out = Object.assign({}, report, { summary: summary, status: status, statusSource: statusSource, usable: true });
+
+                                  if (warnings.length) out.contractWarnings = warnings;
+
+                                  process.stdout.write(JSON.stringify(out));
+
+                                  process.exit(0);
+                              env:
+                                WT: ${steps.readWorktreePath.outputs.stdout}
+                              failOnError: false
+                              output:
+                                captureStdout: true
+                                captureStderr: true
+                          - id: reReadReportStatus
+                            name: Re-read report status
+                            type: cli_command
+                            dependsOn: reCaptureReport
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - >
+                                  const r = JSON.parse(process.env.REPORT ||
+                                  '{}');
+
+                                  process.stdout.write(String(r.status || ''));
+                              env:
+                                REPORT: ${steps.reCaptureReport.outputs.stdout}
+                              failOnError: true
+                              output:
+                                captureStdout: true
+                          - id: reReportBranch
+                            name: Did the revision complete
+                            type: condition
+                            dependsOn: reReadReportStatus
+                            config:
+                              condition: steps.reReadReportStatus.stdout === 'completed'
+                              thenSteps:
+                                - id: logRevisionComplete
+                                  name: Log revision complete
+                                  type: log
+                                  config:
+                                    level: info
+                                    message: Revision cycle ${variables.reviewCycle} completed for
+                                      ${steps.loadTicket.result.reference} -
+                                      re-reviewing.
+                              elseSteps:
+                                - id: logRevisionBlocked
+                                  name: Log revision blocked
+                                  type: log
+                                  config:
+                                    level: warn
+                                    message: Revision cycle ${variables.reviewCycle} did NOT complete (status
+                                      '${steps.reReadReportStatus.outputs.stdout}')
+                                      for ${steps.loadTicket.result.reference}.
+                        elseSteps:
+                          - id: logApproved
+                            name: Log reviewer approval
+                            type: log
+                            config:
+                              level: info
+                              message: Reviewer APPROVED ${steps.loadTicket.result.reference} on review cycle
+                                ${variables.reviewCycle}.
+              - id: outcome
+                name: Loop outcome
+                type: condition
+                dependsOn: reviewLoop
+                config:
+                  condition: variables.reviewVerdict === 'approved'
+                  thenSteps:
+                    - id: acceptedLog
+                      name: Log accepted
+                      type: log
+                      config:
+                        level: info
+                        message: AI run ACCEPTED for ${steps.loadTicket.result.reference} - branch
+                          ${steps.readBranch.outputs.stdout} after
+                          ${variables.reviewCycle} review cycle(s).
+                    - id: acceptedComment
+                      name: Comment acceptance on ticket
+                      type: service_invoke
+                      dependsOn: acceptedLog
+                      config:
+                        service: core.ReactorySupportWorkflowService@1.0.0
+                        method: addComment
+                        params:
+                          ticketId: ${steps.loadTicket.result.id}
+                          comment: AI engineering run reviewed and ACCEPTED after ${variables.reviewCycle}
+                            review cycle(s). Work is on branch
+                            ${steps.readBranch.outputs.stdout} in an isolated
+                            worktree (${steps.readWorktreePath.outputs.stdout}).
+                            Nothing has been pushed - a human sign-off task has
+                            been raised before any status change.
+                  elseSteps:
+                    - id: exhaustedLog
+                      name: Log review exhausted
+                      type: log
+                      config:
+                        level: warn
+                        message: "AI run NOT accepted for ${steps.loadTicket.result.reference} after
+                          ${variables.reviewCycle} review cycle(s) (verdict:
+                          ${variables.reviewVerdict})."
+                    - id: exhaustedComment
+                      name: Comment exhaustion on ticket
+                      type: service_invoke
+                      dependsOn: exhaustedLog
+                      config:
+                        service: core.ReactorySupportWorkflowService@1.0.0
+                        method: addComment
+                        params:
+                          ticketId: ${steps.loadTicket.result.id}
+                          comment: "AI engineering run did NOT reach an accepted state after
+                            ${variables.reviewCycle} review cycle(s) (last
+                            verdict: ${variables.reviewVerdict}). Work in
+                            progress remains on branch
+                            ${steps.readBranch.outputs.stdout}. Human review
+                            required - the SLA escalation workflow will also
+                            pick this up."
+                    - id: exhaustedNotify
+                      name: Notify exhaustion
+                      type: service_invoke
+                      dependsOn: exhaustedComment
+                      config:
+                        service: core.ReactorySupportWorkflowService@1.0.0
+                        method: notify
+                        params:
+                          event: ticket.comment.added
+                          ticketId: ${steps.loadTicket.result.id}
+                          extra:
+                            reason: AI engineering run exhausted its review cycles without approval.
+            elseSteps:
+              - id: notCompletedLog
+                name: Log non-completion
+                type: log
+                config:
+                  level: warn
+                  message: AI run did NOT complete for ${steps.loadTicket.result.reference} -
+                    status '${steps.readReportStatus.outputs.stdout}'.
+              - id: notCompletedComment
+                name: Comment non-completion on ticket
+                type: service_invoke
+                dependsOn: notCompletedLog
+                config:
+                  service: core.ReactorySupportWorkflowService@1.0.0
+                  method: addComment
+                  params:
+                    ticketId: ${steps.loadTicket.result.id}
+                    comment: "AI engineering run did not complete: the agent reported status
+                      '${steps.readReportStatus.outputs.stdout}' with a valid
+                      completion report. See the run report in the worktree.
+                      Human attention required."
+        - id: reportRunOutcome
+          name: Report run outcome
+          type: log
+          dependsOn: reportBranch
+          config:
+            level: info
+            message: Run outcome - ticket=${steps.loadTicket.result.reference}
+              verdict=${variables.reviewVerdict} cycles=${variables.reviewCycle}
+              branch=${steps.readBranch.outputs.stdout}
+              session=${variables.engineerSessionId}
+        - id: signoffGate
+          name: Sign off required
+          type: condition
+          dependsOn: reportRunOutcome
+          config:
+            condition: steps.resolveSignoff.stdout === 'true'
+            thenSteps:
+              - id: signoff
+                name: Human sign-off
+                type: user_activity
+                config:
+                  activityType: approval
+                  assignee: ${steps.loadTicket.result.assignedToEmail}
+                  message: Sign off the AI engineering run for
+                    ${steps.loadTicket.result.reference}
+                  props:
+                    ticketReference: ${steps.loadTicket.result.reference}
+                    ticketId: ${steps.loadTicket.result.id}
+                    branch: ${steps.readBranch.outputs.stdout}
+                    worktree: ${steps.readWorktreePath.outputs.stdout}
+                    agentId: ${input.agentId}
+                    reviewerId: ${input.reviewerId}
+                    chatSessionId: ${variables.engineerSessionId}
+                    reviewCycles: ${variables.reviewCycle}
+                    reviewVerdict: ${variables.reviewVerdict}
+                  propsMap:
+                    ticketRequest: steps.loadTicket.result.request
+                    ticketStatus: steps.loadTicket.result.status
+              - id: signoffOutcome
+                name: Apply sign-off
+                type: condition
+                dependsOn: signoff
+                config:
+                  condition: steps.signoff.approved === true
+                  thenSteps:
+                    - id: signoffAcceptedComment
+                      name: Comment sign-off on ticket
+                      type: service_invoke
+                      config:
+                        service: core.ReactorySupportWorkflowService@1.0.0
+                        method: addComment
+                        params:
+                          ticketId: ${steps.loadTicket.result.id}
+                          comment: Human sign-off APPROVED by ${steps.signoff.outputs.completedByEmail}.
+                            AI engineering run for
+                            ${steps.loadTicket.result.reference} is accepted.
+                            Branch ${steps.readBranch.outputs.stdout} is ready
+                            for merge.
+                    - id: signoffNotify
+                      name: Notify sign-off
+                      type: service_invoke
+                      dependsOn: signoffAcceptedComment
+                      config:
+                        service: core.ReactorySupportWorkflowService@1.0.0
+                        method: notify
+                        params:
+                          event: ticket.resolved
+                          ticketId: ${steps.loadTicket.result.id}
+                    - id: signoffDone
+                      name: Log sign-off complete
+                      type: log
+                      dependsOn: signoffNotify
+                      config:
+                        level: info
+                        message: Human sign-off APPROVED for ${steps.loadTicket.result.reference} by
+                          ${steps.signoff.outputs.completedByEmail}.
+                  elseSteps:
+                    - id: signoffRejectedComment
+                      name: Comment sign-off rejection
+                      type: service_invoke
+                      config:
+                        service: core.ReactorySupportWorkflowService@1.0.0
+                        method: addComment
+                        params:
+                          ticketId: ${steps.loadTicket.result.id}
+                          comment: Human sign-off DECLINED by ${steps.signoff.outputs.completedByEmail}.
+                            The AI engineering run was not accepted; branch
+                            ${steps.readBranch.outputs.stdout} remains available
+                            for inspection. Human follow-up required.
+                    - id: signoffRejectedLog
+                      name: Log sign-off rejection
+                      type: log
+                      dependsOn: signoffRejectedComment
+                      config:
+                        level: warn
+                        message: Human sign-off DECLINED for ${steps.loadTicket.result.reference} by
+                          ${steps.signoff.outputs.completedByEmail}.
+            elseSteps:
+              - id: logNoSignoff
+                name: Log signoff skipped
+                type: log
+                config:
+                  level: info
+                  message: Sign-off skipped for ${steps.loadTicket.result.reference}
+                    (requireSignoff=false).
+        - id: logAudit
+          name: Log audit trail
+          type: log
+          dependsOn: signoffGate
+          config:
+            level: info
+            message: Audit - ticket=${steps.loadTicket.result.reference}
+              agent=${input.agentId} reviewer=${input.reviewerId}
+              branch=${steps.readBranch.outputs.stdout}
+              cycles=${variables.reviewCycle} verdict=${variables.reviewVerdict}
+              session=${variables.engineerSessionId}
+      elseSteps:
+        - id: logTicketNotFound
+          name: Log ticket not found
+          type: log
+          config:
+            level: warn
+            message: No support ticket found for ${steps.guardInputs.outputs.stdout} -
+              nothing to do.

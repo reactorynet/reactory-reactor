@@ -236,9 +236,33 @@ export abstract class BaseGraphProvider {
       this.context.warn("No search service available; skipping index");
       return;
     }
+    if (!project.nameSpace || !project.name) {
+      this.context.warn(
+        `Skipping search index for ${searchables.length} document(s): project nameSpace/name not set`
+      );
+      return;
+    }
     const indexName = `reactor_graph_${project.nameSpace}_${project.name}`;
     try {
-      await search.index(indexName, searchables);
+      // Graph searchables carry both `id` (a logical key that contains "::") and
+      // a numeric `nodeId`. MeiliSearch primary keys reject ':' (and other
+      // punctuation), so the index must be explicitly keyed on `nodeId` — the
+      // graph's single numeric id space. createIndex is idempotent.
+      const svc = search as any;
+      if (typeof svc.createIndex === "function") {
+        const ensured = await svc.createIndex(indexName, { primaryKey: "nodeId" });
+        if (ensured && ensured.success === false) {
+          this.context.warn(
+            `Search index ${indexName} could not be keyed on nodeId: ${ensured.error ?? "unknown error"}`
+          );
+        }
+      }
+      const result = await search.index(indexName, searchables);
+      if (!result?.success) {
+        this.context.error(
+          `Failed to index ${indexName}: ${result?.error ?? "unknown error"}`
+        );
+      }
     } catch (err) {
       this.context.error(`Failed to index ${indexName}: ${(err as Error).message}`);
     }
@@ -423,7 +447,7 @@ export abstract class BaseGraphProvider {
       const gcFilter = { projectId: pid, runId: { $nin: [runId, 'manual'] } };
 
       // Collect the search-document ids of the doomed nodes BEFORE deleting.
-      let searchableIds: string[] = [];
+      let searchableIds: number[] = [];
       if (opts?.searchIndexName && isMongoAvailable(ReactorNodeModel.find)) {
         try {
           const doomed = (await ReactorNodeModel.find(gcFilter)
@@ -431,7 +455,7 @@ export abstract class BaseGraphProvider {
             .lean()) as unknown as Partial<ReactorNode>[];
           searchableIds = (doomed || [])
             .map((n) => this.searchableIdOf(n))
-            .filter((id): id is string => !!id);
+            .filter((id): id is number => id !== null);
         } catch (collectErr) {
           this.context.warn(
             `gcStale: searchable collection failed: ${(collectErr as Error).message}`
@@ -465,23 +489,23 @@ export abstract class BaseGraphProvider {
    * providers stamp `data.searchId`; FILE/DOCUMENT nodes derive it from
    * projectFqn + relativePath (the id `buildSearchable` writes).
    */
-  protected searchableIdOf(node: Partial<ReactorNode>): string | null {
+  protected searchableIdOf(node: Partial<ReactorNode>): number | null {
     const stamped = node?.data?.searchId;
-    if (stamped) return String(stamped);
     const fqn = (node as any)?.projectFqn || node?.data?.projectFqn;
     const rel = node?.data?.relativePath;
-    if (
-      fqn &&
-      rel &&
-      (node.type === ReactorNodeType.FILE || node.type === ReactorNodeType.DOCUMENT)
-    ) {
-      return `${fqn}::${rel}`;
-    }
-    return null;
+    const isFileLike =
+      node.type === ReactorNodeType.FILE || node.type === ReactorNodeType.DOCUMENT;
+    if (!stamped && !(fqn && rel && isFileLike)) return null;
+    // Search documents are keyed on the numeric `nodeId`, which equals the
+    // graph node's own id (`node.id`).
+    return typeof node.id === "number" ? node.id : null;
   }
 
   /** Capability-guarded, best-effort search-document deletion. */
-  protected async deleteSearchables(indexName: string, ids: string[]): Promise<number> {
+  protected async deleteSearchables(
+    indexName: string,
+    ids: Array<string | number>
+  ): Promise<number> {
     if (!ids.length) return 0;
     const search: any =
       this.searchService ||

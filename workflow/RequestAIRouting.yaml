@@ -1,0 +1,90 @@
+nameSpace: core
+name: RequestAIRouting
+version: 1.0.0
+description: >-
+  Raise a SINGLE human task asking a person to choose the AI agent and repository
+  for a ticket the dispatcher could not route automatically (no mapping, or the
+  owner resolves to the system account). One instance per ticket, so each request
+  is its own actionable task in the user task list.
+author: Reactor
+tags: [ai, engineering, routing, human-task, core]
+metadata:
+  timeout: 604800000
+  retryPolicy:
+    maxAttempts: 1
+    backoffStrategy: linear
+    initialDelay: 2000
+
+inputs:
+  ticketId:
+    type: string
+    required: false
+    description: The support ticket id needing manual routing.
+  ticketReference:
+    type: string
+    required: false
+    description: Human-readable ticket reference.
+  ownerEmail:
+    type: string
+    required: false
+    description: Preferred assignee for this routing task (usually the ticket owner).
+  reason:
+    type: string
+    required: false
+    default: unmapped
+    description: Why routing could not be resolved - unmapped | system_owner | different_owner.
+  detail:
+    type: string
+    required: false
+    description: Human-readable explanation shown on the task.
+
+steps:
+  - id: loadTicket
+    name: Load ticket
+    type: service_invoke
+    config:
+      service: core.ReactorySupportWorkflowService@1.0.0
+      method: loadTicket
+      params:
+        id: "${input.ticketId}"
+        reference: "${input.ticketReference}"
+
+  - id: resolveAssignee
+    name: Resolve task assignee
+    type: cli_command
+    dependsOn: loadTicket
+    config:
+      command: node
+      args:
+        - -e
+        - |
+          const TOK = '$' + '{';
+          const email = String(process.env.OWNER || '').trim();
+          const ticketReporter = String(process.env.REPORTER || '').trim();
+          const usable = (v) => !!v && !v.includes(TOK) && v.includes('@');
+          if (usable(email)) { process.stdout.write(email); process.exit(0); }
+          if (usable(ticketReporter)) { process.stdout.write(ticketReporter); process.exit(0); }
+          process.stdout.write('');
+      env:
+        OWNER: "${input.ownerEmail}"
+        REPORTER: "${steps.loadTicket.result.createdByEmail}"
+      output:
+        captureStdout: true
+
+  - id: raiseRoutingTask
+    name: Request AI routing
+    type: user_activity
+    dependsOn: resolveAssignee
+    config:
+      activityType: input
+      assignee: "${steps.resolveAssignee.outputs.stdout}"
+      message: "AI routing needed for ${steps.loadTicket.result.reference}: choose the agent and repository"
+      props:
+        ticketId: "${steps.loadTicket.result.id}"
+        ticketReference: "${steps.loadTicket.result.reference}"
+        ticketRequest: "${steps.loadTicket.result.request}"
+        ticketRequestType: "${steps.loadTicket.result.requestType}"
+        ticketTags: "${steps.loadTicket.result.tags}"
+        reason: "${input.reason}"
+        detail: "${input.detail}"
+        guidance: "To run this ticket automatically, add an opt-in tag (see ~/.reactor/ai-engineering-routing.yaml) or ensure it is assigned to a real user account. Then re-run core.DispatchAITickets@1.0.0."

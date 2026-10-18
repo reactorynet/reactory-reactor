@@ -168,7 +168,7 @@ describe("Session 08 — GC search parity", () => {
     jest.spyOn(ReactorNodeLinkModel, "deleteMany").mockResolvedValue({ deletedCount: 1 } as any);
   };
 
-  it("deletes search documents for GC'd nodes by logical key", async () => {
+  it("deletes search documents for GC'd nodes by their numeric node id", async () => {
     mockGcModels();
     const deleteDocuments = jest.fn().mockResolvedValue({});
     const ctx = makeContext({ "core.ReactorySearchService@1.0.0": { deleteDocuments } });
@@ -180,10 +180,9 @@ describe("Session 08 — GC search parity", () => {
 
     expect(result.nodesGcDeleted).toBe(3);
     expect(result.searchablesDeleted).toBe(2);
-    expect(deleteDocuments).toHaveBeenCalledWith("reactor_graph_test_app", [
-      "test.app@1.0.0::src/deleted.ts", // reconstructed for FILE nodes
-      "jira:x.net/WR#WR-9", // provider-stamped data.searchId
-    ]);
+    // Search documents are keyed on the numeric nodeId (= node.id); only indexed
+    // nodes (FILE/DOCUMENT or provider-stamped) are deleted.
+    expect(deleteDocuments).toHaveBeenCalledWith("reactor_graph_test_app", [1, 2]);
   });
 
   it("warns and continues when the backend lacks deleteDocuments", async () => {
