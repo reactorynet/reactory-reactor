@@ -7,75 +7,11 @@ import { FeatureType } from "@reactorynet/reactory-core";
 import { MacroRegistry } from "@reactory/server-modules/reactory-reactor/ai/macro";
 import { MacroComponentDefinition, MacroToolDefinition } from "../../openai/types/chat";
 import * as lodash from "lodash";
-import { BOOKTUTOR_MACROS as IMPORTED_BOOKTUTOR_MACROS, BOOKTUTOR_MACRO_TOOLS } from './macros';
+import { BOOKTUTOR_MACROS as IMPORTED_BOOKTUTOR_MACROS } from './macros';
+import { BOOKTUTOR_TOOL_INCLUDES } from './toolIncludes';
 
 const BOOKTUTOR_PERSONA_TEXT = ingest(require.resolve('./persona.md'));
 const BOOKTUTOR_FEATURES_TEXT = ingest(require.resolve('./features.md'));
-
-const BOOKTUTOR_TOOL_INCLUDES = [
-  // Execution & CLI
-  'shell',
-  // File & Code Management
-  'readFile',
-  'writeFile',
-  'safeEditFile',
-  'snip',
-  'listDirectory',
-  'pathInfo',
-  'mkdir',
-  'rmdir',
-  'createModuleStructure',
-  // Code Review & QA
-  'CodeReview',
-  'CodeReviewFile',
-  // Database & GraphQL
-  'queryGQL',
-  'mutationGQL',
-  'schemaGQL',
-  'postgres',
-  'mongo',
-  'mongoWrite',
-  // UI & Side Panel Tools
-  'form',
-  'component',
-  'chart',
-  'd3',
-  'image',
-  'side_panel_state',
-  'amq',
-  // Tasks, Workflow & Sub-agent Communication
-  'todo',
-  'chats',
-  'workflow',
-  'executeYamlWorkflow',
-  'listWorkflows',
-  'getWorkflow',
-  'datetime',
-  'var',
-  'sliceVariable',
-  'modules',
-  'env',
-  'state',
-  // Search & Knowledge
-  'grep_search',
-  'file_search',
-  'codebase_search',
-  'searchGraph',
-  'getGraphNode',
-  'graphChildren',
-  'exploreGraph',
-  'graphLinks',
-  'searchContent',
-  'listSearchIndexes',
-  'getIndexStats',
-  // Domain Specific Macros
-  ...BOOKTUTOR_MACRO_TOOLS,
-  'get_book_page',
-  'list_books',
-  'list_chapters',
-  'track_progress',
-  'updateChatData',
-];
 
 const APP_DATA_ROOT = process.env.APP_DATA_ROOT || process.env.REACTORY_DATA
 const BOOKTUTOR_DATA_ROOT = path.join(APP_DATA_ROOT, 'guideai/booktutor');

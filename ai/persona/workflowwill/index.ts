@@ -6,85 +6,10 @@ import { FeatureType } from "@reactorynet/reactory-core";
 import { MacroRegistry } from "@reactory/server-modules/reactory-reactor/ai/macro";
 import { MacroComponentDefinition, MacroToolDefinition } from "../../openai/types/chat";
 import * as lodash from "lodash";
+import { WORKFLOW_TOOL_INCLUDES } from './toolIncludes';
 
 const WORKFLOW_PERSONA_TEXT = ingest(require.resolve('./persona.md'));
 const WORKFLOW_FEATURES_TEXT = ingest(require.resolve('./features.md'));
-
-const WORKFLOW_TOOL_INCLUDES = [
-  'toolkit',
-  'readFile',
-  'writeFile',
-  'safeEditFile',
-  'snip',
-  'listDirectory',
-  'shell',
-  'todo',
-  'var',
-  'svc',
-  'queryGQL',
-  'mutationGQL',
-  'modules',
-  'env',
-  'state',
-  'datetime',
-  'http',
-  'httpPost',
-  'httpGet',
-  'httpPut',
-  'httpDelete',
-  'httpPatch',
-  'controlWorkflowInstance',
-  'executeYamlWorkflow',
-  'getRecentExecutions',
-  'getWorkflow',
-  'getWorkflowErrors',
-  'getWorkflowHistory',
-  'getWorkflowStats',
-  'getWorkflowYaml',
-  'listWorkflowInstances',
-  'listWorkflows',
-  'listWorkflowSchedules',
-  'listWorkflowSteps',
-  'saveWorkflowYaml',
-  'validateWorkflowYaml',
-  'deleteWorkflowDefinition',
-  'workflow',
-  'amq',
-  // System graph traversal tools
-  'searchGraph',
-  'getGraphNode',
-  'graphChildren',
-  'exploreGraph',
-  'graphLinks',
-  'createNodeEdge',
-  'loadGraphPerspective',
-  'deletePerspective',
-  // Project management & cataloging tools
-  'listProjects',
-  'getProject',
-  'createProject',
-  'updateProject',
-  'deleteProject',
-  'searchProject',
-  'catalogProject',
-  // Skills tools
-  'readSkill',
-  'searchSkills',
-  // UI & Side Panel Component mounting tools
-  'component',
-  'form',
-  'chart',
-  'd3',
-  'image',
-  'side_panel_state',
-  'host_fields',
-  'host_field_update',
-  'macros',
-  'logout',
-  // Chat & agent delegation
-  'chats',
-  'updateChatData',
-];
 
 const REACTORY_HOME = process.env.REACTORY_HOME || process.cwd();
 const REACTORY_SERVER = process.env.REACTORY_SERVER || path.join(REACTORY_HOME, 'reactory-express-server');
