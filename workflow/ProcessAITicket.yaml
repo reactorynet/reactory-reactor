@@ -1,11 +1,14 @@
 nameSpace: core
 name: ProcessAITicket
-version: 1.3.0
+version: 1.4.2
 description: Autonomous AI engineering run for a SINGLE support ticket. Loads the ticket,
-  prepares an isolated git worktree, has the nominated AI engineer agent perform
-  the work, captures a structured completion report, has QualityQuinn review it,
-  loops the engineer back in on rejection within a hard cycle bound, then
-  records the audit trail and raises a human sign-off task.
+  moves it to in_progress, prepares an isolated git worktree on a ticket-keyed
+  branch, has the nominated AI engineer agent perform the work, captures a
+  structured completion report, has QualityQuinn review it and loops the engineer
+  back in on rejection within a hard cycle bound. Once the review passes it
+  commits, pushes and opens a pull request, raises a human approval task carrying
+  the pull request link, polls GitHub every three minutes for the merge, and moves
+  the ticket to resolved once the pull request is merged.
 author: Reactor
 tags:
   - ai
@@ -16,8 +19,11 @@ tags:
   - signoff
   - core
   - automation
+  - pull-request
 metadata:
-  timeout: 7200000
+  # 12h. Must exceed the review loop plus the bounded merge poll (20 x 3min), or a
+  # run is killed mid-poll and leaves a pull request nobody is watching.
+  timeout: 43200000
   retryPolicy:
     maxAttempts: 1
     backoffStrategy: linear
@@ -64,6 +70,8 @@ inputs:
     required: false
     default: feature
     description: Branch prefix for the isolated worktree - feature, bug or chore.
+      Used when the ticket's requestType does not map onto a prefix itself
+      (bug -> bug, feature-request -> feature, documentation -> chore).
   oversightMode:
     type: string
     required: false
@@ -79,7 +87,9 @@ inputs:
     type: boolean
     required: false
     default: true
-    description: Raise a human sign-off task before the run is considered complete.
+    description: Raise a human approval task for the pull request (carrying the PR
+      link) and poll for the merge. When false the run polls for the merge
+      immediately after opening the pull request.
 
 steps:
   # ── 0. Guard the inputs ─────────────────────────────────────────────────
@@ -287,11 +297,40 @@ steps:
       key: reviewVerdict
       value: pending
 
+  # Merge-poll and PR-approval state. Seeded here (not inline) so every branch
+  # below can read the variables without depending on a step having run.
+  - id: seedPrState
+    name: Seed pull request state
+    type: set_variable
+    dependsOn: seedVerdict
+    config:
+      action: set
+      key: prState
+      value: unknown
+
+  - id: seedPrPollCount
+    name: Seed merge poll count
+    type: set_variable
+    dependsOn: seedPrState
+    config:
+      action: set
+      key: prPollCount
+      value: 0
+
+  - id: seedPrApproved
+    name: Seed pull request approval
+    type: set_variable
+    dependsOn: seedPrPollCount
+    config:
+      action: set
+      key: prApproved
+      value: "false"
+
   # ── 4. Guard the ticket ─────────────────────────────────────────────────
   - id: ticketGuard
     name: Ticket exists
     type: condition
-    dependsOn: seedVerdict
+    dependsOn: seedPrApproved
     config:
       condition: steps.loadTicket.result && steps.loadTicket.result.id
       thenSteps:
@@ -302,30 +341,65 @@ steps:
             command: node
             args:
               - -e
-              - >
+              - |
                 const { execSync } = require('child_process');
-
                 const fs = require('fs');
-
                 const path = require('path');
-
                 const TOK = '$' + '{';
 
                 const cwd = String(process.env.CWD || '').trim();
-
                 const ref = String(process.env.REF || '').trim();
-
+                const requestType = String(process.env.REQUEST_TYPE || '').trim().toLowerCase();
                 const taskType = (String(process.env.TASK_TYPE || 'feature').trim().toLowerCase() || 'feature');
 
-                const clean = (ref && !ref.includes(TOK) ? ref : 'ticket').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'ticket';
+                // The branch is keyed on the TICKET REFERENCE, so one ticket always maps to
+                // exactly one branch. References carry '/' separators
+                // (REACTORY-302016408/20261018/1674496462) which would split the ref name
+                // into nested components, so every unsafe run is flattened to a single
+                // dash. Case is preserved: the branch must still read as the ticket.
+                //   bug/REACTORY-302016408-20261018-1674496462
+                const rawRef = (ref && !ref.includes(TOK)) ? ref : 'ticket';
+                const flatRef = String(rawRef).trim().replace(/[^A-Za-z0-9._-]+/g, '-').replace(/^[-.]+|[-.]+$/g, '') || 'ticket';
 
-                const branch = taskType + '/ai-' + clean;
+                // requestType decides the prefix where it maps onto a documented task
+                // type; otherwise the taskType input (feature | bug | chore) applies.
+                const PREFIX_BY_REQUEST_TYPE = {
+                  bug: 'bug',
+                  'bug-report': 'bug',
+                  defect: 'bug',
+                  feature: 'feature',
+                  'feature-request': 'feature',
+                  enhancement: 'feature',
+                  chore: 'chore',
+                  documentation: 'chore',
+                  docs: 'chore',
+                  refactor: 'chore',
+                  maintenance: 'chore',
+                };
+                const prefix = (PREFIX_BY_REQUEST_TYPE[requestType] || taskType).replace(/[^a-z0-9-]+/g, '').replace(/^-+|-+$/g, '') || 'feature';
+                const branch = prefix + '/' + flatRef;
 
-                const worktreePath = path.resolve(cwd, '..', 'reactory-worktrees', 'ai-' + clean);
+                const worktreePath = path.resolve(cwd, '..', 'reactory-worktrees', 'ai-' + flatRef.toLowerCase());
+
 
                 if (fs.existsSync(worktreePath)) {
                   fs.mkdirSync(path.join(worktreePath, '.ai-agent'), { recursive: true });
-                  process.stdout.write(JSON.stringify({ branch: branch, worktreePath: worktreePath, reused: true }));
+                  // A reused worktree reports the branch it is ACTUALLY on. Reporting the
+                  // freshly computed name would aim the push and the pull request at a ref
+                  // that does not exist.
+                  let existing = '';
+                  try {
+                    existing = execSync('git rev-parse --abbrev-ref HEAD', { cwd: worktreePath, stdio: 'pipe' }).toString().trim();
+                  } catch (e) {
+                    existing = '';
+                  }
+                  process.stdout.write(JSON.stringify({
+                    branch: existing || branch,
+                    expectedBranch: branch,
+                    worktreePath: worktreePath,
+                    reused: true,
+                    branchMismatch: !!(existing && existing !== branch),
+                  }));
                   process.exit(0);
                 }
 
@@ -334,17 +408,28 @@ steps:
                 try {
                   execSync('git worktree add "' + worktreePath + '" -b "' + branch + '"', { cwd: cwd, stdio: 'pipe' });
                 } catch (e) {
-                  process.stderr.write('Failed to create worktree: ' + (e && e.message ? e.message : String(e)) + '\n');
-                  if (e && e.stderr) process.stderr.write(String(e.stderr) + '\n');
-                  process.exit(1);
+                  // The branch may already exist from an earlier run whose worktree was pruned.
+                  try {
+                    execSync('git worktree add "' + worktreePath + '" "' + branch + '"', { cwd: cwd, stdio: 'pipe' });
+                  } catch (e2) {
+                    process.stderr.write('Failed to create worktree: ' + (e2 && e2.message ? e2.message : String(e2)) + '\n');
+                    if (e2 && e2.stderr) process.stderr.write(String(e2.stderr) + '\n');
+                    process.exit(1);
+                  }
                 }
 
                 fs.mkdirSync(path.join(worktreePath, '.ai-agent'), { recursive: true });
-
-                process.stdout.write(JSON.stringify({ branch: branch, worktreePath: worktreePath, reused: false }));
+                process.stdout.write(JSON.stringify({
+                  branch: branch,
+                  expectedBranch: branch,
+                  worktreePath: worktreePath,
+                  reused: false,
+                  branchMismatch: false,
+                }));
             env:
               CWD: ${steps.resolveWorkdir.outputs.stdout}
               REF: ${input.ticketReference || input.ticketId}
+              REQUEST_TYPE: ${steps.loadTicket.result.requestType}
               TASK_TYPE: ${input.taskType}
             failOnError: true
             output:
@@ -403,20 +488,32 @@ steps:
               ticketId: ${steps.loadTicket.result.id}
               comment: "AI engineering run started by agent '${input.agentId}' (reviewer:
                 '${input.reviewerId}'). Working in an isolated worktree on
-                branch ${steps.readBranch.outputs.stdout}. This ticket will be
-                reviewed and returned for human sign-off before any status
-                change."
+                branch ${steps.readBranch.outputs.stdout}. The ticket is in_progress;
+                a pull request will be opened for human approval once the review
+                passes, and the ticket moves to resolved when it is merged."
+        - id: markInProgress
+          name: Move ticket to in progress
+          type: service_invoke
+          dependsOn: pickupComment
+          config:
+            service: core.ReactorySupportWorkflowService@1.0.0
+            method: updateStatus
+            params:
+              ticketId: ${steps.loadTicket.result.id}
+              status: in_progress
+              comment: Status moved to in_progress - AI engineering run started by agent
+                '${input.agentId}' on branch ${steps.readBranch.outputs.stdout}.
         - id: engineer
           name: Engineering agent run
           type: agent_conversation
-          dependsOn: pickupComment
+          dependsOn: markInProgress
           config:
             personaId: ${input.agentId}
             provider: ${steps.resolveProvider.outputs.stdout}
             model: ${steps.resolveModel.outputs.stdout}
             sessionId: ${variables.engineerSessionId}
             toolApprovalMode: auto
-            maxToolIterations: 60
+            maxToolIterations: 200
             promptMergeStrategy: append
             instructions: >-
               You are an autonomous software engineer working a real support
@@ -433,7 +530,8 @@ steps:
 
               1. Work ONLY inside the worktree directory given to you. Never touch any other checkout.
 
-              2. Never push. Never touch main, master or any protected branch.
+              2. Never commit, never push and never touch main, master or any protected branch.
+                 The pipeline commits, pushes and opens the pull request for you.
 
               3. Read the relevant code before changing it, and match the surrounding conventions.
 
@@ -701,7 +799,7 @@ steps:
                       config:
                         personaId: ${input.reviewerId}
                         toolApprovalMode: auto
-                        maxToolIterations: 40
+                        maxToolIterations: 150
                         promptMergeStrategy: append
                         instructions: >-
                           You are the independent quality reviewer for an AI
@@ -830,7 +928,7 @@ steps:
 
                             if (['approved', 'approve', 'pass', 'passed', 'accept', 'accepted', 'ok'].indexOf(norm) !== -1) verdict = 'approved';
 
-                            else if (['rejected', 'reject', 'fail', 'failed', 'declined'].indexOf(norm) !== -1) verdict = 'rejected';
+                            else if (['rejected', 'reject', 'fail', 'failed', 'declined', 'changes_requested', 'changes-requested', 'request_changes', 'needs_changes', 'needs_work'].indexOf(norm) !== -1) verdict = 'rejected';
 
                             let changes = (rv && rv.requiredChanges) || raw.requiredChanges || [];
 
@@ -859,15 +957,44 @@ steps:
                         command: node
                         args:
                           - -e
-                          - >
-                            const v = JSON.parse(process.env.REVIEW || '{}');
+                          - |
+                            // Read review.json from disk. The previous form passed the whole
+                            // captured verdict through an env var, which broke on a multi-KB
+                            // payload. The file is the source of truth and is already
+                            // normalised by captureReview, so prefer it and only fall back to
+                            // the step output when the file is gone.
+                            const fs = require('fs');
+                            const path = require('path');
+                            const wt = String(process.env.WT || '').trim();
+                            const fallback = String(process.env.REVIEW || '').trim();
 
-                            process.stdout.write(String(v.verdict || 'rejected'));
+                            const normalise = (raw) => {
+                              const rv = (raw && typeof raw.review === 'object' && raw.review) ? raw.review : raw;
+                              const norm = String((rv && (rv.verdict || rv.decision)) || (raw && raw.verdict) || '').trim().toLowerCase();
+                              if (['approved', 'approve', 'pass', 'passed', 'accept', 'accepted', 'ok'].indexOf(norm) !== -1) return 'approved';
+                              return 'rejected';
+                            };
+
+                            try {
+                              const p = path.join(wt, '.ai-agent', 'review.json');
+                              if (fs.existsSync(p)) {
+                                process.stdout.write(normalise(JSON.parse(fs.readFileSync(p, 'utf8'))));
+                                process.exit(0);
+                              }
+                            } catch (e) { /* fall through */ }
+
+                            try {
+                              process.stdout.write(normalise(JSON.parse(fallback)));
+                            } catch (e) {
+                              process.stdout.write('rejected');
+                            }
                         env:
+                          WT: ${steps.readWorktreePath.outputs.stdout}
                           REVIEW: ${steps.captureReview.outputs.stdout}
-                        failOnError: true
+                        failOnError: false
                         output:
                           captureStdout: true
+                          captureStderr: true
                     - id: setVerdict
                       name: Record verdict
                       type: set_variable
@@ -920,7 +1047,7 @@ steps:
                               model: ${steps.resolveModel.outputs.stdout}
                               sessionId: ${variables.engineerSessionId}
                               toolApprovalMode: auto
-                              maxToolIterations: 60
+                              maxToolIterations: 200
                               promptMergeStrategy: append
                               message: >-
                                 The reviewer REJECTED your work. You must fix
@@ -1038,16 +1165,39 @@ steps:
                               command: node
                               args:
                                 - -e
-                                - >
-                                  const r = JSON.parse(process.env.REPORT ||
-                                  '{}');
+                                - |
+                                  // Read the report FILE directly. Passing the whole captured report
+                                  // through an env var failed on a real 20KB revision report, which
+                                  // terminated the run at this step and made a rejected review
+                                  // unrecoverable. The file is the source of truth, and 'not
+                                  // completed' must be a VALUE here, not a thrown error.
+                                  const fs = require('fs');
+                                  const path = require('path');
+                                  const wt = String(process.env.WT || '').trim();
+                                  const p = path.join(wt, '.ai-agent', 'report.json');
 
-                                  process.stdout.write(String(r.status || ''));
+                                  let status = '';
+                                  try {
+                                    const r = JSON.parse(fs.readFileSync(p, 'utf8'));
+                                    const allowed = ['completed', 'blocked', 'failed'];
+                                    if (allowed.indexOf(String(r.status)) !== -1) {
+                                      status = String(r.status);
+                                    } else {
+                                      const t = String((r.ticket && (r.ticket.status || r.ticket.status_after)) || '').toLowerCase();
+                                      const m = { resolved: 'completed', complete: 'completed', completed: 'completed', done: 'completed', blocked: 'blocked', failed: 'failed', open: 'in_progress', in_progress: 'in_progress', new: 'in_progress' };
+                                      status = m[t] || (Array.isArray(r.changes) && r.changes.length > 0 ? 'completed' : '');
+                                    }
+                                  } catch (e) {
+                                    status = '';
+                                  }
+
+                                  process.stdout.write(status);
                               env:
-                                REPORT: ${steps.reCaptureReport.outputs.stdout}
-                              failOnError: true
+                                WT: ${steps.readWorktreePath.outputs.stdout}
+                              failOnError: false
                               output:
                                 captureStdout: true
+                                captureStderr: true
                           - id: reReportBranch
                             name: Did the revision complete
                             type: condition
@@ -1105,11 +1255,669 @@ steps:
                         params:
                           ticketId: ${steps.loadTicket.result.id}
                           comment: AI engineering run reviewed and ACCEPTED after ${variables.reviewCycle}
-                            review cycle(s). Work is on branch
-                            ${steps.readBranch.outputs.stdout} in an isolated
-                            worktree (${steps.readWorktreePath.outputs.stdout}).
-                            Nothing has been pushed - a human sign-off task has
-                            been raised before any status change.
+                            review cycle(s). Publishing branch
+                            ${steps.readBranch.outputs.stdout} and opening a pull
+                            request for human approval.
+
+                    # ── Publish the reviewed work ─────────────────────────────────
+                    - id: commitChanges
+                      name: Commit worktree changes
+                      type: cli_command
+                      dependsOn: acceptedComment
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const { execSync } = require('child_process');
+                            const wt = String(process.env.WT || '').trim();
+                            const ref = String(process.env.REF || '').trim();
+                            const run = (cmd) => execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString();
+
+                            let dirty = '';
+                            // The agent is told never to commit, but it sometimes does. If so, the run
+                            // artifacts are already in the branch and pushBranch would publish them.
+                            // Untrack them here; the tip then carries no .ai-agent content and the PR
+                            // diff collapses to the real work.
+                            let internal = '';
+                            try { internal = run('git ls-files .ai-agent').trim(); } catch (e) { internal = ''; }
+                            if (internal) {
+                              try { run('git rm -r --cached --quiet .ai-agent'); } catch (e) { /* best effort */ }
+                            }
+                            try {
+                              dirty = run('git status --porcelain -- . ":(exclude).ai-agent"');
+                            } catch (e) {
+                              process.stderr.write('git status failed: ' + (e && e.message ? e.message : String(e)) + '\n');
+                              process.exit(1);
+                            }
+                            if (!dirty.trim() && !internal) {
+                              process.stdout.write(JSON.stringify({ committed: false, reason: 'worktree clean' }));
+                              process.exit(0);
+                            }
+
+                            // A headless server may have no git identity configured; a commit
+                            // must not fail for that reason alone.
+                            let email = '';
+                            try { email = run('git config user.email').trim(); } catch (e) { email = ''; }
+                            const identity = email ? '' : ' -c user.name="Reactory AI" -c user.email="ai@reactory.net"';
+                            const safe = ('AI engineering run: ' + ref).replace(/["'`$\\]/g, ' ');
+
+                            try {
+                              // The pipeline writes .ai-agent/report.json and review.json into
+                              // the worktree and no target repository gitignores that path, so
+                              // a bare 'git add -A' would publish run internals in the pull
+                              // request. Exclude it here rather than editing the repo's
+                              // .git/info/exclude, which is shared with the main checkout.
+                              execSync('git add -A -- . ":(exclude).ai-agent" && git commit' + identity + " -m '" + safe + "'", { cwd: wt, stdio: 'pipe' });
+                            } catch (e) {
+                              process.stderr.write('git commit failed: ' + (e && e.message ? e.message : String(e)) + '\n');
+                              if (e && e.stderr) process.stderr.write(String(e.stderr) + '\n');
+                              process.exit(1);
+                            }
+
+                            process.stdout.write(JSON.stringify({
+                              committed: true,
+                              sha: run('git rev-parse HEAD').trim(),
+                            }));
+                        env:
+                          WT: ${steps.readWorktreePath.outputs.stdout}
+                          REF: ${steps.loadTicket.result.reference}
+                        failOnError: false
+                        timeout: 300000
+                        output:
+                          captureStdout: true
+                          captureStderr: true
+
+                    - id: pushBranch
+                      name: Push branch to origin
+                      type: cli_command
+                      dependsOn: commitChanges
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const { execSync } = require('child_process');
+                            const wt = String(process.env.WT || '').trim();
+                            const branch = String(process.env.BRANCH || '').trim();
+                            const run = (cmd) => execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString();
+                            const done = (o) => { process.stdout.write(JSON.stringify(o)); process.exit(0); };
+
+                            if (!branch) done({ ok: false, error: 'no branch resolved for the worktree' });
+
+                            let remote = '';
+                            try { remote = run('git remote get-url origin').trim(); } catch (e) { remote = ''; }
+                            if (!remote) done({ ok: false, error: 'the worktree repository has no "origin" remote' });
+
+                            try {
+                              run('git push --set-upstream origin "' + branch + '"');
+                            } catch (e) {
+                              const detail = [
+                                e && e.stderr ? String(e.stderr).trim() : '',
+                                e && e.message ? e.message : String(e),
+                              ].filter(Boolean).join(' | ');
+                              done({ ok: false, error: 'git push failed: ' + detail.slice(0, 1500), branch: branch, remote: remote });
+                            }
+
+                            done({ ok: true, branch: branch, remote: remote });
+                        env:
+                          WT: ${steps.readWorktreePath.outputs.stdout}
+                          BRANCH: ${steps.readBranch.outputs.stdout}
+                        failOnError: false
+                        timeout: 600000
+                        output:
+                          captureStdout: true
+                          captureStderr: true
+
+                    - id: createPullRequest
+                      name: Create pull request
+                      type: cli_command
+                      dependsOn: pushBranch
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const fs = require('fs');
+                            const path = require('path');
+                            const { execSync } = require('child_process');
+
+                            const wt = String(process.env.WT || '').trim();
+                            const branch = String(process.env.BRANCH || '').trim();
+                            const ref = String(process.env.REF || '').trim();
+                            const request = String(process.env.REQUEST || '').trim();
+                            const cycles = String(process.env.CYCLES || '').trim();
+                            const reviewer = String(process.env.REVIEWER || '').trim();
+                            const run = (cmd) => execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString();
+                            const done = (o) => { process.stdout.write(JSON.stringify(o)); process.exit(0); };
+
+                            // Base branch - origin/HEAD is authoritative, then gh, then master.
+                            let base = '';
+                            try {
+                              base = run('git symbolic-ref --short refs/remotes/origin/HEAD').trim().replace(/^origin\//, '');
+                            } catch (e) {
+                              base = '';
+                            }
+                            if (!base) {
+                              try { base = run('gh repo view --json defaultBranchRef -q .defaultBranchRef.name').trim(); } catch (e) { base = ''; }
+                            }
+                            if (!base) base = 'master';
+
+                            let report = {};
+                            try {
+                              report = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'report.json'), 'utf8'));
+                            } catch (e) {
+                              report = {};
+                            }
+                            const text = (v) => (typeof v === 'string' ? v.trim() : '');
+                            const list = (v) => (Array.isArray(v) ? v : []);
+
+                            const lines = [];
+                            lines.push('## AI engineering run');
+                            lines.push('');
+                            lines.push('Ticket: ' + ref);
+                            if (request) lines.push('Request: ' + request);
+                            lines.push('');
+                            lines.push('### Summary');
+                            lines.push(text(report.summary) || 'No summary supplied by the engineer.');
+
+                            const changes = list(report.changes);
+                            if (changes.length) {
+                              lines.push('');
+                              lines.push('### Changes');
+                              changes.forEach((c) => {
+                                if (typeof c === 'string') lines.push('- ' + c);
+                                else if (c && (c.file || c.description)) lines.push('- `' + String(c.file || '') + '` ' + String(c.description || ''));
+                              });
+                            }
+
+                            const tests = list(report.testsRun);
+                            if (tests.length) {
+                              lines.push('');
+                              lines.push('### Verification');
+                              tests.forEach((t) => {
+                                if (typeof t === 'string') lines.push('- ' + t);
+                                else if (t) lines.push('- `' + String(t.command || '') + '` -> ' + String(t.result || 'unknown'));
+                              });
+                            }
+                            if (text(report.verification)) {
+                              lines.push('');
+                              lines.push(text(report.verification));
+                            }
+
+                            const risks = list(report.risks);
+                            if (risks.length) {
+                              lines.push('');
+                              lines.push('### Risks');
+                              risks.forEach((r) => lines.push('- ' + String(r)));
+                            }
+
+                            lines.push('');
+                            lines.push('### Review');
+                            lines.push('Approved by ' + (reviewer || 'the reviewing agent') + ' after ' + (cycles || '0') + ' review cycle(s).');
+                            lines.push('');
+                            lines.push('---');
+                            lines.push('Generated by core.ProcessAITicket@1.4.2');
+
+                            const bodyFile = path.join(wt, '.ai-agent', 'pr-body.md');
+                            fs.writeFileSync(bodyFile, lines.join('\n'), 'utf8');
+
+                            const title = (ref + (request ? ' - ' + request : '')).slice(0, 140);
+                            let url = '';
+                            try {
+                              url = run('gh pr create --base "' + base + '" --head "' + branch + '" --title "' + title.replace(/["`$\\]/g, ' ') + '" --body-file "' + bodyFile + '"').trim();
+                            } catch (e) {
+                              const detail = [
+                                e && e.stderr ? String(e.stderr).trim() : '',
+                                e && e.message ? e.message : String(e),
+                              ].filter(Boolean).join(' | ');
+
+                              // A pull request for this branch may already exist (run retry).
+                              if (/already exists/i.test(detail)) {
+                                try {
+                                  const view = JSON.parse(run('gh pr view "' + branch + '" --json url,number,state,mergedAt'));
+                                  done({ ok: true, created: false, prUrl: view.url, prNumber: view.number, state: view.state, base: base, branch: branch });
+                                } catch (e2) {
+                                  done({ ok: false, error: 'pull request exists but could not be inspected - ' + String(e2 && e2.message ? e2.message : e2), base: base, branch: branch });
+                                }
+                              }
+                              done({ ok: false, error: 'gh pr create failed: ' + detail.slice(0, 1500), base: base, branch: branch });
+                            }
+
+                            // Normalise to a structured record rather than scraping the URL line.
+                            try {
+                              const view = JSON.parse(run('gh pr view "' + branch + '" --json url,number,state,mergedAt'));
+                              done({ ok: true, created: true, prUrl: view.url || url, prNumber: view.number, state: view.state, base: base, branch: branch });
+                            } catch (e) {
+                              done({ ok: !!url, created: true, prUrl: url, prNumber: null, state: 'OPEN', base: base, branch: branch });
+                            }
+                        env:
+                          WT: ${steps.readWorktreePath.outputs.stdout}
+                          BRANCH: ${steps.readBranch.outputs.stdout}
+                          REF: ${steps.loadTicket.result.reference}
+                          REQUEST: ${steps.loadTicket.result.request}
+                          CYCLES: ${variables.reviewCycle}
+                          REVIEWER: ${input.reviewerId}
+                        failOnError: false
+                        timeout: 300000
+                        output:
+                          captureStdout: true
+                          captureStderr: true
+
+                    - id: readPrUrl
+                      name: Read pull request url
+                      type: cli_command
+                      dependsOn: createPullRequest
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const d = JSON.parse(process.env.PR || '{}');
+                            process.stdout.write(String(d.prUrl || ''));
+                        env:
+                          PR: ${steps.createPullRequest.outputs.stdout}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+
+                    - id: readPrNumber
+                      name: Read pull request number
+                      type: cli_command
+                      dependsOn: readPrUrl
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const d = JSON.parse(process.env.PR || '{}');
+                            process.stdout.write(d.prNumber == null ? '' : String(d.prNumber));
+                        env:
+                          PR: ${steps.createPullRequest.outputs.stdout}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+
+                    - id: prPublishedGate
+                      name: Did the pull request publish
+                      type: condition
+                      dependsOn: readPrNumber
+                      config:
+                        condition: steps.readPrUrl.stdout && steps.readPrUrl.stdout.indexOf('/pull/') !== -1
+                        thenSteps:
+                          - id: prPublishedComment
+                            name: Comment pull request on ticket
+                            type: service_invoke
+                            config:
+                              service: core.ReactorySupportWorkflowService@1.0.0
+                              method: addComment
+                              params:
+                                ticketId: ${steps.loadTicket.result.id}
+                                comment: Pull request ${steps.readPrUrl.outputs.stdout} opened for branch
+                                  ${steps.readBranch.outputs.stdout}. A human approval
+                                  task has been raised - the ticket moves to resolved
+                                  only once the pull request is merged.
+
+                          # ── Human approval of the pull request ──────────────
+                          - id: prApprovalGate
+                            name: Pull request approval required
+                            type: condition
+                            dependsOn: prPublishedComment
+                            config:
+                              condition: steps.resolveSignoff.stdout === 'true'
+                              thenSteps:
+                                - id: prApproval
+                                  name: Approve and merge pull request
+                                  type: user_activity
+                                  config:
+                                    activityType: approval
+                                    assignee: ${steps.loadTicket.result.assignedToEmail}
+                                    message: Approve and merge the pull request for
+                                      ${steps.loadTicket.result.reference} -
+                                      ${steps.readPrUrl.outputs.stdout}
+                                    props:
+                                      ticketReference: ${steps.loadTicket.result.reference}
+                                      ticketId: ${steps.loadTicket.result.id}
+                                      prUrl: ${steps.readPrUrl.outputs.stdout}
+                                      prNumber: ${steps.readPrNumber.outputs.stdout}
+                                      branch: ${steps.readBranch.outputs.stdout}
+                                      worktree: ${steps.readWorktreePath.outputs.stdout}
+                                      agentId: ${input.agentId}
+                                      reviewerId: ${input.reviewerId}
+                                      chatSessionId: ${variables.engineerSessionId}
+                                      reviewCycles: ${variables.reviewCycle}
+                                      reviewVerdict: ${variables.reviewVerdict}
+                                    propsMap:
+                                      ticketRequest: steps.loadTicket.result.request
+                                      ticketStatus: steps.loadTicket.result.status
+                                - id: prDecision
+                                  name: Apply pull request decision
+                                  type: condition
+                                  dependsOn: prApproval
+                                  config:
+                                    condition: steps.prApproval.approved === true
+                                    thenSteps:
+                                      - id: setPrApproved
+                                        name: Record pull request approval
+                                        type: set_variable
+                                        config:
+                                          action: set
+                                          key: prApproved
+                                          value: "true"
+                                      - id: prApprovedComment
+                                        name: Comment pull request approval
+                                        type: service_invoke
+                                        dependsOn: setPrApproved
+                                        config:
+                                          service: core.ReactorySupportWorkflowService@1.0.0
+                                          method: addComment
+                                          params:
+                                            ticketId: ${steps.loadTicket.result.id}
+                                            comment: Pull request APPROVED for merge by
+                                              ${steps.prApproval.outputs.completedByEmail}.
+                                              Polling GitHub every 3 minutes for the
+                                              merge (20 checks maximum).
+                                      - id: prApprovedLog
+                                        name: Log pull request approval
+                                        type: log
+                                        dependsOn: prApprovedComment
+                                        config:
+                                          level: info
+                                          message: Pull request APPROVED for ${steps.loadTicket.result.reference} by
+                                            ${steps.prApproval.outputs.completedByEmail} - polling for merge.
+                                    elseSteps:
+                                      - id: prDeclinedComment
+                                        name: Comment pull request decline
+                                        type: service_invoke
+                                        config:
+                                          service: core.ReactorySupportWorkflowService@1.0.0
+                                          method: addComment
+                                          params:
+                                            ticketId: ${steps.loadTicket.result.id}
+                                            comment: Pull request DECLINED by
+                                              ${steps.prApproval.outputs.completedByEmail}.
+                                              The ticket stays in_progress; branch
+                                              ${steps.readBranch.outputs.stdout} and
+                                              ${steps.readPrUrl.outputs.stdout} remain
+                                              available for inspection.
+                                      - id: prDeclinedLog
+                                        name: Log pull request decline
+                                        type: log
+                                        dependsOn: prDeclinedComment
+                                        config:
+                                          level: warn
+                                          message: Pull request DECLINED for ${steps.loadTicket.result.reference} by
+                                            ${steps.prApproval.outputs.completedByEmail} - no merge
+                                            poll, ticket left in_progress.
+                              elseSteps:
+                                - id: logNoSignoff
+                                  name: Log PR approval skipped
+                                  type: log
+                                  config:
+                                    level: info
+                                    message: Human PR approval skipped for ${steps.loadTicket.result.reference}
+                                      (requireSignoff=false) - polling for merge immediately.
+                                - id: setPrApprovedNoSignoff
+                                  name: Record approval bypass
+                                  type: set_variable
+                                  dependsOn: logNoSignoff
+                                  config:
+                                    action: set
+                                    key: prApproved
+                                    value: "true"
+
+                          # ── Merge polling (3 minutes, 20 attempts) ───────────
+                          - id: pollMerge
+                            name: Poll pull request merge state
+                            type: while
+                            dependsOn: prApprovalGate
+                            config:
+                              condition: variables.prApproved === 'true' && variables.prState !== 'MERGED'
+                                && variables.prState !== 'CLOSED' && Number(variables.prPollCount) < 20
+                              steps:
+                                - id: pollWait
+                                  name: Wait between merge polls
+                                  type: delay
+                                  config:
+                                    duration: 180000
+                                    message: Waiting 3 minutes before checking whether the pull request
+                                      was merged.
+                                - id: checkMerge
+                                  name: Check merge state
+                                  type: cli_command
+                                  dependsOn: pollWait
+                                  config:
+                                    command: gh
+                                    args:
+                                      - pr
+                                      - view
+                                      - ${steps.readPrUrl.outputs.stdout}
+                                      - "--json"
+                                      - state,mergedAt,url,number
+                                    failOnError: false
+                                    output:
+                                      captureStdout: true
+                                      captureStderr: true
+                                - id: readMergeState
+                                  name: Read merge state
+                                  type: cli_command
+                                  dependsOn: checkMerge
+                                  config:
+                                    command: node
+                                    args:
+                                      - -e
+                                      - |
+                                        // Preserve the previous state when gh fails (network,
+                                        // auth). An empty value must not be read as "not merged".
+                                        const raw = String(process.env.RAW || '').trim();
+                                        const prev = String(process.env.PREV || 'unknown').trim() || 'unknown';
+                                        let state = prev;
+                                        try {
+                                          const d = JSON.parse(raw);
+                                          if (d && typeof d.state === 'string' && d.state.trim()) {
+                                            state = d.state.trim().toUpperCase();
+                                          }
+                                        } catch (e) {
+                                          state = prev;
+                                        }
+                                        process.stdout.write(state);
+                                    env:
+                                      RAW: ${steps.checkMerge.outputs.stdout}
+                                      PREV: ${variables.prState}
+                                    failOnError: false
+                                    output:
+                                      captureStdout: true
+                                - id: setPrState
+                                  name: Record merge state
+                                  type: set_variable
+                                  dependsOn: readMergeState
+                                  config:
+                                    action: set
+                                    key: prState
+                                    source: step_output
+                                    sourcePath: readMergeState.outputs.stdout
+                                - id: bumpPoll
+                                  name: Increment poll count
+                                  type: cli_command
+                                  dependsOn: setPrState
+                                  config:
+                                    command: node
+                                    args:
+                                      - -e
+                                      - |
+                                        const n = Number(String(process.env.N || '0').trim());
+                                        process.stdout.write(String((Number.isFinite(n) ? n : 0) + 1));
+                                    env:
+                                      N: ${variables.prPollCount}
+                                    failOnError: true
+                                    output:
+                                      captureStdout: true
+                                - id: setPollCount
+                                  name: Record poll count
+                                  type: set_variable
+                                  dependsOn: bumpPoll
+                                  config:
+                                    action: set
+                                    key: prPollCount
+                                    source: step_output
+                                    sourcePath: bumpPoll.outputs.stdout
+
+                          # ── Merge outcome ────────────────────────────────────
+                          - id: mergeOutcome
+                            name: Merge outcome
+                            type: condition
+                            dependsOn: pollMerge
+                            config:
+                              condition: variables.prState === 'MERGED'
+                              thenSteps:
+                                - id: resolveTicket
+                                  name: Move ticket to resolved
+                                  type: service_invoke
+                                  config:
+                                    service: core.ReactorySupportWorkflowService@1.0.0
+                                    method: updateStatus
+                                    params:
+                                      ticketId: ${steps.loadTicket.result.id}
+                                      status: resolved
+                                      comment: Pull request ${steps.readPrUrl.outputs.stdout} MERGED.
+                                        AI engineering run for
+                                        ${steps.loadTicket.result.reference} is complete -
+                                        ticket moved to resolved.
+                                - id: resolvedNotify
+                                  name: Notify resolution
+                                  type: service_invoke
+                                  dependsOn: resolveTicket
+                                  config:
+                                    service: core.ReactorySupportWorkflowService@1.0.0
+                                    method: notify
+                                    params:
+                                      event: ticket.resolved
+                                      ticketId: ${steps.loadTicket.result.id}
+                                      extra:
+                                        prUrl: ${steps.readPrUrl.outputs.stdout}
+                                        branch: ${steps.readBranch.outputs.stdout}
+                                        mergePolls: ${variables.prPollCount}
+                                - id: resolvedLog
+                                  name: Log resolution
+                                  type: log
+                                  dependsOn: resolvedNotify
+                                  config:
+                                    level: info
+                                    message: Pull request MERGED - ${steps.loadTicket.result.reference}
+                                      moved to resolved after
+                                      ${variables.prPollCount} merge poll(s).
+                              elseSteps:
+                                - id: notMergedReason
+                                  name: Why the pull request is not merged
+                                  type: condition
+                                  config:
+                                    condition: variables.prApproved === 'true'
+                                    thenSteps:
+                                      - id: mergeTimeoutComment
+                                        name: Comment merge timeout
+                                        type: service_invoke
+                                        config:
+                                          service: core.ReactorySupportWorkflowService@1.0.0
+                                          method: addComment
+                                          params:
+                                            ticketId: ${steps.loadTicket.result.id}
+                                            comment: Pull request ${steps.readPrUrl.outputs.stdout} was
+                                              not merged after
+                                              ${variables.prPollCount} checks
+                                              (state ${variables.prState}). The ticket
+                                              stays in_progress and a human task has
+                                              been raised.
+                                      - id: mergeTimeoutTask
+                                        name: Human merge follow-up
+                                        type: user_activity
+                                        dependsOn: mergeTimeoutComment
+                                        config:
+                                          activityType: approval
+                                          assignee: ${steps.loadTicket.result.assignedToEmail}
+                                          message: Merge follow-up needed for
+                                            ${steps.loadTicket.result.reference} -
+                                            ${steps.readPrUrl.outputs.stdout}
+                                          props:
+                                            ticketReference: ${steps.loadTicket.result.reference}
+                                            ticketId: ${steps.loadTicket.result.id}
+                                            prUrl: ${steps.readPrUrl.outputs.stdout}
+                                            prNumber: ${steps.readPrNumber.outputs.stdout}
+                                            branch: ${steps.readBranch.outputs.stdout}
+                                            worktree: ${steps.readWorktreePath.outputs.stdout}
+                                            prState: ${variables.prState}
+                                            mergePolls: ${variables.prPollCount}
+                                      - id: mergeTimeoutAck
+                                        name: Comment merge follow-up
+                                        type: service_invoke
+                                        dependsOn: mergeTimeoutTask
+                                        config:
+                                          service: core.ReactorySupportWorkflowService@1.0.0
+                                          method: addComment
+                                          params:
+                                            ticketId: ${steps.loadTicket.result.id}
+                                            comment: Merge follow-up acknowledged by
+                                              ${steps.mergeTimeoutTask.outputs.completedByEmail}.
+                                              The ticket remains in_progress until the
+                                              pull request is merged.
+                                      - id: mergeTimeoutLog
+                                        name: Log merge timeout
+                                        type: log
+                                        dependsOn: mergeTimeoutAck
+                                        config:
+                                          level: warn
+                                          message: Pull request for ${steps.loadTicket.result.reference}
+                                            not merged after ${variables.prPollCount} checks (state
+                                            ${variables.prState}) - human follow-up raised.
+                                    elseSteps:
+                                      - id: prNotApprovedLog
+                                        name: Log pull request not approved
+                                        type: log
+                                        config:
+                                          level: warn
+                                          message: Merge polling skipped for ${steps.loadTicket.result.reference}
+                                            - the pull request was not approved. Ticket left in_progress.
+
+                        elseSteps:
+                          - id: publishFailedComment
+                            name: Comment publish failure
+                            type: service_invoke
+                            config:
+                              service: core.ReactorySupportWorkflowService@1.0.0
+                              method: addComment
+                              params:
+                                ticketId: ${steps.loadTicket.result.id}
+                                comment: AI engineering run was reviewed and ACCEPTED, but
+                                  publishing branch
+                                  ${steps.readBranch.outputs.stdout} or opening the
+                                  pull request failed - see the workflow run output.
+                                  Work remains in the worktree
+                                  ${steps.readWorktreePath.outputs.stdout}. Human
+                                  attention required.
+                          - id: publishFailedTask
+                            name: Human publish follow-up
+                            type: user_activity
+                            dependsOn: publishFailedComment
+                            config:
+                              activityType: approval
+                              assignee: ${steps.loadTicket.result.assignedToEmail}
+                              message: Publish failed for ${steps.loadTicket.result.reference}
+                                - review branch ${steps.readBranch.outputs.stdout}
+                                manually
+                              props:
+                                ticketReference: ${steps.loadTicket.result.reference}
+                                ticketId: ${steps.loadTicket.result.id}
+                                branch: ${steps.readBranch.outputs.stdout}
+                                worktree: ${steps.readWorktreePath.outputs.stdout}
+                                publishError: ${steps.createPullRequest.outputs.stdout}
+                          - id: publishFailedLog
+                            name: Log publish failure
+                            type: log
+                            dependsOn: publishFailedTask
+                            config:
+                              level: warn
+                              message: Could not publish branch ${steps.readBranch.outputs.stdout} for
+                                ${steps.loadTicket.result.reference} - pull request not
+                                created.
                   elseSteps:
                     - id: exhaustedLog
                       name: Log review exhausted
@@ -1178,105 +1986,10 @@ steps:
               verdict=${variables.reviewVerdict} cycles=${variables.reviewCycle}
               branch=${steps.readBranch.outputs.stdout}
               session=${variables.engineerSessionId}
-        - id: signoffGate
-          name: Sign off required
-          type: condition
-          dependsOn: reportRunOutcome
-          config:
-            condition: steps.resolveSignoff.stdout === 'true'
-            thenSteps:
-              - id: signoff
-                name: Human sign-off
-                type: user_activity
-                config:
-                  activityType: approval
-                  assignee: ${steps.loadTicket.result.assignedToEmail}
-                  message: Sign off the AI engineering run for
-                    ${steps.loadTicket.result.reference}
-                  props:
-                    ticketReference: ${steps.loadTicket.result.reference}
-                    ticketId: ${steps.loadTicket.result.id}
-                    branch: ${steps.readBranch.outputs.stdout}
-                    worktree: ${steps.readWorktreePath.outputs.stdout}
-                    agentId: ${input.agentId}
-                    reviewerId: ${input.reviewerId}
-                    chatSessionId: ${variables.engineerSessionId}
-                    reviewCycles: ${variables.reviewCycle}
-                    reviewVerdict: ${variables.reviewVerdict}
-                  propsMap:
-                    ticketRequest: steps.loadTicket.result.request
-                    ticketStatus: steps.loadTicket.result.status
-              - id: signoffOutcome
-                name: Apply sign-off
-                type: condition
-                dependsOn: signoff
-                config:
-                  condition: steps.signoff.approved === true
-                  thenSteps:
-                    - id: signoffAcceptedComment
-                      name: Comment sign-off on ticket
-                      type: service_invoke
-                      config:
-                        service: core.ReactorySupportWorkflowService@1.0.0
-                        method: addComment
-                        params:
-                          ticketId: ${steps.loadTicket.result.id}
-                          comment: Human sign-off APPROVED by ${steps.signoff.outputs.completedByEmail}.
-                            AI engineering run for
-                            ${steps.loadTicket.result.reference} is accepted.
-                            Branch ${steps.readBranch.outputs.stdout} is ready
-                            for merge.
-                    - id: signoffNotify
-                      name: Notify sign-off
-                      type: service_invoke
-                      dependsOn: signoffAcceptedComment
-                      config:
-                        service: core.ReactorySupportWorkflowService@1.0.0
-                        method: notify
-                        params:
-                          event: ticket.resolved
-                          ticketId: ${steps.loadTicket.result.id}
-                    - id: signoffDone
-                      name: Log sign-off complete
-                      type: log
-                      dependsOn: signoffNotify
-                      config:
-                        level: info
-                        message: Human sign-off APPROVED for ${steps.loadTicket.result.reference} by
-                          ${steps.signoff.outputs.completedByEmail}.
-                  elseSteps:
-                    - id: signoffRejectedComment
-                      name: Comment sign-off rejection
-                      type: service_invoke
-                      config:
-                        service: core.ReactorySupportWorkflowService@1.0.0
-                        method: addComment
-                        params:
-                          ticketId: ${steps.loadTicket.result.id}
-                          comment: Human sign-off DECLINED by ${steps.signoff.outputs.completedByEmail}.
-                            The AI engineering run was not accepted; branch
-                            ${steps.readBranch.outputs.stdout} remains available
-                            for inspection. Human follow-up required.
-                    - id: signoffRejectedLog
-                      name: Log sign-off rejection
-                      type: log
-                      dependsOn: signoffRejectedComment
-                      config:
-                        level: warn
-                        message: Human sign-off DECLINED for ${steps.loadTicket.result.reference} by
-                          ${steps.signoff.outputs.completedByEmail}.
-            elseSteps:
-              - id: logNoSignoff
-                name: Log signoff skipped
-                type: log
-                config:
-                  level: info
-                  message: Sign-off skipped for ${steps.loadTicket.result.reference}
-                    (requireSignoff=false).
         - id: logAudit
           name: Log audit trail
           type: log
-          dependsOn: signoffGate
+          dependsOn: reportBranch
           config:
             level: info
             message: Audit - ticket=${steps.loadTicket.result.reference}
