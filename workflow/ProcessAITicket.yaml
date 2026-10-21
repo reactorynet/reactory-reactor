@@ -1,6 +1,6 @@
 nameSpace: core
 name: ProcessAITicket
-version: 1.4.3
+version: 1.4.4
 description: Autonomous AI engineering run for a SINGLE support ticket. Loads the ticket,
   moves it to in_progress, prepares an isolated git worktree on a ticket-keyed
   branch, has the nominated AI engineer agent perform the work, captures a
@@ -930,99 +930,304 @@ steps:
                 // ---------------------------------------------------------------------------
                 // Submodule / primary-checkout guard.
                 //
-                // reactory-pwa-client mounts src/components/plugins/reactory-core as a git
-                // submodule. A verification recipe that tells an agent to `git checkout` its
-                // branch inside that submodule mutates the developer's primary checkout and
-                // leaves the submodule detached at its own commit (observed on ORG-010, caught
-                // only by manual inspection). The engineer prompt now forbids it; this step is
-                // the deterministic backstop: snapshot the submodule SHAs before the engineer
-                // runs, compare afterwards, and restore the original SHA if the checkout moved.
+                // The repository this workflow runs in is routinely MOUNTED BY ANOTHER WORKING
+                // COPY as a git submodule: reactory-pwa-client mounts
+                // src/components/plugins/reactory-core as a 160000 gitlink pointing at
+                // reactory-client-core-pwa-plugin. A verification recipe that checks a branch
+                // out inside that mount detaches the developer's primary checkout.
+                //
+                // DEFECT 6 (fixed in 1.4.4). The 1.4.3 version of this script only inspected
+                // REPO. REPO is the worktree repo - the plugin - and a plugin has no 160000
+                // entries of its own, so the baseline was legitimately empty and the guard did
+                // nothing while the consumer's mount was left on the branch commit. Note that
+                // `git -C <plugin> submodule status` cannot find the mount either: the mount IS
+                // the plugin, not a submodule of it. The mount is only visible from the
+                // CONSUMER, so consumer working copies are scanned below.
+                //
+                // The agent-facing verification recipe no longer mutates a mount in place (it
+                // clones into a temp dir), so this is defence in depth against an agent that
+                // ignores that instruction - not the primary control.
                 // ---------------------------------------------------------------------------
                 const MODE = String(process.env.MODE || 'snapshot').trim().toLowerCase();
                 const wt = path.resolve(String(process.env.WT || '').trim());
-                const repo = path.resolve(String(process.env.REPO || '').trim());
+                const repoRaw = String(process.env.REPO || '').trim();
+                const repo = repoRaw ? path.resolve(repoRaw) : '';
                 const baselinePath = path.join(wt, '.ai-agent', 'submodule-baseline.json');
 
                 const git = (cwd, cmd) => {
                   try { return execSync(cmd, { cwd: cwd, stdio: 'pipe' }).toString().trim(); } catch (e) { return ''; }
                 };
 
-                if (!repo || !fs.existsSync(repo)) {
-                  process.stdout.write(JSON.stringify({ ok: true, mode: MODE, submodules: [], warnings: ['repository path could not be resolved; submodule guard skipped'] }));
-                  process.exit(0);
-                }
-
-                const listSubmodules = () => {
-                  const lines = git(repo, 'git ls-files -s').split('\n');
-                  const found = [];
-                  lines.forEach((line) => {
-                    const match = line.match(/^160000\s+([0-9a-f]{40})\s+\d+\t(.+)$/);
-                    if (!match) return;
-                    const subPath = match[2];
-                    const subDir = path.resolve(repo, subPath);
-                    found.push({
-                      path: subPath,
-                      indexSha: match[1],
-                      headSha: git(subDir, 'git rev-parse HEAD') || null,
-                      superprojectSha: git(repo, 'git ls-tree HEAD -- "' + subPath + '"').split(/\s+/)[2] || null,
-                    });
-                  });
-                  return found;
+                // The same repository expressed as ssh, https or scp must compare equal.
+                const normaliseUrl = (url) => {
+                  const raw = String(url || '').trim();
+                  if (!raw) return '';
+                  return raw
+                    .replace(/^[a-z][a-z0-9+.-]*:\/\//i, '')
+                    .replace(/^[^@/]+@/, '')
+                    .replace(':', '/')
+                    .replace(/\.git$/i, '')
+                    .replace(/\/+$/, '')
+                    .toLowerCase();
                 };
 
-                if (MODE === 'snapshot') {
-                  const submodules = listSubmodules();
+                // Resolve a gitlink path inside a working copy without escaping it.
+                const within = (root, rel) => {
+                  const base = path.resolve(root);
+                  const abs = path.resolve(base, rel);
+                  if (abs === base || abs.indexOf(base + path.sep) !== 0) return null;
+                  return abs;
+                };
+
+                // 160000 entries look like: `160000 <sha> <stage>\t<path>`.
+                const gitlinks = (root) => {
+                  const out = [];
+                  git(root, 'git ls-files -s').split('\n').forEach((line) => {
+                    const match = line.match(/^160000\s+([0-9a-f]{40})\s+\d+\t(.+)$/);
+                    if (match) out.push({ indexSha: match[1], path: match[2] });
+                  });
+                  return out;
+                };
+
+                // Untracked, non-ignored files. `--exclude-standard` is deliberate: build output
+                // that is gitignored (node_modules, dist) is not a run artefact worth deleting.
+                const untracked = (dir) => {
+                  if (!fs.existsSync(dir)) return [];
+                  return git(dir, 'git ls-files --others --exclude-standard')
+                    .split('\n').map((p) => p.trim()).filter(Boolean);
+                };
+
+                // `git ls-files --others` lists files, so removing them leaves empty
+                // directories behind. Walk back up to the mount root and drop the empties, but
+                // only while they are empty - a directory that still holds something is not
+                // ours to delete.
+                const pruneEmptyParents = (root, startDir) => {
+                  const base = path.resolve(root);
+                  let current = startDir;
+                  while (current && current !== base && current.indexOf(base + path.sep) === 0) {
+                    try {
+                      if (fs.readdirSync(current).length > 0) return;
+                      fs.rmdirSync(current);
+                    } catch (e) { return; }
+                    current = path.dirname(current);
+                  }
+                };
+
+                const repoUrl = normaliseUrl(git(repo, 'git config --get remote.origin.url'));
+                const repoHead = git(repo, 'git rev-parse HEAD');
+
+                // Does this working copy contain the repository under guard?
+                const mountsRepo = (dir) => {
+                  if (!fs.existsSync(path.join(dir, '.git'))) return false;
+                  const subUrl = normaliseUrl(git(dir, 'git config --get remote.origin.url'));
+                  if (repoUrl && subUrl) return repoUrl === subUrl;
+                  // No configured remote on one side (local fixtures, bare-ish clones): fall
+                  // back to shared history. A commit from REPO present in the mount means the
+                  // mount and REPO are the same repository.
+                  if (!repoHead) return false;
+                  return git(dir, 'git cat-file -e ' + repoHead + ' && echo same') === 'same';
+                };
+
+                // Every working copy that could mount REPO.
+                const consumerRoots = () => {
+                  const roots = {};
+
+                  // Explicit list wins. Deterministic, and needed where the consumer is not a
+                  // sibling of the worktree repo.
+                  String(process.env.CONSUMERS || '')
+                    .split(/[\n,]+/).map((s) => s.trim()).filter(Boolean)
+                    .forEach((p) => { roots[path.resolve(p)] = { explicit: true }; });
+
+                  // Sibling working copies: the real topology is a flat ~/Projects directory.
+                  // Siblings are only scanned when they declare submodules via .gitmodules -
+                  // that keeps the cost to one directory listing plus one index dump for the
+                  // repos that can actually have a mount.
                   try {
-                    fs.mkdirSync(path.dirname(baselinePath), { recursive: true });
-                    fs.writeFileSync(baselinePath, JSON.stringify({ capturedAt: new Date().toISOString(), repo: repo, submodules: submodules }, null, 2), 'utf8');
-                  } catch (e) { /* best effort */ }
-                  process.stdout.write(JSON.stringify({ ok: true, mode: MODE, repo: repo, count: submodules.length, submodules: submodules, warnings: [] }));
+                    const parent = path.dirname(repo);
+                    fs.readdirSync(parent, { withFileTypes: true }).forEach((entry) => {
+                      if (!entry.isDirectory() || entry.name.charAt(0) === '.') return;
+                      const candidate = path.join(parent, entry.name);
+                      if (!fs.existsSync(path.join(candidate, '.git'))) return;
+                      if (!fs.existsSync(path.join(candidate, '.gitmodules'))) return;
+                      if (!roots[candidate]) roots[candidate] = { explicit: false };
+                    });
+                  } catch (e) { /* parent not readable - explicit list only */ }
+
+                  delete roots[repo];
+                  return Object.keys(roots).map((dir) => ({ dir: dir, explicit: roots[dir].explicit }));
+                };
+
+                // Collect every checkout this run can mutate: REPO's own submodules AND the
+                // mounts of REPO that live inside consumer working copies.
+                const collect = () => {
+                  const entries = [];
+                  const warnings = [];
+                  let consumersScanned = 0;
+
+                  gitlinks(repo).forEach((gl) => {
+                    const dir = within(repo, gl.path);
+                    if (!dir) { warnings.push('ignoring unsafe submodule path "' + gl.path + '" in the worktree repo'); return; }
+                    const treeSha = git(repo, 'git ls-tree HEAD -- "' + gl.path + '"').split(/\s+/)[2] || null;
+                    entries.push({
+                      consumer: repo,
+                      path: gl.path,
+                      relation: 'owned',
+                      indexSha: gl.indexSha,
+                      superprojectSha: treeSha,
+                      headSha: git(dir, 'git rev-parse HEAD') || null,
+                      untracked: untracked(dir),
+                    });
+                  });
+
+                  // This loop runs unconditionally. An empty result from the block above is NOT
+                  // "nothing to do" - it is only true after the consumers have been checked.
+                  consumerRoots().forEach((candidate) => {
+                    if (!fs.existsSync(path.join(candidate.dir, '.git'))) return;
+                    consumersScanned += 1;
+                    gitlinks(candidate.dir).forEach((gl) => {
+                      const dir = within(candidate.dir, gl.path);
+                      if (!dir) { warnings.push('ignoring unsafe gitlink path "' + gl.path + '" in ' + candidate.dir); return; }
+                      if (!mountsRepo(dir)) return;
+                      const head = git(dir, 'git rev-parse HEAD') || null;
+                      if (!head) {
+                        // A declared but uninitialised mount cannot be compared. Say so rather
+                        // than reporting a clean run we cannot substantiate.
+                        warnings.push('mount "' + gl.path + '" in ' + candidate.dir + ' is not initialised');
+                        return;
+                      }
+                      entries.push({
+                        consumer: candidate.dir,
+                        path: gl.path,
+                        relation: 'consumer',
+                        indexSha: gl.indexSha,
+                        headSha: head,
+                        untracked: untracked(dir),
+                      });
+                    });
+                  });
+
+                  return { entries: entries, warnings: warnings, consumersScanned: consumersScanned };
+                };
+
+                const keyOf = (entry) => String(entry.consumer) + '::' + String(entry.path);
+
+                if (!repo || !fs.existsSync(repo)) {
+                  process.stdout.write(JSON.stringify({ ok: true, mode: MODE, submodules: [], skipped: true, warnings: ['repository path could not be resolved; submodule guard skipped'] }));
                   process.exit(0);
                 }
 
-                let baseline = { submodules: [] };
-                try { baseline = JSON.parse(fs.readFileSync(baselinePath, 'utf8')); } catch (e) { /* nothing captured */ }
+                if (MODE === 'snapshot') {
+                  const collected = collect();
+                  const consumerCount = collected.entries.filter((e) => e.relation === 'consumer').length;
+                  const baseline = {
+                    capturedAt: new Date().toISOString(),
+                    repo: repo,
+                    consumersScanned: collected.consumersScanned,
+                    submodules: collected.entries,
+                  };
+                  try {
+                    fs.mkdirSync(path.dirname(baselinePath), { recursive: true });
+                    fs.writeFileSync(baselinePath, JSON.stringify(baseline, null, 2), 'utf8');
+                  } catch (e) { /* best effort */ }
+                  if (collected.entries.length === 0) {
+                    collected.warnings.push('no submodules in the worktree repo and none of the ' + collected.consumersScanned + ' consumer working cop(ies) scanned mounts it; nothing to protect');
+                  }
+                  process.stdout.write(JSON.stringify({
+                    ok: true,
+                    mode: MODE,
+                    repo: repo,
+                    count: collected.entries.length,
+                    consumerCount: consumerCount,
+                    consumersScanned: collected.consumersScanned,
+                    submodules: collected.entries,
+                    warnings: collected.warnings,
+                  }));
+                  process.exit(0);
+                }
 
-                const current = listSubmodules();
-                const byPath = {};
-                current.forEach((item) => { byPath[item.path] = item; });
+                // ---- verify -----------------------------------------------------------------
+                let baseline = null;
+                try { baseline = JSON.parse(fs.readFileSync(baselinePath, 'utf8')); } catch (e) { baseline = null; }
 
-                const restored = [];
+                const current = collect();
+                const currentByKey = {};
+                current.entries.forEach((entry) => { currentByKey[keyOf(entry)] = entry; });
+
                 const mutated = [];
-                const warnings = [];
+                const cleaned = [];
+                const warnings = current.warnings.slice();
 
-                (baseline.submodules || []).forEach((before) => {
-                  const after = byPath[before.path];
+                if (!baseline) {
+                  // Never report success with nothing to compare against: that is precisely the
+                  // failure mode that hid defect 6 for a whole run.
+                  warnings.push('no submodule baseline was captured; cannot prove the primary checkout was left untouched');
+                }
+
+                const previous = (baseline && Array.isArray(baseline.submodules)) ? baseline.submodules : [];
+
+                previous.forEach((before) => {
+                  const after = currentByKey[keyOf(before)];
                   if (!after) {
-                    warnings.push('submodule "' + before.path + '" is no longer registered in the primary checkout');
+                    warnings.push('"' + before.path + '" is no longer mounted in ' + before.consumer);
                     return;
                   }
-                  if (after.headSha && before.headSha && after.headSha !== before.headSha) {
-                    // Restore the original checked-out commit. This is a pure restore of the
-                    // pre-run state, performed in a guarded block so a failure to restore is
-                    // reported instead of hiding the mutation.
+
+                  if (before.headSha && after.headSha && before.headSha !== after.headSha) {
+                    // Pure restore of the pre-run state. Done in a guarded block so a failure to
+                    // restore is reported rather than hidden.
+                    const dir = within(before.consumer, before.path);
                     let didRestore = false;
-                    try {
-                      execSync('git checkout --detach "' + before.headSha + '"', { cwd: path.resolve(repo, before.path), stdio: 'pipe' });
-                      didRestore = true;
-                    } catch (e) {
-                      didRestore = false;
+                    if (dir) {
+                      try {
+                        execSync('git checkout --detach ' + before.headSha, { cwd: dir, stdio: 'pipe' });
+                        didRestore = true;
+                      } catch (e) { didRestore = false; }
                     }
-                    mutated.push({ path: before.path, before: before.headSha, after: after.headSha, restored: didRestore });
-                    warnings.push('submodule "' + before.path + '" moved from ' + before.headSha + ' to ' + after.headSha + (didRestore ? ' and was restored' : ' and could NOT be restored'));
+
+                    // Remove files the run left in the mount. Only paths that were NOT already
+                    // untracked before the run qualify, so a developer's own scratch files in
+                    // the mount are never touched.
+                    if (didRestore && dir) {
+                      const wasUntracked = {};
+                      (before.untracked || []).forEach((p) => { wasUntracked[p] = true; });
+                      untracked(dir).forEach((rel) => {
+                        if (wasUntracked[rel]) return;
+                        const abs = within(dir, rel);
+                        if (!abs) return;
+                        try {
+                          fs.rmSync(abs, { recursive: true, force: true });
+                          pruneEmptyParents(dir, path.dirname(abs));
+                          cleaned.push(path.join(before.path, rel));
+                        } catch (e) { /* best effort */ }
+                      });
+                    }
+
+                    mutated.push({
+                      consumer: before.consumer,
+                      path: before.path,
+                      relation: before.relation || 'owned',
+                      before: before.headSha,
+                      after: after.headSha,
+                      restored: didRestore,
+                    });
+                    warnings.push('"' + path.join(before.consumer, before.path) + '" moved from ' + before.headSha + ' to ' + after.headSha + (didRestore ? ' and was restored' : ' and could NOT be restored'));
                   }
+
                   if (before.indexSha && after.indexSha && before.indexSha !== after.indexSha) {
-                    warnings.push('the superproject index for submodule "' + before.path + '" changed from ' + before.indexSha + ' to ' + after.indexSha + ' (not auto-reverted: it may be a deliberate bump)');
+                    // Not auto-reverted: a gitlink bump may be a deliberate part of the change.
+                    warnings.push('the gitlink index for "' + before.path + '" in ' + before.consumer + ' changed from ' + before.indexSha + ' to ' + after.indexSha + ' (not auto-reverted: it may be a deliberate bump)');
                   }
                 });
 
                 process.stdout.write(JSON.stringify({
-                  ok: mutated.length === 0,
+                  ok: mutated.length === 0 && !!baseline,
                   mode: MODE,
                   repo: repo,
-                  checked: (baseline.submodules || []).length,
+                  baselineFound: !!baseline,
+                  checked: previous.length,
+                  consumersScanned: current.consumersScanned,
                   mutated: mutated,
-                  restored: restored,
+                  cleaned: cleaned,
                   warnings: warnings,
                 }));
                 process.exit(0);
@@ -1080,21 +1285,48 @@ steps:
 
               VERIFICATION SAFETY - SUBMODULES AND PRIMARY CHECKOUTS
 
-              Never mutate a developer's primary checkout. Some repositories mount a package as a git
-              submodule (reactory-pwa-client mounts src/components/plugins/reactory-core). Checking a
-              branch out INSIDE that submodule detaches the developer's checkout and corrupts their
-              working tree - this happened on a real run and was caught only by manual inspection.
+              Never mutate a developer's primary checkout. Some repositories are mounted by another
+              working copy as a git submodule: reactory-pwa-client mounts
+              src/components/plugins/reactory-core, and that mount points at the plugin repository
+              you are working in. Checking your branch out INSIDE that mount detaches the
+              developer's checkout and leaves the next run fighting their working tree.
 
-              - Before touching any nested repository, detect it:
-                git -C <repo> ls-files -s <path> | grep 160000. A 160000 mode means submodule: never
-                check anything out in place.
+              There is exactly one supported way to verify a submodule-mounted package. Use it by
+              default. Do not check anything out in place and do not hand-roll a
+              "record the SHA and restore it afterwards" dance - the restore is what fails.
 
-              - Verify a submodule-mounted package in a throwaway location instead: git worktree add
-                <tmp> <sha>, or clone and check out into a temp directory, run the verification there,
-                then remove it.
+              1. Detect the mount from the CONSUMER, never from the repository you are working in:
 
-              - If you must touch a submodule in place, record its SHA first and restore it in a
-                finally block. Never leave it detached at your commit.
+                   CONSUMER=<consumer working copy>       # e.g. ~/Projects/reactory-pwa-client
+                   SUBPATH=$(git -C "$CONSUMER" ls-files -s | grep 160000 \
+                     | awk '$1=="160000" && $4 ~ /reactory-core/ {print $4}')
+
+                 `git -C <worktree-repo> submodule status` and `git -C <worktree-repo> ls-files -s`
+                 are both empty in this situation. The mount IS the worktree repository, not a
+                 submodule of it, so it is only visible from the consumer.
+
+              2. Clone into a disposable directory and check your branch out there:
+
+                   TMP=$(mktemp -d)
+                   git clone --shared --no-checkout "$CONSUMER/$SUBPATH" "$TMP/plugin"
+                   git -C "$TMP/plugin" checkout <branch>
+
+              3. Reuse the consumer's installed dependencies. The plugin has no node_modules of its
+                 own, which is the only reason anyone ever did this in place:
+
+                   ln -s "$CONSUMER/node_modules" "$TMP/plugin/node_modules"
+
+              4. Run the real verification against the clone, and record the exact command:
+
+                   (cd "$TMP/plugin" && npx --no-install tsc --noEmit)
+                   (cd "$TMP/plugin" && npx --no-install jest --runInBand <path>)
+
+              5. Remove the clone, including when verification fails:
+
+                   rm -rf "$TMP"
+
+              If verification needs something the clone cannot reach, report the run as blocked and
+              say what was missing. Never fall back to checking out inside the developer's mount.
 
               COMPLETION CONTRACT
 
@@ -2845,7 +3077,7 @@ steps:
                               body = legacyBody() + '\n\n> **PR template not applied:** ' + warnings.join('; ');
                             }
 
-                            body = body.replace(/\s+$/, '') + '\n\n---\nGenerated by core.ProcessAITicket@1.4.3\n';
+                            body = body.replace(/\s+$/, '') + '\n\n---\nGenerated by core.ProcessAITicket@1.4.4\n';
 
                             const bodyFile = path.join(wt, '.ai-agent', 'pr-body.md');
                             fs.writeFileSync(bodyFile, body, 'utf8');
