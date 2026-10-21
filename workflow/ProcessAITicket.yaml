@@ -1,6 +1,6 @@
 nameSpace: core
 name: ProcessAITicket
-version: 1.4.2
+version: 1.4.3
 description: Autonomous AI engineering run for a SINGLE support ticket. Loads the ticket,
   moves it to in_progress, prepares an isolated git worktree on a ticket-keyed
   branch, has the nominated AI engineer agent perform the work, captures a
@@ -326,11 +326,31 @@ steps:
       key: prApproved
       value: "false"
 
+  # Run status is a value, not an inference at the end of the run: a completed
+  # report used to fall through the allow-list and end as verdict=pending.
+  - id: seedRunStatus
+    name: Seed run status
+    type: set_variable
+    dependsOn: seedPrApproved
+    config:
+      action: set
+      key: runStatus
+      value: pending
+
+  - id: seedRunHalt
+    name: Seed run halt flag
+    type: set_variable
+    dependsOn: seedRunStatus
+    config:
+      action: set
+      key: runHalt
+      value: "false"
+
   # ── 4. Guard the ticket ─────────────────────────────────────────────────
   - id: ticketGuard
     name: Ticket exists
     type: condition
-    dependsOn: seedPrApproved
+    dependsOn: seedRunHalt
     config:
       condition: steps.loadTicket.result && steps.loadTicket.result.id
       thenSteps:
@@ -503,10 +523,522 @@ steps:
               status: in_progress
               comment: Status moved to in_progress - AI engineering run started by agent
                 '${input.agentId}' on branch ${steps.readBranch.outputs.stdout}.
+        - id: openWorkspaceNote
+          name: Open persona workspace note
+          type: cli_command
+          dependsOn: markInProgress
+          config:
+            command: node
+            args:
+              - -e
+              - &workspaceNoteScript |
+                const fs = require('fs');
+                const path = require('path');
+                const { execSync } = require('child_process');
+
+                // ---------------------------------------------------------------------------
+                // Persona workspace notes, enforced by the workflow rather than left to agent
+                // discretion. Before this step existed "workspace" did not appear anywhere in
+                // the definition: ORG-003's note was stranded in workspace/notes/ forever while
+                // ORG-002 and ORG-012 landed in complete/ by luck.
+                //
+                // One script, five modes, so slug derivation, workspace resolution and the
+                // front matter cannot drift between start, check, reopen, close and retain:
+                //   open    - create in-progress/<slug>.md at engineer start
+                //   verify  - recreate it if the engineer session lost it (never fail the run)
+                //   reopen  - move complete/<slug>.md back to in-progress/ when a cycle rejects
+                //   close   - move to complete/, stamp PR url, verification and outcome
+                //   retain  - keep it in in-progress/ with status blocked|failed and the reason
+                // ---------------------------------------------------------------------------
+                const MODE = String(process.env.MODE || 'open').trim().toLowerCase();
+                const wt = path.resolve(String(process.env.WT || '').trim());
+                const ref = String(process.env.REF || '').trim();
+                const ticketId = String(process.env.TICKET_ID || '').trim();
+                const repo = String(process.env.REPO || '').trim();
+                const branch = String(process.env.BRANCH || '').trim();
+                const persona = String(process.env.PERSONA || '').trim();
+                const noteStatus = String(process.env.NOTE_STATUS || '').trim().toLowerCase();
+                const reason = String(process.env.REASON || '').trim();
+                const warnings = [];
+
+                const now = new Date().toISOString();
+                const out = (payload) => {
+                  process.stdout.write(JSON.stringify(payload));
+                  process.exit(0);
+                };
+
+                const safePersona = persona.replace(/[^A-Za-z0-9._-]+/g, '');
+                if (!safePersona) {
+                  out({ ok: false, action: MODE, warnings: ['no engineer persona id supplied; workspace notes skipped'] });
+                }
+                if (!ref) {
+                  out({ ok: false, action: MODE, warnings: ['no ticket reference resolved; workspace notes skipped'] });
+                }
+
+                // --- resolve <data root>/profiles/<profile>/personas/<persona>/workspace -----
+                const resolveWorkspace = () => {
+                  const roots = [];
+                  const addRoot = (candidate) => {
+                    const value = String(candidate || '').trim();
+                    if (value && roots.indexOf(value) === -1) roots.push(value);
+                  };
+                  addRoot(process.env.REACTORY_DATA);
+                  addRoot(process.env.APP_DATA_ROOT);
+                  addRoot(path.resolve(process.cwd(), '..', 'reactory-data'));
+                  addRoot(path.resolve(process.cwd(), 'reactory-data'));
+
+                  for (let i = 0; i < roots.length; i += 1) {
+                    const root = roots[i];
+                    const profilesDir = path.join(root, 'profiles');
+                    if (!fs.existsSync(profilesDir)) continue;
+
+                    let profiles = [];
+                    try { profiles = fs.readdirSync(profilesDir); } catch (e) { profiles = []; }
+                    // A profile that already owns this persona's workspace wins; then the
+                    // conventional 'reactor' profile; then the first profile on disk.
+                    const ordered = profiles.slice().sort((a, b) => {
+                      const rank = (p) => {
+                        const hasWorkspace = fs.existsSync(path.join(profilesDir, p, 'personas', safePersona, 'workspace'));
+                        if (hasWorkspace) return 0;
+                        if (p === 'reactor') return 1;
+                        return 2;
+                      };
+                      return rank(a) - rank(b) || a.localeCompare(b);
+                    });
+
+                    for (let j = 0; j < ordered.length; j += 1) {
+                      const profile = ordered[j];
+                      const personaDir = path.join(profilesDir, profile, 'personas', safePersona);
+                      if (!fs.existsSync(personaDir)) continue;
+                      const workspace = path.join(personaDir, 'workspace');
+                      return { root: root, profile: profile, workspace: workspace };
+                    }
+
+                    // No persona directory yet: fall back to the conventional profile so the
+                    // note lands somewhere deterministic rather than nowhere.
+                    const fallbackProfile = ordered.indexOf('reactor') !== -1 ? 'reactor' : ordered[0];
+                    if (fallbackProfile) {
+                      const workspace = path.join(profilesDir, fallbackProfile, 'personas', safePersona, 'workspace');
+                      return { root: root, profile: fallbackProfile, workspace: workspace };
+                    }
+                  }
+                  return null;
+                };
+
+                const resolved = resolveWorkspace();
+                if (!resolved) {
+                  out({ ok: false, action: MODE, warnings: ['could not resolve a persona workspace (no REACTORY_DATA profiles directory); note skipped'] });
+                }
+
+                const workspace = path.resolve(resolved.workspace);
+
+                // Hard guard: a note inside the git worktree could enter the pull request diff.
+                // Write nothing and warn rather than pollute the branch.
+                const relative = path.relative(wt, workspace);
+                const insideWorktree = !!relative && !relative.startsWith('..') && !path.isAbsolute(relative);
+                if (insideWorktree) {
+                  out({
+                    ok: false,
+                    action: MODE,
+                    workspace: workspace,
+                    warnings: ['resolved workspace "' + workspace + '" is inside the git worktree; refusing to write a note that could enter the PR diff'],
+                  });
+                }
+
+                const inProgressDir = path.join(workspace, 'in-progress');
+                const completeDir = path.join(workspace, 'complete');
+                try { fs.mkdirSync(inProgressDir, { recursive: true }); } catch (e) { /* best effort */ }
+                try { fs.mkdirSync(completeDir, { recursive: true }); } catch (e) { /* best effort */ }
+
+                // --- stable, de-duplicated, filesystem-safe slug ----------------------------
+                const baseSlug = String(ref).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'ticket';
+                const frontMatterValue = (text, key) => {
+                  const match = String(text).match(new RegExp('^' + key + ':\\s*(.*)$', 'm'));
+                  return match ? String(match[1]).trim() : '';
+                };
+                const readIf = (p) => { try { return fs.readFileSync(p, 'utf8'); } catch (e) { return ''; } };
+
+                const resolveSlug = () => {
+                  for (let i = 1; i <= 40; i += 1) {
+                    const candidate = i === 1 ? baseSlug : baseSlug + '-' + i;
+                    const inProgress = path.join(inProgressDir, candidate + '.md');
+                    const complete = path.join(completeDir, candidate + '.md');
+                    const existing = readIf(inProgress) || readIf(complete);
+                    if (!existing) return candidate;
+                    if (frontMatterValue(existing, 'reference') === ref) return candidate;
+                  }
+                  return baseSlug + '-' + Date.now();
+                };
+
+                const slug = resolveSlug();
+                const inProgressPath = path.join(inProgressDir, slug + '.md');
+                const completePath = path.join(completeDir, slug + '.md');
+
+                const buildFrontMatter = (status, started) => [
+                  '---',
+                  'ticket: ' + (ticketId || ref),
+                  'reference: ' + ref,
+                  'repo: ' + repo,
+                  'branch: ' + branch,
+                  'status: ' + status,
+                  'started: ' + started,
+                  'persona: ' + persona,
+                  '---',
+                ].join('\n');
+
+                const setFrontMatter = (text, key, value) => {
+                  const match = String(text).match(/^---\n([\s\S]*?)\n---\n?/);
+                  if (!match) return text;
+                  const lines = match[1].split('\n').filter((line) => line.indexOf(key + ':') !== 0);
+                  lines.push(key + ': ' + value);
+                  return '---\n' + lines.join('\n') + '\n---\n' + String(text).slice(match[0].length);
+                };
+
+                const buildBody = () => [
+                  '',
+                  '# ' + ref,
+                  '',
+                  'Working note for ' + ref + '. Kept outside the git worktree so it can never',
+                  'appear in the pull request diff.',
+                  '',
+                  '## Plan',
+                  '',
+                  '- ',
+                  '',
+                  '## Decisions and rationale',
+                  '',
+                  '- ',
+                  '',
+                  '## Commands run',
+                  '',
+                  '- ',
+                  '',
+                  '## Dead ends / notes',
+                  '',
+                  '- ',
+                  '',
+                  '## Outstanding questions',
+                  '',
+                  '- ',
+                  '',
+                ].join('\n');
+
+                const reportValue = () => {
+                  const reportPath = path.join(wt, '.ai-agent', 'report.json');
+                  try { return JSON.parse(fs.readFileSync(reportPath, 'utf8')); } catch (e) { return {}; }
+                };
+                const runStatusPath = path.join(wt, '.ai-agent', 'run-status.json');
+                const runStatus = (() => { try { return JSON.parse(fs.readFileSync(runStatusPath, 'utf8')); } catch (e) { return {}; } })();
+                const report = reportValue();
+
+                const keyOf = (obj, names) => {
+                  if (!obj || typeof obj !== 'object') return undefined;
+                  const wanted = names.map((n) => String(n).toLowerCase().replace(/[^a-z0-9]/g, ''));
+                  const keys = Object.keys(obj);
+                  for (let i = 0; i < wanted.length; i += 1) {
+                    for (let j = 0; j < keys.length; j += 1) {
+                      if (String(keys[j]).toLowerCase().replace(/[^a-z0-9]/g, '') === wanted[i]) return obj[keys[j]];
+                    }
+                  }
+                  return undefined;
+                };
+
+                const changedFiles = () => {
+                  const base = String(runStatus.runEvidence && runStatus.runEvidence.base || 'master');
+                  const commands = [
+                    'git diff --name-only origin/' + base + '...HEAD',
+                    'git diff --name-only ' + base + '...HEAD',
+                    'git diff --name-only HEAD~1..HEAD',
+                  ];
+                  for (let i = 0; i < commands.length; i += 1) {
+                    try {
+                      const value = execSync(commands[i], { cwd: wt, stdio: 'pipe' }).toString().trim();
+                      if (value) return value.split('\n').filter(Boolean);
+                    } catch (e) { /* try the next form */ }
+                  }
+                  return [];
+                };
+
+                const verificationLines = () => {
+                  const testsRaw = keyOf(report, ['testsRun', 'tests_run', 'tests']);
+                  const tests = Array.isArray(testsRaw) ? testsRaw : [];
+                  const lines = tests.map((entry) => {
+                    if (typeof entry === 'string') return '- ' + entry;
+                    if (entry && typeof entry === 'object') {
+                      const command = String(keyOf(entry, ['command', 'cmd']) || '').trim();
+                      const result = String(keyOf(entry, ['result', 'status', 'outcome']) || 'not recorded').trim();
+                      return '- `' + command + '` -> ' + result;
+                    }
+                    return null;
+                  }).filter(Boolean);
+                  const verification = String(keyOf(report, ['verification', 'evidence']) || '').trim();
+                  if (verification) lines.push('- ' + verification.split('\n').join('\n  '));
+                  if (!lines.length) lines.push('- No verification commands were recorded in the completion report.');
+                  return lines;
+                };
+
+                const outcomeSection = () => {
+                  const summary = String(runStatus.summary || keyOf(report, ['summary']) || '').trim() || 'No outcome summary recorded.';
+                  const files = changedFiles();
+                  const lines = [
+                    '',
+                    '## Outcome',
+                    '',
+                    summary,
+                    '',
+                    '## Files touched',
+                    '',
+                  ];
+                  if (files.length) files.forEach((file) => lines.push('- `' + file + '`'));
+                  else lines.push('- No changed files detected in the branch diff.');
+                  lines.push('');
+                  lines.push('## Verification');
+                  lines.push('');
+                  verificationLines().forEach((line) => lines.push(line));
+                  lines.push('');
+                  lines.push('## Pull request');
+                  lines.push('');
+                  lines.push(String(process.env.PR_URL || '').trim() || 'Not opened.');
+                  lines.push('');
+                  lines.push('## Review cycles');
+                  lines.push('');
+                  lines.push(String(process.env.CYCLES || '0').trim() || '0');
+                  return lines.join('\n');
+                };
+
+                const appendTo = (text, extra) => String(text).replace(/\s+$/, '') + '\n' + extra + '\n';
+
+                // --- modes -----------------------------------------------------------------
+                if (MODE === 'open' || MODE === 'verify') {
+                  if (fs.existsSync(inProgressPath)) {
+                    let text = readIf(inProgressPath);
+                    text = setFrontMatter(text, 'status', 'in_progress');
+                    fs.writeFileSync(inProgressPath, text, 'utf8');
+                    out({ ok: true, action: MODE, workspace: workspace, slug: slug, notePath: inProgressPath, alreadyExisted: true, warnings: warnings });
+                  }
+
+                  // A completed note for the same ticket means this is a later cycle: reopen it
+                  // rather than starting a second note that would hide the earlier work.
+                  if (fs.existsSync(completePath)) {
+                    let text = readIf(completePath);
+                    text = setFrontMatter(text, 'status', 'in_progress');
+                    text = appendTo(text, '\n## Reopened\n\nReopened at ' + now + ' for a further review cycle.\n');
+                    fs.writeFileSync(inProgressPath, text, 'utf8');
+                    try { fs.unlinkSync(completePath); } catch (e) { /* best effort */ }
+                    out({ ok: true, action: MODE, workspace: workspace, slug: slug, notePath: inProgressPath, reopened: true, warnings: warnings });
+                  }
+
+                  fs.writeFileSync(
+                    inProgressPath,
+                    buildFrontMatter('in_progress', now) + '\n' + buildBody(),
+                    'utf8'
+                  );
+                  if (MODE === 'verify') warnings.push('the engineer session did not create the workspace note; the workflow recreated it at ' + inProgressPath);
+                  out({ ok: true, action: MODE, workspace: workspace, slug: slug, notePath: inProgressPath, created: true, warnings: warnings });
+                }
+
+                if (MODE === 'reopen') {
+                  if (!fs.existsSync(completePath)) {
+                    out({ ok: true, action: MODE, workspace: workspace, slug: slug, notePath: inProgressPath, moved: false, warnings: ['no completed note to reopen'] });
+                  }
+                  let text = readIf(completePath);
+                  text = setFrontMatter(text, 'status', 'in_progress');
+                  text = appendTo(text, '\n## Reopened\n\nMoved back to in-progress at ' + now + ' because review cycle ' + String(process.env.CYCLES || '') + ' rejected the work.\n');
+                  fs.writeFileSync(inProgressPath, text, 'utf8');
+                  try { fs.unlinkSync(completePath); } catch (e) { /* best effort */ }
+                  out({ ok: true, action: MODE, workspace: workspace, slug: slug, notePath: inProgressPath, moved: true, warnings: warnings });
+                }
+
+                if (MODE === 'close') {
+                  let text = readIf(inProgressPath);
+                  if (!text) {
+                    text = buildFrontMatter('in_progress', now) + '\n' + buildBody();
+                    warnings.push('note was missing at close; recreated it from the completion report');
+                  }
+                  text = setFrontMatter(text, 'status', 'completed');
+                  text = appendTo(text, outcomeSection());
+                  fs.writeFileSync(completePath, text, 'utf8');
+                  try { fs.unlinkSync(inProgressPath); } catch (e) { /* best effort */ }
+                  out({ ok: true, action: MODE, workspace: workspace, slug: slug, notePath: completePath, moved: true, warnings: warnings });
+                }
+
+                // retain
+                let text = readIf(inProgressPath);
+                if (!text && fs.existsSync(completePath)) {
+                  text = readIf(completePath);
+                  try { fs.unlinkSync(completePath); } catch (e) { /* best effort */ }
+                  warnings.push('note had already been moved to complete/; moved back to in-progress/');
+                }
+                if (!text) {
+                  text = buildFrontMatter('in_progress', now) + '\n' + buildBody();
+                  warnings.push('note was missing at retain; recreated it');
+                }
+                const finalStatus = (noteStatus === 'failed' || noteStatus === 'blocked') ? noteStatus : 'blocked';
+                text = setFrontMatter(text, 'status', finalStatus);
+                text = appendTo(text, '\n## ' + (finalStatus === 'failed' ? 'Failure' : 'Blocked') + '\n\n' + (reason || 'The run ended without a pull request; see the ticket for the workflow comment.') + '\n\nRecorded at ' + now + '.\n');
+                fs.writeFileSync(inProgressPath, text, 'utf8');
+                out({ ok: true, action: MODE, workspace: workspace, slug: slug, notePath: inProgressPath, moved: false, status: finalStatus, warnings: warnings });
+            env:
+              MODE: open
+              WT: ${steps.readWorktreePath.outputs.stdout}
+              REF: ${steps.loadTicket.result.reference}
+              TICKET_ID: ${steps.loadTicket.result.id}
+              REPO: ${steps.resolveWorkdir.outputs.stdout}
+              BRANCH: ${steps.readBranch.outputs.stdout}
+              PERSONA: ${input.agentId}
+            failOnError: false
+            output:
+              captureStdout: true
+              captureStderr: true
+
+        # The note path is interpolated into the engineer and reviewer prompts. Reading
+        # it from the open step keeps the slug logic in exactly one place.
+        - id: readNotePath
+          name: Read workspace note path
+          type: cli_command
+          dependsOn: openWorkspaceNote
+          config:
+            command: node
+            args:
+              - -e
+              - |
+                let state = {};
+                try { state = JSON.parse(process.env.NOTE || '{}'); } catch (e) { state = {}; }
+                process.stdout.write(String(state.notePath || ''));
+            env:
+              NOTE: ${steps.openWorkspaceNote.outputs.stdout}
+            failOnError: false
+            output:
+              captureStdout: true
+
+        # Snapshot any submodule SHAs before the engineer runs. A verification
+        # recipe that checks a branch out inside a submodule mutates the primary
+        # checkout; the matching verify step restores it.
+        - id: submoduleGuardSnapshot
+          name: Snapshot submodule state
+          type: cli_command
+          dependsOn: readNotePath
+          config:
+            command: node
+            args:
+              - -e
+              - &submoduleGuardScript |
+                const fs = require('fs');
+                const path = require('path');
+                const { execSync } = require('child_process');
+
+                // ---------------------------------------------------------------------------
+                // Submodule / primary-checkout guard.
+                //
+                // reactory-pwa-client mounts src/components/plugins/reactory-core as a git
+                // submodule. A verification recipe that tells an agent to `git checkout` its
+                // branch inside that submodule mutates the developer's primary checkout and
+                // leaves the submodule detached at its own commit (observed on ORG-010, caught
+                // only by manual inspection). The engineer prompt now forbids it; this step is
+                // the deterministic backstop: snapshot the submodule SHAs before the engineer
+                // runs, compare afterwards, and restore the original SHA if the checkout moved.
+                // ---------------------------------------------------------------------------
+                const MODE = String(process.env.MODE || 'snapshot').trim().toLowerCase();
+                const wt = path.resolve(String(process.env.WT || '').trim());
+                const repo = path.resolve(String(process.env.REPO || '').trim());
+                const baselinePath = path.join(wt, '.ai-agent', 'submodule-baseline.json');
+
+                const git = (cwd, cmd) => {
+                  try { return execSync(cmd, { cwd: cwd, stdio: 'pipe' }).toString().trim(); } catch (e) { return ''; }
+                };
+
+                if (!repo || !fs.existsSync(repo)) {
+                  process.stdout.write(JSON.stringify({ ok: true, mode: MODE, submodules: [], warnings: ['repository path could not be resolved; submodule guard skipped'] }));
+                  process.exit(0);
+                }
+
+                const listSubmodules = () => {
+                  const lines = git(repo, 'git ls-files -s').split('\n');
+                  const found = [];
+                  lines.forEach((line) => {
+                    const match = line.match(/^160000\s+([0-9a-f]{40})\s+\d+\t(.+)$/);
+                    if (!match) return;
+                    const subPath = match[2];
+                    const subDir = path.resolve(repo, subPath);
+                    found.push({
+                      path: subPath,
+                      indexSha: match[1],
+                      headSha: git(subDir, 'git rev-parse HEAD') || null,
+                      superprojectSha: git(repo, 'git ls-tree HEAD -- "' + subPath + '"').split(/\s+/)[2] || null,
+                    });
+                  });
+                  return found;
+                };
+
+                if (MODE === 'snapshot') {
+                  const submodules = listSubmodules();
+                  try {
+                    fs.mkdirSync(path.dirname(baselinePath), { recursive: true });
+                    fs.writeFileSync(baselinePath, JSON.stringify({ capturedAt: new Date().toISOString(), repo: repo, submodules: submodules }, null, 2), 'utf8');
+                  } catch (e) { /* best effort */ }
+                  process.stdout.write(JSON.stringify({ ok: true, mode: MODE, repo: repo, count: submodules.length, submodules: submodules, warnings: [] }));
+                  process.exit(0);
+                }
+
+                let baseline = { submodules: [] };
+                try { baseline = JSON.parse(fs.readFileSync(baselinePath, 'utf8')); } catch (e) { /* nothing captured */ }
+
+                const current = listSubmodules();
+                const byPath = {};
+                current.forEach((item) => { byPath[item.path] = item; });
+
+                const restored = [];
+                const mutated = [];
+                const warnings = [];
+
+                (baseline.submodules || []).forEach((before) => {
+                  const after = byPath[before.path];
+                  if (!after) {
+                    warnings.push('submodule "' + before.path + '" is no longer registered in the primary checkout');
+                    return;
+                  }
+                  if (after.headSha && before.headSha && after.headSha !== before.headSha) {
+                    // Restore the original checked-out commit. This is a pure restore of the
+                    // pre-run state, performed in a guarded block so a failure to restore is
+                    // reported instead of hiding the mutation.
+                    let didRestore = false;
+                    try {
+                      execSync('git checkout --detach "' + before.headSha + '"', { cwd: path.resolve(repo, before.path), stdio: 'pipe' });
+                      didRestore = true;
+                    } catch (e) {
+                      didRestore = false;
+                    }
+                    mutated.push({ path: before.path, before: before.headSha, after: after.headSha, restored: didRestore });
+                    warnings.push('submodule "' + before.path + '" moved from ' + before.headSha + ' to ' + after.headSha + (didRestore ? ' and was restored' : ' and could NOT be restored'));
+                  }
+                  if (before.indexSha && after.indexSha && before.indexSha !== after.indexSha) {
+                    warnings.push('the superproject index for submodule "' + before.path + '" changed from ' + before.indexSha + ' to ' + after.indexSha + ' (not auto-reverted: it may be a deliberate bump)');
+                  }
+                });
+
+                process.stdout.write(JSON.stringify({
+                  ok: mutated.length === 0,
+                  mode: MODE,
+                  repo: repo,
+                  checked: (baseline.submodules || []).length,
+                  mutated: mutated,
+                  restored: restored,
+                  warnings: warnings,
+                }));
+                process.exit(0);
+            env:
+              MODE: snapshot
+              WT: ${steps.readWorktreePath.outputs.stdout}
+              REPO: ${steps.resolveWorkdir.outputs.stdout}
+            failOnError: false
+            output:
+              captureStdout: true
+              captureStderr: true
+
         - id: engineer
           name: Engineering agent run
           type: agent_conversation
-          dependsOn: markInProgress
+          dependsOn: openWorkspaceNote
           config:
             personaId: ${input.agentId}
             provider: ${steps.resolveProvider.outputs.stdout}
@@ -540,6 +1072,29 @@ steps:
                  A claim without a recorded command is not verification.
               5. You MUST finish by writing the completion report described below. This is how the
                  pipeline knows you are done. A run without a report is a failed run.
+
+              6. Keep your persona workspace note current as you work. Its path is given to you as
+                 "NOTE PATH". Record the plan, decisions and their rationale, the exact commands you
+                 ran, dead ends and open questions. The workflow creates the note and moves it to
+                 complete/ on success - you only append to it.
+
+              VERIFICATION SAFETY - SUBMODULES AND PRIMARY CHECKOUTS
+
+              Never mutate a developer's primary checkout. Some repositories mount a package as a git
+              submodule (reactory-pwa-client mounts src/components/plugins/reactory-core). Checking a
+              branch out INSIDE that submodule detaches the developer's checkout and corrupts their
+              working tree - this happened on a real run and was caught only by manual inspection.
+
+              - Before touching any nested repository, detect it:
+                git -C <repo> ls-files -s <path> | grep 160000. A 160000 mode means submodule: never
+                check anything out in place.
+
+              - Verify a submodule-mounted package in a throwaway location instead: git worktree add
+                <tmp> <sha>, or clone and check out into a temp directory, run the verification there,
+                then remove it.
+
+              - If you must touch a submodule in place, record its SHA first and restore it in a
+                finally block. Never leave it detached at your commit.
 
               COMPLETION CONTRACT
 
@@ -607,6 +1162,9 @@ steps:
 
               - REPORT PATH (write your completion report here): ${steps.readWorktreePath.outputs.stdout}/.ai-agent/report.json
 
+              - NOTE PATH (persona workspace note - append your working log here):
+                ${steps.readNotePath.outputs.stdout}
+
 
               ## Additional context / instruction
 
@@ -625,84 +1183,305 @@ steps:
             key: engineerSessionId
             source: step_output
             sourcePath: engineer.outputs.sessionId
-        - id: captureReport
-          name: Capture completion report
+        - id: verifyWorkspaceNote
+          name: Verify persona workspace note
           type: cli_command
           dependsOn: setEngineerSession
           config:
             command: node
             args:
               - -e
-              - >
-                const fs = require('fs');
+              - *workspaceNoteScript
+            env:
+              MODE: verify
+              WT: ${steps.readWorktreePath.outputs.stdout}
+              REF: ${steps.loadTicket.result.reference}
+              TICKET_ID: ${steps.loadTicket.result.id}
+              REPO: ${steps.resolveWorkdir.outputs.stdout}
+              BRANCH: ${steps.readBranch.outputs.stdout}
+              PERSONA: ${input.agentId}
+            failOnError: false
+            output:
+              captureStdout: true
+              captureStderr: true
 
+        - id: submoduleGuardVerify
+          name: Verify submodule state after engineer
+          type: cli_command
+          dependsOn: verifyWorkspaceNote
+          config:
+            command: node
+            args:
+              - -e
+              - *submoduleGuardScript
+            env:
+              MODE: verify
+              WT: ${steps.readWorktreePath.outputs.stdout}
+              REPO: ${steps.resolveWorkdir.outputs.stdout}
+            failOnError: false
+            output:
+              captureStdout: true
+              captureStderr: true
+
+        - id: readSubmoduleMutation
+          name: Read submodule mutation verdict
+          type: cli_command
+          dependsOn: submoduleGuardVerify
+          config:
+            command: node
+            args:
+              - -e
+              - |
+                let state = {};
+                try { state = JSON.parse(process.env.GUARD || '{}'); } catch (e) { state = {}; }
+                const mutated = Array.isArray(state.mutated) ? state.mutated : [];
+                process.stdout.write(mutated.length > 0 ? 'yes' : 'no');
+            env:
+              GUARD: ${steps.submoduleGuardVerify.outputs.stdout}
+            failOnError: false
+            output:
+              captureStdout: true
+
+        - id: submoduleGuardGate
+          name: Did the engineer mutate a submodule
+          type: condition
+          dependsOn: readSubmoduleMutation
+          config:
+            condition: steps.readSubmoduleMutation.stdout === 'yes'
+            thenSteps:
+              - id: submoduleGuardComment
+                name: Comment submodule mutation on ticket
+                type: service_invoke
+                config:
+                  service: core.ReactorySupportWorkflowService@1.0.0
+                  method: addComment
+                  params:
+                    ticketId: ${steps.loadTicket.result.id}
+                    comment: "WARNING - the engineering session mutated a git submodule in the
+                      PRIMARY checkout. The workflow restored the original SHA where it
+                      could; verify the checkout before continuing. Evidence:
+                      ${steps.submoduleGuardVerify.outputs.stdout}"
+
+        - id: captureReport
+          name: Capture completion report
+          type: cli_command
+          dependsOn: submoduleGuardGate
+          config:
+            command: node
+            args:
+              - -e
+              - &reportCaptureScript |
+                const fs = require('fs');
                 const path = require('path');
+                const { execSync } = require('child_process');
 
                 const wt = String(process.env.WT || '').trim();
-
-                const p = path.join(wt, '.ai-agent', 'report.json');
-
+                const reportPath = path.join(wt, '.ai-agent', 'report.json');
+                const statusPath = path.join(wt, '.ai-agent', 'run-status.json');
                 const warnings = [];
 
-                // Never hard-fail: a non-zero exit hides the cause (the engine records only
+                // ---------------------------------------------------------------------------
+                // ONE status vocabulary for the whole workflow.
+                //
+                // This allow-list used to be duplicated in four steps and they drifted: a
+                // report with "status": "complete" (not "completed") failed the allow-list
+                // check, the "did work happen" rescue looked only at report.changes, and the
+                // run was recorded as blocked with a verified, reviewed branch and no pull
+                // request. Every reader now consumes the single normaliser below.
+                // ---------------------------------------------------------------------------
+                const STATUS_SYNONYMS = {
+                  completed: ['completed', 'complete', 'done', 'finished', 'success', 'succeeded', 'successful', 'resolved'],
+                  blocked: ['blocked', 'block', 'stalled', 'waiting', 'waiting_for_input', 'needs_input', 'needs_human', 'paused'],
+                  failed: ['failed', 'fail', 'error', 'errored', 'broken'],
+                };
 
-                // 'Command failed with exit code 1') and burns a retry. Emit a structured
+                const normaliseStatus = (raw) => {
+                  const v = String(raw == null ? '' : raw).trim().toLowerCase().replace(/[\s_-]+/g, '_');
+                  if (!v) return null;
+                  const keys = Object.keys(STATUS_SYNONYMS);
+                  for (let i = 0; i < keys.length; i += 1) {
+                    if (STATUS_SYNONYMS[keys[i]].indexOf(v) !== -1) return keys[i];
+                  }
+                  return null;
+                };
 
-                // result and let the workflow branch on it instead.
+                // Key spellings drift too (required_changes / requiredChanges / required-changes).
+                // Resolve on a normalised key so a new spelling cannot silently discard a field.
+                const normaliseKey = (k) => String(k == null ? '' : k).toLowerCase().replace(/[^a-z0-9]/g, '');
+                const resolveKey = (obj, names) => {
+                  if (!obj || typeof obj !== 'object') return undefined;
+                  const keys = Object.keys(obj);
+                  for (let i = 0; i < names.length; i += 1) {
+                    const wanted = normaliseKey(names[i]);
+                    for (let j = 0; j < keys.length; j += 1) {
+                      if (normaliseKey(keys[j]) === wanted) return obj[keys[j]];
+                    }
+                  }
+                  return undefined;
+                };
+                const asText = (v) => {
+                  if (v == null) return '';
+                  if (typeof v === 'string') return v.trim();
+                  if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+                  if (Array.isArray(v)) return v.map(asText).filter(Boolean).join('\n');
+                  try { return JSON.stringify(v); } catch (e) { return ''; }
+                };
+                const asList = (v) => {
+                  if (v == null) return [];
+                  if (Array.isArray(v)) return v.filter((x) => x != null);
+                  if (typeof v === 'string') return v.trim() ? [v.trim()] : [];
+                  if (typeof v === 'object') return Object.keys(v).length ? [v] : [];
+                  return [];
+                };
 
-                if (!fs.existsSync(p)) {
-                  process.stdout.write(JSON.stringify({ usable: false, missing: true, path: p, warnings: ['report.json not found'] }));
+                // ---------------------------------------------------------------------------
+                // Git is ground truth: a report can lie or drift, a commit range cannot.
+                // ---------------------------------------------------------------------------
+                const git = (cmd) => {
+                  try { return execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString().trim(); } catch (e) { return ''; }
+                };
+                const resolveBase = () => {
+                  let base = git('git symbolic-ref --short refs/remotes/origin/HEAD').replace(/^origin\//, '');
+                  if (!base) {
+                    const candidates = ['origin/main', 'origin/master', 'main', 'master'];
+                    for (let i = 0; i < candidates.length; i += 1) {
+                      if (git('git rev-parse --verify --quiet ' + candidates[i])) {
+                        base = candidates[i].replace(/^origin\//, '');
+                        break;
+                      }
+                    }
+                  }
+                  return base || 'master';
+                };
+                const base = resolveBase();
+                const commitCount = Number(
+                  git('git rev-list --count origin/' + base + '..HEAD') || git('git rev-list --count ' + base + '..HEAD')
+                ) || 0;
+                const commitRange = git('git log --oneline -8 ' + base + '..HEAD');
+                const dirty = git('git status --porcelain -- . ":(exclude).ai-agent"');
+
+                const writeStatus = (payload) => {
+                  try { fs.mkdirSync(path.dirname(statusPath), { recursive: true }); } catch (e) { /* best effort */ }
+                  try { fs.writeFileSync(statusPath, JSON.stringify(payload), 'utf8'); } catch (e) { /* best effort */ }
+                };
+
+                const evidence = {
+                  reportPath: reportPath,
+                  base: base,
+                  commitCount: commitCount,
+                  commitRange: commitRange,
+                  worktreeDirty: !!dirty.trim(),
+                };
+
+                let report = null;
+                let parseError = null;
+                if (!fs.existsSync(reportPath)) {
+                  parseError = 'report.json not found';
+                } else {
+                  try {
+                    const parsed = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+                    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) parseError = 'report is not an object';
+                    else report = parsed;
+                  } catch (e) {
+                    parseError = String((e && e.message) || e);
+                  }
+                }
+
+                if (!report) {
+                  // A missing or unparseable completion report is a contract failure, not a
+                  // status we guess at. Commits are still recorded so the caller can fail loudly
+                  // instead of completing quietly with work stranded on a branch.
+                  warnings.push(parseError || 'report unavailable');
+                  const out = {
+                    usable: false,
+                    missing: parseError === 'report.json not found',
+                    parseError: parseError,
+                    path: reportPath,
+                    status: 'blocked',
+                    statusSource: 'contract:' + (parseError || 'unusable report'),
+                    runEvidence: evidence,
+                    warnings: warnings,
+                  };
+                  writeStatus(out);
+                  process.stdout.write(JSON.stringify(out));
                   process.exit(0);
                 }
 
-                let report;
+                const rawStatus = asText(resolveKey(report, ['status', 'runStatus', 'run_status', 'outcome']));
+                let status = normaliseStatus(rawStatus);
+                let statusSource = status ? 'report.status' : '';
 
-                try { report = JSON.parse(fs.readFileSync(p, 'utf8')); }
-
-                catch (e) {
-                  process.stdout.write(JSON.stringify({ usable: false, parseError: String(e && e.message), path: p, warnings: ['report is not valid JSON'] }));
-                  process.exit(0);
+                if (rawStatus && status && rawStatus.trim().toLowerCase() !== status) {
+                  warnings.push('report status "' + rawStatus + '" normalised to "' + status + '"');
                 }
-
-                if (!report || typeof report !== 'object' || Array.isArray(report)) {
-                  process.stdout.write(JSON.stringify({ usable: false, parseError: 'not an object', path: p, warnings: ['report is not an object'] }));
-                  process.exit(0);
-                }
-
-                // The agent's report shape DRIFTS between runs, so no field may be a hard
-
-                // requirement; only presence + parseability are fatal-equivalent.
-
-                const pick = (...names) => { for (const n of names) { const v = report[n]; if (typeof v === 'string' && v.trim()) return v.trim(); } return null; };
-
-                let summary = pick('summary', 'resolution', 'outcome', 'description', 'result', 'overview', 'conclusion');
-
-                if (!summary && Array.isArray(report.changes) && report.changes.length > 0) summary = 'No summary field supplied; report lists ' + report.changes.length + ' change(s).';
-
-                if (!summary) { summary = 'No summary field supplied and no changes listed.'; warnings.push('no summary-like field'); }
-
-                const allowed = ['completed', 'blocked', 'failed'];
-
-                let status = allowed.indexOf(String(report.status)) !== -1 ? String(report.status) : null;
-
-                let statusSource = status ? 'report.status' : null;
 
                 if (!status) {
-                  const t = String((report.ticket && (report.ticket.status || report.ticket.status_after)) || '').toLowerCase();
-                  const m = { resolved: 'completed', complete: 'completed', completed: 'completed', done: 'completed', blocked: 'blocked', failed: 'failed', open: 'in_progress', in_progress: 'in_progress', new: 'in_progress' };
-                  if (m[t]) { status = m[t]; statusSource = 'report.ticket.status=' + t; }
+                  const ticketStatus = asText(resolveKey(report.ticket || {}, ['status', 'status_after', 'statusAfter']));
+                  const normalisedTicket = normaliseKey(ticketStatus);
+                  if (normalisedTicket === 'resolved' || normalisedTicket === 'complete' || normalisedTicket === 'completed' || normalisedTicket === 'done') {
+                    status = 'completed';
+                    statusSource = 'report.ticket.status';
+                  } else if (normalisedTicket === 'blocked') {
+                    status = 'blocked';
+                    statusSource = 'report.ticket.status';
+                  } else if (normalisedTicket === 'failed') {
+                    status = 'failed';
+                    statusSource = 'report.ticket.status';
+                  }
                 }
 
-                if (!status && Array.isArray(report.changes) && report.changes.length > 0) { status = 'completed'; statusSource = 'inferred:non-empty changes'; }
+                // "Did work happen" must not depend on one field name.
+                const WORK_KEYS = ['changes', 'files', 'fileList', 'implementation', 'acceptanceCriteria', 'diff'];
+                const workEvidence = {};
+                WORK_KEYS.forEach((key) => {
+                  const value = resolveKey(report, [key]);
+                  const list = asList(value);
+                  if (list.length > 0) workEvidence[key] = list.length;
+                  else if (asText(value)) workEvidence[key] = 1;
+                });
+                const hasWork = Object.keys(workEvidence).length > 0 || commitCount > 0 || evidence.worktreeDirty;
 
-                if (!status) { status = 'blocked'; statusSource = 'default:no signal'; }
+                if (!status) {
+                  if (hasWork) {
+                    status = 'completed';
+                    statusSource = commitCount > 0 ? 'inferred:git commits ahead of base' : 'inferred:non-empty work evidence';
+                    warnings.push('no usable report status; inferred completed from ' + statusSource.replace('inferred:', ''));
+                  } else {
+                    status = 'blocked';
+                    statusSource = 'default:no signal';
+                  }
+                }
 
-                const out = Object.assign({}, report, { summary: summary, status: status, statusSource: statusSource, usable: true });
+                let summary = asText(resolveKey(report, ['summary', 'resolution', 'outcome', 'result', 'overview', 'conclusion', 'description']));
+                if (!summary) {
+                  const changeCount = Object.keys(workEvidence).length;
+                  summary = changeCount
+                    ? 'No summary field supplied; the report records work under ' + Object.keys(workEvidence).join(', ') + '.'
+                    : 'No summary field supplied and no work recorded.';
+                  warnings.push('no summary-like field');
+                }
 
+                evidence.hasWork = hasWork;
+                evidence.workEvidence = workEvidence;
+
+                const out = Object.assign({}, report, {
+                  summary: summary,
+                  status: status,
+                  statusSource: statusSource,
+                  usable: true,
+                  runEvidence: evidence,
+                });
                 if (warnings.length) out.contractWarnings = warnings;
 
-                process.stdout.write(JSON.stringify(out));
+                writeStatus({
+                  status: status,
+                  statusSource: statusSource,
+                  summary: summary,
+                  warnings: warnings,
+                  runEvidence: evidence,
+                });
 
+                process.stdout.write(JSON.stringify(out));
                 process.exit(0);
             env:
               WT: ${steps.readWorktreePath.outputs.stdout}
@@ -718,33 +1497,23 @@ steps:
             command: node
             args:
               - -e
-              - >
+              - &readRunStatusScript |
                 const fs = require('fs');
-
                 const path = require('path');
 
+                // The status policy lives in exactly one place (the report-capture script).
+                // This reader consumes its verdict rather than re-implementing the allow-list:
+                // the previous four copies of the allow-list drifted, so a "complete" report was
+                // silently treated as blocked at one site but not at another.
                 const wt = String(process.env.WT || '').trim();
-
-                const p = path.join(wt, '.ai-agent', 'report.json');
-
-                // Read the report FILE directly. Chaining the full report through the previous
-
-                // step's stdout (a multi-KB env var) proved brittle; the file is the source of truth.
-
-                let status = '';
+                const statusPath = path.join(wt, '.ai-agent', 'run-status.json');
 
                 try {
-                  const r = JSON.parse(fs.readFileSync(p, 'utf8'));
-                  const allowed = ['completed', 'blocked', 'failed'];
-                  if (allowed.indexOf(String(r.status)) !== -1) { status = String(r.status); }
-                  else {
-                    const t = String((r.ticket && (r.ticket.status || r.ticket.status_after)) || '').toLowerCase();
-                    const m = { resolved: 'completed', complete: 'completed', completed: 'completed', done: 'completed', blocked: 'blocked', failed: 'failed', open: 'in_progress', in_progress: 'in_progress', new: 'in_progress' };
-                    status = m[t] || (Array.isArray(r.changes) && r.changes.length > 0 ? 'completed' : '');
-                  }
-                } catch (e) { status = ''; }
-
-                process.stdout.write(status);
+                  const record = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
+                  process.stdout.write(String(record.status || ''));
+                } catch (e) {
+                  process.stdout.write('');
+                }
             env:
               WT: ${steps.readWorktreePath.outputs.stdout}
             failOnError: false
@@ -790,6 +1559,7 @@ steps:
                 dependsOn: diffstat
                 config:
                   condition: variables.reviewVerdict !== 'approved' &&
+                    variables.runHalt !== 'true' &&
                     Number(variables.reviewCycle) <
                     Number(variables.reviewCycleBound)
                   steps:
@@ -826,6 +1596,14 @@ steps:
                              fake a fix, unhandled error paths, and regressions elsewhere.
                           5. Approve ONLY if you independently verified the change works and the
                              ticket's requirement is genuinely met.
+
+                          6. Read the engineer's workspace note (NOTE PATH). Its "Files touched"
+                             must match the actual diff and the commands it records must match the
+                             verification you observed being run. A mismatch is a review finding,
+                             not a stylistic note.
+
+                          7. Confirm no submodule in the PRIMARY checkout was left detached or
+                             moved by this run. A primary-checkout mutation is a blocking finding.
 
                           You MUST finish by writing your verdict as a JSON file to the exact path
 
@@ -883,6 +1661,11 @@ steps:
                           ${steps.readWorktreePath.outputs.stdout}/.ai-agent/report.json
 
 
+                          ## Engineer workspace note
+
+                          ${steps.readNotePath.outputs.stdout}
+
+
                           ## Review cycle
 
                           This is review cycle ${variables.reviewCycle} of at most ${steps.resolveCycleBound.outputs.stdout}.
@@ -901,47 +1684,145 @@ steps:
                         command: node
                         args:
                           - -e
-                          - >
+                          - |
                             const fs = require('fs');
-
                             const path = require('path');
 
                             const wt = String(process.env.WT || '').trim();
+                            const reviewPath = path.join(wt, '.ai-agent', 'review.json');
+                            const normalisedPath = path.join(wt, '.ai-agent', 'review-normalised.json');
 
-                            const p = path.join(wt, '.ai-agent', 'review.json');
+                            // ---------------------------------------------------------------------------
+                            // The reviewer writes its verdict in whichever key convention it prefers:
+                            // camelCase (requiredChanges) or snake_case (required_changes), and the verdict
+                            // itself as verdict/decision with PASS/FAIL. The old workflow read camelCase
+                            // only, so six real findings were silently discarded and the engineer was
+                            // handed a generic "no specific required changes" message instead. Resolve keys
+                            // case-insensitively with '_' and '-' stripped so future drift cannot reintroduce
+                            // this class of defect.
+                            // ---------------------------------------------------------------------------
+                            const normaliseKey = (k) => String(k == null ? '' : k).toLowerCase().replace(/[^a-z0-9]/g, '');
+                            const resolveKey = (obj, names) => {
+                              if (!obj || typeof obj !== 'object') return undefined;
+                              const keys = Object.keys(obj);
+                              for (let i = 0; i < names.length; i += 1) {
+                                const wanted = normaliseKey(names[i]);
+                                for (let j = 0; j < keys.length; j += 1) {
+                                  if (normaliseKey(keys[j]) === wanted) return obj[keys[j]];
+                                }
+                              }
+                              return undefined;
+                            };
+                            const asArray = (v) => {
+                              if (v == null) return [];
+                              if (Array.isArray(v)) return v.filter((x) => x != null && String(x).trim() !== '');
+                              const text = String(v).trim();
+                              return text ? [text] : [];
+                            };
 
-                            // The reviewer's verdict shape DRIFTS: it may be top-level or nested under
+                            const fail = (verdict, reason, extra) => {
+                              const payload = Object.assign({
+                                verdict: verdict,
+                                verdictSource: 'unreadable',
+                                findingsResolved: false,
+                                requiredChanges: [],
+                                blockingFindings: [],
+                                acceptanceCriteria: [],
+                                findings: [],
+                                summary: '',
+                                parseError: reason,
+                                reviewPath: reviewPath,
+                              }, extra || {});
+                              try { fs.writeFileSync(normalisedPath, JSON.stringify(payload), 'utf8'); } catch (e) { /* best effort */ }
+                              process.stdout.write(JSON.stringify(payload));
+                              process.exit(0);
+                            };
 
-                            // 'review', and the verdict may be spelled verdict/decision with PASS/FAIL.
+                            if (!fs.existsSync(reviewPath)) {
+                              fail('rejected', 'review.json not found');
+                            }
 
-                            // Accept all of them rather than hard-failing on one expected shape.
-
-                            if (!fs.existsSync(p)) { process.stdout.write(JSON.stringify({ verdict: 'rejected', parseError: 'review.json not found', requiredChanges: ['The reviewer produced no verdict file.'] })); process.exit(0); }
-
-                            let raw; try { raw = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { process.stdout.write(JSON.stringify({ verdict: 'rejected', parseError: String(e && e.message), requiredChanges: ['The reviewer verdict file is not valid JSON.'] })); process.exit(0); }
+                            let raw;
+                            try {
+                              raw = JSON.parse(fs.readFileSync(reviewPath, 'utf8'));
+                            } catch (e) {
+                              fail('rejected', 'review.json is not valid JSON: ' + String((e && e.message) || e));
+                            }
 
                             const rv = (raw && typeof raw.review === 'object' && raw.review) ? raw.review : raw;
 
-                            const norm = String((rv && (rv.verdict || rv.decision)) || raw.verdict || '').trim().toLowerCase();
+                            const norm = String(
+                              resolveKey(rv, ['verdict', 'decision']) || resolveKey(raw, ['verdict', 'decision']) || ''
+                            ).trim().toLowerCase();
 
                             let verdict = '';
-
                             if (['approved', 'approve', 'pass', 'passed', 'accept', 'accepted', 'ok'].indexOf(norm) !== -1) verdict = 'approved';
-
                             else if (['rejected', 'reject', 'fail', 'failed', 'declined', 'changes_requested', 'changes-requested', 'request_changes', 'needs_changes', 'needs_work'].indexOf(norm) !== -1) verdict = 'rejected';
 
-                            let changes = (rv && rv.requiredChanges) || raw.requiredChanges || [];
+                            // Both conventions, first non-empty wins. Same resolver used by captureReport.
+                            const requiredChanges = asArray(resolveKey(rv, ['requiredChanges', 'required_changes', 'changes']))
+                              .concat(asArray(resolveKey(raw, ['requiredChanges', 'required_changes'])));
+                            const blockingFindings = asArray(resolveKey(rv, ['blockingFindings', 'blocking_findings']))
+                              .concat(asArray(resolveKey(raw, ['blockingFindings', 'blocking_findings'])));
+                            const acceptanceCriteria = asArray(resolveKey(rv, ['acceptanceCriteria', 'acceptance_criteria']))
+                              .concat(asArray(resolveKey(raw, ['acceptanceCriteria', 'acceptance_criteria'])));
+                            const findings = asArray(resolveKey(rv, ['findings', 'observations']))
+                              .concat(asArray(resolveKey(raw, ['findings'])));
 
-                            if (!Array.isArray(changes)) changes = [String(changes)];
+                            const dedupe = (list) => {
+                              const seen = {};
+                              const out = [];
+                              list.forEach((item) => {
+                                const text = String(item).trim();
+                                if (!text) return;
+                                if (seen[text]) return;
+                                seen[text] = true;
+                                out.push(text);
+                              });
+                              return out;
+                            };
 
-                            if (!verdict) { verdict = 'rejected'; changes = changes.concat(['The reviewer verdict was not recognisable (raw: ' + norm + '). Treating as rejected.']); }
+                            const resolvedRequired = dedupe(requiredChanges);
+                            const resolvedBlocking = dedupe(blockingFindings);
+                            const resolvedCriteria = dedupe(acceptanceCriteria);
+                            const resolvedFindings = dedupe(findings);
 
-                            if (verdict === 'rejected' && changes.length === 0) changes = ['The reviewer rejected the work but listed no specific required changes; re-check the review report at .ai-agent/review.json.'];
+                            if (!verdict) {
+                              verdict = 'rejected';
+                              resolvedFindings.push('The reviewer verdict was not recognisable (raw: "' + norm + '"). Treating as rejected.');
+                            }
 
-                            const summary = String((rv && (rv.verdictSummary || rv.summary || rv.reason)) || raw.verdictSummary || raw.summary || '').slice(0, 4000);
+                            // A rejection with nothing actionable is NOT something to paper over with a
+                            // generic sentence: the engineer would revise blind. Report it as unresolved so
+                            // the workflow can block and surface it to a human.
+                            const actionable = resolvedRequired.length + resolvedBlocking.length + resolvedFindings.length;
+                            const findingsResolved = verdict === 'approved' ? true : actionable > 0;
 
-                            process.stdout.write(JSON.stringify({ verdict: verdict, verdictSource: norm, requiredChanges: changes, summary: summary, reviewPath: p }));
+                            const summary = String(
+                              resolveKey(rv, ['verdictSummary', 'summary', 'reason']) ||
+                              resolveKey(raw, ['verdictSummary', 'summary', 'reason']) ||
+                              ''
+                            ).slice(0, 4000);
 
+                            const payload = {
+                              verdict: verdict,
+                              verdictSource: norm,
+                              findingsResolved: findingsResolved,
+                              requiredChanges: resolvedRequired,
+                              blockingFindings: resolvedBlocking,
+                              acceptanceCriteria: resolvedCriteria,
+                              findings: resolvedFindings,
+                              summary: summary,
+                              reviewPath: reviewPath,
+                            };
+
+                            if (verdict === 'rejected' && !findingsResolved) {
+                              payload.blockedReason = 'The reviewer REJECTED the work but no findings could be resolved from review.json (checked camelCase, snake_case and kebab-case keys).';
+                            }
+
+                            try { fs.writeFileSync(normalisedPath, JSON.stringify(payload), 'utf8'); } catch (e) { /* best effort */ }
+
+                            process.stdout.write(JSON.stringify(payload));
                             process.exit(0);
                         env:
                           WT: ${steps.readWorktreePath.outputs.stdout}
@@ -949,10 +1830,121 @@ steps:
                         output:
                           captureStdout: true
                           captureStderr: true
+                    - id: readFindingsGate
+                      name: Read whether findings resolved
+                      type: cli_command
+                      dependsOn: captureReview
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const fs = require('fs');
+                            const path = require('path');
+                            const wt = String(process.env.WT || '').trim();
+                            let resolved = false;
+                            try {
+                              const record = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'review-normalised.json'), 'utf8'));
+                              resolved = record.findingsResolved === true;
+                            } catch (e) { resolved = false; }
+                            process.stdout.write(resolved ? 'true' : 'false');
+                        env:
+                          WT: ${steps.readWorktreePath.outputs.stdout}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+
+                    - id: setFindingsGate
+                      name: Record whether findings resolved
+                      type: set_variable
+                      dependsOn: readFindingsGate
+                      config:
+                        action: set
+                        key: reviewFindingsResolved
+                        source: step_output
+                        sourcePath: readFindingsGate.outputs.stdout
+
+                    # The engineer gets the findings as structured text. The old hand-back
+                    # interpolated the raw captureReview JSON and relied on the agent to go
+                    # read review.json, which is how six snake_case findings were lost.
+                    - id: handBackBriefing
+                      name: Build reviewer findings brief
+                      type: cli_command
+                      dependsOn: setFindingsGate
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const fs = require('fs');
+                            const path = require('path');
+
+                            // Build the hand-back brief from the NORMALISED review record written by
+                            // captureReview. The engineer gets the findings as structured text instead of
+                            // being told to go read a JSON file it was never shown: relying on the agent to
+                            // discover the findings is luck, not design.
+                            const wt = String(process.env.WT || '').trim();
+                            const p = path.join(wt, '.ai-agent', 'review-normalised.json');
+
+                            let review = {};
+                            try { review = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { review = {}; }
+
+                            const list = (v) => (Array.isArray(v) ? v.filter((x) => x != null && String(x).trim() !== '') : []);
+                            const numbered = (items) => items.map((item, i) => (i + 1) + '. ' + String(item).trim()).join('\n');
+
+                            const required = list(review.requiredChanges);
+                            const blocking = list(review.blockingFindings);
+                            const findings = list(review.findings);
+                            const criteria = list(review.acceptanceCriteria);
+
+                            const lines = [];
+                            lines.push('Reviewer verdict: ' + String(review.verdict || 'rejected').toUpperCase());
+                            if (review.summary) {
+                              lines.push('');
+                              lines.push(String(review.summary));
+                            }
+
+                            if (required.length) {
+                              lines.push('');
+                              lines.push('## Required changes (' + required.length + ')');
+                              lines.push(numbered(required));
+                            }
+
+                            if (blocking.length) {
+                              lines.push('');
+                              lines.push('## Blocking findings (' + blocking.length + ')');
+                              lines.push(numbered(blocking));
+                            }
+
+                            if (findings.length) {
+                              lines.push('');
+                              lines.push('## Findings observed by the reviewer (' + findings.length + ')');
+                              lines.push(numbered(findings));
+                            }
+
+                            if (criteria.length) {
+                              lines.push('');
+                              lines.push('## Acceptance criteria the reviewer checked');
+                              lines.push(numbered(criteria));
+                            }
+
+                            if (String(review.verdict) !== 'approved' && !required.length && !blocking.length && !findings.length) {
+                              lines.push('');
+                              lines.push('## No actionable findings could be resolved');
+                              lines.push('The reviewer rejected the work but review.json contained no readable findings (camelCase, snake_case and kebab-case keys were all checked). The run is being blocked for a human rather than asking you to revise blind.');
+                            }
+
+                            process.stdout.write(lines.join('\n'));
+                        env:
+                          WT: ${steps.readWorktreePath.outputs.stdout}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+
                     - id: readVerdict
                       name: Read verdict
                       type: cli_command
-                      dependsOn: captureReview
+                      dependsOn: handBackBriefing
                       config:
                         command: node
                         args:
@@ -1031,16 +2023,100 @@ steps:
                         key: reviewCycle
                         source: step_output
                         sourcePath: bumpCycle.outputs.stdout
+                    # A rejection with zero resolvable findings must block for a human,
+                    # not hand the engineer a generic sentence and waste a full cycle.
+                    - id: findingsHaltGate
+                      name: Reviewer rejected without readable findings
+                      type: condition
+                      dependsOn: setCycle
+                      config:
+                        condition: variables.reviewVerdict === 'rejected' && variables.reviewFindingsResolved === 'false'
+                        thenSteps:
+                          - id: findingsHaltLog
+                            name: Log blocked findings
+                            type: log
+                            config:
+                              level: error
+                              message: Reviewer REJECTED ${steps.loadTicket.result.reference} but no
+                                findings resolved from review.json - blocking the run.
+                          - id: findingsHaltComment
+                            name: Comment blocked findings on ticket
+                            type: service_invoke
+                            config:
+                              service: core.ReactorySupportWorkflowService@1.0.0
+                              method: addComment
+                              params:
+                                ticketId: ${steps.loadTicket.result.id}
+                                comment: "BLOCKED - the reviewer rejected the work but no findings
+                                  could be resolved from .ai-agent/review.json (camelCase,
+                                  snake_case and kebab-case keys were all checked). The run was
+                                  halted instead of asking the engineer to revise blind. Human
+                                  attention required. Reviewer evidence:
+                                  ${steps.captureReview.outputs.stdout}"
+                          - id: findingsHaltTask
+                            name: Human review of unreadable findings
+                            type: user_activity
+                            dependsOn: findingsHaltComment
+                            config:
+                              activityType: approval
+                              assignee: ${steps.loadTicket.result.assignedToEmail}
+                              message: Review blocked for ${steps.loadTicket.result.reference} - the
+                                reviewer verdict could not be parsed into findings
+                              props:
+                                ticketReference: ${steps.loadTicket.result.reference}
+                                ticketId: ${steps.loadTicket.result.id}
+                                reviewPath: ${steps.readWorktreePath.outputs.stdout}/.ai-agent/review.json
+                          - id: setRunHalt
+                            name: Halt the review loop
+                            type: set_variable
+                            dependsOn: findingsHaltTask
+                            config:
+                              action: set
+                              key: runHalt
+                              value: "true"
+                          - id: setRunStatusBlockedFindings
+                            name: Record blocked run status
+                            type: set_variable
+                            dependsOn: setRunHalt
+                            config:
+                              action: set
+                              key: runStatus
+                              value: blocked
+
                     - id: verdictBranch
                       name: Act on verdict
                       type: condition
                       dependsOn: setCycle
                       config:
-                        condition: variables.reviewVerdict === 'rejected'
+                        condition: variables.reviewVerdict === 'rejected' && variables.reviewFindingsResolved !== 'false'
                         thenSteps:
+
+                          - id: reopenWorkspaceNote
+                            name: Move workspace note back to in progress
+                            type: cli_command
+                            dependsOn: setCycle
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - *workspaceNoteScript
+                              env:
+                                MODE: reopen
+                                WT: ${steps.readWorktreePath.outputs.stdout}
+                                REF: ${steps.loadTicket.result.reference}
+                                TICKET_ID: ${steps.loadTicket.result.id}
+                                REPO: ${steps.resolveWorkdir.outputs.stdout}
+                                BRANCH: ${steps.readBranch.outputs.stdout}
+                                PERSONA: ${input.agentId}
+                                CYCLES: ${variables.reviewCycle}
+                              failOnError: false
+                              output:
+                                captureStdout: true
+
                           - id: handBack
                             name: Hand findings back to engineer
                             type: agent_conversation
+                            dependsOn: reopenWorkspaceNote
                             config:
                               personaId: ${input.agentId}
                               provider: ${steps.resolveProvider.outputs.stdout}
@@ -1054,9 +2130,9 @@ steps:
                                 it.
 
 
-                                ## Reviewer verdict
+                                ## Reviewer verdict and required changes
 
-                                ${steps.captureReview.outputs.stdout}
+                                ${steps.handBackBriefing.outputs.stdout}
 
 
                                 ## Instructions
@@ -1070,6 +2146,9 @@ steps:
                                    with the updated evidence (real command output, not a summary).
                                 4. If a required change is genuinely wrong or impossible, say so explicitly in
                                    the report's risks and explain why - do not silently ignore it.
+                                5. Update your workspace note (NOTE PATH) with what changed for this
+                                   revision and the commands you re-ran. Leave it in in-progress/ until
+                                   the review passes.
 
                                 Work only inside the worktree. Never push.
                           - id: reCaptureReport
@@ -1080,77 +2159,7 @@ steps:
                               command: node
                               args:
                                 - -e
-                                - >
-                                  const fs = require('fs');
-
-                                  const path = require('path');
-
-                                  const wt = String(process.env.WT || '').trim();
-
-                                  const p = path.join(wt, '.ai-agent', 'report.json');
-
-                                  const warnings = [];
-
-                                  // Never hard-fail: a non-zero exit hides the cause (the engine records only
-
-                                  // 'Command failed with exit code 1') and burns a retry. Emit a structured
-
-                                  // result and let the workflow branch on it instead.
-
-                                  if (!fs.existsSync(p)) {
-                                    process.stdout.write(JSON.stringify({ usable: false, missing: true, path: p, warnings: ['report.json not found'] }));
-                                    process.exit(0);
-                                  }
-
-                                  let report;
-
-                                  try { report = JSON.parse(fs.readFileSync(p, 'utf8')); }
-
-                                  catch (e) {
-                                    process.stdout.write(JSON.stringify({ usable: false, parseError: String(e && e.message), path: p, warnings: ['report is not valid JSON'] }));
-                                    process.exit(0);
-                                  }
-
-                                  if (!report || typeof report !== 'object' || Array.isArray(report)) {
-                                    process.stdout.write(JSON.stringify({ usable: false, parseError: 'not an object', path: p, warnings: ['report is not an object'] }));
-                                    process.exit(0);
-                                  }
-
-                                  // The agent's report shape DRIFTS between runs, so no field may be a hard
-
-                                  // requirement; only presence + parseability are fatal-equivalent.
-
-                                  const pick = (...names) => { for (const n of names) { const v = report[n]; if (typeof v === 'string' && v.trim()) return v.trim(); } return null; };
-
-                                  let summary = pick('summary', 'resolution', 'outcome', 'description', 'result', 'overview', 'conclusion');
-
-                                  if (!summary && Array.isArray(report.changes) && report.changes.length > 0) summary = 'No summary field supplied; report lists ' + report.changes.length + ' change(s).';
-
-                                  if (!summary) { summary = 'No summary field supplied and no changes listed.'; warnings.push('no summary-like field'); }
-
-                                  const allowed = ['completed', 'blocked', 'failed'];
-
-                                  let status = allowed.indexOf(String(report.status)) !== -1 ? String(report.status) : null;
-
-                                  let statusSource = status ? 'report.status' : null;
-
-                                  if (!status) {
-                                    const t = String((report.ticket && (report.ticket.status || report.ticket.status_after)) || '').toLowerCase();
-                                    const m = { resolved: 'completed', complete: 'completed', completed: 'completed', done: 'completed', blocked: 'blocked', failed: 'failed', open: 'in_progress', in_progress: 'in_progress', new: 'in_progress' };
-                                    if (m[t]) { status = m[t]; statusSource = 'report.ticket.status=' + t; }
-                                  }
-
-                                  if (!status && Array.isArray(report.changes) && report.changes.length > 0) { status = 'completed'; statusSource = 'inferred:non-empty changes'; }
-
-                                  if (!status) { status = 'blocked'; statusSource = 'default:no signal'; }
-
-                                  const out = Object.assign({}, report, { summary: summary, status: status, statusSource: statusSource, usable: true });
-
-                                  if (warnings.length) out.contractWarnings = warnings;
-
-                                  process.stdout.write(JSON.stringify(out));
-
-                                  process.exit(0);
+                                - *reportCaptureScript
                               env:
                                 WT: ${steps.readWorktreePath.outputs.stdout}
                               failOnError: false
@@ -1165,33 +2174,7 @@ steps:
                               command: node
                               args:
                                 - -e
-                                - |
-                                  // Read the report FILE directly. Passing the whole captured report
-                                  // through an env var failed on a real 20KB revision report, which
-                                  // terminated the run at this step and made a rejected review
-                                  // unrecoverable. The file is the source of truth, and 'not
-                                  // completed' must be a VALUE here, not a thrown error.
-                                  const fs = require('fs');
-                                  const path = require('path');
-                                  const wt = String(process.env.WT || '').trim();
-                                  const p = path.join(wt, '.ai-agent', 'report.json');
-
-                                  let status = '';
-                                  try {
-                                    const r = JSON.parse(fs.readFileSync(p, 'utf8'));
-                                    const allowed = ['completed', 'blocked', 'failed'];
-                                    if (allowed.indexOf(String(r.status)) !== -1) {
-                                      status = String(r.status);
-                                    } else {
-                                      const t = String((r.ticket && (r.ticket.status || r.ticket.status_after)) || '').toLowerCase();
-                                      const m = { resolved: 'completed', complete: 'completed', completed: 'completed', done: 'completed', blocked: 'blocked', failed: 'failed', open: 'in_progress', in_progress: 'in_progress', new: 'in_progress' };
-                                      status = m[t] || (Array.isArray(r.changes) && r.changes.length > 0 ? 'completed' : '');
-                                    }
-                                  } catch (e) {
-                                    status = '';
-                                  }
-
-                                  process.stdout.write(status);
+                                - *readRunStatusScript
                               env:
                                 WT: ${steps.readWorktreePath.outputs.stdout}
                               failOnError: false
@@ -1260,10 +2243,88 @@ steps:
                             request for human approval.
 
                     # ── Publish the reviewed work ─────────────────────────────────
+                    # Guard: a persona workspace path must never enter the PR diff.
+                    - id: workspaceDiffGuard
+                      name: Keep workspace notes out of the diff
+                      type: cli_command
+                      dependsOn: acceptedComment
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const path = require('path');
+                            const { execSync } = require('child_process');
+
+                            // Belt-and-braces guard for the "no workspace path may appear in a PR diff"
+                            // requirement. Workspace notes are written outside the worktree by design; this
+                            // step catches the case where an agent copied one in, unstages it and reports it
+                            // so the pull request can never carry a persona workspace path.
+                            const wt = path.resolve(String(process.env.WT || '').trim());
+                            const notes = (() => { try { return JSON.parse(String(process.env.NOTE || '{}')); } catch (e) { return {}; } })();
+                            const workspace = String(notes.workspace || '').trim();
+
+                            const git = (cmd) => {
+                              try { return execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString().trim(); } catch (e) { return ''; }
+                            };
+
+                            if (!workspace) {
+                              process.stdout.write(JSON.stringify({ ok: true, removed: [], warnings: ['workspace not resolved; diff guard skipped'] }));
+                              process.exit(0);
+                            }
+
+                            const looksLikeWorkspace = (file) => {
+                              const normalised = String(file).replace(/\\/g, '/');
+                              if (!normalised) return false;
+                              if (workspace && normalised.indexOf(workspace.replace(/\\/g, '/')) !== -1) return true;
+                              return /profiles\/[^/]+\/personas\/[^/]+\/workspace\//.test(normalised);
+                            };
+
+                            const status = git('git status --porcelain');
+                            const changed = status.split('\n')
+                              .map((line) => line.trim())
+                              .filter(Boolean)
+                              .map((line) => {
+                                const value = line.replace(/^[A-Z?!]{1,2}\s+/, '');
+                                const rename = value.split(' -> ');
+                                return rename.length > 1 ? rename[1] : value;
+                              })
+                              .filter(Boolean);
+
+                            const staged = git('git diff --cached --name-only').split('\n').map((s) => s.trim()).filter(Boolean);
+                            const all = Array.from(new Set(changed.concat(staged)));
+                            const offenders = all.filter(looksLikeWorkspace);
+
+                            const removed = [];
+                            offenders.forEach((file) => {
+                              try {
+                                execSync('git reset -q -- "' + file + '"', { cwd: wt, stdio: 'pipe' });
+                              } catch (e) { /* may be untracked */ }
+                              try {
+                                execSync('git rm -r --cached --quiet --ignore-unmatch -- "' + file + '"', { cwd: wt, stdio: 'pipe' });
+                              } catch (e) { /* best effort */ }
+                              removed.push(file);
+                            });
+
+                            process.stdout.write(JSON.stringify({
+                              ok: removed.length === 0,
+                              removed: removed,
+                              warnings: removed.length
+                                ? ['removed persona workspace path(s) from the commit: ' + removed.join(', ')]
+                                : [],
+                            }));
+                            process.exit(0);
+                        env:
+                          WT: ${steps.readWorktreePath.outputs.stdout}
+                          NOTE: ${steps.openWorkspaceNote.outputs.stdout}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+
                     - id: commitChanges
                       name: Commit worktree changes
                       type: cli_command
-                      dependsOn: acceptedComment
+                      dependsOn: workspaceDiffGuard
                       config:
                         command: node
                         args:
@@ -1386,18 +2447,19 @@ steps:
                             const branch = String(process.env.BRANCH || '').trim();
                             const ref = String(process.env.REF || '').trim();
                             const request = String(process.env.REQUEST || '').trim();
+                            const requestType = String(process.env.REQUEST_TYPE || '').trim();
                             const cycles = String(process.env.CYCLES || '').trim();
                             const reviewer = String(process.env.REVIEWER || '').trim();
+                            const ticketId = String(process.env.TICKET_ID || '').trim();
                             const run = (cmd) => execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString();
+                            const tryRun = (cmd) => { try { return run(cmd).trim(); } catch (e) { return ''; } };
                             const done = (o) => { process.stdout.write(JSON.stringify(o)); process.exit(0); };
 
                             // Base branch - origin/HEAD is authoritative, then gh, then master.
                             let base = '';
                             try {
                               base = run('git symbolic-ref --short refs/remotes/origin/HEAD').trim().replace(/^origin\//, '');
-                            } catch (e) {
-                              base = '';
-                            }
+                            } catch (e) { base = ''; }
                             if (!base) {
                               try { base = run('gh repo view --json defaultBranchRef -q .defaultBranchRef.name').trim(); } catch (e) { base = ''; }
                             }
@@ -1406,63 +2468,397 @@ steps:
                             let report = {};
                             try {
                               report = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'report.json'), 'utf8'));
-                            } catch (e) {
-                              report = {};
-                            }
+                            } catch (e) { report = {}; }
+                            let runStatus = {};
+                            try {
+                              runStatus = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'run-status.json'), 'utf8'));
+                            } catch (e) { runStatus = {}; }
+
                             const text = (v) => (typeof v === 'string' ? v.trim() : '');
-                            const list = (v) => (Array.isArray(v) ? v : []);
+                            const list = (v) => (Array.isArray(v) ? v.filter((x) => x != null) : []);
+                            const normaliseKey = (k) => String(k == null ? '' : k).toLowerCase().replace(/[^a-z0-9]/g, '');
+                            const keyOf = (obj, names) => {
+                              if (!obj || typeof obj !== 'object') return undefined;
+                              const keys = Object.keys(obj);
+                              for (let i = 0; i < names.length; i += 1) {
+                                const wanted = normaliseKey(names[i]);
+                                for (let j = 0; j < keys.length; j += 1) {
+                                  if (normaliseKey(keys[j]) === wanted) return obj[keys[j]];
+                                }
+                              }
+                              return undefined;
+                            };
 
-                            const lines = [];
-                            lines.push('## AI engineering run');
-                            lines.push('');
-                            lines.push('Ticket: ' + ref);
-                            if (request) lines.push('Request: ' + request);
-                            lines.push('');
-                            lines.push('### Summary');
-                            lines.push(text(report.summary) || 'No summary supplied by the engineer.');
+                            // --- diff evidence ---------------------------------------------------------
+                            const diffCommands = [
+                              'git diff --name-only origin/' + base + '...HEAD',
+                              'git diff --name-only ' + base + '...HEAD',
+                              'git diff --name-only HEAD~1..HEAD',
+                            ];
+                            let changedFiles = [];
+                            for (let i = 0; i < diffCommands.length; i += 1) {
+                              const value = tryRun(diffCommands[i]);
+                              if (value) { changedFiles = value.split('\n').map((s) => s.trim()).filter(Boolean); break; }
+                            }
+                            const diffText = (tryRun('git diff origin/' + base + '...HEAD') || tryRun('git diff ' + base + '...HEAD') || '').slice(0, 400000);
+                            const commitCount = Number(tryRun('git rev-list --count origin/' + base + '..HEAD') || tryRun('git rev-list --count ' + base + '..HEAD')) || 0;
+                            const commitSubject = tryRun('git log -1 --pretty=%s');
+                            const submodulePointers = tryRun('git diff --raw origin/' + base + '...HEAD')
+                              .split('\n')
+                              .filter((line) => /^:160000 160000 /.test(line))
+                              .map((line) => line.split('\t').pop())
+                              .filter(Boolean);
 
-                            const changes = list(report.changes);
-                            if (changes.length) {
-                              lines.push('');
-                              lines.push('### Changes');
-                              changes.forEach((c) => {
-                                if (typeof c === 'string') lines.push('- ' + c);
-                                else if (c && (c.file || c.description)) lines.push('- `' + String(c.file || '') + '` ' + String(c.description || ''));
+                            const matches = (pattern) => changedFiles.filter((file) => pattern.test(file));
+                            const uiFiles = matches(/\.(tsx|jsx|css|scss|less)$|(^|\/)(components|pages|theme|themes|client)\//i);
+                            const authFiles = matches(/(^|\/)(auth|authorization|authorisation|permissions?|policies|guards?)\//i);
+                            const schemaFiles = matches(/\.graphql$|(^|\/)(schema|typeDefs|resolvers)\//i);
+                            const migrationFiles = matches(/(^|\/)migrations?\//i);
+                            const configFiles = matches(/(^|\.)env|(^|\/)config\//i);
+                            const i18nFiles = matches(/(^|\/)i18n\//i);
+                            const dependencyFiles = matches(/(^|\/)(package\.json|yarn\.lock|package-lock\.json)$/i);
+                            const docFiles = matches(/\.md$|(^|\/)docs\//i);
+                            const testFiles = matches(/__tests__|\.(test|spec)\.[a-z]+$/i);
+
+                            const secretPatterns = [
+                              /AKIA[0-9A-Z]{16}/,
+                              /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+                              /(password|passwd|secret|api[_-]?key|access[_-]?token)\s*[:=]\s*['"][^'"]{8,}['"]/i,
+                            ];
+                            const secretScanClean = !secretPatterns.some((pattern) => pattern.test(diffText));
+
+                            const modulesAffected = Array.from(new Set(changedFiles.map((file) => {
+                              const match = file.match(/^src\/modules\/([^/]+)\//);
+                              return match ? 'src/modules/' + match[1] : null;
+                            }).filter(Boolean)));
+
+                            // --- report content --------------------------------------------------------
+                            const summaryText = text(report.summary) || text(runStatus.summary) || 'No summary supplied by the engineer.';
+                            const risks = list(keyOf(report, ['risks', 'risk'])).map((r) => String(r));
+                            const followUps = list(keyOf(report, ['followUps', 'follow_ups'])).map((r) => String(r));
+
+                            const rawChanges = list(keyOf(report, ['changes', 'files', 'fileList']));
+                            const changeBullets = [];
+                            rawChanges.forEach((entry) => {
+                              if (typeof entry === 'string') { changeBullets.push('- ' + entry); return; }
+                              if (!entry || typeof entry !== 'object') return;
+                              const file = String(keyOf(entry, ['file', 'path', 'filename']) || '').trim();
+                              const description = String(keyOf(entry, ['description', 'summary', 'change', 'what']) || '').trim();
+                              if (file || description) changeBullets.push('- `' + file + '` ' + description);
+                            });
+                            if (!changeBullets.length && changedFiles.length) {
+                              changedFiles.slice(0, 40).forEach((file) => changeBullets.push('- `' + file + '`'));
+                              if (changedFiles.length > 40) changeBullets.push('- … and ' + (changedFiles.length - 40) + ' more file(s)');
+                            }
+                            const implementation = text(keyOf(report, ['implementation'])) || (list(keyOf(report, ['implementation'])).length ? list(keyOf(report, ['implementation'])).map(String).join('\n') : '');
+                            if (implementation && !changeBullets.length) changeBullets.push('- ' + implementation.split('\n').join('\n  '));
+
+                            const tests = list(keyOf(report, ['testsRun', 'tests_run', 'tests'])).map((entry) => {
+                              if (typeof entry === 'string') return { command: entry, result: 'not recorded' };
+                              if (entry && typeof entry === 'object') {
+                                return {
+                                  command: String(keyOf(entry, ['command', 'cmd']) || '').trim(),
+                                  result: String(keyOf(entry, ['result', 'status', 'outcome']) || 'not recorded').trim(),
+                                  output: String(keyOf(entry, ['output', 'stdout', 'detail']) || '').trim(),
+                                };
+                              }
+                              return null;
+                            }).filter((entry) => entry && entry.command);
+                            const verificationText = text(keyOf(report, ['verification', 'evidence', 'howVerified']));
+
+                            // --- template discovery ----------------------------------------------------
+                            const templateDirs = ['.github', '.', 'docs'];
+                            const templateNames = ['pull_request_template.md', 'pull_request_template.markdown'];
+                            const findTemplate = () => {
+                              for (let i = 0; i < templateDirs.length; i += 1) {
+                                const dir = path.join(wt, templateDirs[i]);
+                                if (!fs.existsSync(dir)) continue;
+                                let entries = [];
+                                try { entries = fs.readdirSync(dir); } catch (e) { entries = []; }
+                                for (let j = 0; j < templateNames.length; j += 1) {
+                                  const wanted = templateNames[j];
+                                  if (entries.indexOf(wanted) !== -1) return path.join(dir, wanted);
+                                  const caseInsensitive = entries.find((entry) => String(entry).toLowerCase() === wanted);
+                                  if (caseInsensitive) return path.join(dir, caseInsensitive);
+                                }
+                              }
+                              return null;
+                            };
+
+                            // --- template rendering ----------------------------------------------------
+                            const stripComments = (value) => String(value).replace(/<!--[\s\S]*?-->/g, '');
+                            const tidy = (value) => String(value)
+                              .replace(/[ \t]+$/gm, '')
+                              .replace(/[ \t]+\n/g, '\n')
+                              .replace(/\n{3,}/g, '\n\n')
+                              .trim();
+                            const headingSlug = (heading) => String(heading).replace(/^#+\s*/, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+                            const parseTemplate = (source) => {
+                              const lines = String(source).replace(/\r\n/g, '\n').split('\n');
+                              const preamble = [];
+                              const sections = [];
+                              let current = null;
+                              lines.forEach((line) => {
+                                if (/^##\s+\S/.test(line)) {
+                                  current = { heading: line.replace(/[ \t]+$/, ''), body: [] };
+                                  sections.push(current);
+                                  return;
+                                }
+                                if (current) current.body.push(line);
+                                else preamble.push(line);
                               });
-                            }
+                              return { preamble: preamble, sections: sections };
+                            };
 
-                            const tests = list(report.testsRun);
-                            if (tests.length) {
-                              lines.push('');
-                              lines.push('### Verification');
-                              tests.forEach((t) => {
-                                if (typeof t === 'string') lines.push('- ' + t);
-                                else if (t) lines.push('- `' + String(t.command || '') + '` -> ' + String(t.result || 'unknown'));
+                            const applyTicks = (body, rules, exclusive) => body.split('\n').map((line) => {
+                              const match = line.match(/^(\s*- )\[[ xX]\]\s*(.*)$/);
+                              if (!match) return line;
+                              const label = match[2];
+                              let matched = null;
+                              for (let i = 0; i < rules.length; i += 1) {
+                                if (rules[i].test(label)) { matched = rules[i]; break; }
+                              }
+                              if (exclusive) return match[1] + (matched && matched.enabled ? '[x]' : '[ ]') + ' ' + label;
+                              if (matched && matched.enabled) return match[1] + '[x] ' + label;
+                              return line;
+                            }).join('\n');
+
+                            const setRow = (body, area, value) => body.split('\n').map((line) => {
+                              const match = line.match(/^\|\s*([^|]+?)\s*\|(.*)\|\s*$/);
+                              if (!match) return line;
+                              if (normaliseKey(match[1]) !== normaliseKey(area)) return line;
+                              return '| ' + area + ' | ' + String(value).replace(/\|/g, '/') + ' |';
+                            }).join('\n');
+
+                            const normaliseLabel = (label) => String(label).toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+                            const typeOfChange = {
+                              bug: 'bug fix',
+                              'bug-report': 'bug fix',
+                              defect: 'bug fix',
+                              feature: 'feature',
+                              'feature-request': 'feature',
+                              enhancement: 'feature',
+                              chore: 'refactor',
+                              refactor: 'refactor',
+                              documentation: 'documentation',
+                              docs: 'documentation',
+                              maintenance: 'build',
+                            };
+
+                            const HANDLERS = {
+                              summary: (body) => {
+                                const related = commitCount
+                                  ? commitCount + ' commit(s) on `' + branch + '`' + (commitSubject ? ' — latest: ' + commitSubject : '')
+                                  : 'none recorded';
+                                const focus = risks[0] || followUps[0] || 'Correctness of the change and the recorded verification evidence.';
+                                let out = body;
+                                out = out.replace(/^-\s*\*\*Ticket \/ issue:\*\*.*$/m, '- **Ticket / issue:** `' + ref + '`');
+                                out = out.replace(/^-\s*\*\*Related PRs \/ commits:\*\*.*$/m, '- **Related PRs / commits:** ' + related);
+                                out = out.replace(/^-\s*\*\*Reviewer focus:\*\*.*$/m, '- **Reviewer focus:** ' + focus);
+                                return summaryText + '\n\n' + out;
+                              },
+
+                              typeofchange: (body) => {
+                                const wanted = typeOfChange[String(requestType).toLowerCase()] || '';
+                                const out = applyTicks(body, [{
+                                  test: (label) => !!wanted && normaliseLabel(label).indexOf(normaliseLabel(wanted)) === 0,
+                                  enabled: !!wanted,
+                                }], true);
+                                return out + '\n\n_Derived from the ticket `requestType` = `' + (requestType || 'unknown') + '`._';
+                              },
+
+                              whatchanged: (body) => {
+                                const withoutPlaceholders = body.split('\n').filter((line) => !/^\s*-\s*$/.test(line)).join('\n');
+                                const bullets = changeBullets.length
+                                  ? changeBullets
+                                  : ['- _No change list was recorded by the engineer; review the diff on `' + branch + '` directly._'];
+                                return bullets.join('\n') + '\n\n' + withoutPlaceholders;
+                              },
+
+                              howwasthistested: (body) => {
+                                const has = (pattern) => tests.some((entry) => pattern.test(entry.command));
+                                let out = applyTicks(body, [
+                                  { test: (label) => /not applicable/i.test(label), enabled: false },
+                                  { test: (label) => /unit tests/i.test(label), enabled: has(/jest|vitest|mocha|npm (run )?test|yarn test|pnpm test/i) },
+                                  { test: (label) => /integration/i.test(label), enabled: has(/integration/i) },
+                                  { test: (label) => /type ?check/i.test(label), enabled: has(/typecheck|tsc(\s|$)|npm run type/i) },
+                                  { test: (label) => /^lint|eslint|prettier|lint \(/i.test(label), enabled: has(/lint|eslint|prettier/i) },
+                                ], false);
+
+                                const suites = testFiles.slice(0, 8).join(', ') + (testFiles.length > 8 ? ', …' : '');
+                                out = out.replace(/(Unit tests[^\n]*?)suites touched:[^\n]*/m, '$1suites touched: ' + (suites || 'no test files changed'));
+
+                                const manual = tests.slice(0, 8).map((entry, index) => (index + 1) + '. `' + entry.command + '` — ' + (entry.result || 'result not recorded'));
+                                if (!manual.length) manual.push('1. No verification commands were recorded in the completion report — treat this change as unverified.');
+                                out = out.split('\n').filter((line) => !/^\d+\.\s*$/.test(line)).join('\n');
+
+                                const passed = tests.filter((entry) => /pass|success|ok|green/i.test(entry.result)).length;
+                                const failed = tests.length - passed;
+                                const resultText = tests.length
+                                  ? passed + ' of ' + tests.length + ' recorded command(s) passed' + (failed ? ', ' + failed + ' did not' : '') + '.' + (verificationText ? ' ' + verificationText : '')
+                                  : 'No automated verification was recorded by the engineer.';
+
+                                return out.replace(/^\*\*Result:\*\*.*$/m, manual.join('\n') + '\n\n**Result:** ' + resultText);
+                              },
+
+                              uiuxevidence: (body) => {
+                                if (!uiFiles.length) {
+                                  return '_Not applicable — server-only change: the diff touches no client or UI files. Every box below is intentionally left unticked._';
+                                }
+                                return body + '\n\n_UI files changed: ' + uiFiles.slice(0, 10).map((file) => '`' + file + '`').join(', ') + '. The pipeline cannot capture runtime UI evidence, so no UI box is ticked — the author must supply the before/after proof._';
+                              },
+
+                              impactanalysis: (body) => {
+                                let out = body;
+                                out = setRow(out, 'Server modules affected', modulesAffected.length ? modulesAffected.map((m) => '`' + m + '`').join(', ') : 'None — no `src/modules` files changed');
+                                out = setRow(out, 'Client components / plugins affected', uiFiles.length ? uiFiles.slice(0, 10).map((f) => '`' + f + '`').join(', ') : 'None — no client or plugin files changed');
+                                out = setRow(out, 'GraphQL schema / resolver changes', schemaFiles.length ? schemaFiles.map((f) => '`' + f + '`').join(', ') : 'None — no schema or resolver files changed');
+                                out = setRow(out, 'Database migrations', migrationFiles.length ? migrationFiles.map((f) => '`' + f + '`').join(', ') : 'None — no migration files changed');
+                                out = setRow(out, 'Config or environment variables', configFiles.length ? configFiles.map((f) => '`' + f + '`').join(', ') : 'None — no config files changed');
+                                out = setRow(out, 'Submodule version bumps', submodulePointers.length ? submodulePointers.map((f) => '`' + f + '`').join(', ') : 'None — no submodule pointers changed');
+                                out = setRow(out, 'Cross-repo dependency', dependencyFiles.length ? 'Dependency manifest changed: ' + dependencyFiles.map((f) => '`' + f + '`').join(', ') : 'None — no dependency manifest changes');
+                                out = setRow(out, 'i18n key changes', i18nFiles.length ? i18nFiles.map((f) => '`' + f + '`').join(', ') : 'None — no i18n files changed');
+                                return out + '\n\n_Derived from the ' + changedFiles.length + ' file(s) in the branch diff against `' + base + '`._';
+                              },
+
+                              breakingchangesrollback: (body) => {
+                                const breaking = schemaFiles.length > 0 || /public API/i.test(verificationText || '');
+                                let out = body.replace(/(\*\*Is this a breaking change\?\*\*)[^\n]*/, '$1 ' + (breaking
+                                  ? 'Possibly — public contract or schema files changed; a reviewer must confirm.'
+                                  : 'No — no public API, GraphQL schema, database migration or configuration contract change was detected in the diff.'));
+                                out = applyTicks(out, [{ test: (label) => /reverting this pr is sufficient/i.test(label), enabled: migrationFiles.length === 0 }], true);
+                                return out + (migrationFiles.length ? '\n\n_Data / migration rollback required: ' + migrationFiles.map((f) => '`' + f + '`').join(', ') + '._' : '');
+                              },
+
+                              securityconsiderations: (body) => {
+                                let out = applyTicks(body, [{ test: (label) => /no secrets/i.test(label), enabled: secretScanClean }], false);
+                                const notes = [];
+                                notes.push(authFiles.length
+                                  ? 'authorisation and permission checks: touched ' + authFiles.slice(0, 5).map((f) => '`' + f + '`').join(', ') + ' — human review required'
+                                  : 'authorisation and permission checks: no authorisation code in the diff');
+                                notes.push(schemaFiles.length
+                                  ? 'user input validation: resolvers/schema changed — human review required'
+                                  : 'user input validation: no resolver or endpoint changes in the diff');
+                                notes.push(dependencyFiles.length
+                                  ? 'dependency advisories: dependency manifests changed — run the audit before merging'
+                                  : 'dependency advisories: no dependency manifest changed');
+                                notes.push('sensitive data in logs: the diff adds no logging of request payloads or credentials');
+                                if (!secretScanClean) notes.push('SECRET SCAN FAILED: the diff appears to contain credential material — do not merge before a human reviews it');
+                                return out + '\n\n_Not applicable in this run — ' + notes.join('; ') + '._';
+                              },
+
+                              documentation: (body) => {
+                                const notes = [];
+                                if (docFiles.length) {
+                                  notes.push('documentation files changed: ' + docFiles.slice(0, 8).map((f) => '`' + f + '`').join(', '));
+                                } else {
+                                  notes.push('no documentation files changed and no public API surface was detected in the diff');
+                                }
+                                return body + '\n\n_Not applicable in this run — ' + notes.join('; ') + '. No documentation box is ticked because the pipeline cannot evidence it._';
+                              },
+
+                              authorchecklist: (body) => {
+                                const out = applyTicks(body, [{ test: (label) => /ticket reference present/i.test(label), enabled: true }], false);
+                                return out + '\n\n_Only the ticket-reference box is ticked: it is the one author claim this run can evidence (the pull request title carries `' + ref + '`). The remaining claims are the author\'s to make._';
+                              },
+
+                              reviewerchecklist: (body) => body,
+                            };
+
+                            const renderTemplate = (source) => {
+                              const parsed = parseTemplate(source);
+                              if (!parsed.sections.length) throw new Error('template contains no level-2 headings');
+                              const warnings = [];
+                              const rendered = parsed.sections.map((section) => {
+                                const raw = stripComments(section.body.join('\n'));
+                                const handler = HANDLERS[headingSlug(section.heading)];
+                                let body = raw;
+                                if (handler) {
+                                  try { body = handler(raw); } catch (e) { warnings.push('section "' + section.heading + '" kept as template: ' + String((e && e.message) || e)); }
+                                }
+                                return section.heading + '\n\n' + tidy(body);
                               });
-                            }
-                            if (text(report.verification)) {
+                              return { body: rendered.join('\n\n'), warnings: warnings };
+                            };
+
+                            // --- legacy body (fail-soft path) -----------------------------------------
+                            const legacyBody = () => {
+                              const lines = [];
+                              lines.push('## AI engineering run');
                               lines.push('');
-                              lines.push(text(report.verification));
+                              lines.push('Ticket: ' + ref);
+                              if (request) lines.push('Request: ' + request);
+                              lines.push('');
+                              lines.push('### Summary');
+                              lines.push(summaryText);
+                              if (changeBullets.length) {
+                                lines.push('');
+                                lines.push('### Changes');
+                                changeBullets.forEach((line) => lines.push(line));
+                              }
+                              if (tests.length) {
+                                lines.push('');
+                                lines.push('### Verification');
+                                tests.forEach((entry) => lines.push('- `' + entry.command + '` -> ' + entry.result));
+                              }
+                              if (verificationText) {
+                                lines.push('');
+                                lines.push(verificationText);
+                              }
+                              if (risks.length) {
+                                lines.push('');
+                                lines.push('### Risks');
+                                risks.forEach((risk) => lines.push('- ' + risk));
+                              }
+                              lines.push('');
+                              lines.push('### Review');
+                              lines.push('Approved by ' + (reviewer || 'the reviewing agent') + ' after ' + (cycles || '0') + ' review cycle(s).');
+                              return lines.join('\n');
+                            };
+
+                            // --- build the body --------------------------------------------------------
+                            const warnings = [];
+                            let templateUsed = false;
+                            let templatePath = '';
+                            let body = '';
+
+                            const templateFile = findTemplate();
+                            if (templateFile) {
+                              templatePath = path.relative(wt, templateFile);
+                              try {
+                                const rendered = renderTemplate(fs.readFileSync(templateFile, 'utf8'));
+                                body = rendered.body;
+                                rendered.warnings.forEach((warning) => warnings.push(warning));
+                                if (!/^##\s+\S/m.test(body)) throw new Error('rendered body lost every level-2 heading');
+                                templateUsed = true;
+                              } catch (e) {
+                                warnings.push('PR template could not be applied (' + templatePath + '): ' + String((e && e.message) || e));
+                                body = '';
+                              }
+                            } else {
+                              warnings.push('no pull request template found (.github/, repository root and docs/ were checked, case-insensitively)');
                             }
 
-                            const risks = list(report.risks);
-                            if (risks.length) {
-                              lines.push('');
-                              lines.push('### Risks');
-                              risks.forEach((r) => lines.push('- ' + String(r)));
+                            if (!templateUsed) {
+                              body = legacyBody() + '\n\n> **PR template not applied:** ' + warnings.join('; ');
                             }
 
-                            lines.push('');
-                            lines.push('### Review');
-                            lines.push('Approved by ' + (reviewer || 'the reviewing agent') + ' after ' + (cycles || '0') + ' review cycle(s).');
-                            lines.push('');
-                            lines.push('---');
-                            lines.push('Generated by core.ProcessAITicket@1.4.2');
+                            body = body.replace(/\s+$/, '') + '\n\n---\nGenerated by core.ProcessAITicket@1.4.3\n';
 
                             const bodyFile = path.join(wt, '.ai-agent', 'pr-body.md');
-                            fs.writeFileSync(bodyFile, lines.join('\n'), 'utf8');
+                            fs.writeFileSync(bodyFile, body, 'utf8');
+
+                            // Record the outcome in the completion report so a missing/malformed template is
+                            // visible in the run artefacts, not only in the pull request.
+                            try {
+                              report.prBody = { templateUsed: templateUsed, templatePath: templatePath, warnings: warnings, bodyPath: bodyFile };
+                              fs.writeFileSync(path.join(wt, '.ai-agent', 'report.json'), JSON.stringify(report, null, 2), 'utf8');
+                            } catch (e) { /* best effort */ }
 
                             const title = (ref + (request ? ' - ' + request : '')).slice(0, 140);
+                            const meta = { base: base, branch: branch, templateUsed: templateUsed, templatePath: templatePath, warnings: warnings, bodyPath: bodyFile };
                             let url = '';
                             try {
                               url = run('gh pr create --base "' + base + '" --head "' + branch + '" --title "' + title.replace(/["`$\\]/g, ' ') + '" --body-file "' + bodyFile + '"').trim();
@@ -1476,20 +2872,20 @@ steps:
                               if (/already exists/i.test(detail)) {
                                 try {
                                   const view = JSON.parse(run('gh pr view "' + branch + '" --json url,number,state,mergedAt'));
-                                  done({ ok: true, created: false, prUrl: view.url, prNumber: view.number, state: view.state, base: base, branch: branch });
+                                  done(Object.assign({ ok: true, created: false, prUrl: view.url, prNumber: view.number, state: view.state }, meta));
                                 } catch (e2) {
-                                  done({ ok: false, error: 'pull request exists but could not be inspected - ' + String(e2 && e2.message ? e2.message : e2), base: base, branch: branch });
+                                  done(Object.assign({ ok: false, error: 'pull request exists but could not be inspected - ' + String((e2 && e2.message) || e2) }, meta));
                                 }
                               }
-                              done({ ok: false, error: 'gh pr create failed: ' + detail.slice(0, 1500), base: base, branch: branch });
+                              done(Object.assign({ ok: false, error: 'gh pr create failed: ' + detail.slice(0, 1500) }, meta));
                             }
 
                             // Normalise to a structured record rather than scraping the URL line.
                             try {
                               const view = JSON.parse(run('gh pr view "' + branch + '" --json url,number,state,mergedAt'));
-                              done({ ok: true, created: true, prUrl: view.url || url, prNumber: view.number, state: view.state, base: base, branch: branch });
+                              done(Object.assign({ ok: true, created: true, prUrl: view.url || url, prNumber: view.number, state: view.state }, meta));
                             } catch (e) {
-                              done({ ok: !!url, created: true, prUrl: url, prNumber: null, state: 'OPEN', base: base, branch: branch });
+                              done(Object.assign({ ok: !!url, created: true, prUrl: url, prNumber: null, state: 'OPEN' }, meta));
                             }
                         env:
                           WT: ${steps.readWorktreePath.outputs.stdout}
@@ -1498,6 +2894,8 @@ steps:
                           REQUEST: ${steps.loadTicket.result.request}
                           CYCLES: ${variables.reviewCycle}
                           REVIEWER: ${input.reviewerId}
+                          REQUEST_TYPE: ${steps.loadTicket.result.requestType}
+                          TICKET_ID: ${steps.loadTicket.result.id}
                         failOnError: false
                         timeout: 300000
                         output:
@@ -1538,10 +2936,51 @@ steps:
                         output:
                           captureStdout: true
 
+                    # A malformed or missing template must not block the pull request,
+                    # but it must be visible in the run and on the ticket.
+                    - id: readPrTemplateWarning
+                      name: Read PR template warnings
+                      type: cli_command
+                      dependsOn: readPrNumber
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            let state = {};
+                            try { state = JSON.parse(process.env.PR || '{}'); } catch (e) { state = {}; }
+                            const warnings = Array.isArray(state.warnings) ? state.warnings : [];
+                            process.stdout.write(warnings.join(' | '));
+                        env:
+                          PR: ${steps.createPullRequest.outputs.stdout}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+
+                    - id: prTemplateWarnGate
+                      name: Did the PR template need a fallback
+                      type: condition
+                      dependsOn: readPrTemplateWarning
+                      config:
+                        condition: steps.readPrTemplateWarning.stdout !== '' && steps.readPrUrl.stdout && steps.readPrUrl.stdout.indexOf('/pull/') !== -1
+                        thenSteps:
+                          - id: prTemplateWarnComment
+                            name: Comment PR template warning on ticket
+                            type: service_invoke
+                            config:
+                              service: core.ReactorySupportWorkflowService@1.0.0
+                              method: addComment
+                              params:
+                                ticketId: ${steps.loadTicket.result.id}
+                                comment: "Pull request ${steps.readPrUrl.outputs.stdout} was opened,
+                                  but the repository pull request template was not fully applied:
+                                  ${steps.readPrTemplateWarning.outputs.stdout}. The fallback body
+                                  was used so the PR is not blocked."
+
                     - id: prPublishedGate
                       name: Did the pull request publish
                       type: condition
-                      dependsOn: readPrNumber
+                      dependsOn: prTemplateWarnGate
                       config:
                         condition: steps.readPrUrl.stdout && steps.readPrUrl.stdout.indexOf('/pull/') !== -1
                         thenSteps:
@@ -1559,10 +2998,42 @@ steps:
                                   only once the pull request is merged.
 
                           # ── Human approval of the pull request ──────────────
+                          - id: closeWorkspaceNote
+                            name: Move workspace note to complete
+                            type: cli_command
+                            dependsOn: prPublishedComment
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - *workspaceNoteScript
+                              env:
+                                MODE: close
+                                WT: ${steps.readWorktreePath.outputs.stdout}
+                                REF: ${steps.loadTicket.result.reference}
+                                TICKET_ID: ${steps.loadTicket.result.id}
+                                REPO: ${steps.resolveWorkdir.outputs.stdout}
+                                BRANCH: ${steps.readBranch.outputs.stdout}
+                                PERSONA: ${input.agentId}
+                                PR_URL: ${steps.readPrUrl.outputs.stdout}
+                                CYCLES: ${variables.reviewCycle}
+                              failOnError: false
+                              output:
+                                captureStdout: true
+
+                          - id: setRunStatusCompleted
+                            name: Record completed run status
+                            type: set_variable
+                            dependsOn: closeWorkspaceNote
+                            config:
+                              action: set
+                              key: runStatus
+                              value: completed
+
                           - id: prApprovalGate
                             name: Pull request approval required
                             type: condition
-                            dependsOn: prPublishedComment
+                            dependsOn: setRunStatusCompleted
                             config:
                               condition: steps.resolveSignoff.stdout === 'true'
                               thenSteps:
@@ -1919,43 +3390,213 @@ steps:
                                 ${steps.loadTicket.result.reference} - pull request not
                                 created.
                   elseSteps:
-                    - id: exhaustedLog
-                      name: Log review exhausted
-                      type: log
+                    - id: retainWorkspaceNoteExhausted
+                      name: Keep workspace note in progress
+                      type: cli_command
                       config:
-                        level: warn
-                        message: "AI run NOT accepted for ${steps.loadTicket.result.reference} after
-                          ${variables.reviewCycle} review cycle(s) (verdict:
-                          ${variables.reviewVerdict})."
-                    - id: exhaustedComment
-                      name: Comment exhaustion on ticket
-                      type: service_invoke
-                      dependsOn: exhaustedLog
+                        command: node
+                        args:
+                          - -e
+                          - *workspaceNoteScript
+                        env:
+                          MODE: retain
+                          NOTE_STATUS: blocked
+                          REASON: The review cycle bound was reached without approval, so no pull request was opened.
+                          WT: ${steps.readWorktreePath.outputs.stdout}
+                          REF: ${steps.loadTicket.result.reference}
+                          TICKET_ID: ${steps.loadTicket.result.id}
+                          REPO: ${steps.resolveWorkdir.outputs.stdout}
+                          BRANCH: ${steps.readBranch.outputs.stdout}
+                          PERSONA: ${input.agentId}
+                          CYCLES: ${variables.reviewCycle}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+
+                    - id: haltedGate
+                      name: Was the review halted for a human
+                      type: condition
+                      dependsOn: retainWorkspaceNoteExhausted
                       config:
-                        service: core.ReactorySupportWorkflowService@1.0.0
-                        method: addComment
-                        params:
-                          ticketId: ${steps.loadTicket.result.id}
-                          comment: "AI engineering run did NOT reach an accepted state after
-                            ${variables.reviewCycle} review cycle(s) (last
-                            verdict: ${variables.reviewVerdict}). Work in
-                            progress remains on branch
-                            ${steps.readBranch.outputs.stdout}. Human review
-                            required - the SLA escalation workflow will also
-                            pick this up."
-                    - id: exhaustedNotify
-                      name: Notify exhaustion
-                      type: service_invoke
-                      dependsOn: exhaustedComment
-                      config:
-                        service: core.ReactorySupportWorkflowService@1.0.0
-                        method: notify
-                        params:
-                          event: ticket.comment.added
-                          ticketId: ${steps.loadTicket.result.id}
-                          extra:
-                            reason: AI engineering run exhausted its review cycles without approval.
+                        condition: variables.runHalt === 'true'
+                        thenSteps:
+                          - id: haltedLog
+                            name: Log halted run
+                            type: log
+                            config:
+                              level: warn
+                              message: Run HALTED for ${steps.loadTicket.result.reference} - the reviewer
+                                rejected without readable findings. A human task and a ticket
+                                comment carry the details; no pull request was opened.
+                        elseSteps:
+                          - id: exhaustedLog
+                            name: Log review exhausted
+                            type: log
+                            config:
+                              level: warn
+                              message: "AI run NOT accepted for ${steps.loadTicket.result.reference} after
+                                ${variables.reviewCycle} review cycle(s) (verdict:
+                                ${variables.reviewVerdict})."
+                          - id: exhaustedComment
+                            name: Comment exhaustion on ticket
+                            type: service_invoke
+                            dependsOn: exhaustedLog
+                            config:
+                              service: core.ReactorySupportWorkflowService@1.0.0
+                              method: addComment
+                              params:
+                                ticketId: ${steps.loadTicket.result.id}
+                                comment: "AI engineering run did NOT reach an accepted state after
+                                  ${variables.reviewCycle} review cycle(s) (last
+                                  verdict: ${variables.reviewVerdict}). Work in
+                                  progress remains on branch
+                                  ${steps.readBranch.outputs.stdout}. Human review
+                                  required - the SLA escalation workflow will also
+                                  pick this up."
+                          - id: exhaustedNotify
+                            name: Notify exhaustion
+                            type: service_invoke
+                            dependsOn: exhaustedComment
+                            config:
+                              service: core.ReactorySupportWorkflowService@1.0.0
+                              method: notify
+                              params:
+                                event: ticket.comment.added
+                                ticketId: ${steps.loadTicket.result.id}
+                                extra:
+                                  reason: AI engineering run exhausted its review cycles without approval.
             elseSteps:
+              - id: notCompletedEvidence
+                name: Gather evidence for the non-completion
+                type: cli_command
+                dependsOn: reportBranch
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - |
+                      const fs = require('fs');
+                      const path = require('path');
+
+                      // Build a human-readable evidence block for the "run did not complete" path.
+                      // The old workflow completed the instance quietly with work stranded on a
+                      // branch and verdict=pending, so nothing looked wrong unless someone read the
+                      // log. This text goes into the ticket comment.
+                      const wt = path.resolve(String(process.env.WT || '').trim());
+                      const status = String(process.env.STATUS || '').trim();
+                      const branch = String(process.env.BRANCH || '').trim();
+                      const reference = String(process.env.REF || '').trim();
+
+                      let record = {};
+                      try { record = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'run-status.json'), 'utf8')); } catch (e) { record = {}; }
+
+                      const evidence = record.runEvidence || {};
+                      const commits = Number(evidence.commitCount || 0);
+                      const base = String(evidence.base || 'the base branch');
+                      const summary = String(record.summary || '').trim();
+
+                      const lines = [];
+                      lines.push('Run status: ' + (status || 'no status recorded') + (record.statusSource ? ' (' + record.statusSource + ')' : ''));
+                      lines.push('Branch: ' + branch);
+
+                      if (commits > 0) {
+                        lines.push('');
+                        lines.push('**The branch contains ' + commits + ' commit(s) ahead of `' + base + '` that were NOT published as a pull request.**');
+                        if (evidence.commitRange) {
+                          lines.push('');
+                          lines.push('```');
+                          lines.push(String(evidence.commitRange).split('\n').slice(0, 8).join('\n'));
+                          lines.push('```');
+                        }
+                        lines.push('');
+                        lines.push('A human must review this branch: the work exists but the workflow declined to open a pull request, so it cannot resolve on its own.');
+                      } else {
+                        lines.push('');
+                        lines.push('No commits ahead of `' + base + '` were found, so no work is stranded on the branch.');
+                      }
+
+                      if (summary) {
+                        lines.push('');
+                        lines.push('Engineer summary: ' + summary.slice(0, 1200));
+                      }
+
+                      const warnings = Array.isArray(record.warnings) ? record.warnings : [];
+                      if (warnings.length) {
+                        lines.push('');
+                        lines.push('Contract warnings:');
+                        warnings.forEach((warning) => lines.push('- ' + String(warning)));
+                      }
+
+                      lines.push('');
+                      lines.push('This run is recorded as blocked, not completed, and the ticket stays in_progress.');
+                      lines.push('Ticket: ' + reference + '.');
+
+                      process.stdout.write(lines.join('\n'));
+                  env:
+                    WT: ${steps.readWorktreePath.outputs.stdout}
+                    STATUS: ${steps.readReportStatus.outputs.stdout}
+                    BRANCH: ${steps.readBranch.outputs.stdout}
+                    REF: ${steps.loadTicket.result.reference}
+                  failOnError: false
+                  output:
+                    captureStdout: true
+
+              - id: retainWorkspaceNoteBlocked
+                name: Keep workspace note in progress on non-completion
+                type: cli_command
+                dependsOn: notCompletedEvidence
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - *workspaceNoteScript
+                  env:
+                    MODE: retain
+                    NOTE_STATUS: ${steps.readReportStatus.outputs.stdout}
+                    REASON: The run ended without a pull request (status ${steps.readReportStatus.outputs.stdout}). See the ticket comment for the commit evidence.
+                    WT: ${steps.readWorktreePath.outputs.stdout}
+                    REF: ${steps.loadTicket.result.reference}
+                    TICKET_ID: ${steps.loadTicket.result.id}
+                    REPO: ${steps.resolveWorkdir.outputs.stdout}
+                    BRANCH: ${steps.readBranch.outputs.stdout}
+                    PERSONA: ${input.agentId}
+                    CYCLES: ${variables.reviewCycle}
+                  failOnError: false
+                  output:
+                    captureStdout: true
+
+              - id: setRunStatusBlocked
+                name: Record blocked run status
+                type: set_variable
+                dependsOn: retainWorkspaceNoteBlocked
+                config:
+                  action: set
+                  key: runStatus
+                  value: blocked
+
+              # Fail loudly: if the branch carries commits but no PR was opened, a human
+              # must see it. The old path completed the instance quietly with verdict=pending.
+              - id: strandedCommitGate
+                name: Are commits stranded without a pull request
+                type: condition
+                dependsOn: setRunStatusBlocked
+                config:
+                  condition: "steps.notCompletedEvidence.stdout.indexOf('NOT published as a pull request') !== -1"
+                  thenSteps:
+                    - id: strandedCommitTask
+                      name: Human review of stranded commits
+                      type: user_activity
+                      config:
+                        activityType: approval
+                        assignee: ${steps.loadTicket.result.assignedToEmail}
+                        message: ${steps.loadTicket.result.reference} has commits on branch ${steps.readBranch.outputs.stdout} but no pull request was opened - review required
+                        props:
+                          ticketReference: ${steps.loadTicket.result.reference}
+                          ticketId: ${steps.loadTicket.result.id}
+                          branch: ${steps.readBranch.outputs.stdout}
+                          worktree: ${steps.readWorktreePath.outputs.stdout}
+                          evidence: ${steps.notCompletedEvidence.outputs.stdout}
+
               - id: notCompletedLog
                 name: Log non-completion
                 type: log
@@ -1972,10 +3613,9 @@ steps:
                   method: addComment
                   params:
                     ticketId: ${steps.loadTicket.result.id}
-                    comment: "AI engineering run did not complete: the agent reported status
-                      '${steps.readReportStatus.outputs.stdout}' with a valid
-                      completion report. See the run report in the worktree.
-                      Human attention required."
+                    comment: "AI engineering run did not complete (status
+                      '${steps.readReportStatus.outputs.stdout}'). No pull request was opened.
+                      ${steps.notCompletedEvidence.outputs.stdout}"
         - id: reportRunOutcome
           name: Report run outcome
           type: log
@@ -1983,7 +3623,8 @@ steps:
           config:
             level: info
             message: Run outcome - ticket=${steps.loadTicket.result.reference}
-              verdict=${variables.reviewVerdict} cycles=${variables.reviewCycle}
+              status=${variables.runStatus} verdict=${variables.reviewVerdict}
+              cycles=${variables.reviewCycle}
               branch=${steps.readBranch.outputs.stdout}
               session=${variables.engineerSessionId}
         - id: logAudit
