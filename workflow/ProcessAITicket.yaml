@@ -1,6 +1,6 @@
 nameSpace: core
 name: ProcessAITicket
-version: 1.4.4
+version: 1.4.5
 description: Autonomous AI engineering run for a SINGLE support ticket. Loads the ticket,
   moves it to in_progress, prepares an isolated git worktree on a ticket-keyed
   branch, has the nominated AI engineer agent perform the work, captures a
@@ -401,51 +401,174 @@ steps:
 
                 const worktreePath = path.resolve(cwd, '..', 'reactory-worktrees', 'ai-' + flatRef.toLowerCase());
 
+                // ---------------------------------------------------------------------------
+                // Resolve the base EXPLICITLY. Never inherit it.
+                //
+                // WORKFLOW-002. `git worktree add <path> -b <branch>` with no commit-ish
+                // branches from HEAD of the developer's primary checkout. That silently based
+                // every run on whatever branch/commit that checkout happened to be on:
+                // PLUGIN-001 came up on local master d9e922f while origin/master was 1e32b43
+                // (five commits and two merged tickets behind), so the ticket's own defect was
+                // not even reproducible on the base the agent was given. A checkout on a
+                // feature branch was worse: the worktree inherited unrelated in-progress work.
+                //
+                // The base is now the remote-tracking ref, fetched first. `git fetch` did not
+                // appear anywhere in this workflow before 1.4.5.
+                // ---------------------------------------------------------------------------
+                const runIn = (cmd, dir) => execSync(cmd, { cwd: dir || cwd, stdio: 'pipe' }).toString().trim();
+                const tryRunIn = (cmd, dir) => { try { return runIn(cmd, dir); } catch (e) { return ''; } };
+                const isAncestor = (dir, sha, of) => !!sha && !!of && tryRunIn('git merge-base --is-ancestor ' + sha + ' ' + of + ' && echo yes', dir) === 'yes';
+
+                // origin/HEAD is authoritative; fall back to origin/main then origin/master.
+                const resolveRemoteDefault = () => {
+                  const symbolic = tryRunIn('git symbolic-ref --quiet refs/remotes/origin/HEAD');
+                  if (symbolic) {
+                    const name = symbolic.replace(/^refs\/remotes\/origin\//, '').trim();
+                    if (name && tryRunIn('git rev-parse --verify --quiet origin/' + name)) {
+                      return { remote: 'origin', name: name, ref: 'origin/' + name, source: 'symbolic-ref' };
+                    }
+                  }
+                  const candidates = ['main', 'master'];
+                  for (let i = 0; i < candidates.length; i += 1) {
+                    if (tryRunIn('git rev-parse --verify --quiet origin/' + candidates[i])) {
+                      return { remote: 'origin', name: candidates[i], ref: 'origin/' + candidates[i], source: 'fallback-' + candidates[i] };
+                    }
+                  }
+                  return null;
+                };
+
+                const headBranch = tryRunIn('git rev-parse --abbrev-ref HEAD') || 'unknown';
+                const headSha = tryRunIn('git rev-parse HEAD') || '';
+                const remoteDefault = resolveRemoteDefault();
+
+                if (!remoteDefault) {
+                  process.stderr.write('Cannot resolve a remote default branch in ' + cwd + '\n');
+                  process.stderr.write('  refs/remotes/origin/HEAD is unset and neither origin/main nor origin/master exists.\n');
+                  process.stderr.write('Refusing to create a worktree from the local HEAD: that is how a run ended up based on\n');
+                  process.stderr.write('a stale or unrelated branch (WORKFLOW-002). Run `git fetch origin` in that repository\n');
+                  process.stderr.write('and set refs/remotes/origin/HEAD (git remote set-head origin -a), then retry.\n');
+                  process.exit(1);
+                }
+
+                // Fail-soft: a network or auth failure must not block the run, but it is
+                // recorded so a stale base can never again be silent.
+                let fetchOk = true;
+                let fetchError = '';
+                try {
+                  runIn('git fetch ' + remoteDefault.remote + ' ' + remoteDefault.name + ' --prune');
+                } catch (e) {
+                  fetchOk = false;
+                  fetchError = String((e && (e.stderr || e.message)) || e).trim().slice(0, 500);
+                }
+
+                const baseRef = remoteDefault.ref;
+                const baseSha = tryRunIn('git rev-parse ' + baseRef);
+                if (!baseSha) {
+                  process.stderr.write('Cannot resolve ' + baseRef + ' to a commit after fetching. Refusing to guess a base.\n');
+                  process.exit(1);
+                }
+
+                const warnings = [];
+                if (!fetchOk) {
+                  warnings.push('git fetch ' + remoteDefault.remote + ' ' + remoteDefault.name + ' failed, so ' + baseRef + ' may be stale: ' + fetchError);
+                }
+                if (headBranch !== remoteDefault.name) {
+                  warnings.push("the local checkout is on '" + headBranch + "', not '" + remoteDefault.name + "'; the worktree is based on " + baseRef + ' (' + baseSha.slice(0, 12) + ') so unrelated local work is not inherited');
+                }
+
+                const base = {
+                  baseRef: baseRef,
+                  baseSha: baseSha,
+                  remoteDefault: remoteDefault.name,
+                  remoteDefaultSource: remoteDefault.source,
+                  headBranch: headBranch,
+                  headSha: headSha,
+                  fetchOk: fetchOk,
+                  baseWarnings: warnings,
+                };
 
                 if (fs.existsSync(worktreePath)) {
                   fs.mkdirSync(path.join(worktreePath, '.ai-agent'), { recursive: true });
                   // A reused worktree reports the branch it is ACTUALLY on. Reporting the
                   // freshly computed name would aim the push and the pull request at a ref
                   // that does not exist.
-                  let existing = '';
-                  try {
-                    existing = execSync('git rev-parse --abbrev-ref HEAD', { cwd: worktreePath, stdio: 'pipe' }).toString().trim();
-                  } catch (e) {
-                    existing = '';
+                  const existing = tryRunIn('git rev-parse --abbrev-ref HEAD', worktreePath);
+                  const worktreeHead = tryRunIn('git rev-parse HEAD', worktreePath);
+                  // A reused worktree is only safe to continue if its HEAD descends from the
+                  // current base. Say so in the output rather than assuming it.
+                  const derivedFromBase = worktreeHead ? isAncestor(cwd, worktreeHead, baseSha) : null;
+                  if (derivedFromBase === false) {
+                    warnings.push('the reused worktree at ' + worktreePath + ' is NOT descended from ' + baseRef + '; its commits will be diffed against a base that does not contain them');
                   }
-                  process.stdout.write(JSON.stringify({
+                  process.stdout.write(JSON.stringify(Object.assign({}, base, {
                     branch: existing || branch,
                     expectedBranch: branch,
                     worktreePath: worktreePath,
                     reused: true,
                     branchMismatch: !!(existing && existing !== branch),
-                  }));
+                    worktreeHead: worktreeHead,
+                    derivedFromBase: derivedFromBase,
+                    warnings: warnings,
+                  })));
                   process.exit(0);
                 }
 
                 fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
 
+                const fail = (message, detail) => {
+                  process.stderr.write(message + '\n');
+                  if (detail) process.stderr.write(String(detail).trim() + '\n');
+                  process.exit(1);
+                };
+
+                // ALWAYS an explicit commit-ish. `git worktree add <path> -b <branch>` with no
+                // base is the defect; every invocation below names one.
                 try {
-                  execSync('git worktree add "' + worktreePath + '" -b "' + branch + '"', { cwd: cwd, stdio: 'pipe' });
+                  runIn('git worktree add "' + worktreePath + '" -b "' + branch + '" "' + baseRef + '"');
                 } catch (e) {
                   // The branch may already exist from an earlier run whose worktree was pruned.
+                  // Attaching to it blindly would reuse a branch of unknown provenance, so it
+                  // must be proven to descend from the base before it is reused.
+                  const branchRef = 'refs/heads/' + branch;
+                  if (!tryRunIn('git rev-parse --verify --quiet ' + branchRef)) {
+                    fail('Failed to create worktree from ' + baseRef + ':', (e && (e.stderr || e.message)) || e);
+                  }
+                  const branchSha = tryRunIn('git rev-parse ' + branchRef);
+                  if (!isAncestor(cwd, branchSha, baseSha)) {
+                    fail(
+                      'Refusing to reuse the existing local branch "' + branch + '" (' + String(branchSha).slice(0, 12) + '):\n' +
+                      '  it does not descend from ' + baseRef + ' (' + baseSha.slice(0, 12) + ').\n' +
+                      '  Reusing it would work the ticket on a branch based on unrelated history.\n' +
+                      '  Delete the branch (git branch -D "' + branch + '") or move it onto ' + baseRef + ' and retry.'
+                    );
+                  }
+                  warnings.push('reused the pre-existing local branch "' + branch + '" after validating that it descends from ' + baseRef);
                   try {
-                    execSync('git worktree add "' + worktreePath + '" "' + branch + '"', { cwd: cwd, stdio: 'pipe' });
+                    runIn('git worktree add "' + worktreePath + '" "' + branch + '"');
                   } catch (e2) {
-                    process.stderr.write('Failed to create worktree: ' + (e2 && e2.message ? e2.message : String(e2)) + '\n');
-                    if (e2 && e2.stderr) process.stderr.write(String(e2.stderr) + '\n');
-                    process.exit(1);
+                    fail('Failed to create worktree:', (e2 && (e2.stderr || e2.message)) || e2);
                   }
                 }
 
                 fs.mkdirSync(path.join(worktreePath, '.ai-agent'), { recursive: true });
-                process.stdout.write(JSON.stringify({
+                const createdHead = tryRunIn('git rev-parse HEAD', worktreePath);
+                if (createdHead && createdHead !== baseSha && !isAncestor(cwd, baseSha, createdHead)) {
+                  warnings.push('the new worktree HEAD ' + String(createdHead).slice(0, 12) + ' does not contain ' + baseRef + '; investigate before relying on the diff');
+                }
+                if (createdHead && createdHead !== baseSha) {
+                  warnings.push('the new worktree HEAD ' + String(createdHead).slice(0, 12) + ' differs from ' + baseRef + ' ' + baseSha.slice(0, 12) + ' (pre-existing branch reuse)');
+                }
+
+                process.stdout.write(JSON.stringify(Object.assign({}, base, {
                   branch: branch,
                   expectedBranch: branch,
                   worktreePath: worktreePath,
                   reused: false,
                   branchMismatch: false,
-                }));
+                  worktreeHead: createdHead,
+                  derivedFromBase: createdHead ? isAncestor(cwd, createdHead, baseSha) : null,
+                  warnings: warnings,
+                })));
             env:
               CWD: ${steps.resolveWorkdir.outputs.stdout}
               REF: ${input.ticketReference || input.ticketId}
@@ -511,10 +634,71 @@ steps:
                 branch ${steps.readBranch.outputs.stdout}. The ticket is in_progress;
                 a pull request will be opened for human approval once the review
                 passes, and the ticket moves to resolved when it is merged."
+        # WORKFLOW-002: the base a run was given used to be invisible. A local checkout
+        # that is not on the default branch, a failed fetch or a reused worktree that does
+        # not descend from the base are all legitimate-but-suspicious and must be visible on
+        # the ticket, not only in the run output.
+        - id: readWorktreeBaseWarning
+          name: Read worktree base warnings
+          type: cli_command
+          dependsOn: pickupComment
+          config:
+            command: node
+            args:
+              - -e
+              - |
+                let state = {};
+                try { state = JSON.parse(process.env.WT || '{}'); } catch (e) { state = {}; }
+                const warnings = Array.isArray(state.warnings) ? state.warnings : [];
+                process.stdout.write(warnings.join(' | '));
+            env:
+              WT: ${steps.prepareWorktree.outputs.stdout}
+            failOnError: false
+            output:
+              captureStdout: true
+
+        - id: readWorktreeBaseSummary
+          name: Read worktree base summary
+          type: cli_command
+          dependsOn: readWorktreeBaseWarning
+          config:
+            command: node
+            args:
+              - -e
+              - |
+                let state = {};
+                try { state = JSON.parse(process.env.WT || '{}'); } catch (e) { state = {}; }
+                const baseRef = String(state.baseRef || 'unresolved');
+                const baseSha = String(state.baseSha || '').slice(0, 12);
+                process.stdout.write(baseRef + (baseSha ? '@' + baseSha : ''));
+            env:
+              WT: ${steps.prepareWorktree.outputs.stdout}
+            failOnError: false
+            output:
+              captureStdout: true
+
+        - id: worktreeBaseWarnGate
+          name: Does the worktree base need recording
+          type: condition
+          dependsOn: readWorktreeBaseSummary
+          config:
+            condition: steps.readWorktreeBaseWarning.stdout !== ''
+            thenSteps:
+              - id: worktreeBaseWarnComment
+                name: Comment worktree base warning on ticket
+                type: service_invoke
+                config:
+                  service: core.ReactorySupportWorkflowService@1.0.0
+                  method: addComment
+                  params:
+                    ticketId: ${steps.loadTicket.result.id}
+                    comment: "Worktree for ${steps.readBranch.outputs.stdout} is based on
+                      ${steps.readWorktreeBaseSummary.outputs.stdout}. WARNING -
+                      ${steps.readWorktreeBaseWarning.outputs.stdout}"
         - id: markInProgress
           name: Move ticket to in progress
           type: service_invoke
-          dependsOn: pickupComment
+          dependsOn: worktreeBaseWarnGate
           config:
             service: core.ReactorySupportWorkflowService@1.0.0
             method: updateStatus
@@ -1013,6 +1197,123 @@ steps:
                   }
                 };
 
+                // ── default-branch validation ────────────────────────────────────────
+                // WORKFLOW-003. The guard used to restore to whatever it observed, so a mount
+                // left on a feature-branch commit by a CONCURRENT run became the next run's
+                // "correct" baseline: run N contaminated it, run N+1 recorded that as the
+                // pre-run state and restored to it. The PLUGIN-001 baseline was exactly that -
+                // headSha 8cb4bdda is an ORG-031 branch commit and not an ancestor of
+                // origin/master - and the guard restored to it and reported success.
+                //
+                // A SHA is usable as a restore target only if it is the remote default branch
+                // or an ancestor of it. null means the default branch could not be resolved
+                // offline; that is recorded rather than silently treated as clean.
+                const RUN_ID = String(process.env.RUN_ID || '').trim() || ('pid-' + process.pid);
+
+                // A submodule's `.git` is a FILE pointing at ../.git/modules/<name>, so
+                // path.join(dir, '.git') is not a directory. Ask git instead.
+                const gitDirOf = (dir) => {
+                  const absolute = git(dir, 'git rev-parse --absolute-git-dir');
+                  if (absolute) return absolute;
+                  const raw = git(dir, 'git rev-parse --git-dir');
+                  if (!raw) return path.join(dir, '.git');
+                  return path.isAbsolute(raw) ? raw : path.resolve(dir, raw);
+                };
+
+                const resolveDefault = (dir) => {
+                  const symbolic = git(dir, 'git symbolic-ref --quiet refs/remotes/origin/HEAD');
+                  if (symbolic) {
+                    const name = symbolic.replace(/^refs\/remotes\/origin\//, '').trim();
+                    if (name) {
+                      const sha = git(dir, 'git rev-parse origin/' + name);
+                      if (sha) return { ref: 'origin/' + name, name: name, sha: sha, source: 'symbolic-ref' };
+                    }
+                  }
+                  const candidates = ['main', 'master'];
+                  for (let i = 0; i < candidates.length; i += 1) {
+                    const sha = git(dir, 'git rev-parse --verify --quiet origin/' + candidates[i]);
+                    if (sha) return { ref: 'origin/' + candidates[i], name: candidates[i], sha: sha, source: 'fallback-' + candidates[i] };
+                  }
+                  return null;
+                };
+
+                const isAncestor = (dir, sha, of) => {
+                  if (!sha || !of) return null;
+                  return git(dir, 'git merge-base --is-ancestor ' + sha + ' ' + of + ' && echo yes') === 'yes';
+                };
+
+                const classifyEntry = (entry) => {
+                  const dir = within(entry.consumer, entry.path);
+                  const def = dir ? resolveDefault(dir) : null;
+                  entry.defaultRef = def ? def.ref : null;
+                  entry.defaultSha = def ? def.sha : null;
+                  entry.defaultSource = def ? def.source : 'unresolved';
+                  entry.headShaClean = null;
+                  entry.headShaDirty = null;
+                  if (def && entry.headSha) {
+                    entry.headShaClean = entry.headSha === def.sha || isAncestor(dir, entry.headSha, def.sha) === true;
+                    entry.headShaDirty = entry.headShaClean === false;
+                  }
+                  // Pre-existing gitlink drift (index != mount HEAD). Recorded, never acted on:
+                  // it may be a deliberate bump, and WORKFLOW-001's acceptance criteria require
+                  // it to be neither disturbed nor committed.
+                  entry.indexDrift = !!(entry.indexSha && entry.headSha && entry.indexSha !== entry.headSha);
+                  return entry;
+                };
+
+                // ── per-consumer mount lock ──────────────────────────────────────────
+                // Two runs in the same repository share one consumer mount. Without a lock each
+                // run's snapshot observes the other's mid-flight checkout, which is how ORG-031
+                // and PLUGIN-001 collided. The lock is per MOUNT, not global: parallel
+                // dispatches of different repositories remain a supported pattern.
+                const lockPathFor = (consumer, subPath) => {
+                  const safe = String(subPath).replace(/[^A-Za-z0-9._-]+/g, '-');
+                  return path.join(gitDirOf(consumer), 'reactor-mount-' + safe + '.lock');
+                };
+
+                const pidAlive = (pid) => {
+                  const n = Number(pid);
+                  if (!Number.isFinite(n) || n <= 0) return false;
+                  try { process.kill(n, 0); return true; } catch (e) { return !!e && e.code === 'EPERM'; }
+                };
+
+                const acquireLock = (consumer, subPath) => {
+                  const file = lockPathFor(consumer, subPath);
+                  const payload = { pid: process.pid, runId: RUN_ID, at: new Date().toISOString() };
+                  try {
+                    fs.writeFileSync(file, JSON.stringify(payload), { flag: 'wx' });
+                    return { ok: true, file: file };
+                  } catch (e) {
+                    let held = null;
+                    try { held = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e2) { held = null; }
+                    const sameRun = !!(held && held.runId && held.runId === RUN_ID);
+                    if (held && (sameRun || !pidAlive(held.pid))) {
+                      // Our own earlier attempt, or a run that died without releasing.
+                      try {
+                        fs.writeFileSync(file, JSON.stringify(Object.assign({}, payload, { tookOverFrom: held })), 'utf8');
+                        return { ok: true, file: file, tookOver: true, previous: held };
+                      } catch (e3) {
+                        return { ok: false, file: file, held: held, error: String((e3 && e3.message) || e3) };
+                      }
+                    }
+                    return { ok: false, file: file, held: held };
+                  }
+                };
+
+                const releaseLock = (file) => {
+                  try {
+                    const held = JSON.parse(fs.readFileSync(file, 'utf8'));
+                    // A run spans several processes (one per cli_command step), so identity is
+                    // the RUN ID, not the pid. A takeover by a newer run must still stand.
+                    const mine = !!(held && ((held.runId && held.runId === RUN_ID) || Number(held.pid) === process.pid));
+                    if (mine) {
+                      fs.unlinkSync(file);
+                      return true;
+                    }
+                    return false;
+                  } catch (e) { return false; }
+                };
+
                 const repoUrl = normaliseUrl(git(repo, 'git config --get remote.origin.url'));
                 const repoHead = git(repo, 'git rev-parse HEAD');
 
@@ -1106,6 +1407,17 @@ steps:
                     });
                   });
 
+                  // Classifying here (rather than only in snapshot) keeps a single definition
+                  // of "is this HEAD a legitimate pre-run state" across both modes.
+                  entries.forEach((entry) => {
+                    classifyEntry(entry);
+                    if (entry.headShaClean === null) {
+                      // Never silently call an unvalidated mount clean: without a remote default
+                      // branch there is nothing to validate the baseline against.
+                      warnings.push('could not resolve a remote default branch for ' + path.join(entry.consumer, entry.path) + '; the baseline SHA is recorded but not validated');
+                    }
+                  });
+
                   return { entries: entries, warnings: warnings, consumersScanned: consumersScanned };
                 };
 
@@ -1119,10 +1431,42 @@ steps:
                 if (MODE === 'snapshot') {
                   const collected = collect();
                   const consumerCount = collected.entries.filter((e) => e.relation === 'consumer').length;
+                  const violations = [];
+                  const locks = [];
+
+                  // Take a lock on every CONSUMER mount before trusting its state. A run that
+                  // cannot own the mount must not proceed on an assumption about it.
+                  collected.entries.forEach((entry) => {
+                    if (entry.relation !== 'consumer') return;
+                    const lock = acquireLock(entry.consumer, entry.path);
+                    entry.lockFile = lock.file;
+                    if (lock.ok) {
+                      locks.push(lock.file);
+                      if (lock.tookOver) {
+                        collected.warnings.push('took over a stale mount lock at ' + lock.file + ' (previous holder ' + JSON.stringify(lock.previous) + ')');
+                      }
+                    } else {
+                      violations.push('the mount ' + path.join(entry.consumer, entry.path) + ' is held by another ProcessAITicket run (' + JSON.stringify(lock.held || {}) + '); refusing to share one mount');
+                    }
+                  });
+
+                  // A mount whose HEAD is not on the default branch is not a pre-run state this
+                  // guard can protect: restoring to it would launder whatever left it there.
+                  collected.entries.forEach((entry) => {
+                    if (entry.headShaDirty) {
+                      violations.push('the mount ' + path.join(entry.consumer, entry.path) + ' is already on ' + String(entry.headSha).slice(0, 12) + ', which is not ' + (entry.defaultRef || 'the remote default branch') + ' or an ancestor of it; that is a leftover, not a pre-run state');
+                    }
+                  });
+
+                  const baselineReady = violations.length === 0;
                   const baseline = {
                     capturedAt: new Date().toISOString(),
                     repo: repo,
+                    runId: RUN_ID,
                     consumersScanned: collected.consumersScanned,
+                    baselineReady: baselineReady,
+                    violations: violations,
+                    locks: locks,
                     submodules: collected.entries,
                   };
                   try {
@@ -1133,12 +1477,16 @@ steps:
                     collected.warnings.push('no submodules in the worktree repo and none of the ' + collected.consumersScanned + ' consumer working cop(ies) scanned mounts it; nothing to protect');
                   }
                   process.stdout.write(JSON.stringify({
-                    ok: true,
+                    ok: baselineReady,
                     mode: MODE,
                     repo: repo,
+                    runId: RUN_ID,
                     count: collected.entries.length,
                     consumerCount: consumerCount,
                     consumersScanned: collected.consumersScanned,
+                    baselineReady: baselineReady,
+                    violations: violations,
+                    locks: locks,
                     submodules: collected.entries,
                     warnings: collected.warnings,
                   }));
@@ -1155,6 +1503,8 @@ steps:
 
                 const mutated = [];
                 const cleaned = [];
+                const violations = [];
+                const unsafeBaselines = [];
                 const warnings = current.warnings.slice();
 
                 if (!baseline) {
@@ -1163,7 +1513,15 @@ steps:
                   warnings.push('no submodule baseline was captured; cannot prove the primary checkout was left untouched');
                 }
 
+                if (baseline && baseline.baselineReady === false) {
+                  // Defensive: the pre-flight gate refuses to start the engineer on a
+                  // contaminated baseline, so a verify that sees one means it ran anyway.
+                  warnings.push('the captured baseline was already refused as unsafe; this verify cannot vouch for the primary checkout');
+                }
+
                 const previous = (baseline && Array.isArray(baseline.submodules)) ? baseline.submodules : [];
+                const shortSha = (value) => String(value || '').slice(0, 12);
+                const describeMount = (entry) => path.join(entry.consumer, entry.path);
 
                 previous.forEach((before) => {
                   const after = currentByKey[keyOf(before)];
@@ -1172,10 +1530,44 @@ steps:
                     return;
                   }
 
+                  const dir = within(before.consumer, before.path);
+
+                  // Pre-existing gitlink drift belongs to the developer, not to this run. It is
+                  // recorded so a human can see it, and neither "restored" nor committed.
+                  if (before.indexDrift || (before.indexSha && before.headSha && before.indexSha !== before.headSha)) {
+                    warnings.push('pre-existing gitlink drift for "' + before.path + '" in ' + before.consumer + ': index ' + shortSha(before.indexSha) + ' vs mount HEAD ' + shortSha(before.headSha) + ' (recorded as drift: neither restored nor committed)');
+                  }
+
+                  // A baseline SHA that is not the remote default branch or an ancestor of it is
+                  // NOT a restore target: restoring to it would make a leftover look deliberate.
+                  if (before.headShaDirty) {
+                    unsafeBaselines.push({
+                      consumer: before.consumer,
+                      path: before.path,
+                      headSha: before.headSha,
+                      defaultRef: before.defaultRef || null,
+                      indexSha: before.indexSha || null,
+                    });
+                    if (before.headSha !== after.headSha) {
+                      violations.push('the mount ' + describeMount(before) + ' moved from an ALREADY-DIRTY baseline ' + shortSha(before.headSha) + ' to ' + shortSha(after.headSha) + '. That baseline is not ' + (before.defaultRef || 'the remote default branch') + ' or an ancestor of it, so it is not a restore target - inspect the checkout manually');
+                      mutated.push({
+                        consumer: before.consumer,
+                        path: before.path,
+                        relation: before.relation || 'owned',
+                        before: before.headSha,
+                        after: after.headSha,
+                        restored: false,
+                        dirtyBaseline: true,
+                      });
+                    } else {
+                      warnings.push('the mount ' + describeMount(before) + ' was already on ' + shortSha(before.headSha) + ' (not ' + (before.defaultRef || 'the remote default branch') + ' or an ancestor of it) before the run and was left untouched; recorded as dirty, not adopted');
+                    }
+                    return;
+                  }
+
                   if (before.headSha && after.headSha && before.headSha !== after.headSha) {
                     // Pure restore of the pre-run state. Done in a guarded block so a failure to
                     // restore is reported rather than hidden.
-                    const dir = within(before.consumer, before.path);
                     let didRestore = false;
                     if (dir) {
                       try {
@@ -1202,15 +1594,23 @@ steps:
                       });
                     }
 
+                    // Restoring to the right SHA is not the same as having restored: confirm it.
+                    const restoredSha = dir ? git(dir, 'git rev-parse HEAD') : '';
+                    const restoredExactly = !!didRestore && restoredSha === before.headSha;
+                    if (!restoredExactly) {
+                      violations.push('the mount ' + describeMount(before) + ' was moved by the run from ' + shortSha(before.headSha) + ' to ' + shortSha(after.headSha) + ' and could NOT be returned to the pre-run SHA (now ' + shortSha(restoredSha) + ')');
+                    }
+
                     mutated.push({
                       consumer: before.consumer,
                       path: before.path,
                       relation: before.relation || 'owned',
                       before: before.headSha,
                       after: after.headSha,
-                      restored: didRestore,
+                      restored: restoredExactly,
+                      dirtyBaseline: false,
                     });
-                    warnings.push('"' + path.join(before.consumer, before.path) + '" moved from ' + before.headSha + ' to ' + after.headSha + (didRestore ? ' and was restored' : ' and could NOT be restored'));
+                    warnings.push('"' + describeMount(before) + '" moved from ' + before.headSha + ' to ' + after.headSha + (restoredExactly ? ' and was restored' : ' and could NOT be restored'));
                   }
 
                   if (before.indexSha && after.indexSha && before.indexSha !== after.indexSha) {
@@ -1219,15 +1619,25 @@ steps:
                   }
                 });
 
+                // Release the per-consumer locks this run took. A lock we do not own is left
+                // alone: a takeover by a newer run must stand.
+                const locksReleased = [];
+                const heldLocks = (baseline && Array.isArray(baseline.locks)) ? baseline.locks : [];
+                heldLocks.forEach((file) => { if (releaseLock(file)) locksReleased.push(file); });
+
                 process.stdout.write(JSON.stringify({
-                  ok: mutated.length === 0 && !!baseline,
+                  ok: mutated.length === 0 && violations.length === 0 && !!baseline,
                   mode: MODE,
                   repo: repo,
                   baselineFound: !!baseline,
+                  baselineReady: baseline ? baseline.baselineReady !== false : null,
                   checked: previous.length,
                   consumersScanned: current.consumersScanned,
                   mutated: mutated,
                   cleaned: cleaned,
+                  violations: violations,
+                  unsafeBaselines: unsafeBaselines,
+                  locksReleased: locksReleased,
                   warnings: warnings,
                 }));
                 process.exit(0);
@@ -1235,15 +1645,110 @@ steps:
               MODE: snapshot
               WT: ${steps.readWorktreePath.outputs.stdout}
               REPO: ${steps.resolveWorkdir.outputs.stdout}
+              RUN_ID: ${steps.loadTicket.result.reference}
             failOnError: false
             output:
               captureStdout: true
               captureStderr: true
 
+        # WORKFLOW-003 pre-flight. The guard used to be a post-hoc clean-up: the engineer
+        # ran first and the restore happened afterwards, so a mount left on a feature-branch
+        # commit by a CONCURRENT run was adopted as the "pre-run" state and restored to
+        # afterwards. The baseline is now validated BEFORE any work starts, and a mount that
+        # is already off the default branch (or held by another run) stops the run with a
+        # ticket comment and a human task instead of being used.
+        - id: readSubmoduleBaseline
+          name: Read submodule baseline readiness
+          type: cli_command
+          dependsOn: submoduleGuardSnapshot
+          config:
+            command: node
+            args:
+              - -e
+              - |
+                let state = {};
+                try { state = JSON.parse(process.env.GUARD || '{}'); } catch (e) { state = {}; }
+                process.stdout.write(state.baselineReady === false ? 'blocked' : 'ready');
+            env:
+              GUARD: ${steps.submoduleGuardSnapshot.outputs.stdout}
+            failOnError: false
+            output:
+              captureStdout: true
+
+        - id: submoduleBaselineGate
+          name: Is the primary-checkout baseline safe to work against
+          type: condition
+          dependsOn: readSubmoduleBaseline
+          config:
+            condition: steps.readSubmoduleBaseline.stdout !== 'blocked'
+            thenSteps:
+              - id: submoduleBaselineOkLog
+                name: Log baseline accepted
+                type: log
+                config:
+                  level: info
+                  message: Primary-checkout baseline accepted for
+                    ${steps.loadTicket.result.reference} - the engineer may start.
+            elseSteps:
+              - id: submoduleBaselineBlockedComment
+                name: Comment refused baseline on ticket
+                type: service_invoke
+                config:
+                  service: core.ReactorySupportWorkflowService@1.0.0
+                  method: addComment
+                  params:
+                    ticketId: ${steps.loadTicket.result.id}
+                    comment: "BLOCKED - the run refused to start because the primary checkout is
+                      not in a state this workflow can protect. A mount that is already off its
+                      default branch, or held by another run, is not a baseline: restoring to it
+                      afterwards would launder whatever left it there (WORKFLOW-003). No work was
+                      done and the checkout has not been touched. Evidence:
+                      ${steps.submoduleGuardSnapshot.outputs.stdout}"
+              - id: submoduleBaselineBlockedTask
+                name: Human review of contaminated primary checkout
+                type: user_activity
+                dependsOn: submoduleBaselineBlockedComment
+                config:
+                  activityType: approval
+                  assignee: ${steps.loadTicket.result.assignedToEmail}
+                  message: ${steps.loadTicket.result.reference} was blocked - a mounted
+                    consumer checkout is not on its default branch or is held by another run
+                  props:
+                    ticketReference: ${steps.loadTicket.result.reference}
+                    ticketId: ${steps.loadTicket.result.id}
+                    worktree: ${steps.readWorktreePath.outputs.stdout}
+                    baselinePath: ${steps.readWorktreePath.outputs.stdout}/.ai-agent/submodule-baseline.json
+                    evidence: ${steps.submoduleGuardSnapshot.outputs.stdout}
+              # Fail loudly and immediately: the engineer must not start against a checkout
+              # whose pre-run state cannot be trusted. Nothing has been mutated at this point.
+              - id: submoduleBaselineHalt
+                name: Refuse to run against the contaminated checkout
+                type: cli_command
+                dependsOn: submoduleBaselineBlockedTask
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - |
+                      let state = {};
+                      try { state = JSON.parse(process.env.GUARD || '{}'); } catch (e) { state = {}; }
+                      const violations = Array.isArray(state.violations) ? state.violations : [];
+                      process.stderr.write('Refusing to start the engineering session: the primary-checkout baseline is not usable.\n');
+                      if (!violations.length) process.stderr.write('  - the guard reported the baseline as not ready without a reason\n');
+                      violations.forEach((item) => process.stderr.write('  - ' + String(item) + '\n'));
+                      process.stderr.write('Nothing was mutated. Restore the checkout to its default branch and re-dispatch.\n');
+                      process.exit(1);
+                  env:
+                    GUARD: ${steps.submoduleGuardSnapshot.outputs.stdout}
+                  failOnError: true
+                  output:
+                    captureStdout: true
+                    captureStderr: true
+
         - id: engineer
           name: Engineering agent run
           type: agent_conversation
-          dependsOn: openWorkspaceNote
+          dependsOn: submoduleBaselineGate
           config:
             personaId: ${input.agentId}
             provider: ${steps.resolveProvider.outputs.stdout}
@@ -1291,10 +1796,16 @@ steps:
               you are working in. Checking your branch out INSIDE that mount detaches the
               developer's checkout and leaves the next run fighting their working tree.
 
-              There is exactly one supported way to verify a submodule-mounted package. Use it by
-              default. Do not check anything out in place and do not hand-roll a
-              "record the SHA and restore it afterwards" dance - the restore is what fails.
+              There is exactly ONE supported way to verify a submodule-mounted package, and it is
+              MANDATORY. Do not check anything out in place and do not hand-roll a
+              "record the SHA and restore it afterwards" dance - the restore is what fails, and it
+              is what allowed a concurrent run's branch commit to become the next run's baseline.
 
+              This is enforced, not merely requested. Before you start, the workflow snapshots
+              every consumer mount, validates that its HEAD is the remote default branch or an
+              ancestor of it, and refuses to run at all if it is not. After you finish it compares
+              those mounts again and reports any change on the ticket as a defect, restoring the
+              pre-run SHA only where that SHA was a legitimate pre-run state.
               1. Detect the mount from the CONSUMER, never from the repository you are working in:
 
                    CONSUMER=<consumer working copy>       # e.g. ~/Projects/reactory-pwa-client
@@ -1327,7 +1838,7 @@ steps:
 
               If verification needs something the clone cannot reach, report the run as blocked and
               say what was missing. Never fall back to checking out inside the developer's mount.
-
+              Checking a branch out inside a consumer mount is detected and reported as a defect.
               COMPLETION CONTRACT
 
               Write a single JSON file to the exact path given to you as "REPORT PATH". REQUIREMENT: this object MUST have a TOP-LEVEL "status" field whose value is exactly one of "completed", "blocked" or "failed". It is the RUN status, NOT the ticket status - do not rename it, nest it, or omit it. The pipeline cannot proceed without it. Include every field below:
@@ -1450,6 +1961,7 @@ steps:
               MODE: verify
               WT: ${steps.readWorktreePath.outputs.stdout}
               REPO: ${steps.resolveWorkdir.outputs.stdout}
+              RUN_ID: ${steps.loadTicket.result.reference}
             failOnError: false
             output:
               captureStdout: true
@@ -1467,7 +1979,13 @@ steps:
                 let state = {};
                 try { state = JSON.parse(process.env.GUARD || '{}'); } catch (e) { state = {}; }
                 const mutated = Array.isArray(state.mutated) ? state.mutated : [];
-                process.stdout.write(mutated.length > 0 ? 'yes' : 'no');
+                const violations = Array.isArray(state.violations) ? state.violations : [];
+                const unsafe = Array.isArray(state.unsafeBaselines) ? state.unsafeBaselines : [];
+                // Reported as a DEFECT, not a log line: a mount that moved, a restore that did
+                // not land on the pre-run SHA, a dirty baseline or no baseline at all each mean
+                // this run cannot vouch for the developer's checkout.
+                const flagged = mutated.length > 0 || violations.length > 0 || unsafe.length > 0 || state.baselineFound === false || state.baselineReady === false;
+                process.stdout.write(flagged ? 'yes' : 'no');
             env:
               GUARD: ${steps.submoduleGuardVerify.outputs.stdout}
             failOnError: false
@@ -1490,10 +2008,13 @@ steps:
                   params:
                     ticketId: ${steps.loadTicket.result.id}
                     comment: "WARNING - the engineering session mutated a git submodule in the
-                      PRIMARY checkout. The workflow restored the original SHA where it
-                      could; verify the checkout before continuing. Evidence:
-                      ${steps.submoduleGuardVerify.outputs.stdout}"
-
+                      PRIMARY checkout, or the guard could not vouch for it. Checking a branch
+                      out inside a consumer mount is a defect: the supported recipe clones into
+                      a temporary directory and symlinks the consumer's node_modules. The
+                      workflow restored the pre-run SHA only where that SHA was a legitimate
+                      pre-run state (the remote default branch or an ancestor of it); anything
+                      else is left untouched for a human. Verify the checkout before continuing.
+                      Evidence: ${steps.submoduleGuardVerify.outputs.stdout}"
         - id: captureReport
           name: Capture completion report
           type: cli_command
@@ -3077,7 +3598,7 @@ steps:
                               body = legacyBody() + '\n\n> **PR template not applied:** ' + warnings.join('; ');
                             }
 
-                            body = body.replace(/\s+$/, '') + '\n\n---\nGenerated by core.ProcessAITicket@1.4.4\n';
+                            body = body.replace(/\s+$/, '') + '\n\n---\nGenerated by core.ProcessAITicket@1.4.5\n';
 
                             const bodyFile = path.join(wt, '.ai-agent', 'pr-body.md');
                             fs.writeFileSync(bodyFile, body, 'utf8');
