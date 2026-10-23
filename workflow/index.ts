@@ -45,6 +45,16 @@ const REACTOR_YAML_WORKFLOWS: IReactorYamlWorkflow[] = [
   { nameSpace: 'reactor', name: 'GraphExplore', filename: 'GraphExplore.yaml', version: '1.0.0' },
   { nameSpace: 'reactor', name: 'ProcessConversationWorkflow', filename: 'ProcessConversationWorkflow.yaml', version: '1.0.0' },
 
+  // ── Durable agent continuation (REACTORY-302016408) ────────────────────────
+  // One instance per parked continuation. Started at REGISTRATION from the live
+  // session context (see AgentContinuation.yaml), never at fire time — that is
+  // what makes the wake turn attributable to the session owner.
+  { nameSpace: 'reactor', name: 'AgentContinuation', filename: 'AgentContinuation.yaml', version: '1.0.0' },
+  // The 60s clock: publishes the wake event (or the not_observed sentinel at the
+  // deadline) under each waiting instance's own tenant. Schedule lives in
+  // reactory-data: workflows/schedules/reactor.agentcontinuationsweeper-1.0.0-schedule.yaml.
+  { nameSpace: 'reactor', name: 'AgentContinuationSweeper', filename: 'AgentContinuationSweeper.yaml', version: '1.0.0' },
+
   // ── AI engineering ticket pipeline (core namespace) ────────────────────────
   // Ships with the reactor module because the pipeline is an AI capability, even
   // though it uses the `core` workflow namespace alongside the Support triage /

@@ -26,6 +26,17 @@ import ReactoryAiModel from './ReactoryAiModel';
 import ReactoryAiModelPricing from './ReactoryAiModelPricing';
 import ReactorConversationMessage from './ReactorConversationMessage';
 import ReactorAiFailure from './ReactorAiFailure';
+import AgentContinuationModel, { generateCorrelationKey } from './AgentContinuation';
+// Type-only re-export: `export type` is erased, so no runtime binding is emitted
+// for these under babel/isolatedModules.
+export type {
+  IAgentContinuation,
+  IAgentContinuationDocument,
+  ContinuationTrigger,
+  ContinuationState,
+  ContinuationOutcome,
+  ContinuationFiredBy,
+} from './AgentContinuation';
 import seedAiProviders from './seedAiProviders';
 
 const {
@@ -121,6 +132,12 @@ export {
   ReactoryAiModelPricing,
   ReactorConversationMessage,
   seedAiProviders,
+  // Durable agent continuation (models/AgentContinuation.ts).
+  // Registered by direct import rather than as a component entry: the record is
+  // internal state behind `reactor.AgentContinuationService@1.0.0`, exactly like
+  // ReactorConversationMessage above, and must not be exposed as a component.
+  AgentContinuationModel,
+  generateCorrelationKey,
 };
 
 export default [

@@ -30,6 +30,10 @@ import { ShellSessionManager } from "./reactor/ShellSessionManager";
 import MCPRegistryService from "./mcp/MCPRegistryService";
 import ReactorPlaywrightService from "./playwright/ReactorPlaywrightService";
 import PersonaLoaderService from "@reactory/server-modules/reactory-reactor/ai/persona/loader/persona-loader";
+// Durable agent continuation (REACTORY-302016408). Registered like every other
+// reactor service; `lifeCycle` stays at the decorator default (`instance`) so the
+// wake path holds the workflow instance's own identity.
+import AgentContinuationService from "./reactor/AgentContinuationService";
 
 export default [
   ReactorMacroService,
@@ -63,5 +67,6 @@ export default [
   StreamingTransportManager,
   ShellSessionManager,
   ReactorPlaywrightService,
-  MarkdownProjectProcessor
+  MarkdownProjectProcessor,
+  AgentContinuationService
 ];
