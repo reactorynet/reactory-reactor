@@ -1,5 +1,9 @@
 import Reactory from '@reactorynet/reactory-core';
 import { ChatState, Macro, MacroComponentDefinition } from '../../openai/types/chat';
+// Three levels up: runtime -> macro -> ai -> <module root>. The policy helpers are
+// imported (not duplicated) so the macro and the service can never disagree about
+// which predicates are permitted.
+import { isConditionPredicateAllowed, describeConditionPolicy } from '../../../services/reactor/AgentContinuationService';
 
 /**
  * Durable agent continuation macros (REACTORY-302016408).
@@ -125,6 +129,17 @@ export function buildTrigger(props: IScheduleContinuationProps):
   if (supplied[0] === 'condition') {
     if (!props.condition?.serviceId || !props.condition?.method) {
       return { error: '`condition` needs both serviceId and method.' };
+    }
+    // A condition is evaluated later, unattended, in a context rebuilt from the
+    // registrant — so an arbitrary service method would be a confused-deputy path.
+    // Refused here as well as at the service boundary, so the model gets the
+    // actionable message instead of a generic registration failure.
+    if (!isConditionPredicateAllowed(props.condition.serviceId, props.condition.method)) {
+      return {
+        error:
+          `\`${props.condition.serviceId}.${props.condition.method}\` is not a permitted condition predicate. ` +
+          describeConditionPolicy(),
+      };
     }
     return { trigger: { kind: 'condition', ...props.condition } };
   }
@@ -438,7 +453,8 @@ That single string is what stops an unobserved signal being reported as fact.
               },
               condition: {
                 type: 'object',
-                description: 'Trigger: fire when a service method satisfies a value.',
+                description:
+                  'Trigger: fire when a service method satisfies a value. Only an explicit allowlist of read-only predicates is permitted, and the check runs as you, not as the system. An unlisted pair is refused — use `at` instead.',
                 properties: {
                   serviceId: { type: 'string', description: 'e.g. reactor.ReactorProjectService@1.0.0' },
                   method: { type: 'string' },

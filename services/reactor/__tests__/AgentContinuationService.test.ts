@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, jest } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 import { ObjectId } from 'mongodb';
 
 /**
@@ -53,6 +53,13 @@ import AgentContinuationService, {
   parseOutcome,
   describeReceivedOutcome,
   describeTrigger,
+  registerConditionPredicate,
+  clearConditionPredicates,
+  listConditionPredicates,
+  isConditionPredicateAllowed,
+  describeConditionPolicy,
+  validateConditionParams,
+  MAX_CONDITION_PARAM_BYTES,
   MAX_PENDING_PER_SESSION,  MIN_INTERVAL_MS,
   ACTIVE_STATES,
   CONTINUATION_EVENT_NAME,
@@ -207,6 +214,37 @@ beforeEach(() => {
   service.context = buildContext();
   // No backoff in tests: the retry path is exercised, not waited on.
   service.deliveryRetryDelayMs = 0;
+
+  // The condition policy is module-level state, so it must not leak between tests.
+  clearConditionPredicates();
+
+  // Condition evaluation rebuilds the OWNER's context in production. The default
+  // here is a stub that resolves to the record owner, so a suite that is not about
+  // identity never pays for a real context factory; the identity tests override it
+  // with a spy that records what was asked for.
+  service.conditionContextBuilder = jest.fn(async (identity: any) => ({
+    user: { _id: ownerId, email: identity?.userEmail },
+    getService: (this.context as any)?.getService,
+    log: jest.fn(),
+  }));
+
+  // Write paths default to "matched nothing". Without this an unmocked call falls
+  // through to real mongoose and the test hangs on a connection instead of failing
+  // visibly; any test that asserts a write re-spies it with real behaviour.
+  jest.spyOn(AgentContinuationModel, 'updateOne').mockReturnValue(queryFn(() => ({ acknowledged: true })) as any);
+  jest.spyOn(AgentContinuationModel, 'deleteOne').mockReturnValue(queryFn(() => ({ deletedCount: 0 })) as any);
+  jest.spyOn(AgentContinuationModel, 'findOneAndUpdate').mockReturnValue(queryFn(() => null) as any);
+  jest.spyOn(AgentContinuationModel, 'countDocuments').mockReturnValue(queryFn(() => 0) as any);
+
+  // Condition evaluation rebuilds the OWNER's context in production. The default
+  // here resolves to the record owner and borrows the service's own registry, so a
+  // suite that is not about identity never pays for a real context factory; the
+  // identity tests override it with a spy that records what was asked for.
+  service.conditionContextBuilder = jest.fn(async (identity: any) => ({
+    user: { _id: ownerId, email: identity?.userEmail },
+    getService: service.context.getService,
+    log: jest.fn(),
+  }));
 
   jest.spyOn(AgentContinuationModel.prototype, 'save').mockImplementation(async function (this: any) {
     // Captured so the identity, the key's entropy and the deadline can be asserted.
@@ -688,7 +726,9 @@ describe('claimDue — what the sweeper will fire', () => {
 
   beforeEach(() => {
     conditionService.isMerged.mockReset();
-    // The condition trigger's target service is resolved through the context.
+    // The predicate must be permitted for a condition to be evaluated at all.
+    registerConditionPredicate({ serviceId: 'test.Conditions@1.0.0', method: 'isMerged' });
+    // The condition trigger's target service is resolved through the OWNER context.
     const previous = service.context.getService;
     service.context.getService = jest.fn((id: string) =>
       id === 'test.Conditions@1.0.0' ? conditionService : previous(id),
@@ -1228,6 +1268,12 @@ describe('markArmed and complete', () => {
 // ── F3: condition evaluation failure ─────────────────────────────────────────
 
 describe('claimDue — condition evaluation failure', () => {
+  // The predicates used below must be permitted, or the allowlist would refuse them
+  // before the behaviour under test is reached.
+  beforeEach(() => {
+    registerConditionPredicate({ serviceId: 'test.Conditions@1.0.0', method: 'isMerged' });
+  });
+
   it('treats an unavailable condition service as "not satisfied" and records why', async () => {
     const record = baseRecord({
       trigger: { kind: 'condition', serviceId: 'missing.Service@1.0.0', method: 'isMerged' },
@@ -1262,7 +1308,6 @@ describe('claimDue — condition evaluation failure', () => {
           }
         : getService(id),
     );
-
     const result = await service.claimDue({ now: new Date() });
 
     expect(result.due).toBe(0);
@@ -1682,6 +1727,7 @@ describe('validateTrigger — the shapes register refuses', () => {
   it('accepts a well-formed trigger of every kind', async () => {
     // The complement of the refusals above: each kind's happy path must reach the
     // service, or the macro would be advertising triggers register() rejects.
+    registerConditionPredicate({ serviceId: 'reactor.X@1.0.0', method: 'isMerged' });
     jest.spyOn(AgentContinuationModel, 'countDocuments').mockReturnValue(queryFn(() => 0) as any);
     jest.spyOn(AgentContinuationModel, 'findOne').mockReturnValue(queryFn(() => null) as any);
     jest.spyOn(AgentContinuationModel, 'updateOne').mockReturnValue(queryFn(() => ({})) as any);
@@ -1711,5 +1757,595 @@ describe('planTriggerDecision — an `at` trigger overtaken by its deadline', ()
       firedBy: 'expiry',
       reason: 'deadline_passed',
     });
+  });
+});
+// ── F1 (review 2): condition triggers must not be a system-privileged proxy ──
+
+/**
+ * The reviewer's escalation path: `scheduleContinuation` is exposed to role USER,
+ * and the SWEEPER evaluates a `condition` under its own identity — which is the
+ * system account. Without a policy a user (or a prompt-injected model) could name
+ * any service method and have it called with SYSTEM privileges, with model-chosen
+ * arguments, once per tick for up to 30 days.
+ *
+ * Two independent gates now, and each is asserted separately:
+ *   1. an allowlist of `serviceId`/`method` pairs, empty by default, checked at
+ *      registration AND again at evaluation time;
+ *   2. evaluation runs in a context rebuilt from the RECORD OWNER, verified to
+ *      really be the owner before anything is called (because
+ *      `createWorkflowContext` fails OPEN to the system context).
+ */
+
+describe('condition policy — the allowlist', () => {
+  afterEach(() => {
+    clearConditionPredicates();
+  });
+
+  it('is empty by default, so nothing is permitted', () => {
+    expect(listConditionPredicates()).toEqual([]);
+    expect(isConditionPredicateAllowed('core.UserService@1.0.0', 'createUser')).toBe(false);
+    expect(describeConditionPolicy()).toMatch(/No condition predicates are permitted/);
+  });
+
+  it('permits only the exact serviceId/method pair that was registered', () => {
+    registerConditionPredicate({ serviceId: 'reactor.X@1.0.0', method: 'isMerged', description: 'PR state' });
+
+    expect(isConditionPredicateAllowed('reactor.X@1.0.0', 'isMerged')).toBe(true);
+    // No prefixes, no wildcards, no case folding, no partial service match.
+    expect(isConditionPredicateAllowed('reactor.X@1.0.0', 'ismerged')).toBe(false);
+    expect(isConditionPredicateAllowed('reactor.X@1.0.0', 'merge')).toBe(false);
+    expect(isConditionPredicateAllowed('reactor.X', 'isMerged')).toBe(false);
+    expect(isConditionPredicateAllowed('reactor.X@1.0.1', 'isMerged')).toBe(false);
+    expect(isConditionPredicateAllowed('', 'isMerged')).toBe(false);
+  });
+
+  it('is idempotent, and refuses an incomplete registration', () => {
+    registerConditionPredicate({ serviceId: 'a.B@1.0.0', method: 'c' });
+    registerConditionPredicate({ serviceId: 'a.B@1.0.0', method: 'c' });
+    expect(listConditionPredicates()).toHaveLength(1);
+
+    expect(() => registerConditionPredicate({ serviceId: '', method: 'c' })).toThrow(/serviceId and method/);
+    expect(() => registerConditionPredicate({ serviceId: 'a.B@1.0.0', method: '' } as any)).toThrow();
+  });
+
+  it('names the permitted pairs in the policy description', () => {
+    registerConditionPredicate({ serviceId: 'a.B@1.0.0', method: 'c' });
+    expect(describeConditionPolicy()).toContain('a.B@1.0.0.c');
+  });
+});
+
+describe('condition params — bounded input', () => {
+  it('accepts a plain, small object and nothing else', () => {
+    expect(validateConditionParams(undefined)).toBeUndefined();
+    expect(validateConditionParams({})).toBeUndefined();
+    expect(validateConditionParams({ id: 'x' })).toBeUndefined();
+
+    expect(validateConditionParams([])).toMatch(/plain object/);
+    expect(validateConditionParams('x')).toMatch(/plain object/);
+    expect(validateConditionParams(new Date() as any)).toMatch(/plain object/);
+    expect(validateConditionParams({ a: 'x'.repeat(MAX_CONDITION_PARAM_BYTES) })).toMatch(/at most/);
+
+    const circular: any = {};
+    circular.self = circular;
+    expect(validateConditionParams(circular)).toMatch(/JSON-serialisable/);
+  });
+});
+
+describe('register — an unpermitted condition is refused', () => {
+  const conditionInput = (serviceId: string, method: string, params?: any) => ({
+    chatSessionId: sessionId.toString(),
+    personaId: 'ReactorAIPersona',
+    reason: 'PR #482 merge',
+    resumePrompt: 'Check whether PR #482 merged.',
+    expirePrompt: 'It was not observed.',
+    trigger: { kind: 'condition', serviceId, method, ...(params ? { params } : {}) },
+    ttlMs: 3_600_000,
+  });
+
+  beforeEach(() => {
+    clearConditionPredicates();
+    jest
+      .spyOn(ReactorConversationModel, 'findOne')
+      .mockReturnValue(queryFn(() => ({ _id: sessionId, personaId: 'ReactorAIPersona' })) as any);
+  });
+
+  afterEach(() => {
+    clearConditionPredicates();
+  });
+
+  it("refuses the reviewer's exact reproduction — createUser via core.UserService", async () => {
+    // The escalation this closes: a normal user naming a mutating admin method.
+    const result = await service.register(
+      conditionInput('core.UserService@1.0.0', 'createUser', { email: 'attacker@example.com' }),
+    );
+
+    expect(result.registered).toBe(false);
+    expect(result.code).toBe('invalid_trigger');
+    expect(result.error).toMatch(/not a permitted condition predicate/);
+    expect(result.error).toMatch(/core\.UserService@1\.0\.0\.createUser/);
+    // Nothing is waiting, so nothing may have been started.
+    expect(startWorkflow).not.toHaveBeenCalled();
+  });
+
+  it('refuses before the caps, budget and duplicate checks can be reached', async () => {
+    const countDocuments = jest.spyOn(AgentContinuationModel, 'countDocuments');
+    await service.register(conditionInput('core.UserService@1.0.0', 'createUser'));
+    // validateTrigger runs first, so no other work is done.
+    expect(countDocuments).not.toHaveBeenCalled();
+    expect(checkUserBudget).not.toHaveBeenCalled();
+  });
+
+  it('still refuses a permitted method on an unprefixed service id', async () => {
+    registerConditionPredicate({ serviceId: 'reactor.X@1.0.0', method: 'isMerged' });
+    const result = await service.register(conditionInput('reactor.X', 'isMerged'));
+    expect(result.registered).toBe(false);
+  });
+
+  it('refuses unattested params even for a permitted predicate', async () => {
+    registerConditionPredicate({ serviceId: 'reactor.X@1.0.0', method: 'isMerged' });
+    const result = await service.register(conditionInput('reactor.X@1.0.0', 'isMerged', ['not', 'an', 'object']));
+    expect(result.registered).toBe(false);
+    expect(result.error).toMatch(/plain object/);
+  });
+
+  it('accepts a permitted predicate and starts its waiter', async () => {
+    registerConditionPredicate({ serviceId: 'reactor.X@1.0.0', method: 'isMerged' });
+    jest.spyOn(AgentContinuationModel, 'countDocuments').mockReturnValue(queryFn(() => 0) as any);
+    jest.spyOn(AgentContinuationModel, 'findOne').mockReturnValue(queryFn(() => null) as any);
+    jest.spyOn(AgentContinuationModel, 'updateOne').mockReturnValue(queryFn(() => ({})) as any);
+
+    const result = await service.register(conditionInput('reactor.X@1.0.0', 'isMerged', { pr: 482 }));
+
+    expect(result.registered).toBe(true);
+    expect(startWorkflow).toHaveBeenCalled();
+  });
+});
+
+describe('claimDue — a permitted condition is evaluated AS THE OWNER', () => {
+  const OWNER_EMAIL = 'owner@example.com';
+  const predicateService = { isMerged: jest.fn() };
+
+  const conditionRecord = (overrides: Record<string, any> = {}) =>
+    baseRecord({
+      ownerEmail: OWNER_EMAIL,
+      partnerKey: 'reactory',
+      trigger: {
+        kind: 'condition',
+        serviceId: 'reactor.X@1.0.0',
+        method: 'isMerged',
+        params: { pr: 482 },
+        expectPath: 'merged',
+        expectValue: true,
+      },
+      fireAt: new Date(Date.now() + 86_400_000),
+      ...overrides,
+    });
+
+  beforeEach(() => {
+    clearConditionPredicates();
+    registerConditionPredicate({ serviceId: 'reactor.X@1.0.0', method: 'isMerged' });
+    predicateService.isMerged.mockReset();
+    predicateService.isMerged.mockResolvedValue({ merged: true });
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [conditionRecord()]) as any);
+  });
+
+  afterEach(() => {
+    clearConditionPredicates();
+  });
+
+  /**
+   * An owner context whose identity is spelled out, so the test can prove WHICH
+   * identity made the call rather than just that a call happened.
+   */
+  const ownerContext = (email: string) => ({
+    user: { _id: ownerId, email },
+    getService: jest.fn((id: string) => (id === 'reactor.X@1.0.0' ? predicateService : null)),
+    log: jest.fn(),
+  });
+
+  it('invokes the predicate through the OWNER context, not the sweeper context', async () => {
+    const sweeperGetService = jest.fn((id: string) => (id === 'reactor.X@1.0.0' ? predicateService : null));
+    service.context = { user: null, partner: { key: 'reactory' }, getService: sweeperGetService, log: jest.fn() };
+
+    const owner = ownerContext(OWNER_EMAIL);
+    const conditionContextBuilder = jest.fn(async () => owner as any);
+    service.conditionContextBuilder = conditionContextBuilder;
+
+    const result = await service.claimDue({ now: new Date() });
+
+    // The evaluation asked for the RECORD OWNER's identity...
+    expect(conditionContextBuilder).toHaveBeenCalledWith({
+      userEmail: OWNER_EMAIL,
+      partnerKey: 'reactory',
+    });
+    // ...resolved the target service from THAT context, and called it there.
+    expect(owner.getService).toHaveBeenCalledWith('reactor.X@1.0.0');
+    expect(predicateService.isMerged).toHaveBeenCalledWith({ pr: 482 });
+    // The sweeper's own registry was never used to reach the predicate.
+    expect(sweeperGetService).not.toHaveBeenCalledWith('reactor.X@1.0.0');
+    expect(result.due).toBe(1);
+    expect(result.plan[0].firedBy).toBe('condition');
+  });
+
+  it('refuses when the rebuilt context is the SYSTEM fallback', async () => {
+    // `createWorkflowContext` fails open to state.systemContext on a rehydrate
+    // failure. That must never become a privileged invocation.
+    const systemContext = ownerContext('system@reactory.net');
+    service.conditionContextBuilder = jest.fn(async () => systemContext as any);
+    const updateOne = jest.spyOn(AgentContinuationModel, 'updateOne').mockReturnValue(queryFn(() => ({})) as any);
+
+    const result = await service.claimDue({ now: new Date() });
+
+    expect(result.due).toBe(0);
+    expect(predicateService.isMerged).not.toHaveBeenCalled();
+    expect((updateOne.mock.calls[0] as any[])[1].$set.lastError).toMatch(
+      /refusing to evaluate as system@reactory\.net/,
+    );
+  });
+
+  it('refuses when the rebuilt context carries no user at all', async () => {
+    service.conditionContextBuilder = jest.fn(async () => ({ getService: jest.fn() } as any));
+
+    const result = await service.claimDue({ now: new Date() });
+
+    expect(result.due).toBe(0);
+    expect(predicateService.isMerged).not.toHaveBeenCalled();
+  });
+
+  it('refuses when the record has no owner email to rebuild from', async () => {
+    registerConditionPredicate({ serviceId: 'reactor.X@1.0.0', method: 'isMerged' });
+    jest
+      .spyOn(AgentContinuationModel, 'find')
+      .mockReturnValue(queryFn(() => [conditionRecord({ ownerEmail: '' })]) as any);
+    const builder = jest.fn();
+    service.conditionContextBuilder = builder as any;
+
+    const result = await service.claimDue({ now: new Date() });
+
+    expect(result.due).toBe(0);
+    expect(builder).not.toHaveBeenCalled();
+  });
+
+  it('refuses a record whose predicate is no longer permitted', async () => {
+    // Defence in depth: the record could predate a narrowed policy, or have been
+    // written by a path that skipped validateTrigger.
+    clearConditionPredicates();
+    const builder = jest.fn();
+    service.conditionContextBuilder = builder as any;
+    const updateOne = jest.spyOn(AgentContinuationModel, 'updateOne').mockReturnValue(queryFn(() => ({})) as any);
+
+    const result = await service.claimDue({ now: new Date() });
+
+    expect(result.due).toBe(0);
+    expect(builder).not.toHaveBeenCalled();
+    expect(predicateService.isMerged).not.toHaveBeenCalled();
+    expect((updateOne.mock.calls[0] as any[])[1].$set.lastError).toMatch(/is not permitted/);
+  });
+
+  it('reports "not satisfied" when the context builder throws', async () => {    service.conditionContextBuilder = jest.fn(async () => {
+      throw new Error('factory exploded');
+    });
+
+    const result = await service.claimDue({ now: new Date() });
+
+    expect(result.due).toBe(0);
+    expect(predicateService.isMerged).not.toHaveBeenCalled();
+  });
+});
+
+// ── F2 (review 2): fire() must not coerce an explicit typo ──────────────────
+
+describe('fire — an explicitly supplied outcome must be recognised', () => {
+  it.each([
+    ['a stale word', 'expired'],
+    ['wrong case', 'Observed'],
+    ['the unresolved template token', '${variables.wake.outcome}'],
+    ['an object', { outcome: 'observed' }],
+  ])('refuses %s rather than publishing it as observed', async (_label, value) => {
+    const store = installStore(baseRecord());
+
+    const result = await service.fire({ continuationId: 'cont-1', outcome: value as any, source: 'sweeper' });
+
+    expect(result.fired).toBe(false);
+    expect(result.reason).toBe('invalid_outcome');
+    expect(publishWorkflowEvent).not.toHaveBeenCalled();
+    expect(store.doc.eventPublishedAt).toBeUndefined();
+  });
+
+  it('still defaults an ABSENT outcome to observed (the producer default)', async () => {
+    const store = installStore(baseRecord());
+
+    const result = await service.fire({ continuationId: 'cont-1', source: 'sweeper' });
+
+    expect(result.fired).toBe(true);
+    expect(store.doc.eventOutcome).toBe('observed');
+    expect((publishWorkflowEvent as jest.Mock).mock.calls[0][2]).toEqual(
+      expect.objectContaining({ outcome: 'observed' }),
+    );
+  });
+
+  it('still publishes an explicit not_observed', async () => {
+    const store = installStore(baseRecord());
+
+    const result = await service.fire({ continuationId: 'cont-1', outcome: 'not_observed', source: 'sweeper' });
+
+    expect(result.fired).toBe(true);
+    expect(store.doc.eventOutcome).toBe('not_observed');
+  });
+});
+
+// ── F3 (review 2): recovery must not re-arm a dead waiter ───────────────────
+
+describe('recoverStalledFiring — a waiter that can no longer be woken', () => {
+  const staleAt = (attempt: number, overrides: Record<string, any> = {}) =>
+    baseRecord({
+      state: 'firing',
+      attempt,
+      maxAttempts: 5,
+      workflowInstanceId: 'instance-1',
+      updatedAt: new Date(Date.now() - 10 * 60_000),
+      ...overrides,
+    });
+
+  it('re-arms on the FIRST recovery without paying for an instance lookup', async () => {
+    const stale = staleAt(0);
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [stale]) as any);
+    const findOneAndUpdate = jest
+      .spyOn(AgentContinuationModel, 'findOneAndUpdate')
+      .mockReturnValue(queryFn(() => ({ ...stale, state: 'armed', attempt: 1 })) as any);
+
+    const result = await service.recoverStalledFiring({ now: new Date() });
+
+    expect(result.recovered).toBe(1);
+    expect(getWorkflowHistoryById).not.toHaveBeenCalled();
+    expect(findOneAndUpdate).toHaveBeenCalled();
+  });
+
+  it('fails visibly on a later recovery when the instance has completed', async () => {
+    // The reviewer's case: the waiter claimed, crashed before complete(), and the
+    // engine then finished the instance. Re-arming would leave nothing to wake.
+    const stale = staleAt(1);
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [stale]) as any);
+    getWorkflowHistoryById.mockResolvedValue({ id: 'instance-1', status: 2, statusLabel: 'COMPLETE' });
+    const findOneAndUpdate = jest
+      .spyOn(AgentContinuationModel, 'findOneAndUpdate')
+      .mockReturnValue(queryFn(() => ({ ...stale, state: 'failed' })) as any);
+
+    const result = await service.recoverStalledFiring({ now: new Date() });
+
+    expect(getWorkflowHistoryById).toHaveBeenCalledWith('instance-1');
+    expect(result.recovered).toBe(0);
+    const [filter, update] = findOneAndUpdate.mock.calls[0] as any[];
+    expect(filter.state).toEqual({ $nin: ['fired', 'expired', 'cancelled', 'orphaned', 'failed'] });
+    expect(update.$set.state).toBe('failed');
+    expect(update.$set.lastError).toMatch(/no longer be woken/);
+    expect(taskSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats TERMINATED and a completeTime as terminal too', async () => {
+    const stale = staleAt(1);
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [stale]) as any);
+    getWorkflowHistoryById.mockResolvedValue({ id: 'instance-1', status: 3, statusLabel: 'TERMINATED' });
+    jest
+      .spyOn(AgentContinuationModel, 'findOneAndUpdate')
+      .mockReturnValue(queryFn(() => ({ ...stale, state: 'failed' })) as any);
+
+    await service.recoverStalledFiring({ now: new Date() });
+    expect(taskSave).toHaveBeenCalled();
+
+    taskSave.mockClear();
+    getWorkflowHistoryById.mockResolvedValue({ id: 'instance-1', status: 1, completeTime: new Date() });
+    await service.recoverStalledFiring({ now: new Date() });
+    expect(taskSave).toHaveBeenCalled();
+  });
+
+  it('re-arms a later recovery when the instance is still runnable', async () => {
+    const stale = staleAt(1);
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [stale]) as any);
+    getWorkflowHistoryById.mockResolvedValue({ id: 'instance-1', status: 1, statusLabel: 'RUNNABLE' });
+    jest
+      .spyOn(AgentContinuationModel, 'findOneAndUpdate')
+      .mockReturnValue(queryFn(() => ({ ...stale, state: 'armed' })) as any);
+
+    const result = await service.recoverStalledFiring({ now: new Date() });
+
+    expect(result.recovered).toBe(1);
+    expect(taskSave).not.toHaveBeenCalled();
+  });
+
+  it('re-arms when the instance lookup is uncertain (not found / throws / no service)', async () => {
+    const stale = staleAt(1);
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [stale]) as any);
+    jest
+      .spyOn(AgentContinuationModel, 'findOneAndUpdate')
+      .mockReturnValue(queryFn(() => ({ ...stale, state: 'armed' })) as any);
+
+    // A transient lookup failure must not fail a perfectly good continuation.
+    getWorkflowHistoryById.mockResolvedValue(null);
+    expect((await service.recoverStalledFiring({ now: new Date() })).recovered).toBe(1);
+
+    getWorkflowHistoryById.mockRejectedValue(new Error('history unavailable'));
+    expect((await service.recoverStalledFiring({ now: new Date() })).recovered).toBe(1);
+  });
+
+  it('re-arms when no instance id was ever persisted', async () => {
+    const stale = staleAt(1, { workflowInstanceId: undefined });
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [stale]) as any);
+    jest
+      .spyOn(AgentContinuationModel, 'findOneAndUpdate')
+      .mockReturnValue(queryFn(() => ({ ...stale, state: 'armed' })) as any);
+
+    expect((await service.recoverStalledFiring({ now: new Date() })).recovered).toBe(1);
+    expect(getWorkflowHistoryById).not.toHaveBeenCalled();
+  });
+});
+
+// ── F5 (review 2): a non-owner get() is visible ─────────────────────────────
+
+describe('get — a refused waiter is visible to the owner', () => {
+  it('orphans an active record when the caller is not the owner', async () => {
+    const store = installStore(baseRecord({ state: 'armed' }));
+    service.context = buildContext({ _id: new ObjectId(), email: 'intruder@example.com' });
+
+    const view = await service.get({ continuationId: 'cont-1' });
+
+    expect(view).toBeNull();
+    // Not a silent warn: the record leaves the active set and the owner gets a task.
+    expect(store.doc.state).toBe('orphaned');
+    expect(store.doc.lastError).toMatch(/identity that is not the continuation owner/);
+    expect(taskSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not try to orphan a record that is already terminal', async () => {
+    const store = installStore(baseRecord({ state: 'fired' }));
+    service.context = buildContext({ _id: new ObjectId(), email: 'intruder@example.com' });
+
+    expect(await service.get({ continuationId: 'cont-1' })).toBeNull();
+    expect(store.doc.state).toBe('fired');
+    expect(taskSave).not.toHaveBeenCalled();
+  });
+});
+// ── condition evaluation: the remaining fail-closed guards ───────────────────
+
+describe('condition evaluation — the last two guards', () => {
+  const predicate = { isMerged: jest.fn() };
+
+  const record = () =>
+    baseRecord({
+      ownerEmail: 'owner@example.com',
+      trigger: {
+        kind: 'condition',
+        serviceId: 'reactor.Y@1.0.0',
+        method: 'isMerged',
+        expectPath: 'merged',
+        expectValue: true,
+      },
+      fireAt: new Date(Date.now() + 86_400_000),
+    });
+
+  beforeEach(() => {
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [record()]) as any);
+    predicate.isMerged.mockReset();
+    predicate.isMerged.mockResolvedValue({ merged: true });
+  });
+
+  afterEach(() => {
+    clearConditionPredicates();
+  });
+
+  it('refuses when the owner context exposes no service registry', async () => {
+    registerConditionPredicate({ serviceId: 'reactor.Y@1.0.0', method: 'isMerged' });
+    const updateOne = jest.spyOn(AgentContinuationModel, 'updateOne').mockReturnValue(queryFn(() => ({})) as any);
+    // A context that resolves the identity but cannot resolve services (e.g. a
+    // half-built context from the factory) must not be treated as "check failed".
+    service.conditionContextBuilder = jest.fn(async () => ({ user: { email: 'owner@example.com' } } as any));
+
+    const result = await service.claimDue({ now: new Date() });
+
+    expect(result.due).toBe(0);
+    expect(predicate.isMerged).not.toHaveBeenCalled();
+    expect((updateOne.mock.calls[0] as any[])[1].$set.lastError).toMatch(/no service registry for the owner/);
+  });
+
+  it('refuses when the allowlisted service does not expose the method', async () => {
+    // The allowlist names a predicate; the service still has to provide it.
+    registerConditionPredicate({ serviceId: 'reactor.Y@1.0.0', method: 'isMerged' });
+    const updateOne = jest.spyOn(AgentContinuationModel, 'updateOne').mockReturnValue(queryFn(() => ({})) as any);
+    service.conditionContextBuilder = jest.fn(async () => ({
+      user: { email: 'owner@example.com' },
+      getService: () => ({}),
+    } as any));
+
+    const result = await service.claimDue({ now: new Date() });
+
+    expect(result.due).toBe(0);
+    expect((updateOne.mock.calls[0] as any[])[1].$set.lastError).toMatch(/is unavailable/);
+  });
+
+  it('refuses even when the "owner" email IS the configured system account', async () => {
+    // Belt and braces on buildOwnerContext: an owner email that resolves to the
+    // system account (misconfiguration, or a record written by an internal caller)
+    // must not become a system-privileged evaluation.
+    process.env.SYSTEM_USER_EMAIL = 'owner@example.com';
+    registerConditionPredicate({ serviceId: 'reactor.Y@1.0.0', method: 'isMerged' });
+    const updateOne = jest.spyOn(AgentContinuationModel, 'updateOne').mockReturnValue(queryFn(() => ({})) as any);
+    // Use the REAL builder so its own isSystemIdentity guard runs; the factory is
+    // stubbed to hand back a context whose user matches the requested identity.
+    service.conditionContextBuilder = async (identity: any) => ({
+      user: { _id: ownerId, email: identity.userEmail },
+      getService: () => predicate,
+      log: jest.fn(),
+    } as any);
+
+    try {
+      const result = await service.claimDue({ now: new Date() });
+
+      expect(result.due).toBe(0);
+      expect(predicate.isMerged).not.toHaveBeenCalled();
+      expect((updateOne.mock.calls[0] as any[])[1].$set.lastError).toMatch(
+        /refusing to evaluate a condition under the system identity/,
+      );
+    } finally {
+      delete process.env.SYSTEM_USER_EMAIL;
+    }
+  });
+});
+// ── the production context builder is really wired ───────────────────────────
+
+describe('condition evaluation — the real context builder', () => {
+  /**
+   * Every other condition test stubs `conditionContextBuilder`, which is what makes
+   * them fast and deterministic — but it also means the default (the one production
+   * uses) could be broken and nothing would notice.
+   *
+   * This exercises the real default. In a unit-test process there is no context
+   * factory configured, so `createWorkflowContext` either throws or returns a
+   * context that is not the owner. Either way the evaluation must land on "not
+   * satisfied" with a recorded reason and NO privileged call — which is the
+   * property that matters, and it proves the lazy import resolves.
+   */
+  it('resolves, and fails closed when no owner context can be built', async () => {
+    const predicate = { isMerged: jest.fn(async () => ({ merged: true })) };
+    registerConditionPredicate({ serviceId: 'reactor.Z@1.0.0', method: 'isMerged' });
+
+    const record = baseRecord({
+      ownerEmail: 'owner@example.com',
+      trigger: {
+        kind: 'condition',
+        serviceId: 'reactor.Z@1.0.0',
+        method: 'isMerged',
+        expectPath: 'merged',
+        expectValue: true,
+      },
+      fireAt: new Date(Date.now() + 86_400_000),
+    });
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [record]) as any);
+
+    // Put the predicate on the SWEEPER's registry: if the implementation ever fell
+    // back to `this.getService`, this is the call that would fire — and it must not.
+    const previous = service.context.getService;
+    const sweeperGetService = jest.fn((id: string) =>
+      id === 'reactor.Z@1.0.0' ? predicate : previous(id),
+    );
+    const context = buildContext();
+    (context as any).getService = sweeperGetService;
+
+    // A REAL instance: the class field initialiser is what installs the production
+    // `conditionContextBuilder` (the other suites build the object with
+    // `Object.create`, whose field initialisers never run, and stub it explicitly).
+    const productionService: any = new (AgentContinuationService as any)({} as any, context);
+    productionService.deliveryRetryDelayMs = 0;
+    expect(typeof productionService.conditionContextBuilder).toBe('function');
+
+    // Put the predicate on the SWEEPER's registry: if the implementation ever fell
+    // back to `this.getService`, this is the call that would fire — and it must not.
+    try {
+      const result = await productionService.claimDue({ now: new Date() });
+
+      expect(result.due).toBe(0);
+      expect(predicate.isMerged).not.toHaveBeenCalled();
+    } finally {
+      clearConditionPredicates();
+    }
   });
 });

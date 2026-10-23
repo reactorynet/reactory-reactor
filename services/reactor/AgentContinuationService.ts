@@ -79,6 +79,120 @@ export const DEFAULT_STALE_FIRING_MS = 120_000;
  */
 export const DEFAULT_REPUBLISH_AFTER_MS = 180_000;
 
+/**
+ * Condition-trigger evaluation policy.
+ *
+ * ── Why this exists ────────────────────────────────────────────────────────
+ *
+ * A `condition` trigger names a service, a method and some arguments, and the
+ * SWEEPER evaluates it — under the sweeper's identity. Without a policy, a user (or
+ * a prompt-injected model, since `scheduleContinuation` is exposed to role USER)
+ * could name any method on any service and have it called with SYSTEM privileges,
+ * with model-chosen arguments, once per tick for up to MAX_TTL_MS (30 days). That
+ * is a privilege escalation, so it is closed twice over:
+ *
+ *   1. **This allowlist.** An empty-by-default set of explicitly permitted
+ *      `serviceId`/`method` pairs. Nothing else may be named, and the refusal is
+ *      actionable. Entries are added by the feature that owns the predicate, via
+ *      `registerConditionPredicate` — not by a caller, and never by a model.
+ *
+ *   2. **Owner-scoped evaluation.** `evaluateCondition` rebuilds the RECORD OWNER's
+ *      context and asserts the rebuilt identity really is the owner before calling
+ *      anything, so even an allowlisted method can never exceed the privileges of
+ *      the user who registered the wait.
+ *
+ * Until a feature registers a predicate the set is empty, so `condition` triggers
+ * are refused at registration. That is deliberate: the alternative is a
+ * general-purpose "call any method as the system" primitive, which is exactly the
+ * thing this module exists to avoid.
+ *
+ * Entries must be **read-only** predicates: no mutation, no side effect, and no
+ * arguments beyond the ones the registration recorded.
+ */
+export interface IConditionPredicate {
+  /** Exact service id, e.g. `reactor.ReactorProjectService@1.0.0`. */
+  serviceId: string;
+  /** Exact method name. Must be a read-only predicate. */
+  method: string;
+  /** Optional human note explaining what the predicate observes. */
+  description?: string;
+}
+
+const CONDITION_ALLOWLIST: IConditionPredicate[] = [];
+
+/**
+ * Permit a `serviceId`/`method` pair for `condition` triggers. Idempotent.
+ *
+ * Called by the module that owns the predicate, at startup — never by a caller at
+ * request time, and never derived from user or model input.
+ */
+export function registerConditionPredicate(predicate: IConditionPredicate): void {
+  if (!predicate?.serviceId || !predicate?.method) {
+    throw new Error('registerConditionPredicate requires both serviceId and method');
+  }
+  const exists = CONDITION_ALLOWLIST.some(
+    (entry) => entry.serviceId === predicate.serviceId && entry.method === predicate.method,
+  );
+  if (!exists) CONDITION_ALLOWLIST.push({ ...predicate });
+}
+
+/** Test/maintenance helper — restores the empty-by-default policy. */
+export function clearConditionPredicates(): void {
+  CONDITION_ALLOWLIST.length = 0;
+}
+
+/** The permitted pairs, as a copy. */
+export function listConditionPredicates(): IConditionPredicate[] {
+  return CONDITION_ALLOWLIST.map((entry) => ({ ...entry }));
+}
+
+/** Exact, case-sensitive match on BOTH fields. No prefixes, no wildcards. */
+export function isConditionPredicateAllowed(serviceId: any, method: any): boolean {
+  if (!serviceId || !method) return false;
+  return CONDITION_ALLOWLIST.some(
+    (entry) => entry.serviceId === String(serviceId) && entry.method === String(method),
+  );
+}
+
+/** Model-facing rendering of the current policy, for refusal messages. */
+export function describeConditionPolicy(): string {
+  if (CONDITION_ALLOWLIST.length === 0) {
+    return (
+      'No condition predicates are permitted on this deployment, so a `condition` trigger cannot be ' +
+      'registered at all. Use `at` instead and re-check when you wake.'
+    );
+  }
+  const list = CONDITION_ALLOWLIST.map((entry) => `${entry.serviceId}.${entry.method}`).join(', ');
+  return `Permitted condition predicates: ${list}.`;
+}
+
+/**
+ * Conditions receive model-supplied arguments, so bound them: a plain object, no
+ * prototype tricks, and small enough that it cannot be used to smuggle a payload.
+ */
+export const MAX_CONDITION_PARAM_BYTES = 2048;
+
+export function validateConditionParams(params: any): string | undefined {
+  if (params === undefined || params === null) return undefined;
+  if (typeof params !== 'object' || Array.isArray(params)) {
+    return '`params` must be a plain object';
+  }
+  const proto = Object.getPrototypeOf(params);
+  if (proto !== Object.prototype && proto !== null) {
+    return '`params` must be a plain object';
+  }
+  let serialised: string;
+  try {
+    serialised = JSON.stringify(params);
+  } catch {
+    return '`params` must be JSON-serialisable';
+  }
+  if (serialised.length > MAX_CONDITION_PARAM_BYTES) {
+    return `\`params\` must serialise to at most ${MAX_CONDITION_PARAM_BYTES} bytes`;
+  }
+  return undefined;
+}
+
 /** States that still have a waiter (or are about to). */
 export const ACTIVE_STATES: ContinuationState[] = ['pending', 'armed', 'firing'];
 
@@ -359,6 +473,22 @@ class AgentContinuationService {
    * test can drive the retry path without sleeping; production keeps the 750ms.
    */
   deliveryRetryDelayMs = 750;
+
+  /**
+   * How a condition's owner context is built. Overridable so a test can prove the
+   * evaluation runs as the owner (and refuses the system fallback) without standing
+   * up the context factory. Production uses `createWorkflowContext`, loaded lazily
+   * to avoid an import cycle through the step registry.
+   */
+  conditionContextBuilder: (identity: {
+    userEmail?: string;
+    partnerKey?: string;
+  }) => Promise<Reactory.Server.IReactoryContext | undefined> = async (identity) => {
+    const { createWorkflowContext } = await import(
+      '@reactory/server-modules/reactory-core/workflow/YamlFlow/execution/YamlFlowRuntime'
+    );
+    return createWorkflowContext(identity);
+  };
   nameSpace = 'reactor';
   name = 'Agent Continuation Service';
   version = '1.0.0';
@@ -662,11 +792,23 @@ class AgentContinuationService {
     const user: any = (this.context as any)?.user;
     if (user?._id && String(doc.ownerUserId) !== String(user._id)) {
       this.log('warn', 'continuation get() refused — caller is not the owner', { continuationId });
+
+      // The waiter has just discovered that its identity is not the owner. Returning
+      // null makes the workflow's guard false and the instance ends WITHOUT
+      // delivering — so a bare warn log would be the one path where a continuation
+      // ends with the owner told nothing. Orphan it (terminal + visible task) while
+      // it is still active; a terminal record has nothing left to orphan.
+      if (ACTIVE_STATES.includes(doc.state)) {
+        await this.markTerminalWithVisibility(
+          continuationId,
+          'orphaned',
+          'the waiter ran with an identity that is not the continuation owner, so the wake could not be attributed',
+        );
+      }
       return null;
     }
 
     if (!['pending', 'armed'].includes(doc.state)) return null;
-
     return {
       continuationId: String(doc.continuationId),
       correlationKey: String(doc.correlationKey),
@@ -845,7 +987,23 @@ class AgentContinuationService {
       }
     }
 
-    const outcome: ContinuationOutcome = input?.outcome === 'not_observed' ? 'not_observed' : 'observed';
+    // An ABSENT outcome still means "the trigger arrived" — that is the producer's
+    // default and the only reading available for a bare signal. An explicitly
+    // SUPPLIED value, though, must be one of the two sentinels: a typo must not be
+    // silently published as `observed`, because deliver() would then accept it (by
+    // the time the event is read the value IS a sentinel, so the coercion would be
+    // invisible).
+    if (input?.outcome !== undefined && input?.outcome !== null && parseOutcome(input.outcome) === null) {
+      return {
+        fired: false,
+        reason: 'invalid_outcome',
+        error:
+          `Unrecognised outcome ${describeReceivedOutcome(input.outcome)}. ` +
+          "Expected 'observed' or 'not_observed' (or omit it to mean 'observed').",
+      };
+    }
+
+    const outcome: ContinuationOutcome = input?.outcome ?? 'observed';
     const firedBy: ContinuationFiredBy =
       input?.firedBy || (outcome === 'not_observed' ? 'expiry' : 'signal');
 
@@ -918,11 +1076,15 @@ class AgentContinuationService {
    * back to `armed`, so the next publish can retry the delivery. This is the only
    * transition into `armed` after the initial arm.
    *
-   * Residual (accepted rather than silently ignored): the waiting instance is
-   * single-use, so if the instance itself is gone the re-armed record has nothing
-   * left to wake. Detecting that would need a per-record instance lookup on the
-   * recovery path; the `expiresAt` TTL bounds the damage and the record stays
-   * visible through the owner's `list()` the whole time.
+   * The waiter is single-use. If the instance already reached a terminal state,
+   * re-arming would leave a record with nothing left to wake: no turn, no task, no
+   * sentinel receiver — the one path where a continuation ends with the user told
+   * nothing at all. So on the recovery path the instance is checked, and a terminal
+   * (or absent) instance becomes `failed` plus a visible task instead.
+   *
+   * The lookup is per stale record, not per armed record, and only on the second
+   * and later attempt (`attempt > 1`): by then a crash has already happened once, so
+   * paying one workflow-history read for it is rare and bounded.
    */
   async recoverStalledFiring(input?: {
     now?: string | Date;
@@ -953,6 +1115,20 @@ class AgentContinuationService {
         );
         continue;
       }
+      // Second and later attempt: the waiter is single-use, so check whether the
+      // instance can still receive a wake before promising one.
+      if (Number(record.attempt || 0) >= 1) {
+        const instanceState = await this.inspectWaiterInstance(record.workflowInstanceId);
+        if (instanceState.terminal) {
+          await this.markTerminalWithVisibility(
+            record.continuationId,
+            'failed',
+            `delivery stalled and its waiter instance can no longer be woken (${instanceState.reason}); no turn was sent`,
+          );
+          continue;
+        }
+      }
+
       const updated: any = await AgentContinuationModel.findOneAndUpdate(
         { continuationId: record.continuationId, state: 'firing' } as any,
         {
@@ -965,6 +1141,47 @@ class AgentContinuationService {
     }
 
     return { recovered };
+  }
+
+  /**
+   * Can this waiter still be woken?
+   *
+   * The engine's own status codes: 2 = COMPLETE, 3 = TERMINATED. A completed
+   * instance has no pointer left on the wait_event, so a published event would be
+   * dropped — which is why the recovery path consults this before re-arming.
+   *
+   * Every uncertain outcome (no instance id, an unreadable instance, a status this
+   * code does not recognise) is deliberately reported as NON-terminal: refusing to
+   * re-arm on a transient lookup failure would fail a perfectly good continuation.
+   * The TTL still bounds the case where the guess was wrong.
+   */
+  private async inspectWaiterInstance(
+    workflowInstanceId?: string,
+  ): Promise<{ terminal: boolean; reason: string }> {
+    if (!workflowInstanceId) {
+      return { terminal: false, reason: 'no instance id was ever persisted' };
+    }
+    const workflowService: any = this.getWorkflowService();
+    if (!workflowService) return { terminal: false, reason: 'workflow service unavailable' };
+
+    try {
+      const instance: any = await workflowService.getWorkflowHistoryById(workflowInstanceId);
+      if (!instance) return { terminal: false, reason: 'instance not found (may be pruned)' };
+
+      const status = Number(instance.status);
+      if (status === 2 || status === 3) {
+        return {
+          terminal: true,
+          reason: `instance status ${instance.statusLabel || status}`,
+        };
+      }
+      if (instance.completeTime) {
+        return { terminal: true, reason: 'instance has a completeTime' };
+      }
+      return { terminal: false, reason: 'instance still runnable' };
+    } catch (error: any) {
+      return { terminal: false, reason: `instance lookup failed: ${error?.message}` };
+    }
   }
 
   // ── delivery: the only code path that touches a session ────────────────────
@@ -1190,11 +1407,23 @@ class AgentContinuationService {
           return 'an `event` trigger needs a non-empty eventName';
         }
         return undefined;
-      case 'condition':
-        if (!String(trigger.serviceId || '').trim() || !String(trigger.method || '').trim()) {
+      case 'condition': {
+        const serviceId = String(trigger.serviceId || '').trim();
+        const method = String(trigger.method || '').trim();
+        if (!serviceId || !method) {
           return 'a `condition` trigger needs serviceId and method';
         }
-        return undefined;
+        // The evaluation runs unattended, repeatedly, under a context rebuilt from
+        // the record's owner — so an arbitrary method is a confused-deputy path.
+        // Only explicitly permitted read-only predicates may be named.
+        if (!isConditionPredicateAllowed(serviceId, method)) {
+          return (
+            `\`${serviceId}.${method}\` is not a permitted condition predicate. ` +
+            describeConditionPolicy()
+          );
+        }
+        return validateConditionParams(trigger.params);
+      }
       case 'task':
       case 'webhook':
         return undefined;
@@ -1203,16 +1432,52 @@ class AgentContinuationService {
     }
   }
 
-  /** Evaluate a `condition` trigger. Any failure means "not satisfied", never "fire". */
+  /**
+   * Evaluate a `condition` trigger. Any failure means "not satisfied", never "fire".
+   *
+   * ── Who this runs as ───────────────────────────────────────────────────────
+   *
+   * The sweeper's own context is the SYSTEM account, so resolving the target
+   * service from `this.context` would invoke a model-named method with SYSTEM
+   * privileges, every tick, for up to 30 days. Instead the call is made from a
+   * context rebuilt from the RECORD OWNER's email, so it can never exceed the
+   * privileges of whoever registered the wait.
+   *
+   * `createWorkflowContext` fails OPEN to the system context when it cannot
+   * rehydrate an identity, so the rebuilt context is VERIFIED against the owner
+   * before anything is called. A mismatch is "not satisfied" with a recorded
+   * reason — never a system-privileged call.
+   *
+   * Two independent gates, then: the allowlist (checked at registration AND again
+   * here, against records written by any path) and the owner identity.
+   */
   private async evaluateCondition(record: any): Promise<boolean> {
     const trigger: any = record?.trigger;
     if (!trigger || trigger.kind !== 'condition') return false;
     try {
-      const service: any = this.getService(String(trigger.serviceId));
-      if (!service || typeof service[trigger.method] !== 'function') {
-        throw new Error(`condition service ${trigger.serviceId}.${trigger.method} is unavailable`);
+      const serviceId = String(trigger.serviceId || '');
+      const method = String(trigger.method || '');
+
+      // Re-checked at evaluation time: a record may have been written before the
+      // policy was narrowed, or through a path that bypassed `validateTrigger`.
+      if (!isConditionPredicateAllowed(serviceId, method)) {
+        throw new Error(`condition predicate ${serviceId}.${method} is not permitted`);
       }
-      const result = await service[trigger.method](trigger.params || {});
+
+      const paramError = validateConditionParams(trigger.params);
+      if (paramError) throw new Error(paramError);
+
+      const evaluationContext = await this.buildOwnerContext(record);
+      const getService = (evaluationContext as any)?.getService;
+      if (typeof getService !== 'function') {
+        throw new Error(`no service registry for the owner ${record?.ownerEmail || '(unknown)'}`);
+      }
+
+      const service: any = getService.call(evaluationContext, serviceId);
+      if (!service || typeof service[method] !== 'function') {
+        throw new Error(`condition service ${serviceId}.${method} is unavailable`);
+      }
+      const result = await service[method](trigger.params || {});
       if (!trigger.expectPath) return Boolean(result);
       const read = (path: string) =>
         path
@@ -1240,6 +1505,48 @@ class AgentContinuationService {
       ).exec();
       return false;
     }
+  }
+
+  /**
+   * Build a Reactory context for the RECORD OWNER, and prove it really is the
+   * owner.
+   *
+   * `createWorkflowContext` returns `state.systemContext` when it cannot rehydrate
+   * an identity (and on any failure of the factory). That fail-open is fine for a
+   * step whose own assertions catch it; it is not fine for condition evaluation,
+   * where the SYSTEM identity is the escalation we are trying to prevent. So the
+   * rebuilt context is checked here and the call is refused unless `user.email`
+   * matches the owner recorded at registration.
+   *
+   * Throws — and the caller turns any throw into "not satisfied" — so there is no
+   * path from a failed identity to a privileged invocation.
+   */
+  private async buildOwnerContext(record: any): Promise<Reactory.Server.IReactoryContext> {
+    const ownerEmail = String(record?.ownerEmail || '').trim();
+    if (!ownerEmail) {
+      throw new Error('the record carries no owner email, so the condition cannot be evaluated as its owner');
+    }
+
+    const context = await this.conditionContextBuilder({
+      userEmail: ownerEmail,
+      partnerKey: record?.partnerKey || undefined,
+    });
+
+    const actualEmail = String((context as any)?.user?.email || '').trim().toLowerCase();
+    if (!context || !actualEmail) {
+      throw new Error(`could not rebuild a context for the owner ${ownerEmail}`);
+    }
+    if (actualEmail !== ownerEmail.toLowerCase()) {
+      // This is the fail-open case: the factory fell back to the system context.
+      throw new Error(
+        `refusing to evaluate as ${actualEmail}: the condition must run as its owner (${ownerEmail})`,
+      );
+    }
+    if (isSystemIdentity((context as any).user)) {
+      throw new Error('refusing to evaluate a condition under the system identity');
+    }
+
+    return context as Reactory.Server.IReactoryContext;
   }
 
   /** `checkUserBudget` → a refusal string, or null when the turn may proceed. */

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, jest } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach, jest } from '@jest/globals';
 
 /**
  * continuationMacro.macro.ts — the agent-facing contract of the continuation
@@ -28,7 +28,12 @@ import {
   CONTINUATION_SERVICE_ID,
 } from '../continuationMacro.macro';
 // Four levels up: __tests__ -> runtime -> macro -> ai -> <module root>.
-import { refusal } from '../../../../services/reactor/AgentContinuationService';
+
+import {
+  refusal,
+  registerConditionPredicate,
+  clearConditionPredicates,
+} from '../../../../services/reactor/AgentContinuationService';
 
 const SESSION_ID = '507f1f77bcf86cd799439011';
 
@@ -60,6 +65,8 @@ const HAPPY = {
 };
 
 beforeEach(() => {
+  // The condition policy is module-level state, so it must not leak between tests.
+  clearConditionPredicates();
   register.mockReset();
   cancel.mockReset();
   list.mockReset();
@@ -99,6 +106,10 @@ describe('buildTrigger', () => {
   });
 
   it('builds `event`, `condition` and `task` triggers', () => {
+    // The condition below must be a permitted predicate, or buildTrigger refuses it
+    // before its shape can be asserted. See `scheduleContinuation — condition policy`.
+    registerConditionPredicate({ serviceId: 'reactor.X@1.0.0', method: 'isMerged' });
+
     expect(buildTrigger({ ...HAPPY, at: undefined, eventName: 'pr.merged' } as any).trigger).toEqual({
       kind: 'event',
       eventName: 'pr.merged',
@@ -115,6 +126,7 @@ describe('buildTrigger', () => {
       method: 'isMerged',
       expectValue: true,
     });
+    clearConditionPredicates();
     // A `condition` without its target is a refusal, not a silent no-op.
     expect(
       buildTrigger({ ...HAPPY, at: undefined, condition: { serviceId: '' } } as any).error,
@@ -505,5 +517,98 @@ describe('registry', () => {
       'resumePrompt',
       'expirePrompt',
     ]);
+  });
+});
+
+// ── condition triggers: refused unless the pair is permitted ─────────────────
+
+/**
+ * The reviewer's escalation: `scheduleContinuation` is exposed to role USER and a
+ * `condition` is evaluated by the SWEEPER under the system identity. So an
+ * arbitrary `serviceId`/`method` would let a user — or a prompt-injected model —
+ * have any platform method called with SYSTEM privileges, repeatedly.
+ *
+ * The macro refuses it before the service is even asked, so the model gets an
+ * actionable message naming the policy rather than a generic failure.
+ */
+describe('scheduleContinuation — condition policy', () => {
+  const conditionProps = (serviceId: string, method: string, params?: any) => ({
+    ...HAPPY,
+    at: undefined,
+    condition: { serviceId, method, expectPath: 'merged', expectValue: true, ...(params ? { params } : {}) },
+  });
+
+  afterEach(() => {
+    clearConditionPredicates();
+  });
+
+  it("refuses the reviewer's reproduction at the macro layer", async () => {
+    const result: any = await ScheduleContinuationMacro(
+      conditionProps('core.UserService@1.0.0', 'createUser', { email: 'attacker@example.com' }),
+      makeState(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/not a permitted condition predicate/);
+    expect(result.error).toMatch(/core\.UserService@1\.0\.0\.createUser/);
+    expect(result.instructions).toMatch(/No condition predicates are permitted/);
+    expect(result.instructions).toMatch(/Use `at` instead/);
+    // The service is never asked, so nothing is inserted and nothing is started.
+    expect(register).not.toHaveBeenCalled();
+  });
+
+  it('names the permitted pairs when some are configured', async () => {
+    registerConditionPredicate({ serviceId: 'reactor.X@1.0.0', method: 'isMerged' });
+
+    const refused: any = await ScheduleContinuationMacro(
+      conditionProps('core.UserService@1.0.0', 'createUser'),
+      makeState(),
+    );
+    expect(refused.success).toBe(false);
+    expect(refused.error).toContain('reactor.X@1.0.0.isMerged');
+    expect(refused.instructions).toContain('reactor.X@1.0.0.isMerged');
+
+    const allowed: any = await ScheduleContinuationMacro(
+      conditionProps('reactor.X@1.0.0', 'isMerged', { pr: 482 }),
+      makeState(),
+    );
+    expect(allowed.success).toBe(true);
+    expect(register).toHaveBeenCalledWith(
+      expect.objectContaining({
+        trigger: expect.objectContaining({
+          kind: 'condition',
+          serviceId: 'reactor.X@1.0.0',
+          method: 'isMerged',
+          params: { pr: 482 },
+        }),
+      }),
+    );
+  });
+
+  it('still requires serviceId and method', async () => {
+    const result: any = await ScheduleContinuationMacro(
+      { ...HAPPY, at: undefined, condition: { serviceId: 'reactor.X@1.0.0' } } as any,
+      makeState(),
+    );
+    expect(result.error).toMatch(/needs both serviceId and method/);
+  });
+
+  it('surfaces a service-side condition refusal as success:false', async () => {
+    // Both layers refuse. This asserts the macro does not swallow the service's own
+    // refusal when a pair passes the macro gate but the service disagrees — e.g. the
+    // allowlist was narrowed between the two checks.
+    registerConditionPredicate({ serviceId: 'reactor.X@1.0.0', method: 'isMerged' });
+    register.mockResolvedValue(
+      refusal('invalid_trigger', '`reactor.X@1.0.0.isMerged` is not a permitted condition predicate.'),
+    );
+
+    const result: any = await ScheduleContinuationMacro(
+      conditionProps('reactor.X@1.0.0', 'isMerged'),
+      makeState(),
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('invalid_trigger');
+    expect(result.instructions).toMatch(/Never tell the user you will follow up/);
   });
 });
