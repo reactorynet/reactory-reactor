@@ -887,27 +887,76 @@ const mimeTypeForPath = (filePath: string): string => {
 };
 
 /**
- * The root `path` attachments may be read from.
+ * The failure every call site returns when `path` mode has no workspace root.
  *
- * The agent runs with its worktree as the working directory, so `process.cwd()`
- * is the worktree root. `REACTOR_AGENT_WORKSPACE` lets a deployment pin the root
- * explicitly. It is read from the environment — never from macro parameters — so
- * a caller cannot widen the sandbox from the tool call.
+ * Kept in one place so the message cannot drift between the guard and the tests.
  */
-const attachmentWorkspaceRoot = (): string => {
-  const configured = pathModule.resolve(
-    (process.env.REACTOR_AGENT_WORKSPACE || "").trim() || process.cwd()
-  );
+export const NO_WORKSPACE_CONFIGURED =
+  "No agent workspace configured. Path mode needs the agent worktree root in " +
+  "state.vars.worktreePath (supplied by the ticket dispatcher) or in the " +
+  "REACTOR_AGENT_WORKSPACE environment variable. Nothing was read, uploaded or attached.";
 
-  // Canonicalise the root before any comparison. The workspace itself can sit
-  // behind a symlink (`/tmp` -> `/private/tmp` on macOS, a symlinked checkout in
-  // CI); without this every real file resolves to a different prefix and is
-  // rejected as "outside the workspace".
-  try {
-    return realpathSync(configured);
-  } catch {
-    return configured;
+/**
+ * Resolve the root `path` attachments may be read from — per execution, never global.
+ *
+ * This root is the security boundary of the whole feature, so it is deliberate
+ * that there is NO `process.cwd()` fallback. The express-server process cwd is
+ * the server checkout, and the per-ticket worktree is a *subdirectory* of it
+ * (`<express-server>/src/modules/reactory-worktrees/ai-<ref>`). Rooting at
+ * `process.cwd()` therefore made `<express-server>/.env`,
+ * `config/reactory/.env.local`, `certs/*` and every other module's source
+ * readable and attachable — a prompt-injection route from untrusted ticket
+ * comments to host secret exfiltration. `workdir` on the dispatcher also
+ * defaults to the server process cwd (ProcessAITicket.yaml), so the cwd was
+ * never the worktree in the first place.
+ *
+ * Candidates are supplied BY THE CALLER, in priority order, so this helper does
+ * no environment or cwd lookup of its own:
+ *  1. `state.vars.worktreePath` — server-controlled, per-execution state. The
+ *     dispatcher computes the ticket worktree path (ProcessAITicket.yaml:
+ *     `prepareWorktree` -> `readWorktreePath`) and this is where the run's
+ *     workspace is published.
+ *  2. `REACTOR_AGENT_WORKSPACE` — a deployment-level pin for hosts that run the
+ *     agent outside the dispatcher (CLI, MCP tool-only sessions); read once at
+ *     the call site, never here.
+ *
+ * A candidate only counts if it resolves to an existing directory. When none
+ * does, this returns `undefined` and `path` mode fails closed before a byte is
+ * read. A caller cannot widen the sandbox from macro parameters: neither source
+ * is a tool argument.
+ */
+const attachmentWorkspaceRoot = (candidates: unknown[]): string | undefined => {
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string") continue;
+
+    const configured = candidate.trim();
+    if (configured.length === 0) continue;
+
+    const resolved = pathModule.resolve(configured);
+
+    // The root must already exist: a typo must not degrade into "deny nothing"
+    // or, worse, into a cwd-relative guess. `statSync` is inside the try so a
+    // missing directory (ENOENT) is just the next candidate, not a throw.
+    try {
+      if (!statSync(resolved).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+
+    // Canonicalise before any comparison. The workspace itself can sit behind a
+    // symlink (`/tmp` -> `/private/tmp` on macOS, a symlinked checkout in CI);
+    // without this every real file resolves to a different prefix and is
+    // rejected as "outside the workspace". The entry that survives `statSync`
+    // above is always resolvable, so this cannot throw for a candidate we keep;
+    // `resolved` is returned defensively if it somehow does.
+    try {
+      return realpathSync(resolved);
+    } catch {
+      return resolved;
+    }
   }
+
+  return undefined;
 };
 
 /** True when `candidate` is `root` itself or sits underneath it. */
@@ -923,27 +972,51 @@ interface ResolvedWorkspaceFile {
 }
 
 /**
+ * Either a vetted file or the reason it was rejected — never both, never neither.
+ *
+ * A discriminated union rather than two optional fields: it lets the call site
+ * read `error` without a `|| "something went wrong"` fallback branch that can
+ * never be taken, so the failure message is the guard's real reason.
+ */
+type WorkspaceFileResult =
+  | { file: ResolvedWorkspaceFile; error?: undefined }
+  | { file?: undefined; error: string };
+
+/**
  * Vet a caller supplied path before anything is read or uploaded.
  *
- * Three separate guards, because each one alone is bypassable:
+ * The root is passed in rather than looked up here: it must come from the
+ * per-execution state resolved by `attachmentWorkspaceRoot(state)`, and a
+ * missing root must fail closed (see `NO_WORKSPACE_CONFIGURED`) rather than
+ * silently degrade to the server checkout.
+ *
+ * Four separate guards, because each one alone is bypassable:
  *  - `..` is rejected up front: `path.resolve` silently collapses it, so a
  *    post-hoc check would hide the attempt instead of reporting it;
+ *  - no root means no read at all (fail closed);
  *  - the resolved path must sit inside the workspace root, which stops absolute
- *    host paths (`/etc/passwd`) and `~` expansion from escaping;
+ *    host paths (`/etc/passwd`, `<express-server>/.env`) and `~` expansion from
+ *    escaping;
  *  - symlinks are resolved and re-checked, so a link planted inside the worktree
  *    cannot point at a host file.
  * The size cap is enforced on the stat result, before a byte is streamed.
  */
-const resolveWorkspaceFile = (inputPath: string): { file?: ResolvedWorkspaceFile; error?: string } => {
-  const candidate = (inputPath || "").trim();
-
-  if (candidate.length === 0) return { error: "No file path provided" };
+const resolveWorkspaceFile = (inputPath: string, root: string | undefined): WorkspaceFileResult => {
+  // `path` mode only reaches here when the caller supplied a non-blank string
+  // (see `hasPath` in the macro), so this trim needs no empty-string branch.
+  const candidate = inputPath.trim();
 
   if (candidate.split(/[\\/]+/).includes("..")) {
     return { error: "Operation not allowed. Path traversal ('..') detected." };
   }
 
-  const root = attachmentWorkspaceRoot();
+  // Fail closed. Without a configured workspace there is no boundary to check
+  // against, and guessing one (process.cwd()) is exactly the bug this guard
+  // exists to prevent.
+  if (!root || root.trim().length === 0) {
+    return { error: NO_WORKSPACE_CONFIGURED };
+  }
+
   const absolutePath = pathModule.isAbsolute(candidate)
     ? pathModule.normalize(candidate)
     : pathModule.resolve(root, candidate);
@@ -1166,7 +1239,11 @@ export const GetSupportTicketComments: Macro<SupportMacroResult, GetSupportTicke
     );
     const comments = includeReplies === false ? ordered.filter((comment) => !comment.parentId) : ordered;
     const reference = supportTicketReferenceOf(resolved.ticket);
-    const replyCount = comments.filter((comment) => comment.parentId).length;
+    // Counted before the `includeReplies` filter: the instructions block reports
+    // the thread's true reply count, not how many happened to survive filtering.
+    // Reading it off `comments` made `includeReplies: false` always say
+    // "Replies: 0" even on a thread full of replies.
+    const replyCount = ordered.filter((comment) => comment.parentId).length;
 
     if (!state.vars) {
       state.vars = {};
@@ -1389,6 +1466,12 @@ export const GetSupportTicketAttachmentsRegistry: MacroComponentDefinition<typeo
  *  - `path` reads a file from the agent workspace, uploads it through
  *    `core.ReactoryFileService@1.0.0`, then attaches the uploaded file.
  *
+ * The workspace root for `path` mode comes from per-execution state
+ * (`state.vars.worktreePath`, then `REACTOR_AGENT_WORKSPACE`) and never from
+ * `process.cwd()`; with neither configured, `path` mode fails closed without
+ * reading anything. `fileId` mode is unaffected and is the recommended mode
+ * when the caller already has an uploaded file.
+ *
  * `path` is sandboxed to the workspace root, traversal and symlink escapes are
  * rejected, and uploads are capped at `MAX_ATTACHMENT_BYTES` (10 MB). The agent
  * must not be able to attach arbitrary host files, so nothing outside the
@@ -1443,7 +1526,18 @@ export const AttachSupportTicketFile: Macro<SupportMacroResult, AttachSupportTic
     // Vet the caller's file input before anything is read or looked up: a
     // hostile path or a malformed id must not cost a ticket lookup, and a ticket
     // that turns out not to exist must not leave an orphaned upload behind.
-    const resolvedFile = hasPath ? resolveWorkspaceFile(inputPath) : null;
+    // `hasPath` mode takes its sandbox root from per-execution state only and
+    // fails closed when none is configured. Both sources are read here, at the
+    // call site, so the helpers below stay pure and take the root as an argument.
+    const resolvedFile = hasPath
+      ? resolveWorkspaceFile(
+          inputPath,
+          attachmentWorkspaceRoot([
+            (state?.vars as any)?.worktreePath,
+            process.env.REACTOR_AGENT_WORKSPACE,
+          ])
+        )
+      : null;
 
     if (resolvedFile && !resolvedFile.file) {
       return supportMacroFailure(
@@ -1451,7 +1545,7 @@ export const AttachSupportTicketFile: Macro<SupportMacroResult, AttachSupportTic
         props,
         state,
         startTime,
-        resolvedFile.error || "Unable to read the supplied file"
+        resolvedFile.error
       );
     }
 
@@ -1497,16 +1591,10 @@ export const AttachSupportTicketFile: Macro<SupportMacroResult, AttachSupportTic
         );
       }
 
-      const workspaceFile = resolvedFile.file;
-      if (!workspaceFile) {
-        return supportMacroFailure(
-          "attachSupportTicketFile",
-          props,
-          state,
-          startTime,
-          "Unable to read the supplied file"
-        );
-      }
+      // Vetted above: `path` mode returned when the file could not be read, so
+      // this is present. Asserted rather than re-checked so the upload path
+      // carries no branch that can never be taken.
+      const workspaceFile = (resolvedFile as { file: ResolvedWorkspaceFile }).file;
 
       const filename = pathModule.basename(workspaceFile.absolutePath);
       const mimetype = mimeTypeForPath(workspaceFile.absolutePath);
@@ -1553,6 +1641,27 @@ export const AttachSupportTicketFile: Macro<SupportMacroResult, AttachSupportTic
     const attachments = (Array.isArray(rawDocuments) ? rawDocuments : []).map(toAttachmentView);
     const reference = supportTicketReferenceOf(resolved.ticket);
 
+    // `attachDocument` silently ignores ids that do not resolve to a file
+    // (`if (file && ...)`), so a resolved promise is not proof that anything was
+    // attached. Verify the invariant against the ticket's own document list:
+    // the id we asked for must be there now. Without this the macro could report
+    // success for a typo'd or deleted file id, which the caller cannot check.
+    if (!attachments.some((attachment) => attachment.id === attachFileId)) {
+      const detail = hasFileId
+        ? `File ${attachFileId} was not found in the Reactory file store, so it was not attached to ticket ${resolved.ticketId}.`
+        : `Uploaded file ${attachFileId} did not appear on ticket ${resolved.ticketId} after attaching.`;
+
+      logger.warn(
+        `AttachSupportTicketFile macro could not confirm file ${attachFileId} on ticket ${resolved.ticketId} by user: ${state.user?.id}`
+      );
+
+      return supportMacroFailure("attachSupportTicketFile", props, state, startTime, detail, {
+        lookup: resolved.lookup,
+        attachedFileId: attachFileId,
+        ...(uploaded ? { uploadedFileId: uploaded.fileId } : {}),
+      });
+    }
+
     if (!state.vars) {
       state.vars = {};
     }
@@ -1595,7 +1704,7 @@ export const AttachSupportTicketFile: Macro<SupportMacroResult, AttachSupportTic
 - **Source**: ${hasFileId ? "existing Reactory file" : "uploaded from workspace path"}
 ${uploaded?.filename ? `- **Filename**: ${uploaded.filename}\n` : ""}${uploaded?.size !== null && uploaded?.size !== undefined ? `- **Size**: ${uploaded.size} bytes\n` : ""}${uploaded?.mimetype ? `- **MIME Type**: ${uploaded.mimetype}\n` : ""}- **Attachments on ticket**: ${attachments.length}
 
-${attachments.length === 0 ? "The ticket reports no attachments after the update." : formatAttachmentList(attachments)}
+${formatAttachmentList(attachments)}
       `,
     };
   } catch (error) {
@@ -1625,7 +1734,7 @@ export const AttachSupportTicketFileRegistry: MacroComponentDefinition<typeof At
       type: "function",
       function: {
         name: "attachSupportTicketFile",
-        description: "Attach a file to a support ticket. Pass either 'fileId' (an already-uploaded Reactory file id) or 'path' (a readable file inside the agent workspace, which is uploaded first — capped at 10 MB). Paths outside the workspace and '..' traversal are rejected. Returns the ticket's attachment list afterwards.",
+        description: "Attach a file to a support ticket. Pass either 'fileId' (an already-uploaded Reactory file id) or 'path' (a readable file inside the agent worktree, which is uploaded first — capped at 10 MB). Path mode requires a configured agent workspace and fails closed without one; absolute host paths, paths outside the worktree, '..' traversal and symlink escapes are rejected. Fails if the file id does not appear on the ticket afterwards. Returns the ticket's attachment list.",
         parameters: {
           type: "object",
           properties: {
@@ -1639,7 +1748,7 @@ export const AttachSupportTicketFileRegistry: MacroComponentDefinition<typeof At
             },
             path: {
               type: "string",
-              description: "Path to a file inside the agent workspace (relative to the worktree). It is uploaded to the Reactory file store and then attached. Maximum 10 MB.",
+              description: "Path to a file inside the agent worktree (relative to it, or absolute within it). It is uploaded to the Reactory file store and then attached. Maximum 10 MB. Requires a configured agent workspace; path mode fails closed without one.",
             },
             name: {
               type: "string",
