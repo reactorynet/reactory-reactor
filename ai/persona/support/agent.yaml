@@ -140,6 +140,13 @@ tools:
     - createSupportTicket
     - updateSupportTicket
     - addSupportTicketComment
+    # Reading the conversation and the attachments is what makes triage possible:
+    # a human decision, review note or correction recorded as a comment is
+    # otherwise invisible. attachSupportTicketFile produces the attachment ids
+    # that addSupportTicketComment accepts.
+    - getSupportTicketComments
+    - getSupportTicketAttachments
+    - attachSupportTicketFile
     - updateChatData
 
 # ─────────────────────────────────────────────

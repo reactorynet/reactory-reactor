@@ -820,6 +820,73 @@ describe("Support Ticket Macros", () => {
       expect(mockSupportService.attachDocument).toHaveBeenCalledWith(TICKET_ID, [UPLOADED_FILE_ID]);
     });
 
+    it("accepts an absolute path that is genuinely inside the workspace", async () => {
+      fs.writeFileSync(path.join(workspaceRoot, "notes.txt"), "hello evidence");
+
+      mockSupportService.getTicket.mockResolvedValue(ticketDoc());
+      mockFileService.uploadFile.mockResolvedValue({ _id: UPLOADED_FILE_ID });
+      mockSupportService.attachDocument.mockResolvedValue({});
+      mockSupportService.listTicketDocuments.mockResolvedValue([fileView({ id: UPLOADED_FILE_ID })]);
+
+      const result = await AttachSupportTicketFile(
+        { ticketId: TICKET_ID, path: path.join(workspaceRoot, "notes.txt") },
+        stateWith({ worktreePath: workspaceRoot })
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockSupportService.attachDocument).toHaveBeenCalledWith(TICKET_ID, [UPLOADED_FILE_ID]);
+    });
+
+    it("accepts an absolute in-workspace path spelled through a symlinked root", async () => {
+      // /var -> /private/var on macOS and symlinked checkouts on CI: the configured
+      // root is canonicalised, so a non-canonical absolute spelling of a file that
+      // really is inside it must not be rejected as outside.
+      const linkRoot = path.join(outsideRoot, "workspace-link");
+      fs.symlinkSync(workspaceRoot, linkRoot, "dir");
+      fs.writeFileSync(path.join(workspaceRoot, "notes.txt"), "hello evidence");
+
+      mockSupportService.getTicket.mockResolvedValue(ticketDoc());
+      mockFileService.uploadFile.mockResolvedValue({ _id: UPLOADED_FILE_ID });
+      mockSupportService.attachDocument.mockResolvedValue({});
+      mockSupportService.listTicketDocuments.mockResolvedValue([fileView({ id: UPLOADED_FILE_ID })]);
+
+      // The symlinked spelling is inside the workspace, and now accepted.
+      const viaLink = await AttachSupportTicketFile(
+        { ticketId: TICKET_ID, path: path.join(linkRoot, "notes.txt") },
+        stateWith({ worktreePath: linkRoot })
+      );
+
+      expect(viaLink.success).toBe(true);
+      expect(mockSupportService.attachDocument).toHaveBeenCalledWith(TICKET_ID, [UPLOADED_FILE_ID]);
+
+      // A canonical root with a non-canonical absolute candidate also works.
+      mockSupportService.attachDocument.mockClear();
+      const mixed = await AttachSupportTicketFile(
+        { ticketId: TICKET_ID, path: path.join(linkRoot, "notes.txt") },
+        stateWith({ worktreePath: workspaceRoot })
+      );
+
+      expect(mixed.success).toBe(true);
+      expect(mockSupportService.attachDocument).toHaveBeenCalledWith(TICKET_ID, [UPLOADED_FILE_ID]);
+    });
+
+    it("still rejects a symlinked root's outside neighbour", async () => {
+      // The false-negative fix must not widen the boundary: a sibling of the
+      // symlinked workspace is still outside it.
+      const linkRoot = path.join(outsideRoot, "workspace-link");
+      fs.symlinkSync(workspaceRoot, linkRoot, "dir");
+      fs.writeFileSync(path.join(outsideRoot, "secret.txt"), "host secret");
+
+      const result = await AttachSupportTicketFile(
+        { ticketId: TICKET_ID, path: path.join(outsideRoot, "secret.txt") },
+        stateWith({ worktreePath: linkRoot })
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toMatch(/outside the agent workspace/i);
+      expect(mockFileService.uploadFile).not.toHaveBeenCalled();
+    });
+
     it("ignores an empty worktreePath and still fails closed", async () => {
       const result = await AttachSupportTicketFile(
         { ticketId: TICKET_ID, path: "notes.txt" },
@@ -1187,6 +1254,25 @@ describe("Support Ticket Macros", () => {
       expect(result.error).toContain("No ticket ID provided");
     });
 
+    it.each([
+      ["getSupportTicketComments", GetSupportTicketComments, "getSupportTicketComments"],
+      ["getSupportTicketAttachments", GetSupportTicketAttachments, "getSupportTicketAttachments"],
+      ["attachSupportTicketFile", AttachSupportTicketFile, "attachSupportTicketFile"],
+    ])("%s returns a failure envelope for a non-string ticketId", async (_label, macro, tool) => {
+      // Hand-built macro expressions can bypass the tool JSON schema, so a number
+      // or object must produce the envelope rather than a TypeError from .trim().
+      for (const badId of [42, {}, [], true]) {
+        const props: any = { ticketId: badId, fileId: FILE_ID };
+        const result = await (macro as any)(props, mockState);
+
+        expectFailureEnvelope(result, tool, props);
+        expect(result.success).toBe(false);
+        expect(result.error).toContain("No ticket ID provided");
+      }
+
+      expect(mockSupportService.getTicket).not.toHaveBeenCalled();
+      expect(mockSupportService.attachDocument).not.toHaveBeenCalled();
+    });
     it.each([
       ["getSupportTicketComments", GetSupportTicketComments],
       ["getSupportTicketAttachments", GetSupportTicketAttachments],

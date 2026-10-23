@@ -972,6 +972,29 @@ interface ResolvedWorkspaceFile {
 }
 
 /**
+ * Canonicalise a path's parent directory, keeping the leaf as given.
+ *
+ * The workspace ROOT is already canonical (`attachmentWorkspaceRoot` realpaths
+ * it). An absolute candidate is not, so on a host where the workspace path goes
+ * through a symlink (macOS `/var` -> `/private/var`, a symlinked checkout) a
+ * correct in-workspace path would compare unequal to the root and be rejected
+ * as "outside the agent workspace" — a false negative, not an escape.
+ *
+ * Only the parent is resolved because the leaf may not exist yet, and a
+ * `realpathSync` on a missing file throws. A parent that cannot be resolved is
+ * returned unchanged so the existence check below produces the right error, and
+ * the post-`realpath` containment check still guards symlinked leaves.
+ */
+const canonicaliseParent = (targetPath: string): string => {
+  const parent = pathModule.dirname(targetPath);
+  try {
+    return pathModule.join(realpathSync(parent), pathModule.basename(targetPath));
+  } catch {
+    return targetPath;
+  }
+};
+
+/**
  * Either a vetted file or the reason it was rejected — never both, never neither.
  *
  * A discriminated union rather than two optional fields: it lets the call site
@@ -1017,9 +1040,15 @@ const resolveWorkspaceFile = (inputPath: string, root: string | undefined): Work
     return { error: NO_WORKSPACE_CONFIGURED };
   }
 
-  const absolutePath = pathModule.isAbsolute(candidate)
+  const declaredPath = pathModule.isAbsolute(candidate)
     ? pathModule.normalize(candidate)
     : pathModule.resolve(root, candidate);
+
+  // Canonicalise the parent before the first containment test: `root` is already
+  // canonical, so a non-canonical absolute spelling inside a symlinked workspace
+  // would otherwise be rejected as outside it. The leaf is still checked with a
+  // full realpath below, which is what catches a symlinked file.
+  const absolutePath = canonicaliseParent(declaredPath);
 
   if (!isInsideDirectory(root, absolutePath)) {
     return { error: `Operation not allowed. ${candidate} is outside the agent workspace (${root}). Pass a path relative to the worktree.` };
@@ -1070,6 +1099,18 @@ const supportMacroFailure = (
     ...extra,
   },
 });
+
+/**
+ * True when a caller-supplied ticket identifier is unusable.
+ *
+ * `typeof` is checked, not just truthiness: a number or object arriving from a
+ * hand-built macro expression would otherwise throw a TypeError from
+ * `.trim()` in the guard, breaking the promise that every support macro
+ * returns a failure envelope instead of throwing. The tool JSON schema says
+ * `ticketId` is a string, so this only guards the non-schema entry points.
+ */
+const isMissingTicketId = (identifier: unknown): boolean =>
+  typeof identifier !== "string" || identifier.trim().length === 0;
 
 const supportTicketIdOf = (ticket: any): string | null => {
   const id = ticket?._id ?? ticket?.id;
@@ -1198,7 +1239,7 @@ export const GetSupportTicketComments: Macro<SupportMacroResult, GetSupportTicke
   const startTime = Date.now();
   const { ticketId: identifier, includeReplies = true } = props || ({} as GetSupportTicketCommentsProps);
 
-  if (!identifier || identifier.trim().length === 0) {
+  if (isMissingTicketId(identifier)) {
     return supportMacroFailure("getSupportTicketComments", props, state, startTime, "No ticket ID provided");
   }
 
@@ -1276,7 +1317,7 @@ export const GetSupportTicketComments: Macro<SupportMacroResult, GetSupportTicke
 - **Reference**: ${reference || "N/A"}
 - **Comments**: ${comments.length} (oldest → newest, replies ${includeReplies === false ? "excluded" : "included"})
 - **Replies**: ${replyCount}
-- **Resolved By**: ${resolved.lookup === "reference" ? "reference lookup" : "ObjectId"}
+- **Resolved Via**: ${resolved.lookup === "reference" ? "reference lookup" : "ObjectId"}
 
 ${comments.length === 0 ? "No comments on this ticket yet." : formatCommentTranscript(comments)}
 
@@ -1343,7 +1384,7 @@ export const GetSupportTicketAttachments: Macro<SupportMacroResult, GetSupportTi
   const startTime = Date.now();
   const { ticketId: identifier } = props || ({} as GetSupportTicketAttachmentsProps);
 
-  if (!identifier || identifier.trim().length === 0) {
+  if (isMissingTicketId(identifier)) {
     return supportMacroFailure("getSupportTicketAttachments", props, state, startTime, "No ticket ID provided");
   }
 
@@ -1487,7 +1528,7 @@ export const AttachSupportTicketFile: Macro<SupportMacroResult, AttachSupportTic
   const startTime = Date.now();
   const { ticketId: identifier, path: inputPath, fileId: inputFileId, name } = props || ({} as AttachSupportTicketFileProps);
 
-  if (!identifier || identifier.trim().length === 0) {
+  if (isMissingTicketId(identifier)) {
     return supportMacroFailure("attachSupportTicketFile", props, state, startTime, "No ticket ID provided");
   }
 
