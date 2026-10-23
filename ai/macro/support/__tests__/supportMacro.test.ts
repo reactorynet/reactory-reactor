@@ -967,6 +967,20 @@ describe("Support Ticket Macros", () => {
       expect(mockSupportService.attachDocument).not.toHaveBeenCalled();
     });
 
+    it("reports file-not-found when the parent directory does not exist", async () => {
+      // Exercises the canonicaliseParent fallback: realpathSync on a missing
+      // parent throws, the path is kept as given, and the existence check then
+      // produces the accurate error instead of an 'outside the workspace' one.
+      const result = await AttachSupportTicketFile(
+        { ticketId: TICKET_ID, path: path.join("no-such-dir", "notes.txt") },
+        stateWith({ worktreePath: workspaceRoot })
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("File not found");
+      expect(mockFileService.uploadFile).not.toHaveBeenCalled();
+    });
+
     it("rejects a missing file inside the workspace", async () => {
       const result = await AttachSupportTicketFile(
         { ticketId: TICKET_ID, path: "nope.txt" },
