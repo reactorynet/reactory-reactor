@@ -1,6 +1,6 @@
 nameSpace: core
 name: ProcessAITicket
-version: 1.4.5
+version: 1.4.6
 description: Autonomous AI engineering run for a SINGLE support ticket. Loads the ticket,
   moves it to in_progress, prepares an isolated git worktree on a ticket-keyed
   branch, has the nominated AI engineer agent perform the work, captures a
@@ -2466,12 +2466,69 @@ steps:
                               }
                               return undefined;
                             };
-                            const asArray = (v) => {
-                              if (v == null) return [];
-                              if (Array.isArray(v)) return v.filter((x) => x != null && String(x).trim() !== '');
-                              const text = String(v).trim();
-                              return text ? [text] : [];
+                            // >>> shared findings rendering (byte-identical in captureReport,
+                            // captureReview and handBackBriefing — pinned by a test; do not fork it)
+                            //
+                            // Every rendering defect in this workflow came from `String()` on a list
+                            // item. An object coerces to "[object Object]", so the finding was DESTROYED
+                            // when written to review-normalised.json, and because every object produced
+                            // that same string, every finding collapsed onto one dedupe key.
+                            // `asText` JSON.stringifies an object instead of coercing it: lossless.
+                            const asText = (v) => {
+                              if (v == null) return '';
+                              if (typeof v === 'string') return v.trim();
+                              if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+                              if (Array.isArray(v)) return v.map(asText).filter(Boolean).join('\n');
+                              try { return JSON.stringify(v); } catch (e) { return ''; }
                             };
+                            const asList = (v) => {
+                              if (v == null) return [];
+                              if (Array.isArray(v)) return v.filter((x) => x != null);
+                              if (typeof v === 'string') return v.trim() ? [v.trim()] : [];
+                              if (typeof v === 'object') return Object.keys(v).length ? [v] : [];
+                              return [];
+                            };
+                            // Render one review entry as text without dropping a field. A reviewer's
+                            // finding is an object, so {id, severity, title, detail} reads as
+                            // "F1 [high] title \u2014 detail"; every field that form does not name is
+                            // appended as "key: value"; anything else falls back to JSON. The same
+                            // function is the dedupe key, so "identical" means identical CONTENT.
+                            const renderKey = (k) => String(k == null ? '' : k).toLowerCase().replace(/[^a-z0-9]/g, '');
+                            const renderItem = (v) => {
+                              if (v == null) return '';
+                              if (typeof v === 'string') return v.trim();
+                              if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+                              if (Array.isArray(v)) return v.map(renderItem).filter(Boolean).join('\n');
+                              if (typeof v !== 'object') return asText(v);
+                              const keys = Object.keys(v);
+                              const used = {};
+                              const take = (names) => {
+                                for (let i = 0; i < names.length; i += 1) {
+                                  for (let j = 0; j < keys.length; j += 1) {
+                                    if (used[keys[j]]) continue;
+                                    if (renderKey(keys[j]) === renderKey(names[i])) {
+                                      used[keys[j]] = true;
+                                      return v[keys[j]];
+                                    }
+                                  }
+                                }
+                                return undefined;
+                              };
+                              const id = take(['id', 'key', 'ref', 'reference']);
+                              const severity = take(['severity', 'level']);
+                              const title = take(['title', 'summary', 'finding', 'issue']);
+                              const detail = take(['detail', 'details', 'description']);
+                              const head = [];
+                              if (asText(id)) head.push(asText(id));
+                              if (asText(severity)) head.push('[' + asText(severity) + ']');
+                              if (asText(title)) head.push(asText(title));
+                              const detailText = asText(detail);
+                              let line = head.join(' ');
+                              if (detailText) line = line ? line + ' \u2014 ' + detailText : detailText;
+                              const rows = keys.filter((k) => !used[k]).map((k) => k + ': ' + asText(v[k]));
+                              return [line].concat(rows).filter((part) => part !== '').join('\n');
+                            };
+                            // <<< shared findings rendering
 
                             const fail = (verdict, reason, extra) => {
                               const payload = Object.assign({
@@ -2513,24 +2570,28 @@ steps:
                             else if (['rejected', 'reject', 'fail', 'failed', 'declined', 'changes_requested', 'changes-requested', 'request_changes', 'needs_changes', 'needs_work'].indexOf(norm) !== -1) verdict = 'rejected';
 
                             // Both conventions, first non-empty wins. Same resolver used by captureReport.
-                            const requiredChanges = asArray(resolveKey(rv, ['requiredChanges', 'required_changes', 'changes']))
-                              .concat(asArray(resolveKey(raw, ['requiredChanges', 'required_changes'])));
-                            const blockingFindings = asArray(resolveKey(rv, ['blockingFindings', 'blocking_findings']))
-                              .concat(asArray(resolveKey(raw, ['blockingFindings', 'blocking_findings'])));
-                            const acceptanceCriteria = asArray(resolveKey(rv, ['acceptanceCriteria', 'acceptance_criteria']))
-                              .concat(asArray(resolveKey(raw, ['acceptanceCriteria', 'acceptance_criteria'])));
-                            const findings = asArray(resolveKey(rv, ['findings', 'observations']))
-                              .concat(asArray(resolveKey(raw, ['findings'])));
+                            const requiredChanges = asList(resolveKey(rv, ['requiredChanges', 'required_changes', 'changes']))
+                              .concat(asList(resolveKey(raw, ['requiredChanges', 'required_changes'])));
+                            const blockingFindings = asList(resolveKey(rv, ['blockingFindings', 'blocking_findings']))
+                              .concat(asList(resolveKey(raw, ['blockingFindings', 'blocking_findings'])));
+                            const acceptanceCriteria = asList(resolveKey(rv, ['acceptanceCriteria', 'acceptance_criteria']))
+                              .concat(asList(resolveKey(raw, ['acceptanceCriteria', 'acceptance_criteria'])));
+                            const findings = asList(resolveKey(rv, ['findings', 'observations']))
+                              .concat(asList(resolveKey(raw, ['findings'])));
 
+                            // Key on the RENDERED content, but keep the ORIGINAL entry. The old form
+                            // pushed the rendered string, so an object was replaced by the literal
+                            // "[object Object]": the finding was destroyed on write, and because every
+                            // object rendered to that same key, N findings collapsed to one.
                             const dedupe = (list) => {
                               const seen = {};
                               const out = [];
                               list.forEach((item) => {
-                                const text = String(item).trim();
+                                const text = renderItem(item);
                                 if (!text) return;
                                 if (seen[text]) return;
                                 seen[text] = true;
-                                out.push(text);
+                                out.push(item);
                               });
                               return out;
                             };
@@ -2547,7 +2608,9 @@ steps:
 
                             // A rejection with nothing actionable is NOT something to paper over with a
                             // generic sentence: the engineer would revise blind. Report it as unresolved so
-                            // the workflow can block and surface it to a human.
+                            // the workflow can block and surface it to a human. dedupe() only ever keeps
+                            // entries that render to real text, so this count can no longer be satisfied
+                            // by a "[object Object]" placeholder left behind by the corruption path.
                             const actionable = resolvedRequired.length + resolvedBlocking.length + resolvedFindings.length;
                             const findingsResolved = verdict === 'approved' ? true : actionable > 0;
 
@@ -2642,13 +2705,79 @@ steps:
                             let review = {};
                             try { review = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { review = {}; }
 
-                            const list = (v) => (Array.isArray(v) ? v.filter((x) => x != null && String(x).trim() !== '') : []);
-                            const numbered = (items) => items.map((item, i) => (i + 1) + '. ' + String(item).trim()).join('\n');
+                            // >>> shared findings rendering (byte-identical in captureReport,
+                            // captureReview and handBackBriefing — pinned by a test; do not fork it)
+                            //
+                            // Every rendering defect in this workflow came from `String()` on a list
+                            // item. An object coerces to "[object Object]", so the finding was DESTROYED
+                            // when written to review-normalised.json, and because every object produced
+                            // that same string, every finding collapsed onto one dedupe key.
+                            // `asText` JSON.stringifies an object instead of coercing it: lossless.
+                            const asText = (v) => {
+                              if (v == null) return '';
+                              if (typeof v === 'string') return v.trim();
+                              if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+                              if (Array.isArray(v)) return v.map(asText).filter(Boolean).join('\n');
+                              try { return JSON.stringify(v); } catch (e) { return ''; }
+                            };
+                            const asList = (v) => {
+                              if (v == null) return [];
+                              if (Array.isArray(v)) return v.filter((x) => x != null);
+                              if (typeof v === 'string') return v.trim() ? [v.trim()] : [];
+                              if (typeof v === 'object') return Object.keys(v).length ? [v] : [];
+                              return [];
+                            };
+                            // Render one review entry as text without dropping a field. A reviewer's
+                            // finding is an object, so {id, severity, title, detail} reads as
+                            // "F1 [high] title \u2014 detail"; every field that form does not name is
+                            // appended as "key: value"; anything else falls back to JSON. The same
+                            // function is the dedupe key, so "identical" means identical CONTENT.
+                            const renderKey = (k) => String(k == null ? '' : k).toLowerCase().replace(/[^a-z0-9]/g, '');
+                            const renderItem = (v) => {
+                              if (v == null) return '';
+                              if (typeof v === 'string') return v.trim();
+                              if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+                              if (Array.isArray(v)) return v.map(renderItem).filter(Boolean).join('\n');
+                              if (typeof v !== 'object') return asText(v);
+                              const keys = Object.keys(v);
+                              const used = {};
+                              const take = (names) => {
+                                for (let i = 0; i < names.length; i += 1) {
+                                  for (let j = 0; j < keys.length; j += 1) {
+                                    if (used[keys[j]]) continue;
+                                    if (renderKey(keys[j]) === renderKey(names[i])) {
+                                      used[keys[j]] = true;
+                                      return v[keys[j]];
+                                    }
+                                  }
+                                }
+                                return undefined;
+                              };
+                              const id = take(['id', 'key', 'ref', 'reference']);
+                              const severity = take(['severity', 'level']);
+                              const title = take(['title', 'summary', 'finding', 'issue']);
+                              const detail = take(['detail', 'details', 'description']);
+                              const head = [];
+                              if (asText(id)) head.push(asText(id));
+                              if (asText(severity)) head.push('[' + asText(severity) + ']');
+                              if (asText(title)) head.push(asText(title));
+                              const detailText = asText(detail);
+                              let line = head.join(' ');
+                              if (detailText) line = line ? line + ' \u2014 ' + detailText : detailText;
+                              const rows = keys.filter((k) => !used[k]).map((k) => k + ': ' + asText(v[k]));
+                              return [line].concat(rows).filter((part) => part !== '').join('\n');
+                            };
+                            // <<< shared findings rendering
 
-                            const required = list(review.requiredChanges);
-                            const blocking = list(review.blockingFindings);
-                            const findings = list(review.findings);
-                            const criteria = list(review.acceptanceCriteria);
+                            // An entry that renders to nothing is not an item; drop it before the count
+                            // is taken so the heading and the rendered list can never disagree.
+                            const items = (v) => asList(v).filter((entry) => renderItem(entry) !== '');
+                            const numbered = (list) => list.map((item, i) => (i + 1) + '. ' + renderItem(item)).join('\n');
+
+                            const required = items(review.requiredChanges);
+                            const blocking = items(review.blockingFindings);
+                            const findings = items(review.findings);
+                            const criteria = items(review.acceptanceCriteria);
 
                             const lines = [];
                             lines.push('Reviewer verdict: ' + String(review.verdict || 'rejected').toUpperCase());
@@ -3598,7 +3727,7 @@ steps:
                               body = legacyBody() + '\n\n> **PR template not applied:** ' + warnings.join('; ');
                             }
 
-                            body = body.replace(/\s+$/, '') + '\n\n---\nGenerated by core.ProcessAITicket@1.4.5\n';
+                            body = body.replace(/\s+$/, '') + '\n\n---\nGenerated by core.ProcessAITicket@1.4.6\n';
 
                             const bodyFile = path.join(wt, '.ai-agent', 'pr-body.md');
                             fs.writeFileSync(bodyFile, body, 'utf8');
