@@ -1,0 +1,136 @@
+# reactor.AgentContinuation@1.0.0
+#
+# The durable waiter for one agent continuation.
+#
+# ── Why this is started at REGISTRATION, not at fire time ─────────────────────
+#
+# `WorkflowRunner.buildYamlWorkflowData` seeds `data.__identity` from the context
+# that STARTED the instance, and `YamlFlowRuntime.createWorkflowContext` rebuilds
+# every step's Reactory context from it — falling back SILENTLY to the system
+# context when identity is absent. `deliverWake` must hold the session OWNER's
+# context, because every conversation operation is keyed
+# `{ _id: chatSessionId, user: this.context.user }`.
+#
+# Registering from the live session therefore makes attribution structural: the
+# sweeper only ever publishes an event, and events are tenant-scoped, not
+# user-scoped, so the sweeper cannot mis-attribute a turn. Starting this workflow
+# at fire time would hold the system user and fail closed hours later, per fire,
+# unwatched.
+#
+# ── Why `waitForWake` has NO `timeout` ────────────────────────────────────────
+#
+# `wait_event` has no timer. `effectiveDate` is passed to the engine as
+# `subscribeAsOf`, which the engine reads as "ignore events older than this", NOT
+# as a deadline — so a `timeout` would make this step DEAF for that duration and
+# then wait forever, silently discarding real signals.
+#
+# Expiry is therefore a sentinel EVENT, published by
+# `reactor.AgentContinuationSweeper` on this same `eventKey`:
+#
+#     { outcome: 'not_observed', firedBy: 'expiry', reason: 'deadline_passed' }
+#
+# 'observed' and 'not_observed' consequently arrive as DATA on one path, never as
+# a race between a signal and a clock. Do not add a `timeout` key here. A grep
+# gate in __tests__/AgentContinuation.contract.test.ts fails the build if one
+# appears.
+
+nameSpace: reactor
+name: AgentContinuation
+version: 1.0.0
+description: >-
+  Parks a conversation until a future time or signal, then wakes it as the session
+  owner. Registration starts this instance so the wake turn is attributed
+  structurally; firing is an event publish; expiry is a sentinel event carrying
+  outcome=not_observed.
+author: WorkflowWill
+tags:
+  - reactor
+  - agent
+  - continuation
+  - durable
+  - wait
+
+inputs:
+  continuationId:
+    type: string
+    required: true
+    description: >-
+      Id of the `reactor_continuations` record. The record carries the target chat
+      session, persona, owner identity, both prompts and the correlation key.
+
+outputs:
+  outcome:
+    type: string
+    source: step.deliverWake.result.outcome
+    description: >-
+      `observed` when the signal arrived, `not_observed` when the deadline passed.
+  delivered:
+    type: boolean
+    source: step.deliverWake.result.delivered
+    description: Whether the wake turn was actually persisted to the conversation.
+
+variables:
+  # Set by the wait_event step's `outputVariable`: the event data that woke us.
+  wake: null
+
+steps:
+  - id: loadContinuation
+    name: Load continuation
+    type: service_invoke
+    config:
+      service: reactor.AgentContinuationService@1.0.0
+      method: get
+      params:
+        continuationId: "${input.continuationId}"
+
+  # Guard the body. A record that is cancelled, already fired or orphaned before
+  # the instance armed must NOT park — otherwise it would occupy a waiter for its
+  # whole deadline and then try to deliver a turn nobody wants.
+  - id: guardPending
+    name: Only wait for a pending continuation
+    type: condition
+    dependsOn:
+      - loadContinuation
+    config:
+      condition: "${steps.loadContinuation.result !== null && steps.loadContinuation.result.state === 'pending'}"
+      thenSteps:
+        - id: armContinuation
+          name: Mark armed
+          type: service_invoke
+          config:
+            service: reactor.AgentContinuationService@1.0.0
+            method: markArmed
+            params:
+              continuationId: "${input.continuationId}"
+
+        # THE ONLY WAIT. No `timeout` — see the header. `eventKey` is the
+        # per-continuation correlation key (32 random bytes, base64url), so
+        # knowing the event NAME is useless without it.
+        - id: waitForWake
+          name: Wait for wake or deadline
+          type: wait_event
+          dependsOn:
+            - armContinuation
+          config:
+            eventName: agent.continuation.wake
+            eventKey: "${steps.loadContinuation.result.correlationKey}"
+            outputVariable: wake
+
+        # The only step in the platform that touches a session, and it runs here,
+        # in the instance started by the owner, so context.user IS the owner.
+        - id: deliverWake
+          name: Deliver the wake turn
+          type: service_invoke
+          dependsOn:
+            - waitForWake
+          config:
+            service: reactor.AgentContinuationService@1.0.0
+            method: deliver
+            params:
+              continuationId: "${input.continuationId}"
+              outcome: "${variables.wake.outcome}"
+              firedBy: "${variables.wake.firedBy}"
+
+  - id: done
+    name: Done
+    type: end

@@ -1,0 +1,150 @@
+# reactor.AgentContinuationSweeper@1.0.0
+#
+# The clock behind every continuation.
+#
+# `wait_event` cannot time out (see the header of AgentContinuation.yaml), so time
+# is imposed from outside: this workflow runs every 60 seconds, finds parked
+# continuations whose moment has come, and PUBLISHES THE WAKE EVENT for each one.
+#
+# It holds no user identity, and it never touches a chat session. It only publishes
+# events — which is exactly why a wake turn cannot be mis-attributed: attribution
+# happens inside the waiting instance, whose `__identity` is the session owner.
+#
+# Three things happen each tick, in order:
+#
+#   1. recoverStalled — a `firing` record older than two ticks goes back to
+#      `armed` (or to `failed` when its retry budget is spent), so a crash between
+#      claim and send cannot strand a wake. Nothing else in the platform notices
+#      that state.
+#
+#   2. planDue — computes what each due record's event should SAY. The decision is
+#      `planTriggerDecision` in the service, and its ordering is the whole point:
+#      an `at` trigger that has arrived fires as `observed`; otherwise a reached
+#      deadline fires as `not_observed`; a satisfied `condition` fires as
+#      `observed`. Deadlines always beat an unsatisfied condition, so "it did not
+#      happen" can never be reported as "it happened".
+#
+#   3. fireDue — one publish per record, via
+#      `core.ReactoryWorkflowService@1.0.0.publishWorkflowEvent`, using the
+#      WAITING INSTANCE's tenant (not this workflow's). Event subscriptions are
+#      matched strictly by tenant, so publishing under the wrong one would wake
+#      nothing and the failure would be silent.
+#
+# No `timeout` appears on any wait_event anywhere in this feature: there is no
+# wait_event here at all, and AgentContinuation.yaml's single wait carries none.
+
+nameSpace: reactor
+name: AgentContinuationSweeper
+version: 1.0.0
+description: >-
+  Every 60s: recover continuations that stalled mid-delivery, decide which parked
+  waits are due, and publish the wake event (observed, or the not_observed sentinel
+  at the deadline) under each waiting instance's own tenant.
+author: WorkflowWill
+tags:
+  - reactor
+  - agent
+  - continuation
+  - sweeper
+  - scheduler
+
+inputs:
+  limit:
+    type: number
+    required: false
+    default: 50
+    description: Maximum number of parked continuations to fire in one tick.
+  staleMs:
+    type: number
+    required: false
+    default: 120000
+    description: >-
+      Age at which an in-flight (`firing`) delivery is assumed to have crashed.
+      Two ticks at the 60s schedule.
+
+outputs:
+  due:
+    type: number
+    source: step.planDue.result.due
+    description: How many continuations this tick will fire.
+
+steps:
+  - id: recoverStalled
+    name: Recover deliveries that stalled
+    type: service_invoke
+    config:
+      service: reactor.AgentContinuationService@1.0.0
+      method: recoverStalledFiring
+      params:
+        staleMs: "${input.staleMs}"
+
+  - id: planDue
+    name: Plan this tick's wakes
+    type: service_invoke
+    dependsOn:
+      - recoverStalled
+    config:
+      service: reactor.AgentContinuationService@1.0.0
+      method: claimDue
+      params:
+        limit: "${input.limit}"
+
+  # One publish per due record. `fire` is idempotent: it refuses records that are
+  # already terminal, and the service stops re-publishing an event it already sent
+  # until the record looks stranded (see DEFAULT_REPUBLISH_AFTER_MS).
+  - id: fireDue
+    name: Publish a wake event per due continuation
+    type: for_each
+    dependsOn:
+      - planDue
+    config:
+      items: "${steps.planDue.result.plan}"
+      itemVariable: item
+      maxConcurrency: 1
+      steps:
+        - id: fireContinuation
+          name: Publish wake event
+          type: service_invoke
+          config:
+            service: reactor.AgentContinuationService@1.0.0
+            method: fire
+            params:
+              continuationId: "${variables.item.continuationId}"
+              outcome: "${variables.item.outcome}"
+              firedBy: "${variables.item.firedBy}"
+              reason: "${variables.item.reason}"
+              source: sweeper
+
+        - id: logFired
+          name: Log the wake
+          type: log
+          dependsOn:
+            - fireContinuation
+          config:
+            level: debug
+            # Safe to log: the continuation id is not the credential, the
+            # correlation key is, and it is never interpolated into a log line.
+            message: >-
+              continuation ${variables.item.continuationId} →
+              ${variables.item.outcome} (${variables.item.firedBy})
+            data:
+              continuationId: "${variables.item.continuationId}"
+              outcome: "${variables.item.outcome}"
+              firedBy: "${variables.item.firedBy}"
+              fired: "${steps.fireContinuation.result.fired}"
+
+  - id: logTick
+    name: Tick summary
+    type: log
+    dependsOn:
+      - fireDue
+    config:
+      level: debug
+      message: "agent continuation sweep complete — ${steps.planDue.result.due} due"
+      data:
+        due: "${steps.planDue.result.due}"
+        recovered: "${steps.recoverStalled.result.recovered}"
+
+  - id: done
+    name: Done
+    type: end

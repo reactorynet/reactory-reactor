@@ -7,9 +7,17 @@ import { DateTimeMacroRegistry } from './datetimeMacro.macro';
 import { TodoMacroRegistry } from './todoMacro.macro';
 import { AddToolsToSessionMacroRegistry, RemoveToolsFromSessionMacroRegistry, ToolkitMacroRegistry } from './sessionTools.macro';
 import { ReloadPersonasMacroRegistry } from './reloadPersonas.macro';
+import { ContinuationMacroRegistry } from './continuationMacro.macro';
 import ToolResultProcessor from './ToolResultProcessor';
 
 export { ToolResultProcessor, ToolkitMacroRegistry };
+
+export {
+  ContinuationMacroRegistry,
+  ScheduleContinuationMacro,
+  CancelContinuationMacro,
+  ListContinuationsMacro,
+} from './continuationMacro.macro';
 
 export default [
   VariableMacroRegistry,
@@ -23,5 +31,8 @@ export default [
   ToolkitMacroRegistry,
   AddToolsToSessionMacroRegistry,
   RemoveToolsFromSessionMacroRegistry,
-  ReloadPersonasMacroRegistry
+  ReloadPersonasMacroRegistry,
+  // Durable agent continuation (REACTORY-302016408):
+  // scheduleContinuation / cancelContinuation / listContinuations.
+  ...ContinuationMacroRegistry
 ];
