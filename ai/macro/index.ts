@@ -21,6 +21,9 @@ import SupportMacros, {
   CreateSupportTicket,
   UpdateSupportTicket,
   AddSupportTicketComment,
+  GetSupportTicketComments,
+  GetSupportTicketAttachments,
+  AttachSupportTicketFile,
 } from './support';
 
 export { MacroErrorCode, MacroError, createMacroError } from './errors';
@@ -85,6 +88,10 @@ const inputMacros: MacroFunctions = {
   GetSupportTicket,
   listSupportTickets: ListSupportTickets,
   ListSupportTickets,
+  getSupportTicketComments: GetSupportTicketComments,
+  GetSupportTicketComments,
+  getSupportTicketAttachments: GetSupportTicketAttachments,
+  GetSupportTicketAttachments,
   playwright: PlaywrightNavigate,
   pw: PlaywrightNavigate,
   playwright_open: PlaywrightOpenSession,
@@ -105,6 +112,8 @@ const outputMacros: MacroFunctions = {
   UpdateSupportTicket,
   addSupportTicketComment: AddSupportTicketComment,
   AddSupportTicketComment,
+  attachSupportTicketFile: AttachSupportTicketFile,
+  AttachSupportTicketFile,
   // replace: InsertSnippet,
   // insert: InsertSnippet,
 };
