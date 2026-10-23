@@ -84,6 +84,19 @@ export type ContinuationFiredBy =
   | 'webhook'
   | 'at';
 
+/**
+ * How the owner was told that a continuation ended without a confirmed result.
+ *
+ * `communicator` is preferred but optional (its public send path is still being
+ * repaired), so the task surface is always written as well. `task` alone is the
+ * expected value in the current deployment.
+ */
+export type ContinuationNotificationChannel =
+  | 'communicator'
+  | 'task'
+  | 'communicator+task'
+  | 'none';
+
 export interface IAgentContinuation {
   /** The owning chat session. Conversation queries are keyed `{_id, user}`. */
   chatSessionId: string;
@@ -131,8 +144,27 @@ export interface IAgentContinuation {
    */
   eventPublishedAt?: Date;
   eventOutcome?: ContinuationOutcome;
+  /**
+   * Why the wake event said what it said (`time_reached`, `deadline_passed`,
+   * `time_passed_unswept`, `wake_published_not_delivered`, `condition_satisfied`).
+   *
+   * Persisted because the distinction is user-facing: an `at` wait whose fire time
+   * passed while the sweeper was down never saw its signal *at all*, whereas a
+   * deadline with no signal is a different story. Recording it at publish time is
+   * the only place that knowledge exists.
+   */
+  eventReason?: string;
 
   wakeMessageId?: string;
+
+  /**
+   * Evidence that the owner was told a wait ended without a confirmed result.
+   * `notificationChannel` is the surface that actually accepted the message, so
+   * "never silent" is checkable after the fact rather than a claim in a comment.
+   */
+  notifiedAt?: Date;
+  notificationChannel?: ContinuationNotificationChannel;
+  notificationError?: string;
 
   createdAt: Date;
   updatedAt: Date;
@@ -220,8 +252,16 @@ const AgentContinuationSchema = new Schema<IAgentContinuationDocument>(
 
     eventPublishedAt: Date,
     eventOutcome: { type: String, enum: ['observed', 'not_observed'] },
+    eventReason: String,
 
     wakeMessageId: String,
+
+    notifiedAt: Date,
+    notificationChannel: {
+      type: String,
+      enum: ['communicator', 'task', 'communicator+task', 'none'],
+    },
+    notificationError: String,
 
     createdAt: { type: Date, required: true, default: Date.now },
     updatedAt: { type: Date, required: true, default: Date.now },

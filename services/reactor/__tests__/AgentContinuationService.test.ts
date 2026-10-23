@@ -1610,7 +1610,7 @@ describe('visibility task — idempotency and last resort', () => {
     expect(store.doc.state).toBe('failed');
     // Last resort: the reason is still on the record, so list() shows it.
     expect(service.context.log).toHaveBeenCalledWith(
-      expect.stringMatching(/could not raise the visibility task/),
+      expect.stringMatching(/could not raise the notification task/),
       expect.objectContaining({ error: 'task collection unavailable' }),
       'error',
     );
@@ -1755,10 +1755,44 @@ describe('planTriggerDecision — an `at` trigger overtaken by its deadline', ()
     expect(decision).toEqual({
       outcome: 'not_observed',
       firedBy: 'expiry',
-      reason: 'deadline_passed',
+      reason: 'time_passed_unswept',
+    });
+  });
+
+  it('says the moment passed unwatched, not that the signal never came (F6)', () => {
+    // Both readings are `not_observed` — conservatism is unchanged — but an `at`
+    // wait whose clock moved while nothing was sweeping is an infrastructure gap,
+    // not a negative result about the thing being awaited. Calling it
+    // `deadline_passed` made those two indistinguishable to a user (and to a
+    // future debugging session).
+    const decision = planTriggerDecision(
+      {
+        trigger: { kind: 'at', at: new Date('2026-10-23T12:00:00Z') } as any,
+        fireAt: new Date('2026-10-23T13:00:00Z'),
+      },
+      new Date('2026-10-23T14:00:00Z'),
+    );
+    expect(decision?.outcome).toBe('not_observed');
+    expect(decision?.reason).toBe('time_passed_unswept');
+  });
+
+  it('separates a published-but-undelivered wake from an unswept one', () => {
+    const decision = planTriggerDecision(
+      {
+        trigger: { kind: 'at', at: new Date('2026-10-23T12:00:00Z') } as any,
+        fireAt: new Date('2026-10-23T13:00:00Z'),
+        eventPublishedAt: new Date('2026-10-23T12:00:30Z'),
+      },
+      new Date('2026-10-23T14:00:00Z'),
+    );
+    expect(decision).toEqual({
+      outcome: 'not_observed',
+      firedBy: 'expiry',
+      reason: 'wake_published_not_delivered',
     });
   });
 });
+
 // ── F1 (review 2): condition triggers must not be a system-privileged proxy ──
 
 /**
@@ -2347,5 +2381,115 @@ describe('condition evaluation — the real context builder', () => {
     } finally {
       clearConditionPredicates();
     }
+  });
+});
+// ── listForViewer — the ownership boundary of the observability surface ──────
+//
+// `ReactorPendingContinuations` and the `todo` projection are only safe if the
+// SERVICE decides who may see what. The resolver passes `userId` straight through,
+// so these are the tests that make the GraphQL scoping guarantee real:
+//
+//   * no `userId`              → the caller's own records;
+//   * `userId` == caller       → the caller's own records;
+//   * another `userId`         → refused unless the caller is an administrator;
+//   * invalid `userId`         → refused.
+//
+// A refusal is an ERROR, not an empty list: an empty list would make a scoping bug
+// indistinguishable from "you are waiting on nothing", and it is the exact silent
+// wrong answer this feature exists to remove. Nothing may be queried before the
+// check, so no cross-tenant row is ever read.
+describe('listForViewer — owner scoping for the observability query', () => {
+  const otherId = new ObjectId();
+  let findFilter: any;
+
+  beforeEach(() => {
+    findFilter = undefined;
+    jest.spyOn(AgentContinuationModel, 'find').mockImplementation(((filter: any) => {
+      findFilter = filter;
+      return queryFn(() => [
+        {
+          ...baseRecord({ state: 'armed' }),
+          // Deliberately present on the DOCUMENT: the projection must drop it.
+          correlationKey: 'c2VjcmV0LWNvcnJlbGF0aW9uLWtleS0zMmJ5dGVzLWxvbmc',
+        },
+      ]);
+    }) as any);
+  });
+
+  it('scopes to the caller when no userId is given', async () => {
+    const views = await service.listForViewer({});
+
+    expect(findFilter.ownerUserId).toBe(ownerId);
+    // Active only by default; this is a "what wakes me next" list, not a log.
+    expect(findFilter.state).toEqual({ $in: ACTIVE_STATES });
+    expect(views).toHaveLength(1);
+    expect(views[0]).not.toHaveProperty('correlationKey');
+  });
+
+  it('treats the caller\'s own id as the caller', async () => {
+    await service.listForViewer({ userId: ownerId.toString() });
+
+    expect(findFilter.ownerUserId).toBe(ownerId);
+  });
+
+  it('lets an administrator inspect another user', async () => {
+    service.context = buildContext({ _id: ownerId, email: 'admin@example.com', roles: ['ADMIN'] });
+
+    await service.listForViewer({ userId: otherId.toString() });
+
+    expect(String(findFilter.ownerUserId)).toBe(otherId.toString());
+  });
+
+  it('refuses a non-administrator asking for somebody else, before any read', async () => {
+    await expect(service.listForViewer({ userId: otherId.toString() })).rejects.toThrow(
+      /requires an administrators role/,
+    );
+
+    // The refusal must happen before the query, or "refused" would still have read
+    // another tenant's row.
+    expect(findFilter).toBeUndefined();
+  });
+
+  it('refuses an invalid user id instead of silently narrowing', async () => {
+    await expect(service.listForViewer({ userId: 'not-an-object-id' })).rejects.toThrow(
+      /Invalid userId/,
+    );
+    expect(findFilter).toBeUndefined();
+  });
+
+  it('returns no rows for an anonymous caller, and queries nothing', async () => {
+    // `buildContext` has a default user, so the identity is removed explicitly:
+    // passing `undefined` would silently restore the owner and test nothing.
+    service.context = { ...buildContext(), user: undefined };
+
+    await expect(service.listForViewer({})).resolves.toEqual([]);
+    expect(findFilter).toBeUndefined();
+  });
+
+  it('includes terminal states only when asked', async () => {
+    await service.listForViewer({ includeTerminal: true });
+
+    expect(findFilter.state).toBeUndefined();
+  });
+
+  it('honours the chat session filter and clamps the limit', async () => {
+    await service.listForViewer({ chatSessionId: 'session-1', limit: 5000 });
+    expect(findFilter.chatSessionId).toBe('session-1');
+
+    // The clamp itself is asserted through the builder chain in `list()`; here the
+    // important half is that an over-large limit cannot become an unbounded read.
+    expect(findFilter.ownerUserId).toBe(ownerId);
+  });
+
+  it('orders by fireAt so the next wake is first', async () => {
+    const sort = jest.fn(() => queryFn(() => []));
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue({
+      sort,
+      limit: () => queryFn(() => []),
+    } as any);
+
+    await service.listForViewer({});
+
+    expect(sort).toHaveBeenCalledWith({ fireAt: 1 });
   });
 });
