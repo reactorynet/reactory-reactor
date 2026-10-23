@@ -134,12 +134,30 @@ export function buildTrigger(props: IScheduleContinuationProps):
 }
 
 /**
+ * Trigger kinds that something in THIS delivery actually fires.
+ *
+ * `at` and `condition` are evaluated by `reactor.AgentContinuationSweeper`, which
+ * ships with this change. `event`, `task` and `webhook` are supported end to end by
+ * the record, the waiter and `fire()` — but nothing in this ticket publishes them:
+ * wiring those producers is the follow-up ticket. A continuation registered on one
+ * of them can therefore only ever expire.
+ *
+ * That is honest at expiry (the wake carries `not_observed` and `expirePrompt`), but
+ * it is NOT what the user asked for, so the success message says so explicitly
+ * rather than implying the condition will be watched. This is the difference
+ * between a bounded, disclosed wait and a promise the platform cannot keep.
+ */
+export const PRODUCERLESS_TRIGGER_KINDS: ReadonlyArray<string> = ['event', 'task', 'webhook'];
+
+export function isProducerless(kind: string | undefined): boolean {
+  return !!kind && PRODUCERLESS_TRIGGER_KINDS.includes(kind);
+}
+/**
  * Default deadline. A continuation must be bounded, but making the model compute
  * an absolute deadline invites off-by-an-hour mistakes, so derive a sensible one:
  * the `at` moment plus a 15-minute grace, otherwise 24 hours.
  */
-export function defaultTtlMs(props: IScheduleContinuationProps, now: number = Date.now()): number {
-  if (props.ttlMs && Number.isFinite(Number(props.ttlMs))) return Number(props.ttlMs);
+export function defaultTtlMs(props: IScheduleContinuationProps, now: number = Date.now()): number {  if (props.ttlMs && Number.isFinite(Number(props.ttlMs))) return Number(props.ttlMs);
   if (props.at !== undefined && props.at !== null && props.at !== '') {
     const at = new Date(props.at as any).getTime();
     if (!Number.isNaN(at)) return Math.max(at - now + 15 * 60 * 1000, 60 * 1000);
@@ -222,12 +240,18 @@ export const ScheduleContinuationMacro: Macro<unknown, IScheduleContinuationProp
       };
     }
 
+    const triggerKind = built.trigger?.kind as string | undefined;
+    const producerless = isProducerless(triggerKind);
+
     return {
       success: true,
       continuationId: result.continuationId,
       fireAt: result.fireAt,
       state: result.state,
       reason: props.reason,
+      triggerKind,
+      /** False for event/task/webhook: nothing in this deployment publishes them yet. */
+      producerAvailable: !producerless,
       instructions:
         `## Follow-up scheduled\n\n` +
         `- **Waiting on**: ${props.reason}\n` +
@@ -235,7 +259,14 @@ export const ScheduleContinuationMacro: Macro<unknown, IScheduleContinuationProp
         `- **continuationId**: ${result.continuationId}\n\n` +
         'Tell the user what you are waiting for and when the wait expires. ' +
         'You may say you will report back, because a durable waiter is now parked. ' +
-        'If it expires without the signal you will be woken with an instruction to say it was NOT observed.',
+        'If it expires without the signal you will be woken with an instruction to say it was NOT observed.' +
+        (producerless
+          ? `\n\n### Important — this wait can only expire\n\n` +
+            `Nothing currently publishes a \`${triggerKind}\` signal, so this continuation ` +
+            `WILL expire at ${result.fireAt} unless a producer is wired up. Say that to the user: ` +
+            `you are watching until ${result.fireAt}, not until their condition happens. ` +
+            'Do not describe it as a guarantee that they will be told the moment it happens.'
+          : ''),
     };
   } catch (error: any) {
     // `register` throws only when the waiter could not be started — nothing is
@@ -394,8 +425,7 @@ That single string is what stops an unobserved signal being reported as fact.
         function: {
           name: 'scheduleContinuation',
           description:
-            'Register a durable continuation: you are woken later (at a time, on an event, when a condition is true, or when a task completes) and can then report back to the user. Requires expirePrompt so an expired wait is never reported as a completed one.',
-          parameters: {
+            'Register a durable continuation: you are woken later (at a time, or when a condition is true) and can then report back to the user. eventName and task are accepted for compatibility, but nothing in this deployment publishes those signals yet, so such a wait can only expire — say so to the user. expirePrompt is required so an expired wait is never reported as a completed one.',          parameters: {
             type: 'object',
             properties: {
               at: {

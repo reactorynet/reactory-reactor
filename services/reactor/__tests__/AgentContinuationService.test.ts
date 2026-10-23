@@ -50,11 +50,13 @@ import AgentContinuationService, {
   planTriggerDecision,
   toPublicView,
   isSystemIdentity,
-  MAX_PENDING_PER_SESSION,
-  MIN_INTERVAL_MS,
+  parseOutcome,
+  describeReceivedOutcome,
+  describeTrigger,
+  MAX_PENDING_PER_SESSION,  MIN_INTERVAL_MS,
+  ACTIVE_STATES,
   CONTINUATION_EVENT_NAME,
 } from '../AgentContinuationService';
-
 /** Chainable mongoose query stub. All builders return itself; `exec` yields `fn()`. */
 const queryFn = (fn: () => any) => {
   const q: any = {
@@ -129,7 +131,7 @@ function installStore(initial: any) {
 
   const findOne = jest
     .spyOn(AgentContinuationModel, 'findOne')
-    .mockImplementation((() => queryFn(() => (doc ? { ...doc } : null))) as any);
+    .mockImplementation(((filter: any = {}) => queryFn(() => (doc && matches(filter) ? { ...doc } : null))) as any);
 
   const findOneAndUpdate = jest
     .spyOn(AgentContinuationModel, 'findOneAndUpdate')
@@ -203,6 +205,8 @@ beforeEach(() => {
 
   service = Object.create(AgentContinuationService.prototype);
   service.context = buildContext();
+  // No backoff in tests: the retry path is exercised, not waited on.
+  service.deliveryRetryDelayMs = 0;
 
   jest.spyOn(AgentContinuationModel.prototype, 'save').mockImplementation(async function (this: any) {
     // Captured so the identity, the key's entropy and the deadline can be asserted.
@@ -797,5 +801,915 @@ describe('isSystemIdentity', () => {
     } finally {
       delete process.env.SYSTEM_USER_EMAIL;
     }
+  });
+});
+
+// ── F1: the outcome must be DATA, and must be recognised ─────────────────────
+
+describe('parseOutcome / describeReceivedOutcome', () => {
+  it('accepts only the two sentinel values', () => {
+    expect(parseOutcome('observed')).toBe('observed');
+    expect(parseOutcome('not_observed')).toBe('not_observed');
+  });
+
+  it('rejects everything else, including the unresolved template token', () => {
+    for (const bad of [
+      undefined,
+      null,
+      '',
+      'Observed',
+      'expired',
+      'not-observed',
+      '${variables.wake.outcome}',
+      { outcome: 'observed' },
+      0,
+    ]) {
+      expect(parseOutcome(bad)).toBeNull();
+    }
+  });
+
+  it('describes a received value without throwing on odd input', () => {
+    expect(describeReceivedOutcome(undefined)).toMatch(/no outcome in the wake payload/);
+    expect(describeReceivedOutcome(null)).toBe('null');
+    expect(describeReceivedOutcome('${variables.wake.outcome}')).toBe('${variables.wake.outcome}');
+    const circular: any = {};
+    circular.self = circular;
+    expect(() => describeReceivedOutcome(circular)).not.toThrow();
+    expect(describeReceivedOutcome('x'.repeat(500)).length).toBeLessThanOrEqual(121);
+  });
+});
+
+describe('deliver — unrecognised outcome fails closed (never "observed")', () => {
+  /**
+   * The reachable fail-open the reviewer found: an ABSENT outcome used to be
+   * coerced to 'observed'. It is reachable in production — `signalWorkflowInstance`
+   * (GraphQL) and `workflow signal` (CLI) wake a parked instance with eventData
+   * `{}`, and `resolveTemplate` leaves `${variables.wake.outcome}` as a literal.
+   */
+  const cases: Array<[string, any]> = [
+    ['omitted entirely', undefined],
+    ['null', null],
+    ['the unresolved template token', '${variables.wake.outcome}'],
+    ['an unexpected word', 'expired'],
+    ['a non-string payload', { outcome: 'observed' }],
+  ];
+
+  it.each(cases)('%s ⇒ no turn is sent, the record fails visibly', async (_label, value) => {
+    const store = installStore(baseRecord());
+    jest.spyOn(ReactorConversationModel, 'findOne').mockReturnValue(queryFn(() => ({ _id: sessionId })) as any);
+
+    const result = await service.deliver({ continuationId: 'cont-1', outcome: value } as any);
+
+    expect(result.delivered).toBe(false);
+    expect(result.reason).toBe('invalid_outcome');
+    // Not a single turn, in either wording.
+    expect(sendMessage).not.toHaveBeenCalled();
+    // Terminal, visible, and NOT 'fired'.
+    expect(store.doc.state).toBe('failed');
+    expect(store.doc.state).not.toBe('fired');
+    expect(store.doc.outcome).toBeUndefined();
+    expect(store.doc.lastError).toMatch(/without a recognised outcome/);
+    expect(result.error).toMatch(/Expected 'observed' or 'not_observed'/);
+    // The owner is told through the task list.
+    expect(taskDocuments).toHaveLength(1);
+    expect(taskDocuments[0].category).toBe('agent-continuation');
+  });
+
+  it('does not claim the record before refusing, so no budget is spent', async () => {
+    const store = installStore(baseRecord());
+
+    await service.deliver({ continuationId: 'cont-1' } as any);
+
+    // `attempt` is only incremented by the claim; a refusal must not consume it.
+    expect(store.doc.attempt).toBe(0);
+  });
+
+  it('still delivers normally when the outcome IS recognised', async () => {
+    // The control: without this, a guard that refused everything would pass.
+    const store = installStore(baseRecord());
+    jest.spyOn(ReactorConversationModel, 'findOne').mockReturnValue(queryFn(() => ({ _id: sessionId })) as any);
+
+    const result = await service.deliver({ continuationId: 'cont-1', outcome: 'observed' });
+
+    expect(result.delivered).toBe(true);
+    expect(store.doc.state).toBe('fired');
+  });
+});
+
+// ── F3: stall recovery ───────────────────────────────────────────────────────
+
+describe('recoverStalledFiring', () => {
+  it('re-arms a stale `firing` record with attempts left and increments the attempt', async () => {
+    const stale = baseRecord({
+      state: 'firing',
+      attempt: 0,
+      maxAttempts: 2,
+      updatedAt: new Date(Date.now() - 10 * 60_000),
+    });
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [stale]) as any);
+    const findOneAndUpdate = jest
+      .spyOn(AgentContinuationModel, 'findOneAndUpdate')
+      .mockReturnValue(queryFn(() => ({ ...stale, state: 'armed', attempt: 1 })) as any);
+
+    const result = await service.recoverStalledFiring({ now: new Date(), staleMs: 120_000 });
+
+    expect(result.recovered).toBe(1);
+    const [filter, update] = findOneAndUpdate.mock.calls[0] as any[];
+    // Conditional on `firing`, so a delivery that completed in the meantime is safe.
+    expect(filter).toEqual({ continuationId: 'cont-1', state: 'firing' });
+    expect(update.$set.state).toBe('armed');
+    expect(update.$inc).toEqual({ attempt: 1 });
+    expect(update.$set.lastError).toBe('delivery_stalled');
+    // Re-arming is not a user-visible event: no task for a retry.
+    expect(taskSave).not.toHaveBeenCalled();
+  });
+
+  it('fails a stale `firing` record whose retry budget is spent, and makes it visible', async () => {
+    const stale = baseRecord({
+      state: 'firing',
+      attempt: 2,
+      maxAttempts: 2,
+      updatedAt: new Date(Date.now() - 10 * 60_000),
+    });
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [stale]) as any);
+    const findOneAndUpdate = jest
+      .spyOn(AgentContinuationModel, 'findOneAndUpdate')
+      .mockReturnValue(queryFn(() => ({ ...stale, state: 'failed' })) as any);
+
+    const result = await service.recoverStalledFiring({ now: new Date() });
+
+    expect(result.recovered).toBe(0);
+    const [filter, update] = findOneAndUpdate.mock.calls[0] as any[];
+    expect(filter.state).toEqual({ $nin: ['fired', 'expired', 'cancelled', 'orphaned', 'failed'] });
+    expect(update.$set.state).toBe('failed');
+    expect(update.$set.lastError).toMatch(/retry budget is exhausted/);
+    expect(taskSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('scopes the scan to stale, non-terminal `firing` records', async () => {
+    const find = jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => []) as any);
+
+    const result = await service.recoverStalledFiring({ now: new Date('2026-10-23T12:00:00Z'), staleMs: 60_000 });
+
+    expect(result.recovered).toBe(0);
+    const filter = (find.mock.calls[0] as any)[0];
+    expect(filter.state).toBe('firing');
+    expect(filter.updatedAt).toEqual({ $lt: new Date('2026-10-23T11:59:00Z') });
+  });
+
+  it('does not recover when the conditional update matches nothing', async () => {
+    const stale = baseRecord({ state: 'firing', attempt: 0, maxAttempts: 2 });
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [stale]) as any);
+    jest.spyOn(AgentContinuationModel, 'findOneAndUpdate').mockReturnValue(queryFn(() => null) as any);
+
+    const result = await service.recoverStalledFiring({ now: new Date() });
+
+    expect(result.recovered).toBe(0);
+  });
+});
+
+// ── F3: cancel ───────────────────────────────────────────────────────────────
+
+describe('cancel', () => {
+  it('cancels an armed record and stops its workflow instance', async () => {
+    const store = installStore(baseRecord({ state: 'armed' }));
+
+    const result = await service.cancel({ continuationId: 'cont-1', reason: 'user changed their mind' });
+
+    expect(result.cancelled).toBe(true);
+    expect(store.doc.state).toBe('cancelled');
+    expect(store.doc.lastError).toBe('user changed their mind');
+    expect(cancelWorkflowInstance).toHaveBeenCalledWith('instance-1');
+  });
+
+  it('still cancels the record when the instance cannot be cancelled', async () => {
+    // Best effort: a workflow the runner no longer knows about must not block the
+    // record from leaving the active set.
+    const store = installStore(baseRecord({ state: 'armed' }));
+    cancelWorkflowInstance.mockRejectedValue(new Error('instance not found'));
+
+    const result = await service.cancel({ continuationId: 'cont-1' });
+
+    expect(result.cancelled).toBe(true);
+    expect(store.doc.state).toBe('cancelled');
+  });
+
+  it('refuses without a continuationId', async () => {
+    expect(await service.cancel({ continuationId: '' })).toEqual({
+      cancelled: false,
+      reason: 'continuationId is required',
+    });
+  });
+
+  it('reports not_found for an unknown id', async () => {
+    installStore(baseRecord());
+    const result = await service.cancel({ continuationId: 'nope' });
+    expect(result).toEqual({ cancelled: false, reason: 'not_found' });
+  });
+
+  it('refuses a caller who does not own the continuation', async () => {
+    const store = installStore(baseRecord({ state: 'armed' }));
+    service.context = buildContext({ _id: new ObjectId(), email: 'someone@example.com' });
+
+    const result = await service.cancel({ continuationId: 'cont-1' });
+
+    expect(result).toEqual({ cancelled: false, reason: 'not_owner' });
+    expect(store.doc.state).toBe('armed');
+    expect(cancelWorkflowInstance).not.toHaveBeenCalled();
+  });
+
+  it('lets an internal (no-user) caller cancel', async () => {
+    const store = installStore(baseRecord({ state: 'armed' }));
+    service.context = buildContext(null as any);
+
+    const result = await service.cancel({ continuationId: 'cont-1' });
+
+    expect(result.cancelled).toBe(true);
+    expect(store.doc.state).toBe('cancelled');
+  });
+
+  it('refuses to cancel a terminal record', async () => {
+    const store = installStore(baseRecord({ state: 'fired' }));
+
+    const result = await service.cancel({ continuationId: 'cont-1' });
+
+    expect(result).toEqual({ cancelled: false, reason: 'already_fired' });
+    expect(store.doc.state).toBe('fired');
+  });
+
+  it('does not cancel when the conditional active-state update matches nothing', async () => {
+    const store = installStore(baseRecord({ state: 'armed' }));
+    // A concurrent delivery moved the record to `firing` between the read and the
+    // update: the `$in ACTIVE_STATES` predicate still matches, so this asserts the
+    // predicate is what decides, not the earlier read.
+    jest.spyOn(AgentContinuationModel, 'findOneAndUpdate').mockReturnValue(queryFn(() => null) as any);
+
+    const result = await service.cancel({ continuationId: 'cont-1' });
+
+    expect(result.cancelled).toBe(false);
+    expect(store.doc.state).toBe('armed');
+  });
+});
+
+// ── F3: delivery failure ─────────────────────────────────────────────────────
+
+describe('deliver — delivery failure', () => {
+  it('retries the send, then fails visibly without recording a wake', async () => {
+    const store = installStore(baseRecord());
+    jest.spyOn(ReactorConversationModel, 'findOne').mockReturnValue(queryFn(() => ({ _id: sessionId })) as any);
+    sendMessage.mockRejectedValue(new Error('transport closed'));
+
+    const result = await service.deliver({ continuationId: 'cont-1', outcome: 'observed' });
+
+    expect(result.delivered).toBe(false);
+    expect(result.reason).toBe('send_failed');
+    // maxAttempts (2) attempts, no more.
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(store.doc.state).toBe('failed');
+    expect(store.doc.lastError).toMatch(/transport closed/);
+    expect(taskSave).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats a ReactorErrorResponse as a failure and retries it', async () => {
+    const store = installStore(baseRecord());
+    jest.spyOn(ReactorConversationModel, 'findOne').mockReturnValue(queryFn(() => ({ _id: sessionId })) as any);
+    sendMessage
+      .mockResolvedValueOnce({
+        __typename: 'ReactorErrorResponse',
+        code: 'CONVERSATION_PROCESSING',
+        message: 'Another turn is already running',
+      })
+      .mockResolvedValueOnce({ __typename: 'ReactorChatMessage', id: 'msg-2' });
+
+    const result = await service.deliver({ continuationId: 'cont-1', outcome: 'observed' });
+
+    expect(result.delivered).toBe(true);
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(store.doc.state).toBe('fired');
+    expect(store.doc.wakeMessageId).toBe('msg-2');
+  });
+
+  it('fails when every attempt returns a ReactorErrorResponse', async () => {
+    const store = installStore(baseRecord());
+    jest.spyOn(ReactorConversationModel, 'findOne').mockReturnValue(queryFn(() => ({ _id: sessionId })) as any);
+    sendMessage.mockResolvedValue({
+      __typename: 'ReactorErrorResponse',
+      code: 'BUDGET_EXCEEDED',
+      message: 'no budget',
+    });
+
+    const result = await service.deliver({ continuationId: 'cont-1', outcome: 'observed' });
+
+    expect(result.reason).toBe('send_failed');
+    expect(result.error).toMatch(/BUDGET_EXCEEDED/);
+    expect(store.doc.state).toBe('failed');
+  });
+
+  it('fails when the conversation service is not registered at all', async () => {
+    const store = installStore(baseRecord());
+    jest.spyOn(ReactorConversationModel, 'findOne').mockReturnValue(queryFn(() => ({ _id: sessionId })) as any);
+    const getService = service.context.getService;
+    service.context.getService = jest.fn((id: string) =>
+      id === 'reactor.ReactorConversationService@1.0.0' ? null : getService(id),
+    );
+
+    const result = await service.deliver({ continuationId: 'cont-1', outcome: 'observed' });
+
+    expect(result.reason).toBe('no_conversation_service');
+    expect(store.doc.state).toBe('failed');
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+// ── F3/F4: get() — the waiter read is restricted ─────────────────────────────
+
+describe('get', () => {
+  it('returns the key to the OWNER while the record can still be woken', async () => {
+    installStore(baseRecord({ state: 'pending' }));
+
+    const view = await service.get({ continuationId: 'cont-1' });
+
+    expect(view).toEqual({
+      continuationId: 'cont-1',
+      correlationKey: expect.any(String),
+      state: 'pending',
+      fireAt: expect.any(String),
+    });
+  });
+
+  it('also serves an `armed` record', async () => {
+    installStore(baseRecord({ state: 'armed' }));
+    const view = await service.get({ continuationId: 'cont-1' });
+    expect(view?.state).toBe('armed');
+  });
+
+  it('refuses a caller who is not the owner — no key, no state', async () => {
+    // `list()` exposes continuationIds, so an unguarded get() would let any caller
+    // that learned one mint a wake event for somebody else's session.
+    installStore(baseRecord({ state: 'pending' }));
+    service.context = buildContext({ _id: new ObjectId(), email: 'intruder@example.com' });
+
+    const view = await service.get({ continuationId: 'cont-1' });
+
+    expect(view).toBeNull();
+  });
+
+  it('serves an internal caller with no user on its context', async () => {
+    installStore(baseRecord({ state: 'pending' }));
+    service.context = buildContext(null as any);
+
+    const view = await service.get({ continuationId: 'cont-1' });
+
+    expect(view?.correlationKey).toEqual(expect.any(String));
+  });
+
+  it('refuses a terminal record (there is no waiter left to wake)', async () => {
+    installStore(baseRecord({ state: 'fired' }));
+    expect(await service.get({ continuationId: 'cont-1' })).toBeNull();
+  });
+
+  it('returns null for an unknown or empty id', async () => {
+    installStore(baseRecord());
+    expect(await service.get({ continuationId: 'nope' })).toBeNull();
+    expect(await service.get({ continuationId: '' })).toBeNull();
+  });
+});
+
+// ── F3: markArmed / complete ─────────────────────────────────────────────────
+
+describe('markArmed and complete', () => {
+  it('arms a pending record, and is idempotent on replay', async () => {
+    const store = installStore(baseRecord({ state: 'pending' }));
+
+    expect((await service.markArmed({ continuationId: 'cont-1' })).armed).toBe(true);
+    expect(store.doc.state).toBe('armed');
+    // A second call no longer matches `state: 'pending'`.
+    expect((await service.markArmed({ continuationId: 'cont-1' })).armed).toBe(false);
+  });
+
+  it('does not arm without an id', async () => {
+    expect(await service.markArmed({ continuationId: '' })).toEqual({ armed: false });
+  });
+
+  it('completes a firing record as fired or expired', async () => {
+    const store = installStore(baseRecord({ state: 'firing' }));
+
+    const completed = await service.complete({
+      continuationId: 'cont-1',
+      outcome: 'observed',
+      firedBy: 'at',
+      wakeMessageId: 'msg-9',
+    });
+
+    expect(completed).toEqual({ completed: true, state: 'fired' });
+    expect(store.doc.firedBy).toBe('at');
+    expect(store.doc.wakeMessageId).toBe('msg-9');
+    expect(store.doc.firedAt).toBeInstanceOf(Date);
+  });
+
+  it('completes as expired, defaulting firedBy to expiry', async () => {
+    const store = installStore(baseRecord({ state: 'firing' }));
+
+    const completed = await service.complete({ continuationId: 'cont-1', outcome: 'not_observed' });
+
+    expect(completed.state).toBe('expired');
+    expect(store.doc.firedBy).toBe('expiry');
+  });
+
+  it('refuses to complete a record that is not firing', async () => {
+    installStore(baseRecord({ state: 'cancelled' }));
+    expect(await service.complete({ continuationId: 'cont-1', outcome: 'observed' })).toEqual({
+      completed: false,
+      state: undefined,
+    });
+  });
+});
+
+// ── F3: condition evaluation failure ─────────────────────────────────────────
+
+describe('claimDue — condition evaluation failure', () => {
+  it('treats an unavailable condition service as "not satisfied" and records why', async () => {
+    const record = baseRecord({
+      trigger: { kind: 'condition', serviceId: 'missing.Service@1.0.0', method: 'isMerged' },
+      fireAt: new Date(Date.now() + 86_400_000),
+    });
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [record]) as any);
+    const updateOne = jest.spyOn(AgentContinuationModel, 'updateOne').mockReturnValue(queryFn(() => ({})) as any);
+
+    const result = await service.claimDue({ now: new Date() });
+
+    // Never "fire because the check broke".
+    expect(result.due).toBe(0);
+    expect(updateOne).toHaveBeenCalledTimes(1);
+    const update = (updateOne.mock.calls[0] as any[])[1];
+    expect(update.$set.lastError).toMatch(/condition evaluation failed/);
+  });
+
+  it('treats a throwing condition method as "not satisfied"', async () => {
+    const record = baseRecord({
+      trigger: { kind: 'condition', serviceId: 'test.Conditions@1.0.0', method: 'isMerged' },
+      fireAt: new Date(Date.now() + 86_400_000),
+    });
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [record]) as any);
+    const updateOne = jest.spyOn(AgentContinuationModel, 'updateOne').mockReturnValue(queryFn(() => ({})) as any);
+    const getService = service.context.getService;
+    service.context.getService = jest.fn((id: string) =>
+      id === 'test.Conditions@1.0.0'
+        ? {
+            isMerged: async () => {
+              throw new Error('upstream 503');
+            },
+          }
+        : getService(id),
+    );
+
+    const result = await service.claimDue({ now: new Date() });
+
+    expect(result.due).toBe(0);
+    expect((updateOne.mock.calls[0] as any[])[1].$set.lastError).toMatch(/upstream 503/);
+  });
+
+  it('reports "satisfied" for a truthy result when no expectPath is given', async () => {
+    const record = baseRecord({
+      trigger: { kind: 'condition', serviceId: 'test.Conditions@1.0.0', method: 'isMerged' },
+      fireAt: new Date(Date.now() + 86_400_000),
+    });
+    jest.spyOn(AgentContinuationModel, 'find').mockReturnValue(queryFn(() => [record]) as any);
+    const getService = service.context.getService;
+    service.context.getService = jest.fn((id: string) =>
+      id === 'test.Conditions@1.0.0' ? { isMerged: async () => true } : getService(id),
+    );
+
+    const result = await service.claimDue({ now: new Date() });
+
+    expect(result.due).toBe(1);
+  });
+});
+
+// ── F3: fire() edge paths ────────────────────────────────────────────────────
+
+describe('fire — edge paths', () => {
+  it('reports publish_failed when the workflow service returns failure', async () => {
+    installStore(baseRecord());
+    publishWorkflowEvent.mockResolvedValue({ success: false, message: 'runner offline' });
+
+    const result = await service.fire({ continuationId: 'cont-1', source: 'sweeper' });
+
+    expect(result).toEqual({ fired: false, reason: 'publish_failed', error: 'runner offline' });
+  });
+
+  it('reports publish_failed when publishing throws', async () => {
+    installStore(baseRecord());
+    publishWorkflowEvent.mockRejectedValue(new Error('bus down'));
+
+    const result = await service.fire({ continuationId: 'cont-1', source: 'sweeper' });
+
+    expect(result.reason).toBe('publish_failed');
+    expect(result.error).toMatch(/bus down/);
+  });
+
+  it('reports workflow_service_unavailable when the service is missing', async () => {
+    installStore(baseRecord());
+    service.context = { user: { _id: ownerId }, getService: () => null, log: jest.fn() } as any;
+
+    const result = await service.fire({ continuationId: 'cont-1' });
+
+    expect(result.reason).toBe('workflow_service_unavailable');
+  });
+
+  it("falls back to the caller's tenant when the instance cannot be read", async () => {
+    installStore(baseRecord());
+    getWorkflowHistoryById.mockRejectedValue(new Error('instance pruned'));
+
+    const result = await service.fire({ continuationId: 'cont-1', source: 'sweeper' });
+
+    expect(result.fired).toBe(true);
+    // The fourth argument is the tenant; with no instance, the sweeper's partner.
+    expect((publishWorkflowEvent as jest.Mock).mock.calls[0][3]).toBe('reactory');
+  });
+
+  it('uses the context tenant when there is no instance id at all', async () => {
+    installStore(baseRecord({ workflowInstanceId: undefined }));
+
+    const result = await service.fire({ continuationId: 'cont-1', source: 'sweeper' });
+
+    expect(result.fired).toBe(true);
+    expect(getWorkflowHistoryById).not.toHaveBeenCalled();
+    expect((publishWorkflowEvent as jest.Mock).mock.calls[0][3]).toBe('reactory');
+  });
+
+  it('does not fire without a continuationId, or for an unknown one', async () => {
+    expect(await service.fire({ continuationId: '' })).toEqual({
+      fired: false,
+      reason: 'continuationId is required',
+    });
+    installStore(baseRecord());
+    expect((await service.fire({ continuationId: 'nope' })).reason).toBe('not_found');
+  });
+
+  it('records when the event was published so the sweeper will not repeat it', async () => {
+    const store = installStore(baseRecord());
+
+    await service.fire({ continuationId: 'cont-1', outcome: 'not_observed', source: 'sweeper' });
+
+    expect(store.doc.eventPublishedAt).toBeInstanceOf(Date);
+    expect(store.doc.eventOutcome).toBe('not_observed');
+  });
+});
+
+// ── F3: register adopt failure is non-fatal ─────────────────────────────────
+
+describe('register — adopt failure', () => {
+  it('stays registered when the instance id cannot be persisted', async () => {
+    // The waiter IS running; losing the pointer only costs the tenant lookup a
+    // fallback in fire(), so this must not fail the registration.
+    jest
+      .spyOn(ReactorConversationModel, 'findOne')
+      .mockReturnValue(queryFn(() => ({ _id: sessionId, personaId: 'ReactorAIPersona' })) as any);
+    jest.spyOn(AgentContinuationModel, 'countDocuments').mockReturnValue(queryFn(() => 0) as any);
+    jest.spyOn(AgentContinuationModel, 'findOne').mockReturnValue(queryFn(() => null) as any);
+    jest.spyOn(AgentContinuationModel, 'updateOne').mockImplementation((() => {
+      const q: any = {
+        lean: () => q,
+        select: () => q,
+        sort: () => q,
+        limit: () => q,
+        exec: async () => {
+          throw new Error('write concern failed');
+        },
+      };
+      return q;
+    }) as any);
+
+    const result = await service.register({
+      chatSessionId: sessionId.toString(),
+      personaId: 'ReactorAIPersona',
+      reason: 'PR #482 merge',
+      resumePrompt: 'Check whether PR #482 merged.',
+      expirePrompt: 'It was not observed.',
+      trigger: { kind: 'at', at: new Date(Date.now() + 60_000) },
+      ttlMs: 3_600_000,
+    });
+
+    expect(result.registered).toBe(true);
+    // The failure is logged rather than thrown: the waiter IS running.
+    expect(service.context.log).toHaveBeenCalledWith(
+      expect.stringMatching(/could not be persisted/),
+      expect.objectContaining({ error: 'write concern failed' }),
+      'warn',
+    );
+  });
+});
+// ── internals and edge branches ─────────────────────────────────────────────
+
+/**
+ * These cover the branches that decide *whether* something happens, rather than
+ * the happy path: the trigger describer used by every list surface, the class's own
+ * construction (the other suites build it with `Object.create` so the field
+ * initialisers never run), the duplicate guard, the rollback when the cleanup
+ * itself fails, and the two "last resort" logging/visibility paths.
+ */
+describe('describeTrigger — every trigger kind is rendered for the UI', () => {
+  it('describes each kind, and degrades safely', () => {
+    expect(describeTrigger(undefined)).toBe('unknown');
+    expect(describeTrigger({ kind: 'at', at: new Date('2026-10-23T14:00:00Z') } as any)).toBe(
+      'at 2026-10-23T14:00:00.000Z',
+    );
+    expect(describeTrigger({ kind: 'event', eventName: 'pr.merged' } as any)).toBe('on event pr.merged');
+    expect(
+      describeTrigger({ kind: 'condition', serviceId: 'reactor.X@1.0.0', method: 'isMerged' } as any),
+    ).toMatch(/the predicate/);
+    expect(
+      describeTrigger({
+        kind: 'condition',
+        serviceId: 'reactor.X@1.0.0',
+        method: 'isMerged',
+        expectPath: 'result.merged',
+      } as any),
+    ).toMatch(/result\.merged/);
+    expect(describeTrigger({ kind: 'task', taskId: 'task-1' } as any)).toBe('on task task-1');
+    expect(describeTrigger({ kind: 'task' } as any)).toBe('on task completion');
+    expect(describeTrigger({ kind: 'webhook', label: 'github' } as any)).toBe('on webhook github');
+    expect(describeTrigger({ kind: 'webhook' } as any)).toBe('on webhook (unlabelled)');
+    expect(describeTrigger({ kind: 'nonsense' } as any)).toBe('unknown');
+  });
+});
+
+describe('class construction', () => {
+  it('exposes the service identity the registry and logs rely on', () => {
+    const instance: any = new (AgentContinuationService as any)(
+      {} as any,
+      buildContext(),
+    );
+
+    expect(instance.nameSpace).toBe('reactor');
+    expect(instance.name).toBe('Agent Continuation Service');
+    expect(instance.version).toBe('1.0.0');
+    expect(instance.tags).toContain('continuation');
+    expect(instance.deliveryRetryDelayMs).toBe(750);
+    expect(instance.toString()).toBe('AgentContinuationService');
+    expect(instance.toString(true)).toBe('AgentContinuationService@1.0.0');
+    expect(instance.context).toBeDefined();
+  });
+});
+
+describe('register — duplicate guard', () => {
+  it('refuses a second identical active continuation', async () => {
+    jest
+      .spyOn(ReactorConversationModel, 'findOne')
+      .mockReturnValue(queryFn(() => ({ _id: sessionId, personaId: 'ReactorAIPersona' })) as any);
+    jest.spyOn(AgentContinuationModel, 'countDocuments').mockReturnValue(queryFn(() => 0) as any);
+    jest
+      .spyOn(AgentContinuationModel, 'findOne')
+      .mockReturnValue(queryFn(() => ({ continuationId: 'cont-existing' })) as any);
+
+    const result = await service.register({
+      chatSessionId: sessionId.toString(),
+      personaId: 'ReactorAIPersona',
+      reason: 'PR #482 merge',
+      resumePrompt: 'Check.',
+      expirePrompt: 'It was not observed.',
+      trigger: { kind: 'at', at: new Date(Date.now() + 60_000) },
+      ttlMs: 3_600_000,
+    });
+
+    expect(result.registered).toBe(false);
+    expect(result.code).toBe('duplicate');
+    expect(result.error).toContain('cont-existing');
+    expect(startWorkflow).not.toHaveBeenCalled();
+  });
+});
+
+describe('register — rollback when the cleanup itself fails', () => {
+  it('still throws, and records that the record could not be removed', async () => {
+    jest
+      .spyOn(ReactorConversationModel, 'findOne')
+      .mockReturnValue(queryFn(() => ({ _id: sessionId, personaId: 'ReactorAIPersona' })) as any);
+    jest.spyOn(AgentContinuationModel, 'countDocuments').mockReturnValue(queryFn(() => 0) as any);
+    jest.spyOn(AgentContinuationModel, 'findOne').mockReturnValue(queryFn(() => null) as any);
+    startWorkflow.mockRejectedValue(new Error('host not started'));
+    jest.spyOn(AgentContinuationModel, 'deleteOne').mockImplementation((() => {
+      const q: any = {
+        lean: () => q,
+        exec: async () => {
+          throw new Error('delete failed');
+        },
+      };
+      return q;
+    }) as any);
+
+    await expect(
+      service.register({
+        chatSessionId: sessionId.toString(),
+        personaId: 'ReactorAIPersona',
+        reason: 'PR #482 merge',
+        resumePrompt: 'Check.',
+        expirePrompt: 'It was not observed.',
+        trigger: { kind: 'at', at: new Date(Date.now() + 60_000) },
+        ttlMs: 3_600_000,
+      }),
+    ).rejects.toThrow(/Nothing is waiting/);
+
+    // Both the cleanup failure and the start failure are logged.
+    expect(service.context.log).toHaveBeenCalledWith(
+      expect.stringMatching(/could not be removed/),
+      expect.objectContaining({ error: 'delete failed' }),
+      'error',
+    );
+  });
+});
+
+describe('orphan', () => {
+  it('orphans with the supplied reason and raises a task', async () => {
+    const store = installStore(baseRecord({ state: 'armed' }));
+
+    const result = await service.orphan({ continuationId: 'cont-1', reason: 'session revoked' });
+
+    expect(result.orphaned).toBe(true);
+    expect(store.doc.state).toBe('orphaned');
+    expect(store.doc.lastError).toBe('session revoked');
+    expect(taskSave).toHaveBeenCalled();
+  });
+
+  it('uses a default reason and refuses without an id', async () => {
+    const store = installStore(baseRecord({ state: 'armed' }));
+    await service.orphan({ continuationId: 'cont-1' });
+    expect(store.doc.lastError).toMatch(/could not be attributed to the owner/);
+
+    expect(await service.orphan({ continuationId: '' })).toEqual({ orphaned: false });
+  });
+
+  it('reports not-orphaned when the record is already terminal', async () => {
+    installStore(baseRecord({ state: 'fired' }));
+    expect(await service.orphan({ continuationId: 'cont-1' })).toEqual({ orphaned: false });
+  });
+});
+
+describe('visibility task — idempotency and last resort', () => {
+  it('does not raise a second task when one is already pending', async () => {
+    installStore(baseRecord({ state: 'armed' }));
+    taskFindOne.mockResolvedValue({ _id: new ObjectId() });
+
+    await service.markTerminalWithVisibility('cont-1', 'failed', 'send failed');
+
+    expect(taskSave).not.toHaveBeenCalled();
+  });
+
+  it('keeps the record terminal even when the task cannot be created', async () => {
+    const store = installStore(baseRecord({ state: 'armed' }));
+    taskSave.mockRejectedValueOnce(new Error('task collection unavailable'));
+
+    const result = await service.markTerminalWithVisibility('cont-1', 'failed', 'send failed');
+
+    expect(result.updated).toBe(true);
+    expect(store.doc.state).toBe('failed');
+    // Last resort: the reason is still on the record, so list() shows it.
+    expect(service.context.log).toHaveBeenCalledWith(
+      expect.stringMatching(/could not raise the visibility task/),
+      expect.objectContaining({ error: 'task collection unavailable' }),
+      'error',
+    );
+  });
+});
+
+describe('getService / log — defensive paths', () => {
+  it('returns null when the context has no getService', async () => {
+    installStore(baseRecord());
+    service.context = { user: { _id: ownerId }, log: jest.fn() } as any;
+
+    // No registry at all: the record is still readable (owner scope only).
+    expect((await service.get({ continuationId: 'cont-1' }))?.state).toBe('armed');
+  });
+
+  it('treats a throwing getService as "no service"', async () => {
+    installStore(baseRecord());
+    service.context = {
+      user: { _id: ownerId },
+      log: jest.fn(),
+      getService: () => {
+        throw new Error('registry exploded');
+      },
+    } as any;
+
+    const result = await service.fire({ continuationId: 'cont-1' });
+
+    expect(result.fired).toBe(false);
+    expect(result.reason).toBe('workflow_service_unavailable');
+  });
+
+  it('falls back to the module logger when the context has no log()', async () => {
+    installStore(baseRecord({ state: 'armed' }));
+    service.context = { user: { _id: ownerId }, getService: () => null } as any;
+
+    // Any of these paths logs; none may throw because log() is unavailable.
+    await expect(service.orphan({ continuationId: 'cont-1', reason: 'x' })).resolves.toEqual({
+      orphaned: true,
+    });
+  });
+
+  it('swallows a throwing context.log()', async () => {
+    installStore(baseRecord({ state: 'armed' }));
+    service.context = {
+      user: { _id: ownerId },
+      getService: () => null,
+      log: () => {
+        throw new Error('logger down');
+      },
+    } as any;
+
+    await expect(service.orphan({ continuationId: 'cont-1' })).resolves.toEqual({ orphaned: true });
+  });
+});
+
+describe('checkBudget — degraded enforcement', () => {
+  it('allows the continuation when the budget service throws', async () => {
+    const store = installStore(baseRecord());
+    jest.spyOn(ReactorConversationModel, 'findOne').mockReturnValue(queryFn(() => ({ _id: sessionId })) as any);
+    checkUserBudget.mockRejectedValue(new Error('usage db unreachable'));
+
+    const result = await service.deliver({ continuationId: 'cont-1', outcome: 'observed' });
+
+    // Degraded to allow, the same stance ReactorAIUsageService takes itself.
+    expect(result.delivered).toBe(true);
+    expect(store.doc.state).toBe('fired');
+    expect(service.context.log).toHaveBeenCalledWith(
+      expect.stringMatching(/budget check failed/),
+      expect.anything(),
+      'warn',
+    );
+  });
+
+  it('refuses with a default reason when the budget verdict has none', async () => {
+    installStore(baseRecord());
+    jest.spyOn(ReactorConversationModel, 'findOne').mockReturnValue(queryFn(() => ({ _id: sessionId })) as any);
+    checkUserBudget.mockResolvedValue({ allowed: false, status: 'EXCEEDED', percentageUsed: 101 });
+
+    const result = await service.deliver({ continuationId: 'cont-1', outcome: 'observed' });
+
+    expect(result.reason).toBe('over_budget');
+    expect(result.error).toMatch(/AI usage budget reached/);
+  });
+});
+
+describe('validateTrigger — the shapes register refuses', () => {
+  const call = (trigger: any) =>
+    service.register({
+      chatSessionId: sessionId.toString(),
+      personaId: 'ReactorAIPersona',
+      reason: 'r',
+      resumePrompt: 'p',
+      expirePrompt: 'e',
+      trigger,
+      ttlMs: 60_000,
+    });
+
+  beforeEach(() => {
+    jest
+      .spyOn(ReactorConversationModel, 'findOne')
+      .mockReturnValue(queryFn(() => ({ _id: sessionId, personaId: 'ReactorAIPersona' })) as any);
+  });
+
+  it('rejects a missing kind, a bad `at`, an empty eventName and an incomplete condition', async () => {
+    expect((await call({ } as any)).error).toMatch(/trigger.kind is required/);
+    expect((await call({ kind: 'at', at: 'nope' } as any)).error).toMatch(/valid ISO date-time/);
+    expect((await call({ kind: 'event', eventName: '  ' } as any)).error).toMatch(/non-empty eventName/);
+    expect((await call({ kind: 'condition', serviceId: 'x' } as any)).error).toMatch(
+      /needs serviceId and method/,
+    );
+    expect((await call({ kind: 'bogus' } as any)).error).toMatch(/unknown trigger kind/);
+  });
+
+  it('accepts a well-formed trigger of every kind', async () => {
+    // The complement of the refusals above: each kind's happy path must reach the
+    // service, or the macro would be advertising triggers register() rejects.
+    jest.spyOn(AgentContinuationModel, 'countDocuments').mockReturnValue(queryFn(() => 0) as any);
+    jest.spyOn(AgentContinuationModel, 'findOne').mockReturnValue(queryFn(() => null) as any);
+    jest.spyOn(AgentContinuationModel, 'updateOne').mockReturnValue(queryFn(() => ({})) as any);
+
+    expect((await call({ kind: 'task' })).registered).toBe(true);
+    expect((await call({ kind: 'task', taskId: 'task-1' })).registered).toBe(true);
+    expect((await call({ kind: 'webhook', label: 'github' })).registered).toBe(true);
+    expect((await call({ kind: 'event', eventName: 'pr.merged' })).registered).toBe(true);
+    expect(
+      (await call({ kind: 'condition', serviceId: 'reactor.X@1.0.0', method: 'isMerged' })).registered,
+    ).toBe(true);
+  });
+});
+
+describe('planTriggerDecision — an `at` trigger overtaken by its deadline', () => {
+  it('reports not_observed when the sweeper was down past fireAt', () => {
+    // Conservative by construction: it can never over-claim an observation.
+    const decision = planTriggerDecision(
+      {
+        trigger: { kind: 'at', at: new Date('2026-10-23T12:00:00Z') } as any,
+        fireAt: new Date('2026-10-23T13:00:00Z'),
+      },
+      new Date('2026-10-23T14:00:00Z'),
+    );
+    expect(decision).toEqual({
+      outcome: 'not_observed',
+      firedBy: 'expiry',
+      reason: 'deadline_passed',
+    });
   });
 });

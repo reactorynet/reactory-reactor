@@ -216,6 +216,38 @@ export function isSystemIdentity(user: any): boolean {
   return false;
 }
 
+/**
+ * Strict outcome parsing.
+ *
+ * Returns `null` for anything that is not EXACTLY one of the two sentinel values —
+ * including `undefined`, `null`, `''` and an unresolved template token.
+ *
+ * This exists because the two values choose which prompt is sent, so a lenient
+ * `=== 'not_observed' ? 'not_observed' : 'observed'` would make every unrecognised
+ * input mean "the signal arrived". That is precisely the failure this feature
+ * exists to remove, and it is reachable: `signalWorkflowInstance(instanceId)`
+ * (GraphQL) and `workflow signal` (CLI) both wake a parked instance with eventData
+ * `{}`, and `BaseYamlStep.resolveTemplate` leaves an unresolvable `${...}` as the
+ * original token, so a payload without `outcome` reaches the step as the literal
+ * string `"${variables.wake.outcome}"`.
+ */
+export function parseOutcome(raw: any): ContinuationOutcome | null {
+  return raw === 'observed' || raw === 'not_observed' ? raw : null;
+}
+
+/** Safe, truncated rendering of a received value for `lastError` and logs. */
+export function describeReceivedOutcome(raw: any): string {
+  if (raw === undefined) return 'undefined (no outcome in the wake payload)';
+  if (raw === null) return 'null';
+  let text: string;
+  try {
+    text = typeof raw === 'string' ? raw : JSON.stringify(raw) ?? String(raw);
+  } catch {
+    text = String(raw);
+  }
+  return text.length > 120 ? `${text.slice(0, 120)}…` : text;
+}
+
 /** Human-readable one-liner for the trigger, for lists and UI. */
 export function describeTrigger(trigger: ContinuationTrigger | undefined): string {
   if (!trigger) return 'unknown';
@@ -321,6 +353,12 @@ class AgentContinuationService {
   context: Reactory.Server.IReactoryContext;
 
   description = 'Durable agent continuation: parks an agent until a future time or signal, then wakes it as the session owner.';
+
+  /**
+   * Backoff between delivery attempts, in ms. A field rather than a constant so a
+   * test can drive the retry path without sleeping; production keeps the 750ms.
+   */
+  deliveryRetryDelayMs = 750;
   nameSpace = 'reactor';
   name = 'Agent Continuation Service';
   version = '1.0.0';
@@ -598,14 +636,37 @@ class AgentContinuationService {
 
   /**
    * Waiter-internal read. Returns the correlation key because the waiting step
-   * needs it as its `eventKey`; it is therefore NOT a public surface. Callers that
-   * render state must use `list()`.
+   * needs it as its `eventKey` — which makes this the one method that hands out the
+   * wake credential. It is therefore gated to the two callers that legitimately
+   * hold it:
+   *
+   *   - **the waiter**, whose Reactory context is rebuilt from `data.__identity`
+   *     and is therefore the OWNER. A different authenticated user is refused;
+   *     because `list()` exposes `continuationId`s, an unguarded `get()` would let
+   *     any caller that learned one mint a wake event for somebody else's session.
+   *   - **an internal caller with no user on its context** (the sweeper, platform
+   *     tooling). There is nothing to attribute, and such a caller already has
+   *     database access.
+   *
+   * The state gate matters as much as the caller gate: a terminal record has no
+   * waiter left, so its key can only be used to publish a wake nobody will
+   * receive. `list()` stays the surface for everything else, and never carries the
+   * key.
    */
   async get(input: { continuationId: string }): Promise<IContinuationWaiterView | null> {
     const continuationId = String(input?.continuationId || '').trim();
     if (!continuationId) return null;
     const doc: any = await AgentContinuationModel.findOne({ continuationId } as any).lean().exec();
     if (!doc) return null;
+
+    const user: any = (this.context as any)?.user;
+    if (user?._id && String(doc.ownerUserId) !== String(user._id)) {
+      this.log('warn', 'continuation get() refused — caller is not the owner', { continuationId });
+      return null;
+    }
+
+    if (!['pending', 'armed'].includes(doc.state)) return null;
+
     return {
       continuationId: String(doc.continuationId),
       correlationKey: String(doc.correlationKey),
@@ -797,14 +858,21 @@ class AgentContinuationService {
         const instance: any = await workflowService.getWorkflowHistoryById(record.workflowInstanceId);
         tenantId = instance?.tenantId || undefined;
       } catch (error: any) {
-        this.log('warn', 'could not read the waiting instance; publishing without an explicit tenant', {
+        this.log('warn', 'could not read the waiting instance; falling back to the caller tenant', {
           continuationId,
           error: error?.message,
         });
       }
-    } else {
-      tenantId = (this.context as any)?.partner?.key;
     }
+
+    // Fall back to the caller's tenant when the instance is unreadable or its id was
+    // never persisted. This is reachable: `register` logs and continues when the
+    // adopt write fails, and an instance can be pruned. `publishWorkflowEvent`
+    // would resolve `undefined` the same way, but doing it explicitly keeps the
+    // behaviour visible here. Residual: for a tenant user the sweeper's partner may
+    // differ from the instance's tenant, and the engine would then drop the event
+    // silently — the adopt failure is always logged at `register` time.
+    if (!tenantId) tenantId = (this.context as any)?.partner?.key;
 
     // Deliberately no correlationKey in the payload: the key is the credential and
     // workflow data is persisted.
@@ -849,6 +917,12 @@ class AgentContinuationService {
    * Crash recovery: a `firing` record older than two ticks with attempts left goes
    * back to `armed`, so the next publish can retry the delivery. This is the only
    * transition into `armed` after the initial arm.
+   *
+   * Residual (accepted rather than silently ignored): the waiting instance is
+   * single-use, so if the instance itself is gone the re-armed record has nothing
+   * left to wake. Detecting that would need a per-record instance lookup on the
+   * recovery path; the `expiresAt` TTL bounds the damage and the record stays
+   * visible through the owner's `list()` the whole time.
    */
   async recoverStalledFiring(input?: {
     now?: string | Date;
@@ -901,12 +975,14 @@ class AgentContinuationService {
    *
    * Order:
    *   1. identity + owner assertion (mismatch ⇒ orphan, never a system-context send);
-   *   2. load the session scoped to the owner (missing ⇒ orphan);
-   *   3. budget pre-check BEFORE the irreversible claim;
-   *   4. atomic claim `{pending|armed} → firing` (null ⇒ already fired ⇒ no-op);
-   *   5. send with `StreamingMode.NONE` (SSE would return an initiate-response
+   *   2. **strict outcome validation** — an absent or unrecognised outcome is a
+   *      failure, never 'observed' (see `parseOutcome`);
+   *   3. load the session scoped to the owner (missing ⇒ orphan);
+   *   4. budget pre-check BEFORE the irreversible claim;
+   *   5. atomic claim `{pending|armed} → firing` (null ⇒ already fired ⇒ no-op);
+   *   6. send with `StreamingMode.NONE` (SSE would return an initiate-response
    *      instead of replying when no transport is attached);
-   *   6. persist `fired|expired`, outcome, firedAt, wakeMessageId.
+   *   7. persist `fired|expired`, outcome, firedAt, wakeMessageId.
    */
   async deliver(input: {
     continuationId: string;
@@ -942,6 +1018,29 @@ class AgentContinuationService {
       return { delivered: false, reason: 'owner_mismatch', state: 'orphaned' };
     }
 
+    // ── The honesty invariant: observed vs not-observed must arrive as DATA ────
+    //
+    // Never coerce. An unrecognised value means we do not know what happened, and
+    // "we do not know" must not be reported to the user as "it happened". Fail
+    // closed, and make the failure visible in the owner's task list.
+    const outcome = parseOutcome(input?.outcome);
+    if (!outcome) {
+      const received = describeReceivedOutcome(input?.outcome);
+      await this.markTerminalWithVisibility(
+        continuationId,
+        'failed',
+        `wake arrived without a recognised outcome (received ${received}); no turn was sent`,
+      );
+      return {
+        delivered: false,
+        reason: 'invalid_outcome',
+        state: 'failed',
+        error:
+          `Unrecognised wake outcome ${received}. Expected 'observed' or 'not_observed' — ` +
+          'the wake event must carry the outcome, and no turn was sent.',
+      };
+    }
+
     const session: any = await ReactorConversationModel.findOne({
       _id: new mongoose.Types.ObjectId(String(record.chatSessionId)),
       user: user._id,
@@ -966,8 +1065,6 @@ class AgentContinuationService {
       await this.markTerminalWithVisibility(continuationId, 'failed', `budget_exhausted: ${budgetRefusal}`);
       return { delivered: false, reason: 'over_budget', state: 'failed', error: budgetRefusal };
     }
-
-    const outcome: ContinuationOutcome = input?.outcome === 'not_observed' ? 'not_observed' : 'observed';
 
     // Atomic claim — the single idempotency hinge. `null` means another firer won,
     // or this record is already terminal, and a double event is NOT a double turn.
@@ -1014,7 +1111,7 @@ class AgentContinuationService {
       }
 
       if (attempt < maxAttempts) {
-        await new Promise((resolve) => setTimeout(resolve, 750));
+        await new Promise((resolve) => setTimeout(resolve, this.deliveryRetryDelayMs));
       }
     }
 
