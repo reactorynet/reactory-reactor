@@ -145,6 +145,9 @@ const EXPECTED_SERVER_TOOL_NAMES: string[] = [
   'createSupportTicket',
   'updateSupportTicket',
   'addSupportTicketComment',
+  'getSupportTicketComments',
+  'getSupportTicketAttachments',
+  'attachSupportTicketFile',
 ];
 
 const registeredToolNames = (): string[] =>

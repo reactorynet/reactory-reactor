@@ -9,6 +9,12 @@ import {
   UpdateSupportTicketRegistry,
   AddSupportTicketComment,
   AddSupportTicketCommentRegistry,
+  GetSupportTicketComments,
+  GetSupportTicketCommentsRegistry,
+  GetSupportTicketAttachments,
+  GetSupportTicketAttachmentsRegistry,
+  AttachSupportTicketFile,
+  AttachSupportTicketFileRegistry,
 } from "./macro";
 
 export * from "./types";
@@ -20,6 +26,9 @@ export const SupportMacros = [
   CreateSupportTicketRegistry,
   UpdateSupportTicketRegistry,
   AddSupportTicketCommentRegistry,
+  GetSupportTicketCommentsRegistry,
+  GetSupportTicketAttachmentsRegistry,
+  AttachSupportTicketFileRegistry,
 ];
 
 export default SupportMacros;

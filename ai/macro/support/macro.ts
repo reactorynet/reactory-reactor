@@ -6,10 +6,17 @@ import {
   CreateSupportTicketProps,
   UpdateSupportTicketProps,
   AddSupportTicketCommentProps,
+  GetSupportTicketCommentsProps,
+  GetSupportTicketAttachmentsProps,
+  AttachSupportTicketFileProps,
+  SupportTicketCommentView,
+  SupportTicketFileView,
   SupportMacroResult,
 } from "./types";
 import logger from "@reactory/server-core/logging";
 import { ObjectId } from "mongodb";
+import { createReadStream, existsSync, realpathSync, statSync } from "fs";
+import pathModule from "path";
 
 /**
  * Guard that determines whether a supplied ticket identifier is a MongoDB ObjectId.
@@ -792,6 +799,854 @@ export const AddSupportTicketCommentRegistry: MacroComponentDefinition<typeof Ad
             },
           },
           required: ["ticketId", "comment"],
+        },
+      },
+    },
+  ],
+};
+
+/* ------------------------------------------------------------------------- *
+ * TOOLS-002 — reading the ticket conversation, listing its attachments and
+ * attaching a file.
+ *
+ * The five macros above can open, list, create, update and comment on a ticket,
+ * but an agent that cannot read the thread (human decisions, review notes,
+ * corrections) or the attachments is working half blind, and `addComment`
+ * accepts `attachmentIds` that nothing could produce. The three macros below
+ * close that gap. They are read/write path only — no GraphQL surface, no model
+ * access: every call lands on `core.ReactorySupportService@1.0.0`.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * The support service surface these macros consume.
+ *
+ * TOOLS-001 gave `core.ReactorySupportService@1.0.0` populated single-ticket
+ * reads plus `getTicketComments(ticketId)` and `listTicketDocuments(ticketId)`,
+ * and widened `attachDocument` to take file ids. The published
+ * `@reactorynet/reactory-core` typings this module compiles against still carry
+ * the old surface (no read methods, and `attachDocument(ticketId, file, name)`),
+ * so the macros declare the shape they use here and cast once at the service
+ * boundary. The service remains the only thing that touches a model.
+ */
+interface SupportTicketReadService {
+  getTicket(ticketId: string): Promise<Reactory.Models.ReactorySupportDocument>;
+  pagedRequest(
+    filter: Partial<Reactory.Models.IReactorySupportTicketFilter>,
+    paging: Reactory.Models.IPagingRequest
+  ): Promise<Reactory.Models.IPagedReactorySupportTickets>;
+  getTicketComments(ticketId: string): Promise<SupportTicketCommentView[]>;
+  listTicketDocuments(ticketId: string): Promise<SupportTicketFileView[]>;
+  attachDocument(ticketId: string, fileIds: string[]): Promise<unknown>;
+}
+
+/**
+ * The largest file `attachSupportTicketFile` will upload from `path`: 10 MB.
+ *
+ * Attachments are triage evidence — a screenshot, a log extract, a spreadsheet —
+ * not data exports. 10 MB covers all of those and stops a runaway agent from
+ * filling the file store with a single tool call.
+ */
+export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
+
+/** MIME type by extension; enough for the evidence an agent actually attaches. */
+const MIME_TYPE_BY_EXTENSION: { [extension: string]: string } = {
+  csv: "text/csv",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  gif: "image/gif",
+  gz: "application/gzip",
+  htm: "text/html",
+  html: "text/html",
+  jpeg: "image/jpeg",
+  jpg: "image/jpeg",
+  json: "application/json",
+  log: "text/plain",
+  md: "text/markdown",
+  mov: "video/quicktime",
+  mp3: "audio/mpeg",
+  mp4: "video/mp4",
+  pdf: "application/pdf",
+  png: "image/png",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  svg: "image/svg+xml",
+  tar: "application/x-tar",
+  txt: "text/plain",
+  webp: "image/webp",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xml: "application/xml",
+  yaml: "application/x-yaml",
+  yml: "application/x-yaml",
+  zip: "application/zip",
+};
+
+const mimeTypeForPath = (filePath: string): string => {
+  const extension = pathModule.extname(filePath).toLowerCase().replace(".", "");
+  return MIME_TYPE_BY_EXTENSION[extension] || "application/octet-stream";
+};
+
+/**
+ * The root `path` attachments may be read from.
+ *
+ * The agent runs with its worktree as the working directory, so `process.cwd()`
+ * is the worktree root. `REACTOR_AGENT_WORKSPACE` lets a deployment pin the root
+ * explicitly. It is read from the environment — never from macro parameters — so
+ * a caller cannot widen the sandbox from the tool call.
+ */
+const attachmentWorkspaceRoot = (): string => {
+  const configured = pathModule.resolve(
+    (process.env.REACTOR_AGENT_WORKSPACE || "").trim() || process.cwd()
+  );
+
+  // Canonicalise the root before any comparison. The workspace itself can sit
+  // behind a symlink (`/tmp` -> `/private/tmp` on macOS, a symlinked checkout in
+  // CI); without this every real file resolves to a different prefix and is
+  // rejected as "outside the workspace".
+  try {
+    return realpathSync(configured);
+  } catch {
+    return configured;
+  }
+};
+
+/** True when `candidate` is `root` itself or sits underneath it. */
+const isInsideDirectory = (root: string, candidate: string): boolean => {
+  const relative = pathModule.relative(root, candidate);
+  if (relative.length === 0) return true;
+  return relative !== ".." && !relative.startsWith(`..${pathModule.sep}`) && !pathModule.isAbsolute(relative);
+};
+
+interface ResolvedWorkspaceFile {
+  absolutePath: string;
+  size: number;
+}
+
+/**
+ * Vet a caller supplied path before anything is read or uploaded.
+ *
+ * Three separate guards, because each one alone is bypassable:
+ *  - `..` is rejected up front: `path.resolve` silently collapses it, so a
+ *    post-hoc check would hide the attempt instead of reporting it;
+ *  - the resolved path must sit inside the workspace root, which stops absolute
+ *    host paths (`/etc/passwd`) and `~` expansion from escaping;
+ *  - symlinks are resolved and re-checked, so a link planted inside the worktree
+ *    cannot point at a host file.
+ * The size cap is enforced on the stat result, before a byte is streamed.
+ */
+const resolveWorkspaceFile = (inputPath: string): { file?: ResolvedWorkspaceFile; error?: string } => {
+  const candidate = (inputPath || "").trim();
+
+  if (candidate.length === 0) return { error: "No file path provided" };
+
+  if (candidate.split(/[\\/]+/).includes("..")) {
+    return { error: "Operation not allowed. Path traversal ('..') detected." };
+  }
+
+  const root = attachmentWorkspaceRoot();
+  const absolutePath = pathModule.isAbsolute(candidate)
+    ? pathModule.normalize(candidate)
+    : pathModule.resolve(root, candidate);
+
+  if (!isInsideDirectory(root, absolutePath)) {
+    return { error: `Operation not allowed. ${candidate} is outside the agent workspace (${root}). Pass a path relative to the worktree.` };
+  }
+
+  if (!existsSync(absolutePath)) return { error: `File not found: ${candidate}` };
+
+  let realPath = absolutePath;
+  try {
+    realPath = realpathSync(absolutePath);
+  } catch {
+    // Keep the normalised path; the stat below decides whether it is usable.
+  }
+
+  if (!isInsideDirectory(root, realPath)) {
+    return { error: `Operation not allowed. ${candidate} resolves outside the agent workspace (${root}).` };
+  }
+
+  const stats = statSync(realPath);
+  if (!stats.isFile()) return { error: `Not a file: ${candidate}` };
+
+  if (stats.size > MAX_ATTACHMENT_BYTES) {
+    return {
+      error: `File ${candidate} is ${stats.size} bytes. The attachment limit is ${MAX_ATTACHMENT_BYTES} bytes (10 MB).`,
+    };
+  }
+
+  return { file: { absolutePath: realPath, size: stats.size } };
+};
+
+/** The standard failure envelope. Every support macro returns this, never a throw. */
+const supportMacroFailure = (
+  tool: string,
+  props: unknown,
+  state: ChatState,
+  startTime: number,
+  error: string,
+  extra: Record<string, unknown> = {}
+): SupportMacroResult => ({
+  success: false,
+  error,
+  tool,
+  params: props,
+  metadata: {
+    executionTime: Date.now() - startTime,
+    timestamp: new Date(),
+    user: state.user?.id,
+    ...extra,
+  },
+});
+
+const supportTicketIdOf = (ticket: any): string | null => {
+  const id = ticket?._id ?? ticket?.id;
+  return id === null || id === undefined ? null : String(id);
+};
+
+const supportTicketReferenceOf = (ticket: any): string | null => {
+  const reference = ticket?.reference;
+  return typeof reference === "string" && reference.length > 0 ? reference : null;
+};
+
+interface ResolvedSupportTicket {
+  /** The canonical ObjectId string every service call must use. */
+  ticketId: string;
+  ticket: Reactory.Models.ReactorySupportDocument | null;
+  lookup: "id" | "reference";
+}
+
+/**
+ * Resolve a caller supplied identifier to the ObjectId the service expects.
+ *
+ * Mirrors `getSupportTicket`: a canonical ObjectId goes straight to `getTicket`,
+ * anything else is treated as the human readable reference and resolved through
+ * the reference index (references are stored upper-cased, so both spellings are
+ * queried). This is required, not cosmetic: the read methods take an ObjectId
+ * and `findById` raises a CastError when handed a reference.
+ */
+const resolveSupportTicket = async (
+  service: SupportTicketReadService,
+  identifier: string
+): Promise<ResolvedSupportTicket | null> => {
+  const candidate = identifier.trim();
+
+  if (isObjectIdString(candidate)) {
+    const ticket = await service.getTicket(candidate);
+    if (!ticket) return null;
+    return { ticketId: supportTicketIdOf(ticket) || candidate, ticket, lookup: "id" };
+  }
+
+  const references = Array.from(new Set([candidate, candidate.toUpperCase()]));
+  const paged = await service.pagedRequest({ reference: references }, { page: 1, pageSize: 1 });
+  const ticket = ((paged?.tickets?.[0] ?? null) as unknown) as Reactory.Models.ReactorySupportDocument | null;
+
+  if (!ticket) return null;
+
+  const ticketId = supportTicketIdOf(ticket);
+  if (!ticketId) return null;
+
+  return { ticketId, ticket, lookup: "reference" };
+};
+
+/** Normalise a comment to the shape the agent consumes (never trust optional fields). */
+const toCommentView = (comment: any): SupportTicketCommentView => ({
+  id: String(comment?.id ?? comment?._id ?? ""),
+  text: typeof comment?.text === "string" ? comment.text : "",
+  createdAt: comment?.createdAt ? new Date(comment.createdAt) : null,
+  author: {
+    id: comment?.author?.id ?? null,
+    name: comment?.author?.name ?? null,
+  },
+  parentId: comment?.parentId ?? null,
+  attachments: Array.isArray(comment?.attachments) ? comment.attachments.map(toAttachmentView) : [],
+});
+
+/** Normalise a file to reader-facing metadata. */
+function toAttachmentView(file: any): SupportTicketFileView {
+  return {
+    id: String(file?.id ?? file?._id ?? ""),
+    filename: file?.filename ?? null,
+    alias: file?.alias ?? null,
+    url: file?.url ?? file?.link ?? null,
+    size: typeof file?.size === "number" ? file.size : null,
+    mimetype: file?.mimetype ?? null,
+  };
+}
+
+/**
+ * Oldest comment first, ties broken by id.
+ *
+ * The service already sorts, but the ordering is part of this macro's contract
+ * ("read the conversation top to bottom"), so it is asserted here rather than
+ * assumed. Comments without a timestamp sort last instead of jumping to 1970.
+ */
+const orderCommentsOldestFirst = (comments: SupportTicketCommentView[]): SupportTicketCommentView[] =>
+  [...comments].sort((left, right) => {
+    const leftTime = left.createdAt ? new Date(left.createdAt).getTime() : Number.MAX_SAFE_INTEGER;
+    const rightTime = right.createdAt ? new Date(right.createdAt).getTime() : Number.MAX_SAFE_INTEGER;
+    if (leftTime !== rightTime) return leftTime - rightTime;
+    if (left.id === right.id) return 0;
+    return left.id < right.id ? -1 : 1;
+  });
+
+const formatCommentTranscript = (comments: SupportTicketCommentView[]): string =>
+  comments
+    .map((comment, index) => {
+      const author = comment.author?.name || comment.author?.id || "Unknown author";
+      const when = comment.createdAt ? new Date(comment.createdAt).toISOString() : "unknown time";
+      const reply = comment.parentId ? ` (reply to ${comment.parentId})` : "";
+      const attachments = comment.attachments.length > 0 ? ` [${comment.attachments.length} attachment(s)]` : "";
+      return `${index + 1}. ${when} · ${author}${reply}${attachments}\n   ${comment.text}`;
+    })
+    .join("\n");
+
+const formatAttachmentList = (attachments: SupportTicketFileView[]): string =>
+  attachments
+    .map((attachment, index) => {
+      const name = attachment.filename || attachment.alias || "(unnamed)";
+      const size = attachment.size === null ? "unknown size" : `${attachment.size} bytes`;
+      const mimetype = attachment.mimetype || "unknown type";
+      const url = attachment.url ? `\n   ${attachment.url}` : "";
+      return `${index + 1}. ${name} — ${size} — ${mimetype} — id: ${attachment.id}${url}`;
+    })
+    .join("\n");
+
+/**
+ * Reads the conversation on a support ticket, oldest comment first.
+ *
+ * Accepts the ticket's ObjectId or its human readable reference. Replies carry
+ * the `parentId` of the comment they answer, so a caller can rebuild the thread
+ * without a nested tree; `includeReplies: false` returns only top-level comments.
+ */
+export const GetSupportTicketComments: Macro<SupportMacroResult, GetSupportTicketCommentsProps> = async (
+  props: GetSupportTicketCommentsProps,
+  state: ChatState
+): Promise<SupportMacroResult> => {
+  const startTime = Date.now();
+  const { ticketId: identifier, includeReplies = true } = props || ({} as GetSupportTicketCommentsProps);
+
+  if (!identifier || identifier.trim().length === 0) {
+    return supportMacroFailure("getSupportTicketComments", props, state, startTime, "No ticket ID provided");
+  }
+
+  const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
+    "core.ReactorySupportService@1.0.0"
+  );
+
+  if (!supportService) {
+    return supportMacroFailure(
+      "getSupportTicketComments",
+      props,
+      state,
+      startTime,
+      "ReactorySupportService not found in execution context"
+    );
+  }
+
+  const service = (supportService as unknown) as SupportTicketReadService;
+  const candidate = identifier.trim();
+
+  try {
+    const resolved = await resolveSupportTicket(service, candidate);
+
+    if (!resolved) {
+      return supportMacroFailure(
+        "getSupportTicketComments",
+        props,
+        state,
+        startTime,
+        `Ticket with ${isObjectIdString(candidate) ? "ID" : "reference"} ${candidate} not found`,
+        { lookup: isObjectIdString(candidate) ? "id" : "reference" }
+      );
+    }
+
+    const rawComments = await service.getTicketComments(resolved.ticketId);
+    const ordered = orderCommentsOldestFirst(
+      (Array.isArray(rawComments) ? rawComments : []).map(toCommentView)
+    );
+    const comments = includeReplies === false ? ordered.filter((comment) => !comment.parentId) : ordered;
+    const reference = supportTicketReferenceOf(resolved.ticket);
+    const replyCount = comments.filter((comment) => comment.parentId).length;
+
+    if (!state.vars) {
+      state.vars = {};
+    }
+    state.vars.lastSupportTicketComments = { ticketId: resolved.ticketId, comments };
+
+    return {
+      success: true,
+      data: {
+        ticketId: resolved.ticketId,
+        reference,
+        lookup: resolved.lookup,
+        includeReplies: includeReplies !== false,
+        total: comments.length,
+        comments,
+      },
+      tool: "getSupportTicketComments",
+      params: props,
+      metadata: {
+        executionTime: Date.now() - startTime,
+        timestamp: new Date(),
+        user: state.user?.id,
+        lookup: resolved.lookup,
+        total: comments.length,
+      },
+      instructions: `
+## Ticket Conversation — ${reference || resolved.ticketId}
+
+- **Ticket ID**: ${resolved.ticketId}
+- **Reference**: ${reference || "N/A"}
+- **Comments**: ${comments.length} (oldest → newest, replies ${includeReplies === false ? "excluded" : "included"})
+- **Replies**: ${replyCount}
+- **Resolved By**: ${resolved.lookup === "reference" ? "reference lookup" : "ObjectId"}
+
+${comments.length === 0 ? "No comments on this ticket yet." : formatCommentTranscript(comments)}
+
+Reply with addSupportTicketComment, passing parentId to answer a specific comment. Files attached to a comment are listed with their ids in the transcript above.
+      `,
+    };
+  } catch (error) {
+    logger.error(`Error in GetSupportTicketComments macro for ticket ${identifier}:`, error);
+    return supportMacroFailure(
+      "getSupportTicketComments",
+      props,
+      state,
+      startTime,
+      `Error retrieving support ticket comments: ${error instanceof Error ? error.message : "Unknown error"}`
+    );
+  }
+};
+
+export const GetSupportTicketCommentsRegistry: MacroComponentDefinition<typeof GetSupportTicketComments> = {
+  nameSpace: "reactor-macros",
+  name: "getSupportTicketComments",
+  version: "1.0.0",
+  component: GetSupportTicketComments,
+  description: "Read the conversation on a support ticket: oldest comment first, with author names, timestamps, reply relationships and comment attachments",
+  roles: ["ADMIN", "USER", "SUPPORT_ADMIN", "SUPPORT"],
+  stem: "support",
+  tags: ["support", "ticket", "comments", "conversation", "thread", "read"],
+  tools: [
+    {
+      type: "function",
+      safeForAutoExecution: true,
+      function: {
+        name: "getSupportTicketComments",
+        description: "Read a support ticket's comments, oldest first. Accepts the ticket ObjectId or its human-readable reference. Every comment carries its author's name, its timestamp, the id of the comment it replies to (parentId) and the files attached to it.",
+        parameters: {
+          type: "object",
+          properties: {
+            ticketId: {
+              type: "string",
+              description: "The support ticket's ObjectId (24 char hex) or its human-readable reference number",
+            },
+            includeReplies: {
+              type: "boolean",
+              description: "Include replies (comments that answer another comment). Defaults to true; set false for top-level notes only",
+            },
+          },
+          required: ["ticketId"],
+        },
+      },
+    },
+  ],
+};
+
+/**
+ * Lists the files attached to a support ticket.
+ *
+ * Returns resolved metadata (id, filename/alias, url, size, mimetype) so the
+ * agent can name a file in a reply, fetch it, or reference its id.
+ */
+export const GetSupportTicketAttachments: Macro<SupportMacroResult, GetSupportTicketAttachmentsProps> = async (
+  props: GetSupportTicketAttachmentsProps,
+  state: ChatState
+): Promise<SupportMacroResult> => {
+  const startTime = Date.now();
+  const { ticketId: identifier } = props || ({} as GetSupportTicketAttachmentsProps);
+
+  if (!identifier || identifier.trim().length === 0) {
+    return supportMacroFailure("getSupportTicketAttachments", props, state, startTime, "No ticket ID provided");
+  }
+
+  const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
+    "core.ReactorySupportService@1.0.0"
+  );
+
+  if (!supportService) {
+    return supportMacroFailure(
+      "getSupportTicketAttachments",
+      props,
+      state,
+      startTime,
+      "ReactorySupportService not found in execution context"
+    );
+  }
+
+  const service = (supportService as unknown) as SupportTicketReadService;
+  const candidate = identifier.trim();
+
+  try {
+    const resolved = await resolveSupportTicket(service, candidate);
+
+    if (!resolved) {
+      return supportMacroFailure(
+        "getSupportTicketAttachments",
+        props,
+        state,
+        startTime,
+        `Ticket with ${isObjectIdString(candidate) ? "ID" : "reference"} ${candidate} not found`,
+        { lookup: isObjectIdString(candidate) ? "id" : "reference" }
+      );
+    }
+
+    const rawDocuments = await service.listTicketDocuments(resolved.ticketId);
+    const attachments = (Array.isArray(rawDocuments) ? rawDocuments : []).map(toAttachmentView);
+    const reference = supportTicketReferenceOf(resolved.ticket);
+
+    if (!state.vars) {
+      state.vars = {};
+    }
+    state.vars.lastSupportTicketAttachments = { ticketId: resolved.ticketId, attachments };
+
+    return {
+      success: true,
+      data: {
+        ticketId: resolved.ticketId,
+        reference,
+        lookup: resolved.lookup,
+        total: attachments.length,
+        attachments,
+      },
+      tool: "getSupportTicketAttachments",
+      params: props,
+      metadata: {
+        executionTime: Date.now() - startTime,
+        timestamp: new Date(),
+        user: state.user?.id,
+        lookup: resolved.lookup,
+        total: attachments.length,
+      },
+      instructions: `
+## Ticket Attachments — ${reference || resolved.ticketId}
+
+- **Ticket ID**: ${resolved.ticketId}
+- **Reference**: ${reference || "N/A"}
+- **Attachments**: ${attachments.length}
+
+${attachments.length === 0 ? "This ticket has no attachments." : formatAttachmentList(attachments)}
+      `,
+    };
+  } catch (error) {
+    logger.error(`Error in GetSupportTicketAttachments macro for ticket ${identifier}:`, error);
+    return supportMacroFailure(
+      "getSupportTicketAttachments",
+      props,
+      state,
+      startTime,
+      `Error listing support ticket attachments: ${error instanceof Error ? error.message : "Unknown error"}`
+    );
+  }
+};
+
+export const GetSupportTicketAttachmentsRegistry: MacroComponentDefinition<typeof GetSupportTicketAttachments> = {
+  nameSpace: "reactor-macros",
+  name: "getSupportTicketAttachments",
+  version: "1.0.0",
+  component: GetSupportTicketAttachments,
+  description: "List the files attached to a support ticket with resolved id, filename, url, size and MIME type",
+  roles: ["ADMIN", "USER", "SUPPORT_ADMIN", "SUPPORT"],
+  stem: "support",
+  tags: ["support", "ticket", "attachments", "documents", "files", "read"],
+  tools: [
+    {
+      type: "function",
+      safeForAutoExecution: true,
+      function: {
+        name: "getSupportTicketAttachments",
+        description: "List a support ticket's attachments with resolved metadata (id, filename/alias, url, size, mimetype). Use the returned id with addSupportTicketComment to reference a file, or fetch the url.",
+        parameters: {
+          type: "object",
+          properties: {
+            ticketId: {
+              type: "string",
+              description: "The support ticket's ObjectId (24 char hex) or its human-readable reference number",
+            },
+          },
+          required: ["ticketId"],
+        },
+      },
+    },
+  ],
+};
+
+/**
+ * Attaches an existing Reactory file to a support ticket.
+ *
+ * Two input modes:
+ *  - `fileId` attaches a file that is already in the Reactory file store;
+ *  - `path` reads a file from the agent workspace, uploads it through
+ *    `core.ReactoryFileService@1.0.0`, then attaches the uploaded file.
+ *
+ * `path` is sandboxed to the workspace root, traversal and symlink escapes are
+ * rejected, and uploads are capped at `MAX_ATTACHMENT_BYTES` (10 MB). The agent
+ * must not be able to attach arbitrary host files, so nothing outside the
+ * worktree is ever read.
+ *
+ * Returns the ticket's attachment list after the attach so the caller can
+ * confirm the file landed.
+ */
+export const AttachSupportTicketFile: Macro<SupportMacroResult, AttachSupportTicketFileProps> = async (
+  props: AttachSupportTicketFileProps,
+  state: ChatState
+): Promise<SupportMacroResult> => {
+  const startTime = Date.now();
+  const { ticketId: identifier, path: inputPath, fileId: inputFileId, name } = props || ({} as AttachSupportTicketFileProps);
+
+  if (!identifier || identifier.trim().length === 0) {
+    return supportMacroFailure("attachSupportTicketFile", props, state, startTime, "No ticket ID provided");
+  }
+
+  const hasPath = typeof inputPath === "string" && inputPath.trim().length > 0;
+  const hasFileId = typeof inputFileId === "string" && inputFileId.trim().length > 0;
+
+  if (hasPath === hasFileId) {
+    return supportMacroFailure(
+      "attachSupportTicketFile",
+      props,
+      state,
+      startTime,
+      "Provide either 'fileId' (an already-uploaded Reactory file) or 'path' (a file inside the agent workspace) — not both, and not neither"
+    );
+  }
+
+  const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
+    "core.ReactorySupportService@1.0.0"
+  );
+
+  if (!supportService) {
+    return supportMacroFailure(
+      "attachSupportTicketFile",
+      props,
+      state,
+      startTime,
+      "ReactorySupportService not found in execution context"
+    );
+  }
+
+  const service = (supportService as unknown) as SupportTicketReadService;
+  const candidate = identifier.trim();
+  let uploaded: { fileId: string; filename: string | null; size: number | null; mimetype: string | null } | null = null;
+
+  try {
+    // Vet the caller's file input before anything is read or looked up: a
+    // hostile path or a malformed id must not cost a ticket lookup, and a ticket
+    // that turns out not to exist must not leave an orphaned upload behind.
+    const resolvedFile = hasPath ? resolveWorkspaceFile(inputPath) : null;
+
+    if (resolvedFile && !resolvedFile.file) {
+      return supportMacroFailure(
+        "attachSupportTicketFile",
+        props,
+        state,
+        startTime,
+        resolvedFile.error || "Unable to read the supplied file"
+      );
+    }
+
+    if (hasFileId && !isObjectIdString(inputFileId.trim())) {
+      return supportMacroFailure(
+        "attachSupportTicketFile",
+        props,
+        state,
+        startTime,
+        `fileId '${inputFileId.trim()}' is not a Reactory file id (expected a 24 character hex ObjectId)`
+      );
+    }
+
+    const resolved = await resolveSupportTicket(service, candidate);
+
+    if (!resolved) {
+      return supportMacroFailure(
+        "attachSupportTicketFile",
+        props,
+        state,
+        startTime,
+        `Ticket with ${isObjectIdString(candidate) ? "ID" : "reference"} ${candidate} not found`,
+        { lookup: isObjectIdString(candidate) ? "id" : "reference" }
+      );
+    }
+
+    let attachFileId: string;
+
+    if (hasFileId) {
+      attachFileId = inputFileId.trim();
+    } else {
+      const fileService = state.context?.getService<Reactory.Service.IReactoryFileService>(
+        "core.ReactoryFileService@1.0.0"
+      );
+
+      if (!fileService) {
+        return supportMacroFailure(
+          "attachSupportTicketFile",
+          props,
+          state,
+          startTime,
+          "ReactoryFileService not found in execution context"
+        );
+      }
+
+      const workspaceFile = resolvedFile.file;
+      if (!workspaceFile) {
+        return supportMacroFailure(
+          "attachSupportTicketFile",
+          props,
+          state,
+          startTime,
+          "Unable to read the supplied file"
+        );
+      }
+
+      const filename = pathModule.basename(workspaceFile.absolutePath);
+      const mimetype = mimeTypeForPath(workspaceFile.absolutePath);
+
+      // The file service expects the graphql-upload shape: a promise-like whose
+      // `createReadStream()` yields the bytes. A plain object satisfies it.
+      const upload = await fileService.uploadFile({
+        file: {
+          createReadStream: () => createReadStream(workspaceFile.absolutePath),
+          filename,
+          mimetype,
+          encoding: "binary",
+        },
+        rename: false,
+        catalog: true,
+        isUserSpecific: true,
+        virtualPath: "support/attachments",
+        filename: typeof name === "string" && name.trim().length > 0 ? name.trim() : undefined,
+      });
+
+      const uploadedId = (upload as any)?._id ?? (upload as any)?.id;
+      if (!uploadedId) {
+        return supportMacroFailure(
+          "attachSupportTicketFile",
+          props,
+          state,
+          startTime,
+          "ReactoryFileService did not return a file id for the upload"
+        );
+      }
+
+      uploaded = {
+        fileId: String(uploadedId),
+        filename: (upload as any)?.filename ?? filename,
+        size: typeof (upload as any)?.size === "number" ? (upload as any).size : workspaceFile.size,
+        mimetype: (upload as any)?.mimetype ?? mimetype,
+      };
+      attachFileId = uploaded.fileId;
+    }
+
+    await service.attachDocument(resolved.ticketId, [attachFileId]);
+
+    const rawDocuments = await service.listTicketDocuments(resolved.ticketId);
+    const attachments = (Array.isArray(rawDocuments) ? rawDocuments : []).map(toAttachmentView);
+    const reference = supportTicketReferenceOf(resolved.ticket);
+
+    if (!state.vars) {
+      state.vars = {};
+    }
+    state.vars.lastSupportTicketAttachments = { ticketId: resolved.ticketId, attachments };
+
+    logger.info(
+      `AttachSupportTicketFile macro attached file ${attachFileId} to ticket ${resolved.ticketId} (${uploaded ? "uploaded from path" : "existing file"}) by user: ${state.user?.id}`
+    );
+
+    return {
+      success: true,
+      data: {
+        ticketId: resolved.ticketId,
+        reference,
+        lookup: resolved.lookup,
+        attached: {
+          fileId: attachFileId,
+          mode: hasFileId ? "fileId" : "path",
+          filename: uploaded?.filename ?? null,
+          size: uploaded?.size ?? null,
+          mimetype: uploaded?.mimetype ?? null,
+        },
+        total: attachments.length,
+        attachments,
+      },
+      tool: "attachSupportTicketFile",
+      params: props,
+      metadata: {
+        executionTime: Date.now() - startTime,
+        timestamp: new Date(),
+        user: state.user?.id,
+        lookup: resolved.lookup,
+        total: attachments.length,
+      },
+      instructions: `
+## File Attached to Ticket ${reference || resolved.ticketId}
+
+- **Ticket ID**: ${resolved.ticketId}
+- **File ID**: ${attachFileId}
+- **Source**: ${hasFileId ? "existing Reactory file" : "uploaded from workspace path"}
+${uploaded?.filename ? `- **Filename**: ${uploaded.filename}\n` : ""}${uploaded?.size !== null && uploaded?.size !== undefined ? `- **Size**: ${uploaded.size} bytes\n` : ""}${uploaded?.mimetype ? `- **MIME Type**: ${uploaded.mimetype}\n` : ""}- **Attachments on ticket**: ${attachments.length}
+
+${attachments.length === 0 ? "The ticket reports no attachments after the update." : formatAttachmentList(attachments)}
+      `,
+    };
+  } catch (error) {
+    logger.error(`Error in AttachSupportTicketFile macro for ticket ${identifier}:`, error);
+    return supportMacroFailure(
+      "attachSupportTicketFile",
+      props,
+      state,
+      startTime,
+      `Error attaching file to support ticket: ${error instanceof Error ? error.message : "Unknown error"}`,
+      uploaded ? { uploadedFileId: uploaded.fileId } : {}
+    );
+  }
+};
+
+export const AttachSupportTicketFileRegistry: MacroComponentDefinition<typeof AttachSupportTicketFile> = {
+  nameSpace: "reactor-macros",
+  name: "attachSupportTicketFile",
+  version: "1.0.0",
+  component: AttachSupportTicketFile,
+  description: "Attach an existing Reactory file, or a workspace file uploaded on the fly, to a support ticket",
+  roles: ["ADMIN", "USER", "SUPPORT_ADMIN", "SUPPORT"],
+  stem: "support",
+  tags: ["support", "ticket", "attachment", "upload", "file", "attach"],
+  tools: [
+    {
+      type: "function",
+      function: {
+        name: "attachSupportTicketFile",
+        description: "Attach a file to a support ticket. Pass either 'fileId' (an already-uploaded Reactory file id) or 'path' (a readable file inside the agent workspace, which is uploaded first — capped at 10 MB). Paths outside the workspace and '..' traversal are rejected. Returns the ticket's attachment list afterwards.",
+        parameters: {
+          type: "object",
+          properties: {
+            ticketId: {
+              type: "string",
+              description: "The support ticket's ObjectId (24 char hex) or its human-readable reference number",
+            },
+            fileId: {
+              type: "string",
+              description: "Id of an already-uploaded Reactory file to attach",
+            },
+            path: {
+              type: "string",
+              description: "Path to a file inside the agent workspace (relative to the worktree). It is uploaded to the Reactory file store and then attached. Maximum 10 MB.",
+            },
+            name: {
+              type: "string",
+              description: "Optional display name to store the uploaded file under (path mode only)",
+            },
+          },
+          required: ["ticketId"],
         },
       },
     },
