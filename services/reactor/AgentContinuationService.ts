@@ -8,6 +8,7 @@ import AgentContinuationModel, {
   ContinuationState,
   ContinuationOutcome,
   ContinuationFiredBy,
+  ContinuationNotificationChannel,
   generateCorrelationKey,
 } from '../../models/AgentContinuation';
 import ReactorConversationModel from '../../models/ReactorChatState';
@@ -58,6 +59,15 @@ export const CONTINUATION_EVENT_NAME = 'agent.continuation.wake';
 
 /** The YAML workflow that parks, and is woken by, one continuation. */
 export const CONTINUATION_WORKFLOW_ID = 'reactor.AgentContinuation@1.0.0';
+
+/**
+ * The communicator's public send entry point.
+ *
+ * Resolved optionally: the module is present and registered, but its provider
+ * wiring is under repair, so `send()` may throw or decline. A non-delivery
+ * notification therefore never depends on it — see `notifyNonDelivery`.
+ */
+export const COMMUNICATOR_SERVICE_ID = 'communicator.CommunicatorService@1.0.0';
 
 /** How many non-terminal continuations one chat session may hold. */
 export const MAX_PENDING_PER_SESSION = 3;
@@ -193,6 +203,31 @@ export function validateConditionParams(params: any): string | undefined {
   return undefined;
 }
 
+/**
+ * Roles allowed to read another user's continuations.
+ *
+ * Mirrors `graphql/resolvers/ReactorAIUsage.ts` deliberately: the platform has one
+ * spelling of "administrative" and a second one here would drift.
+ */
+export const ADMIN_ROLES = ['ADMIN', 'SUPERADMIN', 'DEVELOPER'];
+
+/** Whether the given Reactory context carries an administrative role. */
+export function hasAdministrativeRole(context: any): boolean {
+  if (!context) return false;
+  if (typeof context.hasRole === 'function') {
+    try {
+      if (ADMIN_ROLES.some((role) => context.hasRole(role) === true)) return true;
+    } catch {
+      /* fall through to the role list */
+    }
+  }
+  const roles: string[] = ((context.user as any)?.roles ?? []) as string[];
+  return (
+    Array.isArray(roles) &&
+    roles.some((role) => ADMIN_ROLES.includes(String(role).toUpperCase()))
+  );
+}
+
 /** States that still have a waiter (or are about to). */
 export const ACTIVE_STATES: ContinuationState[] = ['pending', 'armed', 'firing'];
 
@@ -235,6 +270,25 @@ export interface IRegisterContinuationResult {
   code?: ContinuationRefusalCode;
   /** Actionable, model-facing explanation. Never contains the correlation key. */
   error?: string;
+}
+
+/**
+ * Query accepted by `listForViewer` — the observability/projection read.
+ *
+ * Deliberately NOT reused by `list()`: `list()` is the model-facing macro surface
+ * and must never accept an owner id. Keeping the two inputs distinct means the
+ * admin affordance cannot leak into the macro by widening a shared type.
+ */
+export interface IContinuationListQuery {
+  chatSessionId?: string;
+  state?: ContinuationState;
+  includeTerminal?: boolean;
+  limit?: number;
+  /**
+   * Admins only. Another user's id; a non-admin caller is refused, never silently
+   * narrowed, so a scoping mistake cannot look like "nothing pending".
+   */
+  userId?: string;
 }
 
 export interface IContinuationPublicView {
@@ -382,6 +436,56 @@ export function describeTrigger(trigger: ContinuationTrigger | undefined): strin
 }
 
 /**
+ * Compose the owner-facing notification for a wait that ended unconfirmed.
+ *
+ * Exported because it is the contract the acceptance criteria are written against:
+ * the message must name the `reason` (what was being waited on) and state plainly
+ * that **the signal was not observed**. Tests assert both, so a later edit cannot
+ * soften the wording into something a reader could mistake for a result.
+ */
+export function buildNonDeliveryNotification(
+  record: Pick<IAgentContinuation, 'continuationId' | 'reason' | 'chatSessionId'> & {
+    eventReason?: string;
+  },
+  input: { state: 'expired' | 'orphaned' | 'failed'; reason: string },
+): { subject: string; text: string } {
+  const reason = String(record?.reason || 'a follow-up').slice(0, 200);
+  const continuationId = String(record?.continuationId || '');
+  const chatSessionId = String(record?.chatSessionId || '');
+
+  const stateLine =
+    input.state === 'expired'
+      ? 'The deadline passed before the outcome could be confirmed.'
+      : input.state === 'orphaned'
+        ? 'The chat session, or its ownership, was no longer available, so the agent could not be woken in it.'
+        : 'The wake turn could not be delivered.';
+
+  // F6: an `at` wait never "missed a signal" — the clock WAS the signal. When the
+  // moment passed with nothing sweeping, say that instead of implying the thing
+  // being awaited did not happen.
+  const outageNote =
+    input.state === 'expired' && record?.eventReason === 'time_passed_unswept'
+      ? 'The moment you were waiting for arrived while the continuation sweeper was not running, so the wake was never published. That is an outage on our side, not a verdict on what you were waiting for.'
+      : input.state === 'expired' && record?.eventReason === 'wake_published_not_delivered'
+        ? 'The moment you were waiting for arrived and the wake was published, but it was never delivered to your session.'
+        : '';
+
+  const lines = [
+    `Your agent was waiting on "${reason}" and has stopped waiting (${input.state}).`,
+    'The signal was not observed. Nothing was confirmed either way, so treat the outcome as unknown — do not read this as a result.',
+    stateLine,
+    outageNote,
+    `Technical reason: ${input.reason}.`,
+    `Continuation: ${continuationId} · chat session: ${chatSessionId}`,
+  ].filter((line) => Boolean(line));
+
+  return {
+    subject: `Agent follow-up not observed: ${reason.slice(0, 80)}`,
+    text: lines.join('\n\n'),
+  };
+}
+
+/**
  * The public projection. **Never** include `correlationKey` here — this is the
  * only shape any list/GraphQL surface is allowed to expose.
  */
@@ -408,6 +512,33 @@ export function toPublicView(doc: any): IContinuationPublicView {
 }
 
 /**
+ * Why a wake was published, in the record and in the event payload.
+ *
+ * These are not decoration: `expired` is the one state where the platform tells a
+ * user that something did NOT happen, so the reason has to distinguish "the signal
+ * never came" from "the moment arrived while nothing was watching". The two have
+ * different follow-ups — the first is a real negative result, the second is an
+ * infrastructure gap the user should not read as a verdict on their signal.
+ *
+ *  - `time_reached`                 — an `at` wait fired on time, OBSERVED.
+ *  - `condition_satisfied`          — a condition wait fired, OBSERVED.
+ *  - `signal`                       — a producer fired it, OBSERVED.
+ *  - `deadline_passed`              — the deadline passed with no signal: NOT observed.
+ *  - `time_passed_unswept`          — an `at` wait whose moment passed with no wake
+ *                                     ever published (the sweeper was not running):
+ *                                     the time arrived, nothing watched it.
+ *  - `wake_published_not_delivered` — an `at` wait whose wake WAS published but the
+ *                                     record never closed, so delivery never ran.
+ */
+export type ContinuationWakeReason =
+  | 'time_reached'
+  | 'condition_satisfied'
+  | 'signal'
+  | 'deadline_passed'
+  | 'time_passed_unswept'
+  | 'wake_published_not_delivered';
+
+/**
  * Decide whether a parked record should be fired by the sweeper.
  *
  * Pure on purpose: the ordering rules that make expiry deterministic are the part
@@ -423,10 +554,11 @@ export function toPublicView(doc: any): IContinuationPublicView {
  * "it did not happen" impossible to report as "it happened".
  */
 export function planTriggerDecision(
-  record: Pick<IAgentContinuation, 'trigger' | 'fireAt'>,
+  record: Pick<IAgentContinuation, 'trigger' | 'fireAt'> &
+    Partial<Pick<IAgentContinuation, 'eventPublishedAt' | 'eventOutcome'>>,
   now: Date,
   conditionSatisfied: boolean = false,
-): { outcome: ContinuationOutcome; firedBy: ContinuationFiredBy; reason: string } | null {
+): { outcome: ContinuationOutcome; firedBy: ContinuationFiredBy; reason: ContinuationWakeReason } | null {
   const nowMs = now.getTime();
   const fireAtMs = new Date(record.fireAt).getTime();
   const trigger: any = record.trigger;
@@ -435,6 +567,32 @@ export function planTriggerDecision(
     const atMs = new Date(trigger.at).getTime();
     if (nowMs >= atMs && nowMs < fireAtMs) {
       return { outcome: 'observed', firedBy: 'at', reason: 'time_reached' };
+    }
+
+    if (nowMs >= fireAtMs) {
+      //
+      // F6 — the wording matters when the deadline is reached on an `at` wait.
+      //
+      // For an `at` trigger the CLOCK is the signal, so "we reached the deadline"
+      // can never mean "your signal never came". It means one of two things, and
+      // the difference is actionable:
+      //
+      //   * no wake was ever published  → the moment arrived while the sweeper was
+      //     down. The user's wait was never watched, which is not a verdict on
+      //     whatever they were waiting for.
+      //   * a wake was published        → the platform noticed on time but the
+      //     delivery never completed.
+      //
+      // Both stay `not_observed` (conservative: they can never over-claim), but the
+      // reason stops calling an infrastructure gap "the signal never came".
+      //
+      if (atMs <= fireAtMs) {
+        return {
+          outcome: 'not_observed',
+          firedBy: 'expiry',
+          reason: record.eventPublishedAt ? 'wake_published_not_delivered' : 'time_passed_unswept',
+        };
+      }
     }
   }
 
@@ -765,6 +923,67 @@ class AgentContinuationService {
   }
 
   /**
+   * The owner-scoped read behind `ReactorPendingContinuations` (the GraphQL
+   * surface) and the read-only `todo(list)` projection.
+   *
+   * ── Why this is separate from `list()` ────────────────────────────────────
+   *
+   * `list()` is the model-facing macro surface: it always means "the caller's own
+   * records" and takes no user id at all. An observability query needs one extra
+   * affordance — an administrator looking at a specific user — and that affordance
+   * must not become a hole in the macro surface. So it lives here, with the scope
+   * decision written down once:
+   *
+   *   * no `userId`                  → the caller's own records;
+   *   * `userId` equals the caller  → the caller's own records;
+   *   * another `userId`            → REFUSED unless the caller is an administrator.
+   *
+   * A refusal is an error rather than an empty list on purpose: an empty list would
+   * make a scoping bug indistinguishable from "you are waiting on nothing", and a
+   * silent wrong answer is exactly the class of bug this ticket is about. Nothing is
+   * queried before the check, so no cross-tenant row is ever read.
+   *
+   * The projection is `toPublicView`, the same one `list()` uses, so
+   * `correlationKey` cannot appear here either — there is one shape and it has no
+   * credential field.
+   */
+  async listForViewer(input: IContinuationListQuery = {}): Promise<IContinuationPublicView[]> {
+    const user: any = (this.context as any)?.user;
+    // No identity, no rows. Never fall back to "all owners".
+    if (!user?._id) return [];
+
+    const requested = String(input?.userId || '').trim();
+    let ownerUserId: any = user._id;
+
+    if (requested && requested !== String(user._id)) {
+      if (!mongoose.Types.ObjectId.isValid(requested)) {
+        throw new Error(`Invalid userId "${requested}": expected a 24-character object id.`);
+      }
+      if (!hasAdministrativeRole(this.context)) {
+        throw new Error(
+          "Access denied: listing another user's pending continuations requires an administrators role.",
+        );
+      }
+      ownerUserId = new mongoose.Types.ObjectId(requested);
+    }
+
+    const filter: any = { ownerUserId };
+    if (input?.chatSessionId) filter.chatSessionId = String(input.chatSessionId);
+    if (input?.state) filter.state = input.state;
+    else if (!input?.includeTerminal) filter.state = { $in: ACTIVE_STATES };
+
+    const limit = Math.min(Math.max(Number(input?.limit) || 20, 1), 100);
+    const docs = await AgentContinuationModel.find(filter)
+      // Imminent first: this is a "what wakes me next" list, not a log.
+      .sort({ fireAt: 1 })
+      .limit(limit)
+      .lean()
+      .exec();
+
+    return (docs as any[]).map(toPublicView);
+  }
+
+  /**
    * Waiter-internal read. Returns the correlation key because the waiting step
    * needs it as its `eventKey` — which makes this the one method that hands out the
    * wake credential. It is therefore gated to the two callers that legitimately
@@ -1062,6 +1281,10 @@ class AgentContinuationService {
         $set: {
           eventPublishedAt: new Date(),
           eventOutcome: outcome,
+          // Why the wake said what it said. The expiry notification reads this so
+          // "the moment arrived unwatched" is never reported as "the signal never
+          // came" (F6).
+          eventReason: eventData.reason,
           updatedAt: new Date(),
         },
       } as any,
@@ -1352,6 +1575,23 @@ class AgentContinuationService {
     });
     const finalState: ContinuationState = completed.state || (outcome === 'observed' ? 'fired' : 'expired');
 
+    // `expired` is delivered but NOT confirmed. The user received `expirePrompt` in
+    // the session; this notification is the durable, session-independent evidence
+    // that the wait ended without an observed signal — and if the session is gone,
+    // the only evidence they get.
+    //
+    // Gated on `completed.state === 'expired'`: `complete()` is conditional on the
+    // record still being `firing`, so a cancellation that raced this delivery closes
+    // nothing and must not produce an expiry notification.
+    if (completed.state === 'expired') {
+      const wakeReason: ContinuationWakeReason =
+        record.eventReason || inferNotObservedReason(record);
+      await this.notifyNonDelivery(
+        { ...record, eventReason: wakeReason },
+        { state: 'expired', reason: wakeReason },
+      );
+    }
+
     this.log('info', 'continuation delivered', {
       continuationId,
       outcome,
@@ -1372,8 +1612,7 @@ class AgentContinuationService {
    * `orphaned` and `failed` are never silent: a user task is raised in the task
    * list (the platform's existing non-blocking surface — the same
    * `reactory_tasks` collection `userTasks` reads and `user_activity` writes).
-   */
-  async markTerminalWithVisibility(
+   */  async markTerminalWithVisibility(
     continuationId: string,
     state: 'orphaned' | 'failed',
     reason: string,
@@ -1385,7 +1624,7 @@ class AgentContinuationService {
     ).exec();
 
     if (updated) {
-      await this.raiseVisibilityTask(updated, reason);
+      await this.notifyNonDelivery(updated, { state, reason });
     }
     return { updated: Boolean(updated) };
   }
@@ -1567,53 +1806,164 @@ class AgentContinuationService {
   }
 
   /**
-   * Raise a user task so an orphaned/failed continuation is visible in the task
-   * list. Idempotent per continuation, so a retried delivery cannot spam the list.
+   * Tell the owner that a continuation ended without a confirmed result.
+   *
+   * ── Which channel, and why ────────────────────────────────────────────────
+   *
+   * The requirement is "never silent, on a channel they will actually see". Two
+   * surfaces exist, and the ordering below is deliberate:
+   *
+   *   1. **The task surface** (`reactory_tasks`, read by `userTasks`) — ALWAYS
+   *      written. It is already the platform's non-blocking "you need to look at
+   *      this" list, and it is the surface `user_activity` writes. It is the only
+   *      channel that works today.
+   *
+   *   2. **The communicator** (`communicator.CommunicatorService@1.0.0.send`) — the
+   *      right long-term channel (email/SMS/Slack), attempted BEST-EFFORT. Its
+   *      provider wiring is being repaired by a parallel programme, so a send that
+   *      throws or resolves `success: false` is recorded and never suppresses the
+   *      task. An optional channel must never be the only evidence.
+   *
+   * That decision (task-always + communicator-best-effort) is written down in
+   * `docs/agent-continuations.md` too, so the compromise is visible to whoever
+   * reads the docs rather than buried here.
+   *
+   * Idempotent per continuation. Terminal states are never re-entered, but a crash
+   * between the state write and this call can retry the whole path, so the existing
+   * task is checked first. `notifiedAt` / `notificationChannel` are persisted so
+   * "the owner was told" is a fact in the record, not an inference from a log line.
    */
-  private async raiseVisibilityTask(record: any, reason: string): Promise<void> {
+  private async notifyNonDelivery(
+    record: any,
+    input: { state: 'expired' | 'orphaned' | 'failed'; reason: string },
+  ): Promise<ContinuationNotificationChannel> {
+    const continuationId = String(record?.continuationId || '');
+    const message = buildNonDeliveryNotification(record, input);
+
+    // ── Idempotency gate ─────────────────────────────────────────────────────
+    // If the owner has already been told about this continuation, stop. Checked
+    // BEFORE the communicator so a retry cannot send a second email either.
+    let TaskModel: any = null;
+    let existing: any = null;
     try {
-      const TaskModel = (await import('@reactory/server-modules/reactory-core/models/Task')).default as any;
-      const existing = await TaskModel.findOne({
+      TaskModel = (await import('@reactory/server-modules/reactory-core/models/Task')).default as any;
+      existing = await TaskModel.findOne({
         user: record.ownerUserId,
-        status: 'pending',
-        'componentProps.continuationId': String(record.continuationId),
+        'componentProps.continuationId': continuationId,
       }).exec();
-      if (existing) return;
-
-      await new TaskModel({
-        title: `Agent follow-up could not be delivered: ${String(record.reason).slice(0, 80)}`,
-        description:
-          `You asked the agent to follow up on "${record.reason}". ` +
-          `The follow-up could not be delivered (${reason}). ` +
-          'Nothing was reported back, so treat the outcome as unknown.',
-        category: 'agent-continuation',
-        workflowStatus: 'attention_required',
-        status: 'pending',
-        workflowId: CONTINUATION_WORKFLOW_ID,
-        instanceId: record.workflowInstanceId,
-        stepId: 'deliverWake',
-        componentProps: {
-          continuationId: String(record.continuationId),
-          chatSessionId: String(record.chatSessionId),
-          outcome: record.outcome,
-        },
-        user: record.ownerUserId,
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      }).save();
-
-      this.log('warn', 'continuation could not be delivered; a task was raised for the owner', {
-        continuationId: record.continuationId,
-        reason,
-      });
     } catch (error: any) {
-      // Last resort: the record still carries `lastError`, so `list()` shows it.
-      this.log('error', 'could not raise the visibility task for a non-delivered continuation', {
-        continuationId: record.continuationId,
-        reason,
+      this.log('error', 'could not read the notification task for a non-delivered continuation', {
+        continuationId,
         error: error?.message,
       });
     }
+
+    if (existing) {
+      return (existing?.componentProps?.notificationChannel as ContinuationNotificationChannel) || 'task';
+    }
+
+    // ── 1. Communicator: preferred, optional, never blocking ────────────────
+    let communicatorAccepted = false;
+    let communicatorError: string | undefined;
+    const recipient = String(record?.ownerEmail || '').trim();
+    if (recipient) {
+      try {
+        const communicator: any = this.getService(COMMUNICATOR_SERVICE_ID);
+        if (communicator && typeof communicator.send === 'function') {
+          const result: any = await communicator.send({
+            channel: 'email',
+            to: recipient,
+            content: { subject: message.subject, text: message.text },
+            metadata: {
+              source: 'reactor.AgentContinuation',
+              continuationId,
+              state: input.state,
+            },
+          });
+          communicatorAccepted = result?.success === true;
+          if (!communicatorAccepted) {
+            communicatorError = String(result?.error || 'communicator did not accept the message');
+          }
+        }
+      } catch (error: any) {
+        communicatorError = error?.message || String(error);
+      }
+    }
+
+    // ── 2. Task surface: the guaranteed channel ─────────────────────────────
+    let taskRaised = false;
+    if (TaskModel) {
+      try {
+        await new TaskModel({
+          title: message.subject,
+          description: message.text,
+          category: 'agent-continuation',
+          workflowStatus: 'attention_required',
+          status: 'pending',
+          workflowId: CONTINUATION_WORKFLOW_ID,
+          instanceId: record.workflowInstanceId,
+          stepId: 'deliverWake',
+          componentProps: {
+            continuationId,
+            chatSessionId: String(record.chatSessionId),
+            state: input.state,
+            outcome: 'not_observed',
+            notificationChannel: communicatorAccepted ? 'communicator+task' : 'task',
+          },
+          user: record.ownerUserId,
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        }).save();
+        taskRaised = true;
+      } catch (error: any) {
+        this.log('error', 'could not raise the notification task for a non-delivered continuation', {
+          continuationId,
+          state: input.state,
+          error: error?.message,
+        });
+      }
+    }
+
+    const channel: ContinuationNotificationChannel = communicatorAccepted
+      ? taskRaised
+        ? 'communicator+task'
+        : 'communicator'
+      : taskRaised
+        ? 'task'
+        : 'none';
+
+    try {
+      await AgentContinuationModel.updateOne(
+        { continuationId } as any,
+        {
+          $set: {
+            notifiedAt: new Date(),
+            notificationChannel: channel,
+            notificationError: communicatorError,
+            updatedAt: new Date(),
+          },
+        } as any,
+      ).exec();
+    } catch (error: any) {
+      this.log('warn', 'could not persist the notification evidence for a continuation', {
+        continuationId,
+        channel,
+        error: error?.message,
+      });
+    }
+
+    // `none` means both channels failed. It is logged at error level on purpose:
+    // there is nothing else this process can do, and the log is then the only
+    // remaining evidence that the owner was not reached.
+    this.log(channel === 'none' ? 'error' : 'warn', 'continuation ended without delivery; owner notified', {
+      continuationId,
+      state: input.state,
+      outcome: 'not_observed',
+      channel,
+      reason: input.reason,
+    });
+
+    return channel;
   }
 
   private getService(id: string): any {
@@ -1652,6 +2002,21 @@ class AgentContinuationService {
     const fn = level === 'error' ? logger.error : level === 'warn' ? logger.warn : logger.info;
     fn.call(logger, `[AgentContinuationService] ${message}`, safe || {});
   }
+}
+
+/**
+ * Best-effort reason for a `not_observed` wake that arrived without one.
+ *
+ * `fire()` normally persists the reason at publish time. This covers the other
+ * producers (a raw signal that carries `not_observed`, or a record written before
+ * the field existed), so an expiry notification still distinguishes an `at` wait
+ * whose moment passed unwatched from a signal that never arrived.
+ */
+function inferNotObservedReason(record: any): ContinuationWakeReason {
+  if (record?.trigger?.kind === 'at') {
+    return record?.eventPublishedAt ? 'wake_published_not_delivered' : 'time_passed_unswept';
+  }
+  return 'deadline_passed';
 }
 
 /** Kept separate so the delivery loop reads clearly and the default is explicit. */

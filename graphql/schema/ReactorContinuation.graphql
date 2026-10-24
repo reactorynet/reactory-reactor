@@ -1,0 +1,72 @@
+"""
+A durable agent continuation the caller is currently waiting on.
+
+An agent that says "I will follow up when PR 482 merges, or at 14:00 at the
+latest" has registered one of these. Until it is queryable that sentence is an
+unbacked promise; this type is what makes it a checkable statement — the record,
+its deadline and its state are all real rows rather than a claim in a transcript.
+
+`correlationKey` is deliberately absent and must stay absent. It is 32 random bytes
+that authorise a wake (the `wait_event` key), so it is a credential, not data: the
+only shapes allowed to carry it are the waiting workflow's own steps. If you are
+adding a field here, add it to `IContinuationPublicView` in
+`services/reactor/AgentContinuationService.ts` instead of reading the model — that
+projection is the single place where the key is removed.
+"""
+type ReactorPendingContinuation {
+  """Stable id; also the id `cancelContinuation` takes."""
+  continuationId: String!
+
+  """What the agent is waiting for, in the user's words."""
+  reason: String!
+
+  """
+  pending (record inserted), armed (the waiter is parked), firing (a wake is being
+  delivered), or a terminal state when `includeTerminal` was requested.
+  """
+  state: String!
+
+  """ISO-8601 deadline. Reaching it without a signal means `not_observed`."""
+  fireAt: String!
+
+  """ISO-8601 time the record was closed; null while it is still waiting."""
+  firedAt: String
+
+  """observed | not_observed; null while it is still waiting."""
+  outcome: String
+
+  """The chat session the wake turn is delivered into."""
+  chatSessionId: String!
+
+  """The persona that answers the wake turn."""
+  personaId: String!
+
+  """ISO-8601 registration time."""
+  createdAt: String!
+}
+
+extend type Query {
+  """
+  Durable continuations the caller is waiting on.
+
+  Scoped to the authenticated user (`ownerUserId === context.user._id`). An
+  administrative role may pass `userId` to inspect one user's records; any other
+  caller asking for somebody else's id is refused rather than silently narrowed,
+  because an empty list would make a scoping bug look like "nothing pending".
+
+  Defaults to active records only (`pending`/`armed`/`firing`); pass
+  `includeTerminal: true` to include closed ones and read their `outcome`.
+
+  Never returns `correlationKey` — see the type comment.
+  """
+  ReactorPendingContinuations(
+    """Restrict to one chat session (optional)."""
+    chatSessionId: String
+    """Include terminal records (fired/expired/cancelled/orphaned/failed)."""
+    includeTerminal: Boolean
+    """Administrators only: another user's id."""
+    userId: String
+    """Page size, 1-100. Defaults to 20."""
+    limit: Int
+  ): [ReactorPendingContinuation!]!
+}

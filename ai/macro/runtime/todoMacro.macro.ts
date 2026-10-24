@@ -8,8 +8,51 @@ import {
   TodoExecutionMode,
 } from './types';
 import logger from '@reactory/server-core/logging';
+import {
+  loadContinuationProjection,
+  isContinuationProjectionId,
+  continuationMutationRefusal,
+} from './continuationProjection';
 
 const TODOS_VAR_PREFIX = 'reactor.todos';
+
+/**
+ * Arguments that look like "schedule this" and are REFUSED by `todo`.
+ *
+ * A `todo(dueAt: ...)` used to be silently ignored: the item was stored with no
+ * deadline, the model was told it succeeded, and the promise it then made to the
+ * user had nothing behind it. That is not a small bug — it is the exact failure
+ * mode durable continuations exist to remove, wearing a better disguise. So every
+ * spelling a model is likely to reach for is rejected with a message that names the
+ * tool that can actually keep the promise.
+ */
+const SCHEDULING_ARGUMENTS = [
+  'dueAt',
+  'due_at',
+  'dueDate',
+  'due',
+  'at',
+  'remindAt',
+  'remind_at',
+  'wakeAt',
+  'wake_at',
+  'scheduledFor',
+  'scheduled_for',
+  'trigger',
+  'schedule',
+];
+
+function suppliedSchedulingArguments(props: any): string[] {
+  if (!props || typeof props !== 'object') return [];
+  return SCHEDULING_ARGUMENTS.filter((key) => {
+    const value = props[key];
+    if (value === undefined || value === null || value === '') return false;
+    // An empty object/array is not a request to schedule anything.
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === 'object') return Object.keys(value).length > 0;
+    return true;
+  });
+}
 
 /**
  * Generate a short unique id for todo items and lists.
@@ -73,12 +116,40 @@ function getTodoLists(state: ChatState): Record<string, TodoList> {
 export const TodoMacro: Macro<unknown, TodoMacroProps> = async (
   props: TodoMacroProps,
   state: ChatState,
+  context?: Reactory.Server.IReactoryContext,
 ): Promise<unknown> => {
   const { action } = props;
 
   try {
     if (!state) {
       return { error: 'Chat state is not defined', success: false };
+    }
+
+    // ── `todo` never schedules ────────────────────────────────────────────────
+    //
+    // Rejecting is the teaching moment, not pedantry. A modelled `dueAt` would
+    // either be ignored (a silent no-op that leaves the model free to promise) or
+    // stored as an ordinary item with a date nobody enforces — both produce the
+    // same broken outcome: a user told a follow-up is coming, and nothing waiting.
+    // The error names `scheduleContinuation`, so the next call can be the honest one.
+    const schedulingArgs = suppliedSchedulingArguments(props as any);
+    if (schedulingArgs.length > 0) {
+      return {
+        success: false,
+        operation: 'rejected',
+        error:
+          `The todo macro cannot schedule a wake (received ${schedulingArgs.join(', ')}). ` +
+          'Use `scheduleContinuation` instead — it registers a durable, owned wait and wakes you at ' +
+          'the deadline or on the signal, so a follow-up you promise is backed by a record. ' +
+          'A todo with a due date is only a note: nothing will fire.',
+        instructions:
+          '## Use scheduleContinuation, not todo, for anything time-based\n\n' +
+          '`todo` tracks work inside a conversation; it has no scheduler. Nothing will wake you from a todo, ' +
+          'so a due date here would become an unbacked promise.\n\n' +
+          '```\n@scheduleContinuation({\n  at: "<future ISO date-time>",\n  reason: "<what you are waiting for>",\n  resumePrompt: "<what to do when the signal arrives>",\n  expirePrompt: "<what to say if it never arrives — state plainly that it was NOT observed>"\n})\n```\n\n' +
+          '- Ordinary work that needs no wake: `todo` action="add" with no date.\n' +
+          '- See what is already waiting: `listContinuations` or `todo` action="list".',
+      };
     }
 
     const lists = getTodoLists(state);
@@ -129,11 +200,25 @@ export const TodoMacro: Macro<unknown, TodoMacroProps> = async (
           ? 'No todo lists exist yet.'
           : summaries.map(s => `- **${s.name}** (${s.id}): ${s.totalItems} items — ${s.pending} pending, ${s.inProgress} in progress, ${s.completed} completed, ${s.failed} failed`).join('\n');
 
+        // Scheduler-backed waits the owner is holding, rendered read-only. A todo
+        // listing is where they already look for outstanding work, so hiding them
+        // here would push the model back to promising instead of reporting. The
+        // entries are derived on every call — nothing is copied into the todo vars,
+        // which is what keeps them non-completable and non-removable.
+        const continuations = await loadContinuationProjection(state, context);
+        const continuationSummary =
+          continuations.length === 0
+            ? ''
+            : `\n\n## Waiting (read-only — ${continuations.length})\n\n${continuations
+                .map((entry) => `- ${entry.label}`)
+                .join('\n')}\n\nThese are scheduler-backed waits, not todos: they cannot be completed, edited, assigned or removed here. They are listed so you can tell the user what is outstanding. To stop one, use \`cancelContinuation\` with its continuation id.`;
+
         return {
           success: true,
           operation: 'list',
           lists: summaries,
-          instructions: `## Todo Lists (${summaries.length})\n\n${listSummary}\n\n### Suggested Next Steps:\n${summaries.length === 0 ? '- Use \`todo\` with action="create" to create a new list' : '- Use \`todo\` with action="get" and a listId to see all items\n- Use \`todo\` with action="add" to add items to a list'}`
+          continuations,
+          instructions: `## Todo Lists (${summaries.length})\n\n${listSummary}${continuationSummary}\n\n### Suggested Next Steps:\n${summaries.length === 0 ? '- Use \`todo\` with action="create" to create a new list' : '- Use \`todo\` with action="get" and a listId to see all items\n- Use \`todo\` with action="add" to add items to a list'}`
         };
       }
 
@@ -208,6 +293,12 @@ export const TodoMacro: Macro<unknown, TodoMacroProps> = async (
         if (!props.todoId) {
           return { error: 'todoId is required for the update action', success: false };
         }
+        // A projected continuation is a VIEW of a scheduler record. Refuse by name,
+        // so the caller learns where the state actually lives instead of concluding
+        // the item vanished (or worse, that marking it done did something).
+        if (isContinuationProjectionId(props.todoId)) {
+          return continuationMutationRefusal(props.todoId);
+        }
         const list = lists[props.listId];
         if (!list) {
           return { error: `Todo list "${props.listId}" not found`, success: false };
@@ -242,6 +333,9 @@ export const TodoMacro: Macro<unknown, TodoMacroProps> = async (
         }
         if (!props.todoId) {
           return { error: 'todoId is required for the assign action', success: false };
+        }
+        if (isContinuationProjectionId(props.todoId)) {
+          return continuationMutationRefusal(props.todoId);
         }
         if (!props.assignee) {
           return { error: 'assignee is required for the assign action', success: false };
@@ -278,6 +372,9 @@ export const TodoMacro: Macro<unknown, TodoMacroProps> = async (
         }
         if (!props.todoId) {
           return { error: 'todoId is required for the remove action', success: false };
+        }
+        if (isContinuationProjectionId(props.todoId)) {
+          return continuationMutationRefusal(props.todoId);
         }
         const list = lists[props.listId];
         if (!list) {
@@ -328,6 +425,12 @@ export const TodoMacroRegistry: MacroComponentDefinition<typeof TodoMacro> = {
 
   Todo lists support series or parallel execution modes, enabling the
   ReactorConversationService to execute items sequentially or concurrently.
+
+  ## This macro never schedules
+  A todo has no due date and nothing will wake you from one. For anything
+  time-based or signal-based use \`scheduleContinuation\`; \`todo(dueAt=…)\` is
+  refused so an unbacked promise cannot be made by accident. \`list\` also shows
+  pending continuations, read-only.
 
   ## Actions
   - **create** – Create a new todo list
@@ -397,7 +500,7 @@ export const TodoMacroRegistry: MacroComponentDefinition<typeof TodoMacro> = {
     type: "function",
     function: {
       name: "todo",
-      description: "Create and manage todo lists for planning and tracking work. Supports creating lists, adding/updating/assigning/removing items, and choosing series or parallel execution.",
+      description: "Create and manage todo lists for planning and tracking work. Supports creating lists, adding/updating/assigning/removing items, and choosing series or parallel execution. This macro never schedules: it has no due date and nothing will wake you from a todo. For a time-based or signal-based follow-up use scheduleContinuation. list also renders pending continuations read-only; they cannot be completed or removed here.",
       parameters: {
         type: "object",
         properties: {
