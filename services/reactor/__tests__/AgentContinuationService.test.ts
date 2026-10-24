@@ -2425,7 +2425,22 @@ describe('condition evaluation — the real context builder', () => {
     } finally {
       clearConditionPredicates();
     }
-  });
+    // Deliberately well above the 5 s default — do not "tidy" this back.
+    // Exercising the production `conditionContextBuilder` resolves its lazy import
+    // for real, which pulls the whole module registry (`src/modules/index.ts` →
+    // convert-svg → PIPEWRAP, and MCPRequestHandlers).
+    //
+    // Measured on a warm cache: 23.7 s and 28.1 s in isolation, 48.0 s when the rest
+    // of this 152-test file runs alongside it. The spread is real, so the ceiling is
+    // set at ~2.5x the worst observed run rather than just above it — a timeout here
+    // is a hang detector, not a performance assertion, and the one thing it must not
+    // do is flake. That load is also synchronous, so Jest cannot interrupt it
+    // mid-`require` and only reports a breach once the event loop frees up, which is
+    // why the original 5 s default surfaced as a ~11 s failure on a ~22 s test.
+    //
+    // Scoped to this one test: a file-wide `jest.setTimeout` would mask real hangs
+    // in the other 151.
+  }, 120_000);
 });
 // ── listForViewer — the ownership boundary of the observability surface ──────
 //
