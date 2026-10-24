@@ -171,20 +171,23 @@ those actions explicitly refuse the `continuation:` prefix and name
 ## 4. When a wait ends without a result
 
 `expired`, `orphaned` and `failed` are **never silent**. The owner is notified through
-two channels, in this order:
+two channels. `notifyNonDelivery()` attempts them in this order:
 
-1. **Task surface — always.** A task is written to `reactory_tasks`
-   (`category: agent-continuation`, `workflowStatus: attention_required`) with the
-   `reason` and the explicit statement that **the signal was not observed**. This is
-   the surface `userTasks` and `user_activity` already use, and it is the only
-   channel that works today.
-2. **Communicator — best effort.** `communicator.CommunicatorService@1.0.0.send` is
+1. **Communicator — best effort.** `communicator.CommunicatorService@1.0.0.send` is
    attempted when an owner email is present. Its provider wiring is being repaired by
    a parallel programme, so a throw or a declined send is recorded
    (`notificationError`) and never suppresses the task.
+2. **Task surface — always.** A task is then written to `reactory_tasks`
+   (`category: agent-continuation`, `workflowStatus: attention_required`) with the
+   `reason` and the explicit statement that **the signal was not observed**. This is
+   the surface `userTasks` and `user_activity` already use, and it is the only
+   channel that works today. The communicator is wrapped in its own `try/catch`, so
+   the task is written whatever the communicator did.
 
 The chosen channel is persisted on the record as `notificationChannel`
 (`task`, `communicator`, `communicator+task`, or `none`) together with `notifiedAt`.
+The task's own `componentProps.notificationChannel` records the pair as it stood at
+write time (`task`, or `communicator+task`).
 `none` means both channels failed and is logged at error level — at that point the
 log is the only remaining evidence, and it says so.
 

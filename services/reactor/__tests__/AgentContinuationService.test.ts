@@ -610,6 +610,50 @@ describe('list() — the correlation key never leaks', () => {
     expect(view.correlationKey).toBeUndefined();
     expect(JSON.stringify(view)).not.toContain('c2VjcmV0');
   });
+
+  it('toPublicView is a CLOSED set, so a widened projection must be reviewed', () => {
+    // Why this exists next to the key assertion: the test harness runs with
+    // `diagnostics: false` and `isolatedModules: true`, so no compile-time
+    // assertion can fail here. The only enforceable statement of "the type has no
+    // credential field" is a structural one, and `toPublicView` is the runtime
+    // shadow of `IContinuationPublicView`.
+    //
+    // This is the assertion that makes the interface's shape a reviewed decision:
+    // adding any field — a prompt, an owner email, the key — fails until this list
+    // is updated deliberately.
+    const EXPECTED_PUBLIC_VIEW_KEYS = [
+      'attempt',
+      'chatSessionId',
+      'continuationId',
+      'createdAt',
+      'fireAt',
+      'firedAt',
+      'firedBy',
+      'lastError',
+      'maxAttempts',
+      'outcome',
+      'personaId',
+      'reason',
+      'state',
+      'triggerKind',
+      'triggerSummary',
+      'updatedAt',
+      'workflowInstanceId',
+    ];
+
+    const view = toPublicView(baseRecord()) as any;
+
+    expect(Object.keys(view).sort()).toEqual(EXPECTED_PUBLIC_VIEW_KEYS);
+    expect(Object.keys(view)).not.toContain('correlationKey');
+
+    // The internal material a full document carries must not ride along either.
+    for (const internal of ['resumePrompt', 'expirePrompt', 'ownerEmail', 'ownerUserId', 'expiresAt']) {
+      expect(view).not.toHaveProperty(internal);
+    }
+
+    // And the credential's value appears nowhere in the serialised view.
+    expect(JSON.stringify(view)).not.toContain(baseRecord().correlationKey);
+  });
 });
 
 // ── fire: tenant + token ─────────────────────────────────────────────────────
