@@ -1,6 +1,13 @@
 nameSpace: core
 name: ProcessAITicket
-version: 1.5.0
+# Deliberately NOT bumped. The version is the workflow's identity: it must match
+# REACTOR_YAML_WORKFLOWS in ../index.ts (which derives the catalog destination from
+# it) AND reactory-core's PROCESS_AI_TICKET_WORKFLOW_ID, whose guard test compares
+# that constant to this body and whose checkWorkflowRegistered gate refuses to
+# dispatch a run whose id it cannot resolve. reactory-core lives in the
+# express-server repository, so those two cannot be moved from this one PR.
+# Keep 1.4.6 until the bump is coordinated across both repositories.
+version: 1.4.6
 description: Autonomous AI engineering run for a SINGLE support ticket. Loads the ticket,
   moves it to in_progress, prepares an isolated git worktree on a ticket-keyed
   branch, has the nominated AI engineer agent perform the work, captures a
@@ -2311,29 +2318,218 @@ steps:
                   command: node
                   args:
                     - -e
-                    - >
+                    - |
                       const { execSync } = require('child_process');
 
+                      // RC-3 (REACTORY-302016408). This used to run `git diff --stat HEAD`,
+                      // which reports NOTHING for a run whose engineer committed - the reviewer
+                      // was then handed "no changes detected" as its change evidence while the
+                      // real diff was hundreds of lines. Diff against the resolved BASE so
+                      // committed work is visible, and list the uncommitted worktree state
+                      // separately, because the engineer does not commit and a revision lives
+                      // there until the pipeline commits it.
                       const wt = String(process.env.WT || '').trim();
+                      const NL = String.fromCharCode(10);
 
-                      let out = '';
+                      const git = (cmd) => {
+                        try { return execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString().trim(); } catch (e) { return ''; }
+                      };
 
-                      try {
-                        out = execSync('git diff --stat HEAD', { cwd: wt, stdio: 'pipe' }).toString().trim();
-                      } catch (e) {
-                        out = 'unable to compute diffstat: ' + (e && e.message ? e.message : String(e));
+                      const resolveBase = () => {
+                        const symbolic = git('git symbolic-ref --short refs/remotes/origin/HEAD').replace(/^origin\//, '');
+                        if (symbolic) return symbolic;
+                        const candidates = ['origin/main', 'origin/master', 'main', 'master'];
+                        for (let i = 0; i < candidates.length; i += 1) {
+                          if (git('git rev-parse --verify --quiet ' + candidates[i])) return candidates[i].replace(/^origin\//, '');
+                        }
+                        return '';
+                      };
+
+                      const base = resolveBase();
+                      const lines = [];
+
+                      if (base) {
+                        const committed = git('git diff --stat ' + base + '...HEAD');
+                        const count = git('git rev-list --count ' + base + '..HEAD');
+                        lines.push('Committed work against ' + base + ' (' + (count || '0') + ' commit(s) ahead):');
+                        lines.push(committed || '(no committed changes against ' + base + ')');
+                      } else {
+                        lines.push('Could not resolve a base branch, so committed work cannot be summarised.');
                       }
 
-                      process.stdout.write(out || 'no changes detected in the worktree');
+                      const dirty = git('git status --porcelain -- . ' + "':(exclude).ai-agent'");
+                      lines.push('');
+                      if (dirty) {
+                        lines.push('Uncommitted worktree changes (not yet committed by the pipeline):');
+                        lines.push(dirty);
+                      } else {
+                        lines.push('Uncommitted worktree changes: none - all work for this run is already committed.');
+                      }
+
+                      process.stdout.write(lines.join(NL));
                   env:
                     WT: ${steps.readWorktreePath.outputs.stdout}
                   failOnError: false
                   output:
                     captureStdout: true
+              # ── Pre-existing publication guard (RC-2) ────────────────────
+              # An engineer that commits, pushes and opens its own pull request before the
+              # review defeats the publish gate this workflow exists to enforce: unreviewed
+              # code sits on origin, the reviewer is handed a diffstat of nothing, and the
+              # run looks identical to a normal publish. Detect it and REPORT it rather
+              # than silently adopting it.
+              - id: detectPrematurePublish
+                name: Check the branch was not published before review
+                type: cli_command
+                dependsOn: diffstat
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - |
+                      const { execSync } = require('child_process');
+
+                      const wt = String(process.env.WT || '').trim();
+                      const branch = String(process.env.BRANCH || '').trim();
+                      const run = (cmd) => {
+                        try { return execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString().trim(); } catch (e) { return ''; }
+                      };
+
+                      const state = { branch: branch, remoteBranchExists: false, remoteSha: '', openPrUrl: '', openPrNumber: null, checked: false, warnings: [] };
+
+                      if (!branch) {
+                        state.warnings.push('no branch name was resolved, so the pre-publication check was skipped');
+                        process.stdout.write(JSON.stringify(state));
+                        process.exit(0);
+                      }
+
+                      // A pull request cannot exist without a pushed branch, so the remote ref is
+                      // the primary signal - and it needs no `gh` authentication to read.
+                      // A FAILED ls-remote (no remote, no network, no credentials) must not be
+                      // read as "not published": that would be a silent false negative, which is
+                      // the failure mode this guard exists to prevent.
+                      let remote = '';
+                      try {
+                        remote = execSync('git ls-remote --heads origin "' + branch + '"', { cwd: wt, stdio: 'pipe' }).toString().trim();
+                        state.checked = true;
+                      } catch (e) {
+                        state.checked = false;
+                        state.warnings.push('git ls-remote could not be run, so a pre-existing remote branch cannot be ruled out: ' + String((e && (e.stderr || e.message)) || e).trim().slice(0, 300));
+                      }
+                      if (remote) {
+                        state.remoteBranchExists = true;
+                        state.remoteSha = String(remote.split(/\s+/)[0] || '').slice(0, 40);
+                      }
+
+                      if (state.remoteBranchExists) {
+                        let list = '';
+                        try {
+                          list = execSync('gh pr list --head "' + branch + '" --state open --json url,number', { cwd: wt, stdio: 'pipe' }).toString().trim();
+                        } catch (e) { list = ''; }
+                        try {
+                          const found = JSON.parse(list || '[]');
+                          if (Array.isArray(found) && found.length) {
+                            state.openPrUrl = String(found[0].url || '');
+                            state.openPrNumber = found[0].number == null ? null : found[0].number;
+                          }
+                        } catch (e) { /* gh unavailable: the remote ref already proves it */ }
+                      }
+
+                      process.stdout.write(JSON.stringify(state));
+                  env:
+                    WT: ${steps.readWorktreePath.outputs.stdout}
+                    BRANCH: ${steps.readBranch.outputs.stdout}
+                  failOnError: false
+                  output:
+                    captureStdout: true
+
+              - id: readPrematurePublish
+                name: Read the pre-publication verdict
+                type: cli_command
+                dependsOn: detectPrematurePublish
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - |
+                      let state = {};
+                      try { state = JSON.parse(process.env.PRE || '{}'); } catch (e) { state = {}; }
+                      process.stdout.write(state.remoteBranchExists === true ? 'yes' : 'no');
+                  env:
+                    PRE: ${steps.detectPrematurePublish.outputs.stdout}
+                  failOnError: false
+                  output:
+                    captureStdout: true
+
+              # The reviewer and the ticket both get the finding in words, so a run that
+              # published early can never be mistaken for a normal publish.
+              - id: readPrematurePublishSummary
+                name: Describe the pre-publication finding
+                type: cli_command
+                dependsOn: readPrematurePublish
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - |
+                      const NL = String.fromCharCode(10);
+                      let state = {};
+                      try { state = JSON.parse(process.env.PRE || '{}'); } catch (e) { state = {}; }
+
+                      if (state.remoteBranchExists === true) {
+                        const pr = state.openPrUrl
+                          ? ' and an OPEN pull request ' + state.openPrUrl
+                          : ' (no open pull request was found)';
+                        const lines = [];
+                        lines.push('WARNING - branch ' + String(state.branch || '') + ' ALREADY EXISTS on origin at ' + String(state.remoteSha || '').slice(0, 12) + pr + '.');
+                        lines.push('This run committed, pushed and/or opened a pull request BEFORE the review ran, which the engineering rules forbid: the pipeline owns committing, pushing and opening the pull request, and doing it early bypasses the publish gate this workflow exists to enforce.');
+                        lines.push('The work under review is the working-tree state; the pushed branch is UNREVIEWED output that the pipeline must re-push only after approval.');
+                        process.stdout.write(lines.join(NL));
+                      } else if (state.checked === true) {
+                        process.stdout.write('No pre-existing remote branch and no open pull request were found for this branch - publication has not happened yet, as expected at review time.');
+                      } else {
+                        process.stdout.write('The pre-publication check did not run (' + (Array.isArray(state.warnings) ? state.warnings.join('; ') : 'no detail') + ').');
+                      }
+                  env:
+                    PRE: ${steps.detectPrematurePublish.outputs.stdout}
+                  failOnError: false
+                  output:
+                    captureStdout: true
+
+              - id: prematurePublishGate
+                name: Was the branch published before review
+                type: condition
+                dependsOn: readPrematurePublishSummary
+                config:
+                  condition: steps.readPrematurePublish.stdout === 'yes'
+                  thenSteps:
+                    - id: prematurePublishLog
+                      name: Log the premature publication
+                      type: log
+                      config:
+                        level: error
+                        message: ${steps.readPrematurePublishSummary.outputs.stdout} This is a
+                          process violation by the engineering run, not a normal publish.
+                    - id: prematurePublishComment
+                      name: Comment the premature publication on ticket
+                      type: service_invoke
+                      dependsOn: prematurePublishLog
+                      config:
+                        service: core.ReactorySupportWorkflowService@1.0.0
+                        method: addComment
+                        params:
+                          ticketId: ${steps.loadTicket.result.id}
+                          comment: "PROCESS VIOLATION - the engineering run published work for
+                            ${steps.loadTicket.result.reference} BEFORE it was reviewed.
+                            ${steps.readPrematurePublishSummary.outputs.stdout} The review that
+                            follows is reviewing work that is already on origin. The pipeline
+                            re-pushes only after the review passes; this comment records that
+                            the earlier push was NOT a pipeline publication."
+
               - id: reviewLoop
                 name: Review loop
                 type: while
-                dependsOn: diffstat
+                dependsOn: prematurePublishGate
                 config:
                   condition: variables.reviewVerdict !== 'approved' &&
                     variables.runHalt !== 'true' &&
@@ -2429,6 +2625,11 @@ steps:
                           ## Change evidence (diffstat)
 
                           ${steps.diffstat.outputs.stdout}
+
+
+                          ## Pre-publication check
+
+                          ${steps.readPrematurePublishSummary.outputs.stdout}
 
 
                           ## Engineer's completion report (a CLAIM - verify it)
@@ -3239,6 +3440,7 @@ steps:
                           - |
                             const fs = require('fs');
                             const path = require('path');
+                            const { execSync } = require('child_process');
 
                             // Compares the completion report mtime with the review verdict mtime.
                             // Both files already exist in the worktree and the pipeline writes them
@@ -3274,8 +3476,43 @@ steps:
 
                             // Equal timestamps are treated as a revision: reviewing unchanged work
                             // costs one turn, publishing a never-reviewed revision strands it.
+                            //
+                            // RC-4. mtime alone is not enough: an engineer that edits files without
+                            // rewriting report.json would still be skipped, which is the original
+                            // defect one step narrower. A changed file (or a commit) at or after the
+                            // review timestamp is also a revision. The cost of a false positive is
+                            // one extra review; the cost of a false negative is stranded work.
+                            const git = (cmd) => {
+                              try { return execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString().trim(); } catch (e) { return ''; }
+                            };
+
+                            const touchedAtOrAfterReview = () => {
+                              const status = git('git status --porcelain -- . ' + "':(exclude).ai-agent'");
+                              const changed = status.split(String.fromCharCode(10))
+                                .map((line) => line.trim())
+                                .filter(Boolean)
+                                .map((line) => line.replace(/^[A-Z?!]{1,3}\s+/, '').split(' -> ').pop())
+                                .filter(Boolean);
+                              for (let i = 0; i < changed.length; i += 1) {
+                                const stamp = mtimeOf(path.join(wt, changed[i]));
+                                if (stamp !== null && stamp >= reviewMtime) return changed[i];
+                              }
+                              // An engineer that committed may have touched nothing since, so the
+                              // commit timestamp is the only remaining evidence of new work.
+                              // git's %ct has one-second resolution, so the comparison is strict:
+                              // a commit in the same second as the review is not new work.
+                              const commitSeconds = Number(git('git log -1 --format=%ct'));
+                              if (Number.isFinite(commitSeconds) && commitSeconds > 0 && commitSeconds * 1000 > reviewMtime) {
+                                return 'commit ' + git('git rev-parse --short HEAD');
+                              }
+                              return '';
+                            };
+
                             if (reportMtime < reviewMtime) {
-                              skip('the engineer has not revised since the last review');
+                              const touched = touchedAtOrAfterReview();
+                              if (!touched) skip('the engineer has not revised since the last review');
+                              process.stderr.write('confirmation review triggered by changed work (' + touched + ') even though report.json was not rewritten');
+                              process.stderr.write(String.fromCharCode(10));
                             }
 
                             let status = '';
@@ -4295,7 +4532,7 @@ steps:
                               body = legacyBody() + '\n\n> **PR template not applied:** ' + warnings.join('; ');
                             }
 
-                            body = body.replace(/\s+$/, '') + '\n\n---\nGenerated by core.ProcessAITicket@1.5.0\n';
+                            body = body.replace(/\s+$/, '') + '\n\n---\nGenerated by core.ProcessAITicket@1.4.6\n';
 
                             // A publication on non-blocking-only findings must SAY so: a human
                             // reading this pull request must not mistake it for an approval.
@@ -4970,14 +5207,19 @@ steps:
                       config:
                         condition: variables.runHalt === 'true'
                         thenSteps:
+                          # RC-5. This used to hard-code "the reviewer rejected without readable
+                          # findings", but runHalt is ALSO set by the review_unavailable branch,
+                          # where no verdict exists at all - which re-created exactly the
+                          # rejection/could-not-review ambiguity this ticket removes. The
+                          # narrative already distinguishes the two, so use it.
                           - id: haltedLog
                             name: Log halted run
                             type: log
                             config:
                               level: warn
-                              message: Run HALTED for ${steps.loadTicket.result.reference} - the reviewer
-                                rejected without readable findings. A human task and a ticket
-                                comment carry the details; no pull request was opened.
+                              message: ${steps.readReviewOutcomeNarrative.outputs.stdout} The run is
+                                halted for a human; a ticket comment carries the details and no
+                                pull request was opened.
                         elseSteps:
                           - id: exhaustedLog
                             name: Log review exhausted
