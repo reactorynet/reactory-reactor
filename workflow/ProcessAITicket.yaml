@@ -1,5 +1,12 @@
 nameSpace: core
 name: ProcessAITicket
+# Deliberately NOT bumped. The version is the workflow's identity: it must match
+# REACTOR_YAML_WORKFLOWS in ../index.ts (which derives the catalog destination from
+# it) AND reactory-core's PROCESS_AI_TICKET_WORKFLOW_ID, whose guard test compares
+# that constant to this body and whose checkWorkflowRegistered gate refuses to
+# dispatch a run whose id it cannot resolve. reactory-core lives in the
+# express-server repository, so those two cannot be moved from this one PR.
+# Keep 1.4.6 until the bump is coordinated across both repositories.
 version: 1.4.6
 description: Autonomous AI engineering run for a SINGLE support ticket. Loads the ticket,
   moves it to in_progress, prepares an isolated git worktree on a ticket-keyed
@@ -346,11 +353,35 @@ steps:
       key: runHalt
       value: "false"
 
+  # One-shot marker for the confirmation review that runs when the engineer revised
+  # after the last review the loop was allowed to run (REACTORY-302016408). It is a
+  # flag, not a counter: the confirmation pass happens at most once per run.
+  - id: seedConfirmationReview
+    name: Seed confirmation review flag
+    type: set_variable
+    dependsOn: seedRunHalt
+    config:
+      action: set
+      key: confirmationReview
+      value: "false"
+
+  # Whether the finished work may be published. Replaces the old
+  # `reviewVerdict === 'approved'` publish gate, which could never open once the
+  # review bound was exhausted after a revision.
+  - id: seedPublishable
+    name: Seed publishable flag
+    type: set_variable
+    dependsOn: seedConfirmationReview
+    config:
+      action: set
+      key: publishable
+      value: "false"
+
   # ── 4. Guard the ticket ─────────────────────────────────────────────────
   - id: ticketGuard
     name: Ticket exists
     type: condition
-    dependsOn: seedRunHalt
+    dependsOn: seedPublishable
     config:
       condition: steps.loadTicket.result && steps.loadTicket.result.id
       thenSteps:
@@ -2287,29 +2318,218 @@ steps:
                   command: node
                   args:
                     - -e
-                    - >
+                    - |
                       const { execSync } = require('child_process');
 
+                      // RC-3 (REACTORY-302016408). This used to run `git diff --stat HEAD`,
+                      // which reports NOTHING for a run whose engineer committed - the reviewer
+                      // was then handed "no changes detected" as its change evidence while the
+                      // real diff was hundreds of lines. Diff against the resolved BASE so
+                      // committed work is visible, and list the uncommitted worktree state
+                      // separately, because the engineer does not commit and a revision lives
+                      // there until the pipeline commits it.
                       const wt = String(process.env.WT || '').trim();
+                      const NL = String.fromCharCode(10);
 
-                      let out = '';
+                      const git = (cmd) => {
+                        try { return execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString().trim(); } catch (e) { return ''; }
+                      };
 
-                      try {
-                        out = execSync('git diff --stat HEAD', { cwd: wt, stdio: 'pipe' }).toString().trim();
-                      } catch (e) {
-                        out = 'unable to compute diffstat: ' + (e && e.message ? e.message : String(e));
+                      const resolveBase = () => {
+                        const symbolic = git('git symbolic-ref --short refs/remotes/origin/HEAD').replace(/^origin\//, '');
+                        if (symbolic) return symbolic;
+                        const candidates = ['origin/main', 'origin/master', 'main', 'master'];
+                        for (let i = 0; i < candidates.length; i += 1) {
+                          if (git('git rev-parse --verify --quiet ' + candidates[i])) return candidates[i].replace(/^origin\//, '');
+                        }
+                        return '';
+                      };
+
+                      const base = resolveBase();
+                      const lines = [];
+
+                      if (base) {
+                        const committed = git('git diff --stat ' + base + '...HEAD');
+                        const count = git('git rev-list --count ' + base + '..HEAD');
+                        lines.push('Committed work against ' + base + ' (' + (count || '0') + ' commit(s) ahead):');
+                        lines.push(committed || '(no committed changes against ' + base + ')');
+                      } else {
+                        lines.push('Could not resolve a base branch, so committed work cannot be summarised.');
                       }
 
-                      process.stdout.write(out || 'no changes detected in the worktree');
+                      const dirty = git('git status --porcelain -- . ' + "':(exclude).ai-agent'");
+                      lines.push('');
+                      if (dirty) {
+                        lines.push('Uncommitted worktree changes (not yet committed by the pipeline):');
+                        lines.push(dirty);
+                      } else {
+                        lines.push('Uncommitted worktree changes: none - all work for this run is already committed.');
+                      }
+
+                      process.stdout.write(lines.join(NL));
                   env:
                     WT: ${steps.readWorktreePath.outputs.stdout}
                   failOnError: false
                   output:
                     captureStdout: true
+              # ── Pre-existing publication guard (RC-2) ────────────────────
+              # An engineer that commits, pushes and opens its own pull request before the
+              # review defeats the publish gate this workflow exists to enforce: unreviewed
+              # code sits on origin, the reviewer is handed a diffstat of nothing, and the
+              # run looks identical to a normal publish. Detect it and REPORT it rather
+              # than silently adopting it.
+              - id: detectPrematurePublish
+                name: Check the branch was not published before review
+                type: cli_command
+                dependsOn: diffstat
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - |
+                      const { execSync } = require('child_process');
+
+                      const wt = String(process.env.WT || '').trim();
+                      const branch = String(process.env.BRANCH || '').trim();
+                      const run = (cmd) => {
+                        try { return execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString().trim(); } catch (e) { return ''; }
+                      };
+
+                      const state = { branch: branch, remoteBranchExists: false, remoteSha: '', openPrUrl: '', openPrNumber: null, checked: false, warnings: [] };
+
+                      if (!branch) {
+                        state.warnings.push('no branch name was resolved, so the pre-publication check was skipped');
+                        process.stdout.write(JSON.stringify(state));
+                        process.exit(0);
+                      }
+
+                      // A pull request cannot exist without a pushed branch, so the remote ref is
+                      // the primary signal - and it needs no `gh` authentication to read.
+                      // A FAILED ls-remote (no remote, no network, no credentials) must not be
+                      // read as "not published": that would be a silent false negative, which is
+                      // the failure mode this guard exists to prevent.
+                      let remote = '';
+                      try {
+                        remote = execSync('git ls-remote --heads origin "' + branch + '"', { cwd: wt, stdio: 'pipe' }).toString().trim();
+                        state.checked = true;
+                      } catch (e) {
+                        state.checked = false;
+                        state.warnings.push('git ls-remote could not be run, so a pre-existing remote branch cannot be ruled out: ' + String((e && (e.stderr || e.message)) || e).trim().slice(0, 300));
+                      }
+                      if (remote) {
+                        state.remoteBranchExists = true;
+                        state.remoteSha = String(remote.split(/\s+/)[0] || '').slice(0, 40);
+                      }
+
+                      if (state.remoteBranchExists) {
+                        let list = '';
+                        try {
+                          list = execSync('gh pr list --head "' + branch + '" --state open --json url,number', { cwd: wt, stdio: 'pipe' }).toString().trim();
+                        } catch (e) { list = ''; }
+                        try {
+                          const found = JSON.parse(list || '[]');
+                          if (Array.isArray(found) && found.length) {
+                            state.openPrUrl = String(found[0].url || '');
+                            state.openPrNumber = found[0].number == null ? null : found[0].number;
+                          }
+                        } catch (e) { /* gh unavailable: the remote ref already proves it */ }
+                      }
+
+                      process.stdout.write(JSON.stringify(state));
+                  env:
+                    WT: ${steps.readWorktreePath.outputs.stdout}
+                    BRANCH: ${steps.readBranch.outputs.stdout}
+                  failOnError: false
+                  output:
+                    captureStdout: true
+
+              - id: readPrematurePublish
+                name: Read the pre-publication verdict
+                type: cli_command
+                dependsOn: detectPrematurePublish
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - |
+                      let state = {};
+                      try { state = JSON.parse(process.env.PRE || '{}'); } catch (e) { state = {}; }
+                      process.stdout.write(state.remoteBranchExists === true ? 'yes' : 'no');
+                  env:
+                    PRE: ${steps.detectPrematurePublish.outputs.stdout}
+                  failOnError: false
+                  output:
+                    captureStdout: true
+
+              # The reviewer and the ticket both get the finding in words, so a run that
+              # published early can never be mistaken for a normal publish.
+              - id: readPrematurePublishSummary
+                name: Describe the pre-publication finding
+                type: cli_command
+                dependsOn: readPrematurePublish
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - |
+                      const NL = String.fromCharCode(10);
+                      let state = {};
+                      try { state = JSON.parse(process.env.PRE || '{}'); } catch (e) { state = {}; }
+
+                      if (state.remoteBranchExists === true) {
+                        const pr = state.openPrUrl
+                          ? ' and an OPEN pull request ' + state.openPrUrl
+                          : ' (no open pull request was found)';
+                        const lines = [];
+                        lines.push('WARNING - branch ' + String(state.branch || '') + ' ALREADY EXISTS on origin at ' + String(state.remoteSha || '').slice(0, 12) + pr + '.');
+                        lines.push('This run committed, pushed and/or opened a pull request BEFORE the review ran, which the engineering rules forbid: the pipeline owns committing, pushing and opening the pull request, and doing it early bypasses the publish gate this workflow exists to enforce.');
+                        lines.push('The work under review is the working-tree state; the pushed branch is UNREVIEWED output that the pipeline must re-push only after approval.');
+                        process.stdout.write(lines.join(NL));
+                      } else if (state.checked === true) {
+                        process.stdout.write('No pre-existing remote branch and no open pull request were found for this branch - publication has not happened yet, as expected at review time.');
+                      } else {
+                        process.stdout.write('The pre-publication check did not run (' + (Array.isArray(state.warnings) ? state.warnings.join('; ') : 'no detail') + ').');
+                      }
+                  env:
+                    PRE: ${steps.detectPrematurePublish.outputs.stdout}
+                  failOnError: false
+                  output:
+                    captureStdout: true
+
+              - id: prematurePublishGate
+                name: Was the branch published before review
+                type: condition
+                dependsOn: readPrematurePublishSummary
+                config:
+                  condition: steps.readPrematurePublish.stdout === 'yes'
+                  thenSteps:
+                    - id: prematurePublishLog
+                      name: Log the premature publication
+                      type: log
+                      config:
+                        level: error
+                        message: ${steps.readPrematurePublishSummary.outputs.stdout} This is a
+                          process violation by the engineering run, not a normal publish.
+                    - id: prematurePublishComment
+                      name: Comment the premature publication on ticket
+                      type: service_invoke
+                      dependsOn: prematurePublishLog
+                      config:
+                        service: core.ReactorySupportWorkflowService@1.0.0
+                        method: addComment
+                        params:
+                          ticketId: ${steps.loadTicket.result.id}
+                          comment: "PROCESS VIOLATION - the engineering run published work for
+                            ${steps.loadTicket.result.reference} BEFORE it was reviewed.
+                            ${steps.readPrematurePublishSummary.outputs.stdout} The review that
+                            follows is reviewing work that is already on origin. The pipeline
+                            re-pushes only after the review passes; this comment records that
+                            the earlier push was NOT a pipeline publication."
+
               - id: reviewLoop
                 name: Review loop
                 type: while
-                dependsOn: diffstat
+                dependsOn: prematurePublishGate
                 config:
                   condition: variables.reviewVerdict !== 'approved' &&
                     variables.runHalt !== 'true' &&
@@ -2324,7 +2544,9 @@ steps:
                         toolApprovalMode: auto
                         maxToolIterations: 150
                         promptMergeStrategy: append
-                        instructions: >-
+                        # Reused by the confirmation review so both passes review to the same
+                        # standard; only the framing message differs.
+                        instructions: &reviewerInstructions >-
                           You are the independent quality reviewer for an AI
                           engineering run.
 
@@ -2405,6 +2627,11 @@ steps:
                           ${steps.diffstat.outputs.stdout}
 
 
+                          ## Pre-publication check
+
+                          ${steps.readPrematurePublishSummary.outputs.stdout}
+
+
                           ## Engineer's completion report (a CLAIM - verify it)
 
                           Read the CURRENT report yourself - it is rewritten after each revision, so
@@ -2437,7 +2664,9 @@ steps:
                         command: node
                         args:
                           - -e
-                          - |
+                          # Reused verbatim by captureConfirmationReview: the confirmation pass
+                          # must normalise a verdict exactly the way the loop does.
+                          - &captureReviewScript |
                             const fs = require('fs');
                             const path = require('path');
 
@@ -2530,10 +2759,15 @@ steps:
                             };
                             // <<< shared findings rendering
 
+                            // A capture failure is NOT a quality judgement. It is reported as
+                            // verdict 'review_unavailable' so the loop can halt loudly and the
+                            // ticket is never told the work was "rejected" when it was never
+                            // reviewed at all (REACTORY-302016408).
                             const fail = (verdict, reason, extra) => {
                               const payload = Object.assign({
                                 verdict: verdict,
-                                verdictSource: 'unreadable',
+                                verdictSource: 'capture_failed',
+                                reviewAvailable: false,
                                 findingsResolved: false,
                                 requiredChanges: [],
                                 blockingFindings: [],
@@ -2549,14 +2783,14 @@ steps:
                             };
 
                             if (!fs.existsSync(reviewPath)) {
-                              fail('rejected', 'review.json not found');
+                              fail('review_unavailable', 'review.json not found');
                             }
 
                             let raw;
                             try {
                               raw = JSON.parse(fs.readFileSync(reviewPath, 'utf8'));
                             } catch (e) {
-                              fail('rejected', 'review.json is not valid JSON: ' + String((e && e.message) || e));
+                              fail('review_unavailable', 'review.json is not valid JSON: ' + String((e && e.message) || e));
                             }
 
                             const rv = (raw && typeof raw.review === 'object' && raw.review) ? raw.review : raw;
@@ -2623,6 +2857,7 @@ steps:
                             const payload = {
                               verdict: verdict,
                               verdictSource: norm,
+                              reviewAvailable: true,
                               findingsResolved: findingsResolved,
                               requiredChanges: resolvedRequired,
                               blockingFindings: resolvedBlocking,
@@ -2831,12 +3066,12 @@ steps:
                         command: node
                         args:
                           - -e
-                          - |
-                            // Read review.json from disk. The previous form passed the whole
-                            // captured verdict through an env var, which broke on a multi-KB
-                            // payload. The file is the source of truth and is already
-                            // normalised by captureReview, so prefer it and only fall back to
-                            // the step output when the file is gone.
+                          # Reused verbatim by readConfirmationVerdict.
+                          - &readVerdictScript |
+                            // Read the verdict that captureReview RESOLVED, not a re-derivation of
+                            // it. review-normalised.json is the only place a capture failure is
+                            // recorded, so it is read first: a missing or unparseable review.json
+                            // must surface as review_unavailable, never as "rejected".
                             const fs = require('fs');
                             const path = require('path');
                             const wt = String(process.env.WT || '').trim();
@@ -2846,8 +3081,17 @@ steps:
                               const rv = (raw && typeof raw.review === 'object' && raw.review) ? raw.review : raw;
                               const norm = String((rv && (rv.verdict || rv.decision)) || (raw && raw.verdict) || '').trim().toLowerCase();
                               if (['approved', 'approve', 'pass', 'passed', 'accept', 'accepted', 'ok'].indexOf(norm) !== -1) return 'approved';
+                              if (['review_unavailable', 'reviewunavailable', 'capture_failed', 'capturefailed'].indexOf(norm) !== -1) return 'review_unavailable';
                               return 'rejected';
                             };
+
+                            try {
+                              const p = path.join(wt, '.ai-agent', 'review-normalised.json');
+                              if (fs.existsSync(p)) {
+                                process.stdout.write(normalise(JSON.parse(fs.readFileSync(p, 'utf8'))));
+                                process.exit(0);
+                              }
+                            } catch (e) { /* fall through */ }
 
                             try {
                               const p = path.join(wt, '.ai-agent', 'review.json');
@@ -2860,7 +3104,7 @@ steps:
                             try {
                               process.stdout.write(normalise(JSON.parse(fallback)));
                             } catch (e) {
-                              process.stdout.write('rejected');
+                              process.stdout.write('review_unavailable');
                             }
                         env:
                           WT: ${steps.readWorktreePath.outputs.stdout}
@@ -2886,13 +3130,17 @@ steps:
                         command: node
                         args:
                           - -e
-                          - >
-                            const n = Number(String(process.env.CYCLE ||
-                            '0').trim());
-
-                            process.stdout.write(String((Number.isFinite(n) ? n : 0) + 1));
+                          - |
+                            const n = Number(String(process.env.CYCLE || '0').trim());
+                            const cycle = Number.isFinite(n) ? n : 0;
+                            // A review that COULD NOT RUN is a pipeline fault, not a review. It must
+                            // not consume one of the engineer's permitted cycles, or a broken capture
+                            // would silently burn the budget and be reported as a rejection.
+                            const unavailable = String(process.env.VERDICT || '').trim() === 'review_unavailable';
+                            process.stdout.write(String(unavailable ? cycle : cycle + 1));
                         env:
                           CYCLE: ${variables.reviewCycle}
+                          VERDICT: ${variables.reviewVerdict}
                         failOnError: true
                         output:
                           captureStdout: true
@@ -2905,6 +3153,77 @@ steps:
                         key: reviewCycle
                         source: step_output
                         sourcePath: bumpCycle.outputs.stdout
+                    # ── Could not review at all ──────────────────────────────────
+                    # REACTORY-302016408. A run with no review.json (or an unparseable one) is a
+                    # PIPELINE fault, not a quality judgement. It must not consume a cycle, must
+                    # not be reported as "rejected", and must be loud: halt for a human with a
+                    # ticket comment that says the work could not be reviewed.
+                    - id: reviewUnavailableGate
+                      name: The reviewer produced no verdict
+                      type: condition
+                      dependsOn: setCycle
+                      config:
+                        condition: variables.reviewVerdict === 'review_unavailable'
+                        thenSteps:
+                          - id: reviewUnavailableLog
+                            name: Log the review capture failure
+                            type: log
+                            config:
+                              level: error
+                              message: REVIEW UNAVAILABLE for ${steps.loadTicket.result.reference} -
+                                no review verdict could be captured. This is a pipeline fault,
+                                not a rejection, and no review cycle was consumed.
+                          - id: reviewUnavailableComment
+                            name: Comment the capture failure on ticket
+                            type: service_invoke
+                            dependsOn: reviewUnavailableLog
+                            config:
+                              service: core.ReactorySupportWorkflowService@1.0.0
+                              method: addComment
+                              params:
+                                ticketId: ${steps.loadTicket.result.id}
+                                comment: "COULD NOT BE REVIEWED - the reviewer produced no usable
+                                  verdict file for
+                                  ${steps.loadTicket.result.reference} (.ai-agent/review.json
+                                  was missing or unparseable), so the work was NEVER JUDGED.
+                                  This is NOT a rejection and no review cycle was consumed: it
+                                  is an operational fault in the AI pipeline. The run is halted
+                                  for a human. Capture evidence:
+                                  ${steps.captureReview.outputs.stdout}"
+                          - id: reviewUnavailableTask
+                            name: Human review of the capture failure
+                            type: user_activity
+                            dependsOn: reviewUnavailableComment
+                            config:
+                              activityType: approval
+                              assignee: ${steps.loadTicket.result.assignedToEmail}
+                              message: Review could not run for
+                                ${steps.loadTicket.result.reference} - the reviewer produced no
+                                verdict file
+                              props:
+                                ticketReference: ${steps.loadTicket.result.reference}
+                                ticketId: ${steps.loadTicket.result.id}
+                                worktree: ${steps.readWorktreePath.outputs.stdout}
+                                reviewPath: ${steps.readWorktreePath.outputs.stdout}/.ai-agent/review.json
+                                normalisedPath: ${steps.readWorktreePath.outputs.stdout}/.ai-agent/review-normalised.json
+                                reason: review_unavailable
+                          - id: setRunStatusUnavailable
+                            name: Record blocked run status (could not review)
+                            type: set_variable
+                            dependsOn: reviewUnavailableTask
+                            config:
+                              action: set
+                              key: runStatus
+                              value: blocked
+                          - id: setRunHaltUnavailable
+                            name: Halt the review loop (could not review)
+                            type: set_variable
+                            dependsOn: setRunStatusUnavailable
+                            config:
+                              action: set
+                              key: runHalt
+                              value: "true"
+
                     # A rejection with zero resolvable findings must block for a human,
                     # not hand the engineer a generic sentence and waste a full cycle.
                     - id: findingsHaltGate
@@ -3089,25 +3408,448 @@ steps:
                                       for ${steps.loadTicket.result.reference}.
                         elseSteps:
                           - id: logApproved
-                            name: Log reviewer approval
+                            name: Log reviewer verdict
                             type: log
                             config:
                               level: info
-                              message: Reviewer APPROVED ${steps.loadTicket.result.reference} on review cycle
-                                ${variables.reviewCycle}.
-              - id: outcome
-                name: Loop outcome
+                              message: Review cycle ${variables.reviewCycle} ended with verdict
+                                '${variables.reviewVerdict}' for
+                                ${steps.loadTicket.result.reference} - no hand-back required.
+              # ── Confirmation review after the last permitted cycle ───────────
+              # REACTORY-302016408 (option A). The loop stops when reviewCycle reaches the
+              # bound. On that last cycle the engineer revises, but no further review runs,
+              # so reviewVerdict still holds the rejection from BEFORE the fix. When the
+              # engineer wrote a report AFTER the last review, the revision was never
+              # reviewed: run exactly ONE confirmation review whose verdict is authoritative.
+              # This is a one-shot guard, not another cycle counter - it cannot repeat.
+              - id: confirmationReviewGate
+                name: Confirmation review after a late revision
                 type: condition
                 dependsOn: reviewLoop
                 config:
-                  condition: variables.reviewVerdict === 'approved'
+                  condition: variables.reviewVerdict === 'rejected' && variables.runHalt !== 'true'
+                    && variables.confirmationReview !== 'true'
+                  thenSteps:
+                    - id: assessConfirmationNeed
+                      name: Did the engineer revise after the last review
+                      type: cli_command
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const fs = require('fs');
+                            const path = require('path');
+                            const { execSync } = require('child_process');
+
+                            // Compares the completion report mtime with the review verdict mtime.
+                            // Both files already exist in the worktree and the pipeline writes them
+                            // in a fixed order, so the comparison is reliable: a report NEWER than
+                            // the last review means the revision was never reviewed.
+                            const wt = String(process.env.WT || '').trim();
+                            const dir = path.join(wt, '.ai-agent');
+                            const reportPath = path.join(dir, 'report.json');
+                            const reviewPath = path.join(dir, 'review.json');
+                            const normalisedPath = path.join(dir, 'review-normalised.json');
+                            const statusPath = path.join(dir, 'run-status.json');
+
+                            const mtimeOf = (file) => {
+                              try { return fs.statSync(file).mtimeMs; } catch (e) { return null; }
+                            };
+                            const skip = (why) => {
+                              process.stderr.write('confirmation review skipped: ' + why);
+                              process.stderr.write(String.fromCharCode(10));
+                              process.stdout.write('skip');
+                              process.exit(0);
+                            };
+
+                            // No verdict artefact at all is a capture failure, handled as
+                            // review_unavailable. It is never a reason to review again.
+                            if (!fs.existsSync(reviewPath) && !fs.existsSync(normalisedPath)) {
+                              skip('no review artefacts exist');
+                            }
+
+                            const reportMtime = mtimeOf(reportPath);
+                            const reviewMtime = mtimeOf(reviewPath) === null ? mtimeOf(normalisedPath) : mtimeOf(reviewPath);
+                            if (reportMtime === null) skip('there is no completion report to review');
+                            if (reviewMtime === null) skip('there is no review timestamp');
+
+                            // Equal timestamps are treated as a revision: reviewing unchanged work
+                            // costs one turn, publishing a never-reviewed revision strands it.
+                            //
+                            // RC-4. mtime alone is not enough: an engineer that edits files without
+                            // rewriting report.json would still be skipped, which is the original
+                            // defect one step narrower. A changed file (or a commit) at or after the
+                            // review timestamp is also a revision. The cost of a false positive is
+                            // one extra review; the cost of a false negative is stranded work.
+                            const git = (cmd) => {
+                              try { return execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString().trim(); } catch (e) { return ''; }
+                            };
+
+                            const touchedAtOrAfterReview = () => {
+                              const status = git('git status --porcelain -- . ' + "':(exclude).ai-agent'");
+                              const changed = status.split(String.fromCharCode(10))
+                                .map((line) => line.trim())
+                                .filter(Boolean)
+                                .map((line) => line.replace(/^[A-Z?!]{1,3}\s+/, '').split(' -> ').pop())
+                                .filter(Boolean);
+                              for (let i = 0; i < changed.length; i += 1) {
+                                const stamp = mtimeOf(path.join(wt, changed[i]));
+                                if (stamp !== null && stamp >= reviewMtime) return changed[i];
+                              }
+                              // An engineer that committed may have touched nothing since, so the
+                              // commit timestamp is the only remaining evidence of new work.
+                              // git's %ct has one-second resolution, so the comparison is strict:
+                              // a commit in the same second as the review is not new work.
+                              const commitSeconds = Number(git('git log -1 --format=%ct'));
+                              if (Number.isFinite(commitSeconds) && commitSeconds > 0 && commitSeconds * 1000 > reviewMtime) {
+                                return 'commit ' + git('git rev-parse --short HEAD');
+                              }
+                              return '';
+                            };
+
+                            if (reportMtime < reviewMtime) {
+                              const touched = touchedAtOrAfterReview();
+                              if (!touched) skip('the engineer has not revised since the last review');
+                              process.stderr.write('confirmation review triggered by changed work (' + touched + ') even though report.json was not rewritten');
+                              process.stderr.write(String.fromCharCode(10));
+                            }
+
+                            let status = '';
+                            try { status = String(JSON.parse(fs.readFileSync(statusPath, 'utf8')).status || ''); } catch (e) { status = ''; }
+                            if (status && status !== 'completed') {
+                              skip('the last revision did not complete (status ' + status + ')');
+                            }
+
+                            process.stdout.write('run');
+                        env:
+                          WT: ${steps.readWorktreePath.outputs.stdout}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+                          captureStderr: true
+                    - id: confirmationNeedGate
+                      name: Run the confirmation review
+                      type: condition
+                      dependsOn: assessConfirmationNeed
+                      config:
+                        condition: steps.assessConfirmationNeed.stdout === 'run'
+                        thenSteps:
+                          - id: confirmationReviewLog
+                            name: Log the confirmation review
+                            type: log
+                            config:
+                              level: info
+                              message: The engineer revised after the last permitted review for
+                                ${steps.loadTicket.result.reference} - running ONE
+                                confirmation review whose verdict is authoritative.
+                          - id: confirmationReview
+                            name: Confirmation reviewer agent run
+                            type: agent_conversation
+                            dependsOn: confirmationReviewLog
+                            config:
+                              personaId: ${input.reviewerId}
+                              toolApprovalMode: auto
+                              maxToolIterations: 150
+                              promptMergeStrategy: append
+                              instructions: *reviewerInstructions
+                              message: >-
+                                Review the following AI engineering run.
+
+
+                                This is a CONFIRMATION REVIEW. The review cycle bound was reached
+                                and the engineer revised AFTER the last review, so the previous
+                                verdict (${variables.reviewVerdict}) describes work that no longer
+                                exists. Your verdict replaces it and is authoritative: it decides
+                                whether this work is published.
+
+
+                                ## Ticket under work
+
+                                - Reference: ${steps.loadTicket.result.reference}
+
+                                - Request: ${steps.loadTicket.result.request}
+
+                                - Type: ${steps.loadTicket.result.requestType}
+
+                                - Description:
+
+                                ${steps.loadTicket.result.description}
+
+
+                                ## Worktree to inspect
+
+                                ${steps.readWorktreePath.outputs.stdout}
+
+
+                                ## Change evidence (diffstat)
+
+                                ${steps.diffstat.outputs.stdout}
+
+
+                                ## Engineer's completion report (a CLAIM - verify it)
+
+                                Read the CURRENT report yourself - it was rewritten after your
+                                previous review:
+
+                                ${steps.readWorktreePath.outputs.stdout}/.ai-agent/report.json
+
+
+                                ## Engineer workspace note
+
+                                ${steps.readNotePath.outputs.stdout}
+
+
+                                ## Review cycle
+
+                                This confirmation review follows ${variables.reviewCycle} of at most
+                                ${variables.reviewCycleBound} permitted cycle(s). It does not count
+                                against that bound.
+
+
+                                ## Your output
+
+                                Write your verdict JSON to REVIEW PATH (replace the previous
+                                verdict):
+
+                                ${steps.readWorktreePath.outputs.stdout}/.ai-agent/review.json
+
+
+                                Tag every finding with its severity and with blocking true or false.
+                                A finding you record as blocking false must be one you are
+                                genuinely content to merge with; the pipeline publishes work whose
+                                only findings are explicitly non-blocking.
+                          - id: captureConfirmationReview
+                            name: Capture the confirmation verdict
+                            type: cli_command
+                            dependsOn: confirmationReview
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - *captureReviewScript
+                              env:
+                                WT: ${steps.readWorktreePath.outputs.stdout}
+                              failOnError: false
+                              output:
+                                captureStdout: true
+                                captureStderr: true
+                          - id: readConfirmationVerdict
+                            name: Read the confirmation verdict
+                            type: cli_command
+                            dependsOn: captureConfirmationReview
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - *readVerdictScript
+                              env:
+                                WT: ${steps.readWorktreePath.outputs.stdout}
+                                REVIEW: ${steps.captureConfirmationReview.outputs.stdout}
+                              failOnError: false
+                              output:
+                                captureStdout: true
+                                captureStderr: true
+                          - id: setConfirmationVerdict
+                            name: Record the confirmation verdict
+                            type: set_variable
+                            dependsOn: readConfirmationVerdict
+                            config:
+                              action: set
+                              key: reviewVerdict
+                              source: step_output
+                              sourcePath: readConfirmationVerdict.outputs.stdout
+                          - id: setConfirmationRan
+                            name: Mark the confirmation review as used
+                            type: set_variable
+                            dependsOn: setConfirmationVerdict
+                            config:
+                              action: set
+                              key: confirmationReview
+                              value: "true"
+                          - id: confirmationVerdictLog
+                            name: Log the confirmation verdict
+                            type: log
+                            dependsOn: setConfirmationRan
+                            config:
+                              level: info
+                              message: Confirmation review for ${steps.loadTicket.result.reference}
+                                returned verdict '${variables.reviewVerdict}'.
+                        elseSteps:
+                          - id: confirmationSkippedLog
+                            name: Log a skipped confirmation review
+                            type: log
+                            config:
+                              level: info
+                              message: No confirmation review was needed for
+                                ${steps.loadTicket.result.reference} - the engineer did not
+                                revise after the last review.
+
+              # ── Publish decision ────────────────────────
+              # REACTORY-302016408 (option B). The publish gate used to test
+              # `reviewVerdict === 'approved'`, so a rejection for a low-severity,
+              # non-blocking finding stranded finished work. Publish when the reviewer
+              # approved OR when it rejected with ZERO blocking findings. Absent or
+              # unparseable blocking flags fail closed.
+              - id: readPublishable
+                name: Decide whether the work may be published
+                type: cli_command
+                dependsOn: confirmationReviewGate
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - |
+                      const fs = require('fs');
+                      const path = require('path');
+
+                      const wt = String(process.env.WT || '').trim();
+                      const dir = path.join(wt, '.ai-agent');
+                      const readJson = (name) => {
+                        try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch (e) { return null; }
+                      };
+
+                      const review = readJson('review-normalised.json') || {};
+                      const verdict = String(review.verdict || '').trim() || 'not_reviewed';
+                      const asArray = (value) => (Array.isArray(value) ? value : []);
+
+                      const entries = [];
+                      asArray(review.requiredChanges).forEach((finding) => entries.push({ finding: finding, list: 'requiredChanges' }));
+                      asArray(review.blockingFindings).forEach((finding) => entries.push({ finding: finding, list: 'blockingFindings' }));
+                      asArray(review.findings).forEach((finding) => entries.push({ finding: finding, list: 'findings' }));
+
+                      // true / false / undefined, where undefined means the reviewer did not say.
+                      const blockingFlag = (entry) => {
+                        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return undefined;
+                        const keys = Object.keys(entry);
+                        for (let i = 0; i < keys.length; i += 1) {
+                          const key = String(keys[i]).toLowerCase().replace(/[^a-z0-9]/g, '');
+                          if (key !== 'blocking' && key !== 'isblocking' && key !== 'blocker') continue;
+                          const value = entry[keys[i]];
+                          if (value === true || value === 'true') return true;
+                          if (value === false || value === 'false') return false;
+                          return undefined;
+                        }
+                        return undefined;
+                      };
+
+                      let blocking = 0;
+                      let nonBlocking = 0;
+                      let unstated = 0;
+                      entries.forEach((entry) => {
+                        // requiredChanges and an explicit blockingFindings entry are blocking by
+                        // definition: the reviewer named them as work that must happen.
+                        if (entry.list !== 'findings') { blocking += 1; return; }
+                        const flag = blockingFlag(entry.finding);
+                        if (flag === true) blocking += 1;
+                        else if (flag === false) nonBlocking += 1;
+                        else unstated += 1;
+                      });
+
+                      let outcome = 'not_reviewed';
+                      let publishable = false;
+                      let basis = 'no review verdict was recorded, so nothing was published';
+
+                      if (verdict === 'approved') {
+                        outcome = 'approved';
+                        publishable = true;
+                        basis = 'the reviewer approved the work';
+                      } else if (verdict === 'review_unavailable') {
+                        outcome = 'review_unavailable';
+                        basis = 'the work could not be reviewed: no verdict was captured';
+                      } else if (verdict === 'rejected') {
+                        if (review.findingsResolved === false) {
+                          outcome = 'rejected';
+                          basis = 'the reviewer rejected the work and no actionable finding could be resolved';
+                        } else if (blocking === 0 && unstated === 0 && nonBlocking > 0) {
+                          outcome = 'rejected_non_blocking';
+                          publishable = true;
+                          basis = 'the reviewer rejected the work but every one of its ' + String(nonBlocking) + ' finding(s) is explicitly non-blocking';
+                        } else {
+                          outcome = 'rejected';
+                          basis = 'the reviewer rejected the work with ' + String(blocking) + ' blocking and ' + String(unstated) + ' unstated finding(s)';
+                        }
+                      }
+
+                      const decision = {
+                        verdict: verdict,
+                        outcome: outcome,
+                        publishable: publishable,
+                        blocking: blocking,
+                        nonBlocking: nonBlocking,
+                        unstated: unstated,
+                        basis: basis,
+                        decidedAt: new Date().toISOString(),
+                      };
+                      try { fs.writeFileSync(path.join(dir, 'publish-decision.json'), JSON.stringify(decision, null, 2), 'utf8'); } catch (e) { /* best effort */ }
+
+                      process.stdout.write(publishable ? 'true' : 'false');
+                  env:
+                    WT: ${steps.readWorktreePath.outputs.stdout}
+                  failOnError: false
+                  output:
+                    captureStdout: true
+                    captureStderr: true
+
+              - id: setPublishable
+                name: Record the publish decision
+                type: set_variable
+                dependsOn: readPublishable
+                config:
+                  action: set
+                  key: publishable
+                  source: step_output
+                  sourcePath: readPublishable.outputs.stdout
+
+              # The narrative is derived from publish-decision.json, so the ticket comment can
+              # never claim an approval the reviewer did not give.
+              - id: readAcceptanceNarrative
+                name: Describe the review basis
+                type: cli_command
+                dependsOn: setPublishable
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - |
+                      const fs = require('fs');
+                      const path = require('path');
+                      const wt = String(process.env.WT || '').trim();
+                      let decision = {};
+                      try { decision = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'publish-decision.json'), 'utf8')); } catch (e) { decision = {}; }
+                      const outcome = String(decision.outcome || 'not_reviewed');
+                      const basis = String(decision.basis || 'no publish decision was recorded');
+                      const parts = [];
+                      if (outcome === 'approved') {
+                        parts.push('reviewed and APPROVED by the reviewer');
+                      } else if (outcome === 'rejected_non_blocking') {
+                        parts.push('reviewed by the reviewer, whose verdict was REJECTED but whose findings are ALL non-blocking (' + String(decision.nonBlocking || 0) + ' finding(s), 0 blocking)');
+                        parts.push('It is published for human decision instead of being stranded on the branch.');
+                      } else {
+                        parts.push('published on the basis: ' + basis);
+                      }
+                      process.stdout.write(parts.join(' '));
+                  env:
+                    WT: ${steps.readWorktreePath.outputs.stdout}
+                  failOnError: false
+                  output:
+                    captureStdout: true
+
+              - id: outcome
+                name: Loop outcome
+                type: condition
+                dependsOn: readAcceptanceNarrative
+                config:
+                  condition: variables.publishable === 'true'
                   thenSteps:
                     - id: acceptedLog
                       name: Log accepted
                       type: log
+                      dependsOn: readAcceptanceNarrative
                       config:
                         level: info
-                        message: AI run ACCEPTED for ${steps.loadTicket.result.reference} - branch
+                        message: AI run PUBLISHABLE for ${steps.loadTicket.result.reference} -
+                          ${steps.readAcceptanceNarrative.outputs.stdout}. Branch
                           ${steps.readBranch.outputs.stdout} after
                           ${variables.reviewCycle} review cycle(s).
                     - id: acceptedComment
@@ -3119,17 +3861,80 @@ steps:
                         method: addComment
                         params:
                           ticketId: ${steps.loadTicket.result.id}
-                          comment: AI engineering run reviewed and ACCEPTED after ${variables.reviewCycle}
-                            review cycle(s). Publishing branch
+                          comment: AI engineering run ${steps.readAcceptanceNarrative.outputs.stdout}
+                            after ${variables.reviewCycle} review cycle(s). Publishing branch
                             ${steps.readBranch.outputs.stdout} and opening a pull
                             request for human approval.
+
+                    # Publication on non-blocking grounds must SAY so on the ticket: the
+                    # verdict is still a rejection and a human must not read it as an approval.
+                    - id: nonBlockingPublishGate
+                      name: Was the work published on non-blocking grounds only
+                      type: condition
+                      dependsOn: acceptedComment
+                      config:
+                        condition: variables.reviewVerdict === 'rejected' && variables.publishable === 'true'
+                        thenSteps:
+                          - id: readNonBlockingFindings
+                            name: Read the non-blocking findings
+                            type: cli_command
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - |
+                                  const fs = require('fs');
+                                  const path = require('path');
+                                  const wt = String(process.env.WT || '').trim();
+                                  let review = {};
+                                  try { review = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'review-normalised.json'), 'utf8')); } catch (e) { review = {}; }
+                                  const text = (value) => {
+                                    if (value === null || value === undefined) return '';
+                                    if (typeof value === 'string') return value.trim();
+                                    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+                                    try { return JSON.stringify(value); } catch (e) { return ''; }
+                                  };
+                                  const lines = [];
+                                  (Array.isArray(review.findings) ? review.findings : []).forEach((finding) => {
+                                    const rendered = text(finding);
+                                    if (rendered) lines.push('- ' + rendered);
+                                  });
+                                  process.stdout.write(lines.join(String.fromCharCode(10)));
+                              env:
+                                WT: ${steps.readWorktreePath.outputs.stdout}
+                              failOnError: false
+                              output:
+                                captureStdout: true
+                          - id: nonBlockingPublishComment
+                            name: Comment the non-blocking publication on ticket
+                            type: service_invoke
+                            dependsOn: readNonBlockingFindings
+                            config:
+                              service: core.ReactorySupportWorkflowService@1.0.0
+                              method: addComment
+                              params:
+                                ticketId: ${steps.loadTicket.result.id}
+                                comment: "Published on NON-BLOCKING grounds. The reviewer verdict
+                                  is '${variables.reviewVerdict}', but it recorded ZERO blocking
+                                  findings, so the finished work is published for a human
+                                  decision rather than stranded on a branch. The remaining
+                                  findings are listed here for the human reviewer:
+                                  ${steps.readNonBlockingFindings.outputs.stdout}"
+                          - id: nonBlockingPublishLog
+                            name: Log the non-blocking publication
+                            type: log
+                            dependsOn: nonBlockingPublishComment
+                            config:
+                              level: warn
+                              message: ${steps.loadTicket.result.reference} published after a
+                                REJECTED verdict - the reviewer recorded zero blocking findings.
 
                     # ── Publish the reviewed work ─────────────────────────────────
                     # Guard: a persona workspace path must never enter the PR diff.
                     - id: workspaceDiffGuard
                       name: Keep workspace notes out of the diff
                       type: cli_command
-                      dependsOn: acceptedComment
+                      dependsOn: nonBlockingPublishGate
                       config:
                         command: node
                         args:
@@ -3729,6 +4534,16 @@ steps:
 
                             body = body.replace(/\s+$/, '') + '\n\n---\nGenerated by core.ProcessAITicket@1.4.6\n';
 
+                            // A publication on non-blocking-only findings must SAY so: a human
+                            // reading this pull request must not mistake it for an approval.
+                            try {
+                              const decision = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'publish-decision.json'), 'utf8'));
+                              if (String(decision.outcome || '') === 'rejected_non_blocking') {
+                                const note = '> **Review status:** the reviewer REJECTED this change, but every finding it recorded is explicitly non-blocking (0 blocking findings). It is published for a human decision instead of being stranded on the branch. The finding-list is in .ai-agent/review-normalised.json in the run artefacts.';
+                                body = String(body).replace(/ +$/, '') + String.fromCharCode(10, 10) + note + String.fromCharCode(10);
+                              }
+                            } catch (e) { /* no publish decision recorded: leave the body as-is */ }
+
                             const bodyFile = path.join(wt, '.ai-agent', 'pr-body.md');
                             fs.writeFileSync(bodyFile, body, 'utf8');
 
@@ -3879,11 +4694,41 @@ steps:
                                   task has been raised - the ticket moves to resolved
                                   only once the pull request is merged.
 
+                          # The recorded pull request state must be the real one, not the seeded
+                          # 'unknown': a run that opened a PR was indistinguishable from one that
+                          # never reached publish.
+                          - id: readCreatedPrState
+                            name: Read the opened pull request state
+                            type: cli_command
+                            dependsOn: prPublishedComment
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - |
+                                  const d = (() => { try { return JSON.parse(process.env.PR || '{}'); } catch (e) { return {}; } })();
+                                  const state = String(d.state || '').trim().toUpperCase();
+                                  process.stdout.write(state || 'OPEN');
+                              env:
+                                PR: ${steps.createPullRequest.outputs.stdout}
+                              failOnError: false
+                              output:
+                                captureStdout: true
+                          - id: setPrStateOpened
+                            name: Record the opened pull request state
+                            type: set_variable
+                            dependsOn: readCreatedPrState
+                            config:
+                              action: set
+                              key: prState
+                              source: step_output
+                              sourcePath: readCreatedPrState.outputs.stdout
+
                           # ── Human approval of the pull request ──────────────
                           - id: closeWorkspaceNote
                             name: Move workspace note to complete
                             type: cli_command
-                            dependsOn: prPublishedComment
+                            dependsOn: setPrStateOpened
                             config:
                               command: node
                               args:
@@ -4231,9 +5076,28 @@ steps:
                                             - the pull request was not approved. Ticket left in_progress.
 
                         elseSteps:
+                          # A publish that failed must still end with a terminal run status and
+                          # an honest pull request state: it used to leave runStatus=pending and
+                          # prState=unknown, which reads exactly like a run still in flight.
+                          - id: setRunStatusPublishFailed
+                            name: Record failed run status
+                            type: set_variable
+                            config:
+                              action: set
+                              key: runStatus
+                              value: failed
+                          - id: setPrStatePublishFailed
+                            name: Record that no pull request was opened
+                            type: set_variable
+                            dependsOn: setRunStatusPublishFailed
+                            config:
+                              action: set
+                              key: prState
+                              value: NOT_OPENED
                           - id: publishFailedComment
                             name: Comment publish failure
                             type: service_invoke
+                            dependsOn: setPrStatePublishFailed
                             config:
                               service: core.ReactorySupportWorkflowService@1.0.0
                               method: addComment
@@ -4272,9 +5136,50 @@ steps:
                                 ${steps.loadTicket.result.reference} - pull request not
                                 created.
                   elseSteps:
+                    # The ticket must be told WHICH of the two things happened. A run the
+                    # reviewer rejected and a run that could not be reviewed at all used to
+                    # read identically ("did NOT reach an accepted state").
+                    - id: readReviewOutcomeNarrative
+                      name: Describe why the run did not publish
+                      type: cli_command
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const fs = require('fs');
+                            const path = require('path');
+                            const wt = String(process.env.WT || '').trim();
+                            const dir = path.join(wt, '.ai-agent');
+                            const readJson = (name) => {
+                              try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch (e) { return null; }
+                            };
+                            const decision = readJson('publish-decision.json') || {};
+                            const review = readJson('review-normalised.json') || {};
+                            const verdict = String(decision.verdict || review.verdict || 'not_reviewed');
+                            const outcome = String(decision.outcome || 'not_reviewed');
+                            const halted = String(process.env.HALT || '') === 'true';
+
+                            if (outcome === 'review_unavailable' || verdict === 'review_unavailable') {
+                              process.stdout.write('COULD NOT BE REVIEWED - no review verdict could be captured, so the work was never judged. That is an operational fault in the AI pipeline, not a rejection of the work, and no review cycle was consumed.');
+                            } else if (halted) {
+                              process.stdout.write('was HALTED for a human: the reviewer rejected the work but no actionable finding could be resolved from review.json.');
+                            } else {
+                              const blocking = String(decision.blocking === undefined ? 'an unrecorded number of' : decision.blocking);
+                              process.stdout.write('was NOT accepted: the reviewer REJECTED the work after ' + String(process.env.CYCLES || '0') + ' review cycle(s), with ' + blocking + ' blocking finding(s).');
+                            }
+                        env:
+                          WT: ${steps.readWorktreePath.outputs.stdout}
+                          HALT: ${variables.runHalt}
+                          CYCLES: ${variables.reviewCycle}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+                          captureStderr: true
                     - id: retainWorkspaceNoteExhausted
                       name: Keep workspace note in progress
                       type: cli_command
+                      dependsOn: readReviewOutcomeNarrative
                       config:
                         command: node
                         args:
@@ -4283,7 +5188,7 @@ steps:
                         env:
                           MODE: retain
                           NOTE_STATUS: blocked
-                          REASON: The review cycle bound was reached without approval, so no pull request was opened.
+                          REASON: The run did not publish. See the ticket comment for whether the reviewer rejected the work or the work could not be reviewed at all.
                           WT: ${steps.readWorktreePath.outputs.stdout}
                           REF: ${steps.loadTicket.result.reference}
                           TICKET_ID: ${steps.loadTicket.result.id}
@@ -4302,23 +5207,28 @@ steps:
                       config:
                         condition: variables.runHalt === 'true'
                         thenSteps:
+                          # RC-5. This used to hard-code "the reviewer rejected without readable
+                          # findings", but runHalt is ALSO set by the review_unavailable branch,
+                          # where no verdict exists at all - which re-created exactly the
+                          # rejection/could-not-review ambiguity this ticket removes. The
+                          # narrative already distinguishes the two, so use it.
                           - id: haltedLog
                             name: Log halted run
                             type: log
                             config:
                               level: warn
-                              message: Run HALTED for ${steps.loadTicket.result.reference} - the reviewer
-                                rejected without readable findings. A human task and a ticket
-                                comment carry the details; no pull request was opened.
+                              message: ${steps.readReviewOutcomeNarrative.outputs.stdout} The run is
+                                halted for a human; a ticket comment carries the details and no
+                                pull request was opened.
                         elseSteps:
                           - id: exhaustedLog
                             name: Log review exhausted
                             type: log
                             config:
                               level: warn
-                              message: "AI run NOT accepted for ${steps.loadTicket.result.reference} after
-                                ${variables.reviewCycle} review cycle(s) (verdict:
-                                ${variables.reviewVerdict})."
+                              message: "AI run ${steps.readReviewOutcomeNarrative.outputs.stdout}
+                                (verdict: ${variables.reviewVerdict}, cycles:
+                                ${variables.reviewCycle})."
                           - id: exhaustedComment
                             name: Comment exhaustion on ticket
                             type: service_invoke
@@ -4328,13 +5238,14 @@ steps:
                               method: addComment
                               params:
                                 ticketId: ${steps.loadTicket.result.id}
-                                comment: "AI engineering run did NOT reach an accepted state after
-                                  ${variables.reviewCycle} review cycle(s) (last
-                                  verdict: ${variables.reviewVerdict}). Work in
-                                  progress remains on branch
-                                  ${steps.readBranch.outputs.stdout}. Human review
-                                  required - the SLA escalation workflow will also
-                                  pick this up."
+                                comment: "AI engineering run
+                                  ${steps.readReviewOutcomeNarrative.outputs.stdout} after
+                                  ${variables.reviewCycle} review cycle(s) (last verdict:
+                                  ${variables.reviewVerdict}). Work in progress remains on
+                                  branch ${steps.readBranch.outputs.stdout}. Human review
+                                  required - the SLA escalation workflow will also pick this
+                                  up. This comment distinguishes a reviewer rejection from a
+                                  run that could not be reviewed."
                           - id: exhaustedNotify
                             name: Notify exhaustion
                             type: service_invoke
@@ -4346,7 +5257,74 @@ steps:
                                 event: ticket.comment.added
                                 ticketId: ${steps.loadTicket.result.id}
                                 extra:
-                                  reason: AI engineering run exhausted its review cycles without approval.
+                                  reason: AI engineering run ended without publishing (verdict
+                                    ${variables.reviewVerdict}).
+
+                    # Terminal state on the exhaustion and halt paths too. These used to be
+                    # left at runStatus=pending / prState=unknown / prApproved=false, so a
+                    # finished run reported itself as still in flight.
+                    - id: setPrStateNotOpenedExhausted
+                      name: Record that no pull request was opened
+                      type: set_variable
+                      dependsOn: haltedGate
+                      config:
+                        action: set
+                        key: prState
+                        value: NOT_OPENED
+                    - id: setPrApprovedFalseExhausted
+                      name: Record that no pull request was approved
+                      type: set_variable
+                      dependsOn: setPrStateNotOpenedExhausted
+                      config:
+                        action: set
+                        key: prApproved
+                        value: "false"
+                    - id: setRunStatusExhausted
+                      name: Record the terminal run status
+                      type: set_variable
+                      dependsOn: setPrApprovedFalseExhausted
+                      config:
+                        action: set
+                        key: runStatus
+                        value: blocked
+
+                    # A capture failure that happened in the CONFIRMATION pass never reaches
+                    # the in-loop halt branch, so raise the human task here as well. A run
+                    # that could not be reviewed is an operational fault, not a quiet
+                    # rejection, and must not disappear into an SLA queue.
+                    - id: reviewUnavailableOutcomeGate
+                      name: Did the run fail to review at all
+                      type: condition
+                      dependsOn: setRunStatusExhausted
+                      config:
+                        condition: variables.reviewVerdict === 'review_unavailable'
+                        thenSteps:
+                          - id: reviewUnavailableOutcomeLog
+                            name: Log the un-reviewable run
+                            type: log
+                            config:
+                              level: error
+                              message: REVIEW UNAVAILABLE for ${steps.loadTicket.result.reference} -
+                                the pipeline could not obtain a verdict. No review cycle was
+                                consumed and the work was never judged. This is an operational
+                                fault in the pipeline.
+                          - id: reviewUnavailableOutcomeTask
+                            name: Human follow-up for the un-reviewable run
+                            type: user_activity
+                            dependsOn: reviewUnavailableOutcomeLog
+                            config:
+                              activityType: approval
+                              assignee: ${steps.loadTicket.result.assignedToEmail}
+                              message: ${steps.loadTicket.result.reference} could not be reviewed -
+                                the pipeline produced no review verdict
+                              props:
+                                ticketReference: ${steps.loadTicket.result.reference}
+                                ticketId: ${steps.loadTicket.result.id}
+                                branch: ${steps.readBranch.outputs.stdout}
+                                worktree: ${steps.readWorktreePath.outputs.stdout}
+                                reason: review_unavailable
+                                normalisedPath: ${steps.readWorktreePath.outputs.stdout}/.ai-agent/review-normalised.json
+
             elseSteps:
               - id: notCompletedEvidence
                 name: Gather evidence for the non-completion
@@ -4456,12 +5434,32 @@ steps:
                   key: runStatus
                   value: blocked
 
+              # No pull request exists on this path either, so say so rather than leaving
+              # prState=unknown behind.
+              - id: setPrStateNotOpenedBlocked
+                name: Record that no pull request was opened
+                type: set_variable
+                dependsOn: setRunStatusBlocked
+                config:
+                  action: set
+                  key: prState
+                  value: NOT_OPENED
+
+              - id: setPrApprovedFalseBlocked
+                name: Record that no pull request was approved
+                type: set_variable
+                dependsOn: setPrStateNotOpenedBlocked
+                config:
+                  action: set
+                  key: prApproved
+                  value: "false"
+
               # Fail loudly: if the branch carries commits but no PR was opened, a human
               # must see it. The old path completed the instance quietly with verdict=pending.
               - id: strandedCommitGate
                 name: Are commits stranded without a pull request
                 type: condition
-                dependsOn: setRunStatusBlocked
+                dependsOn: setPrApprovedFalseBlocked
                 config:
                   condition: "steps.notCompletedEvidence.stdout.indexOf('NOT published as a pull request') !== -1"
                   thenSteps:
@@ -4528,3 +5526,19 @@ steps:
             level: warn
             message: No support ticket found for ${steps.guardInputs.outputs.stdout} -
               nothing to do.
+        - id: setRunStatusNoTicket
+          name: Record terminal run status (no ticket)
+          type: set_variable
+          dependsOn: logTicketNotFound
+          config:
+            action: set
+            key: runStatus
+            value: blocked
+        - id: setPrStateNoTicket
+          name: Record that no pull request was opened (no ticket)
+          type: set_variable
+          dependsOn: setRunStatusNoTicket
+          config:
+            action: set
+            key: prState
+            value: NOT_OPENED

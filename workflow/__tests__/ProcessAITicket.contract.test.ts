@@ -658,3 +658,171 @@ describe('core.ProcessAITicket baseline validation contracts (WORKFLOW-003)', ()
     expect(byId('submoduleGuardComment').config.method).toBe('addComment');
   });
 });
+
+/**
+ * REACTORY-302016408 - the loop's exit condition.
+ *
+ * The workflow is YAML, so a plausible-looking edit (a gate that still tests only
+ * `approved`, a halt that forgets to break the loop) would only show up as a
+ * stranded branch hours later. These assertions pin the wiring of the fix.
+ */
+describe('core.ProcessAITicket exit condition contracts (REACTORY-302016408)', () => {
+  it('runs a one-shot confirmation review after the loop rather than restructuring it', () => {
+    expect(byId('confirmationReviewGate').type).toBe('condition');
+    expect(byId('confirmationReviewGate').config.condition).toContain("variables.reviewVerdict === 'rejected'");
+    expect(byId('confirmationReviewGate').config.condition).toContain("variables.confirmationReview !== 'true'");
+    expect(byId('confirmationReviewGate').config.condition).toContain("variables.runHalt !== 'true'");
+
+    expect(indexOf('reviewLoop')).toBeLessThan(indexOf('confirmationReviewGate'));
+    expect(indexOf('confirmationReviewGate')).toBeLessThan(indexOf('outcome'));
+
+    // A confirmation review is one reviewer turn, not a second loop.
+    expect(byId('confirmationReview').type).toBe('agent_conversation');
+    expect(byId('confirmationReview').config.personaId).toBe('${input.reviewerId}');
+    expect(byId('setConfirmationRan').config.value).toBe('true');
+    expect(JSON.stringify(def)).not.toContain('confirmationCycle');
+
+    // It normalises a verdict exactly the way the loop does.
+    expect(String(byId('captureConfirmationReview').config.args[1])).toBe(String(byId('captureReview').config.args[1]));
+    expect(String(byId('readConfirmationVerdict').config.args[1])).toBe(String(byId('readVerdict').config.args[1]));
+
+    // "Did the engineer revise after the last review" is decided from the artefact mtimes.
+    const assess = String(byId('assessConfirmationNeed').config.args[1]);
+    expect(assess).toContain('report.json');
+    expect(assess).toContain('review.json');
+    expect(assess).toContain('mtimeMs');
+  });
+
+  it('gates publication on the publish decision, not on an approved verdict alone', () => {
+    expect(byId('outcome').config.condition).toBe("variables.publishable === 'true'");
+    expect(String(byId('outcome').config.condition)).not.toContain("reviewVerdict === 'approved'");
+
+    const script = String(byId('readPublishable').config.args[1]);
+    expect(script).toContain('blockingFlag');
+    expect(script).toContain('rejected_non_blocking');
+    expect(script).toContain('publish-decision.json');
+    // Fail closed: unstated blocking flags are counted, never read as non-blocking.
+    expect(script).toContain('blocking === 0 && unstated === 0 && nonBlocking > 0');
+  });
+
+  it('reports a capture failure as review_unavailable and never as rejected', () => {
+    const script = String(byId('captureReview').config.args[1]);
+    expect(script).toContain("fail('review_unavailable', 'review.json not found')");
+    expect(script).not.toContain("fail('rejected', 'review.json not found')");
+    expect(script).toContain('reviewAvailable: false');
+
+    expect(byId('reviewUnavailableGate').type).toBe('condition');
+    expect(byId('reviewUnavailableGate').config.condition).toBe("variables.reviewVerdict === 'review_unavailable'");
+    expect(byId('reviewUnavailableComment').config.method).toBe('addComment');
+    expect(byId('reviewUnavailableTask').type).toBe('user_activity');
+    expect(byId('setRunHaltUnavailable').config.value).toBe('true');
+
+    // It must not consume a review cycle.
+    const bump = String(byId('bumpCycle').config.args[1]);
+    expect(bump).toContain("=== 'review_unavailable'");
+    expect(bump).toContain('unavailable ? cycle : cycle + 1');
+  });
+
+  it('sets a terminal runStatus and an honest prState on every path that runs its steps', () => {
+    const value = (id: string): string => String(byId(id).config.value);
+    const trailOf = (id: string): string[] => (all.find((n) => n.step.id === id) || { trail: [] as string[] }).trail;
+
+    // Each EXIT PATH is enumerated: the setter's value, and the branch it lives under,
+    // so a setter that drifts into the wrong branch fails here. (The earlier version of
+    // this test proved only two ordering relationships, which was not the claim.)
+    const EXITS: Array<{ id: string; value: string; trail: string[] }> = [
+      { id: 'setRunStatusCompleted', value: 'completed', trail: ['reportBranch', 'outcome', 'prPublishedGate'] },
+      { id: 'setRunStatusPublishFailed', value: 'failed', trail: ['reportBranch', 'outcome', 'prPublishedGate'] },
+      { id: 'setRunStatusExhausted', value: 'blocked', trail: ['reportBranch', 'outcome'] },
+      { id: 'setRunStatusUnavailable', value: 'blocked', trail: ['reportBranch', 'reviewLoop'] },
+      { id: 'setRunStatusBlocked', value: 'blocked', trail: ['reportBranch'] },
+      { id: 'setRunStatusNoTicket', value: 'blocked', trail: ['ticketGuard'] },
+    ];
+
+    EXITS.forEach((exit) => {
+      expect(value(exit.id)).toBe(exit.value);
+      const trail = trailOf(exit.id);
+      exit.trail.forEach((parent) => expect(trail).toContain(parent));
+    });
+
+    const PR_STATE_EXITS: Array<{ id: string; trail: string[] }> = [
+      { id: 'setPrStateNotOpenedExhausted', trail: ['reportBranch', 'outcome'] },
+      { id: 'setPrStateNotOpenedBlocked', trail: ['reportBranch'] },
+      { id: 'setPrStatePublishFailed', trail: ['reportBranch', 'outcome', 'prPublishedGate'] },
+      { id: 'setPrStateNoTicket', trail: ['ticketGuard'] },
+    ];
+
+    PR_STATE_EXITS.forEach((exit) => {
+      expect(value(exit.id)).toBe('NOT_OPENED');
+      const trail = trailOf(exit.id);
+      exit.trail.forEach((parent) => expect(trail).toContain(parent));
+    });
+
+    // A run that opened a pull request records the state the create call returned.
+    expect(byId('setPrStateOpened').config.sourcePath).toBe('readCreatedPrState.outputs.stdout');
+
+    // DOCUMENTED BOUNDARY: guardInputs, prepareWorktree and submoduleBaselineHalt are
+    // failOnError steps that TERMINATE the instance from inside their own step. No later
+    // step can run, so no variable can be set on those paths - the instance ends failed,
+    // not pending. Asserted so the boundary is deliberate rather than an omission.
+    ['guardInputs', 'prepareWorktree', 'submoduleBaselineHalt'].forEach((id) => {
+      expect(byId(id).config.failOnError).toBe(true);
+    });
+  });
+
+  it('reports a branch that was published before the review instead of adopting it', () => {
+    // RC-2: an engineer that pushes early defeats the publish gate this ticket is about.
+    expect(byId('detectPrematurePublish').type).toBe('cli_command');
+    const script = String(byId('detectPrematurePublish').config.args[1]);
+    expect(script).toContain('git ls-remote --heads origin');
+    expect(script).toContain('gh pr list --head');
+
+    expect(byId('prematurePublishGate').type).toBe('condition');
+    expect(byId('prematurePublishGate').config.condition).toBe("steps.readPrematurePublish.stdout === 'yes'");
+    expect(byId('prematurePublishComment').config.method).toBe('addComment');
+    expect(String(byId('prematurePublishComment').config.params.comment)).toContain('PROCESS VIOLATION');
+
+    // The check runs BEFORE the review, so the reviewer is told, not protected from it.
+    expect(indexOf('detectPrematurePublish')).toBeLessThan(indexOf('reviewLoop'));
+    expect(byId('reviewLoop').dependsOn).toBe('prematurePublishGate');
+    expect(String(byId('review').config.message)).toContain('steps.readPrematurePublishSummary');
+  });
+
+  it('gives the reviewer the committed diff against the base, not a diff against HEAD', () => {
+    // RC-3: `git diff --stat HEAD` reports nothing for a committed run, so the reviewer
+    // was handed "no changes detected" as its change evidence.
+    const script = String(byId('diffstat').config.args[1]);
+    // The COMMAND must be the base form; the old HEAD-only invocation may survive only
+    // as the explanatory comment above it.
+    expect(script).not.toContain("git('git diff --stat HEAD')");
+    expect(script).toContain("git('git diff --stat ' + base + '...HEAD')");
+    expect(script).toContain('git status --porcelain');
+    expect(script).toContain('resolveBase');
+  });
+
+  it('hardens revision detection beyond the report mtime alone', () => {
+    // RC-4: a code change with no report rewrite must still trigger the confirmation pass.
+    const script = String(byId('assessConfirmationNeed').config.args[1]);
+    expect(script).toContain('touchedAtOrAfterReview');
+    expect(script).toContain('git status --porcelain');
+    expect(script).toContain('git log -1 --format=%ct');
+  });
+
+  it('warns the human when work is published on non-blocking grounds', () => {
+    expect(byId('nonBlockingPublishGate').config.condition).toContain("variables.reviewVerdict === 'rejected'");
+    expect(byId('nonBlockingPublishComment').config.method).toBe('addComment');
+
+    const pr = String(byId('createPullRequest').config.args[1]);
+    expect(pr).toContain('rejected_non_blocking');
+    expect(pr).toContain('Review status');
+  });
+
+  it('distinguishes a rejection from a run that could not be reviewed on the ticket', () => {
+    const narrative = String(byId('readReviewOutcomeNarrative').config.args[1]);
+    expect(narrative).toContain('COULD NOT BE REVIEWED');
+    expect(narrative).toContain('REJECTED');
+
+    expect(String(byId('exhaustedComment').config.params.comment)).toContain('steps.readReviewOutcomeNarrative');
+    expect(String(byId('exhaustedLog').config.message)).toContain('steps.readReviewOutcomeNarrative');
+  });
+});

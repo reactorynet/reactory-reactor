@@ -1434,3 +1434,362 @@ describe('ProcessAITicket refuses a contaminated baseline (WORKFLOW-003)', () =>
     }
   });
 });
+
+/**
+ * REACTORY-302016408 - the exit condition of the review loop.
+ *
+ * The defect had two halves and both are executed here against real fixture
+ * worktrees, because neither is a shape problem:
+ *
+ *  1. The loop stops at the cycle bound. On the last permitted cycle the engineer
+ *     revises, but no further review runs, so `variables.reviewVerdict` still holds
+ *     the rejection from BEFORE the fix and the publish gate never opens. Three
+ *     consecutive runs (W6, T3, W8) finished "green" with the work stranded on a
+ *     local branch and no pull request.
+ *  2. A run whose review artefacts were missing reported `rejected`, which is a
+ *     quality judgement it never made.
+ */
+describe('ProcessAITicket exit condition after the last permitted review (REACTORY-302016408)', () => {
+  const assess = scriptOf('assessConfirmationNeed');
+  const capture = scriptOf('captureReview');
+  const readVerdict = scriptOf('readVerdict');
+  const publishable = scriptOf('readPublishable');
+  const bumpCycle = scriptOf('bumpCycle');
+
+  /** Age a run artefact so the mtime comparison is deterministic, not timing luck. */
+  const age = (dir: string, file: string, secondsAgo: number): void => {
+    const target = path.join(dir, '.ai-agent', file);
+    const stamp = new Date(Date.now() - secondsAgo * 1000);
+    fs.utimesSync(target, stamp, stamp);
+  };
+
+  const writeRunStatus = (dir: string, status: string): void => {
+    fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.ai-agent', 'run-status.json'), JSON.stringify({ status }), 'utf8');
+  };
+
+  const decisionOf = (dir: string): any =>
+    JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'publish-decision.json'), 'utf8'));
+
+  const rejectedWithBlockingFinding = {
+    verdict: 'rejected',
+    summary: 'One blocking problem',
+    requiredChanges: ['Guard the null case'],
+    findings: [{ id: 'F1', severity: 'high', title: 'null deref', blocking: true }],
+  };
+
+  it('re-reviews after a revision that landed on the last permitted cycle', () => {
+    const dir = repoWithWork();
+    try {
+      // Cycle N: the engineer's work is reviewed and rejected.
+      writeReport(dir, { status: 'completed', summary: 'first attempt', changes: [{ file: 'a.ts', description: 'd' }] });
+      writeReview(dir, rejectedWithBlockingFinding);
+      age(dir, 'report.json', 60);
+
+      expect(runJson(capture, { WT: dir }, dir).verdict).toBe('rejected');
+      expect(runScript(readVerdict, { WT: dir }, dir)).toBe('rejected');
+      // Nothing to confirm yet: the engineer has not revised since that review.
+      expect(runScript(assess, { WT: dir }, dir)).toBe('skip');
+      // This is the old dead end: a rejection cannot publish.
+      expect(runScript(publishable, { WT: dir }, dir)).toBe('false');
+
+      // Cycle N (final): the engineer revises AFTER the review, and the bound is spent,
+      // so the loop cannot review again. This is the exact state W6/T3/W8 ended in.
+      writeReport(dir, { status: 'completed', summary: 'fixed the blocking finding', changes: [{ file: 'a.ts', description: 'd' }] });
+      expect(runScript(assess, { WT: dir }, dir)).toBe('run');
+
+      // The confirmation review now runs and its verdict is authoritative.
+      writeReview(dir, { verdict: 'approved', summary: 'the fix addresses F1', findings: [] });
+      expect(runJson(capture, { WT: dir }, dir).verdict).toBe('approved');
+      expect(runScript(readVerdict, { WT: dir }, dir)).toBe('approved');
+
+      // The work is publishable, which is what the old workflow refused to do.
+      expect(runScript(publishable, { WT: dir }, dir)).toBe('true');
+      expect(decisionOf(dir).outcome).toBe('approved');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('publishes a rejection whose only findings are explicitly non-blocking (W8)', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, { status: 'completed', summary: 'work', changes: [{ file: 'a.ts', description: 'd' }] });
+      // W8 verbatim: RC-6, severity low, blocking false, and the engineer fixed it
+      // six minutes after the review. Nothing here should strand the work.
+      writeReview(dir, {
+        verdict: 'rejected',
+        summary: 'One low-severity nit',
+        findings: [{ id: 'RC-6', severity: 'low', title: 'webhook error-code string mismatch', blocking: false }],
+      });
+
+      expect(runJson(capture, { WT: dir }, dir).verdict).toBe('rejected');
+      expect(runScript(readVerdict, { WT: dir }, dir)).toBe('rejected');
+      expect(runScript(publishable, { WT: dir }, dir)).toBe('true');
+
+      const decision = decisionOf(dir);
+      expect(decision.outcome).toBe('rejected_non_blocking');
+      expect(decision.blocking).toBe(0);
+      expect(decision.nonBlocking).toBe(1);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('fails closed when the blocking flag is absent, unparseable or contradicted', () => {
+    const CASES: Array<{ review: any; why: string }> = [
+      { review: { verdict: 'rejected', findings: [{ id: 'F1', severity: 'low', title: 'no flag at all' }] }, why: 'an absent blocking flag is not proof of non-blocking' },
+      { review: { verdict: 'rejected', findings: [{ id: 'F1', title: 'garbled flag', blocking: 'maybe' }] }, why: 'an unparseable blocking flag is not proof of non-blocking' },
+      { review: { verdict: 'rejected', findings: [{ id: 'F1', title: 'plain string' }] }, why: 'a string finding carries no flag' },
+      { review: { verdict: 'rejected', findings: [{ id: 'F1', title: 'real blocker', blocking: true }] }, why: 'a blocking finding blocks' },
+      { review: { verdict: 'rejected', requiredChanges: ['do the work'], findings: [{ id: 'F1', title: 'nit', blocking: false }] }, why: 'requiredChanges are blocking by definition' },
+      { review: { verdict: 'rejected', blockingFindings: ['role gating missing'], findings: [{ id: 'F1', title: 'nit', blocking: false }] }, why: 'an explicit blockingFindings entry blocks' },
+      { review: { verdict: 'rejected', summary: 'nothing actionable', findings: [] }, why: 'a rejection with no findings cannot be published' },
+    ];
+
+    CASES.forEach((testCase) => {
+      const dir = repoWithWork();
+      try {
+        writeReport(dir, { status: 'completed', summary: 'work', changes: [{ file: 'a.ts', description: 'd' }] });
+        writeReview(dir, testCase.review);
+        runJson(capture, { WT: dir }, dir);
+        expect(runScript(publishable, { WT: dir }, dir)).toBe('false');
+        expect(decisionOf(dir).publishable).toBe(false);
+      } finally {
+        removeDir(dir);
+      }
+    });
+  });
+
+  it('never runs a confirmation review when the engineer has not revised since the last review', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, { status: 'completed', summary: 'work', changes: [{ file: 'a.ts', description: 'd' }] });
+      writeReview(dir, rejectedWithBlockingFinding);
+      // Report is OLDER than the review: the review is the last thing that happened.
+      age(dir, 'report.json', 120);
+      expect(runScript(assess, { WT: dir }, dir)).toBe('skip');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('never runs a confirmation review when the last revision did not complete', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, { status: 'completed', summary: 'work', changes: [{ file: 'a.ts', description: 'd' }] });
+      writeReview(dir, rejectedWithBlockingFinding);
+      age(dir, 'report.json', 120);
+      // The revision attempt failed: publishing it would publish a broken report.
+      writeReport(dir, { status: 'blocked', summary: 'could not finish' });
+      writeRunStatus(dir, 'blocked');
+      expect(runScript(assess, { WT: dir }, dir)).toBe('skip');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('reports missing review artefacts as review_unavailable, not as a rejection', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, { status: 'completed', summary: 'work', changes: [{ file: 'a.ts', description: 'd' }] });
+      // T3 verbatim: report.json exists, no review.json and no review-normalised.json.
+      const captured = runJson(capture, { WT: dir }, dir);
+
+      expect(captured.verdict).toBe('review_unavailable');
+      expect(captured.reviewAvailable).toBe(false);
+      expect(captured.verdictSource).toBe('capture_failed');
+
+      // The distinct outcome survives the verdict reader.
+      expect(runScript(readVerdict, { WT: dir }, dir)).toBe('review_unavailable');
+
+      // It must not be published, and the recorded outcome must say why.
+      expect(runScript(publishable, { WT: dir }, dir)).toBe('false');
+      expect(decisionOf(dir).outcome).toBe('review_unavailable');
+
+      // It must not be confirmed either: there is nothing to confirm.
+      expect(runScript(assess, { WT: dir }, dir)).toBe('skip');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('does not consume a review cycle when the work could not be reviewed', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, { status: 'completed', summary: 'work', changes: [{ file: 'a.ts', description: 'd' }] });
+      runJson(capture, { WT: dir }, dir);
+
+      // A capture failure is a pipeline fault, not a review: the budget is untouched.
+      expect(runScript(bumpCycle, { CYCLE: '2', VERDICT: 'review_unavailable' }, dir)).toBe('2');
+      // A real verdict still consumes one.
+      expect(runScript(bumpCycle, { CYCLE: '2', VERDICT: 'rejected' }, dir)).toBe('3');
+      expect(runScript(bumpCycle, { CYCLE: '2', VERDICT: 'approved' }, dir)).toBe('3');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('treats an unparseable review.json as review_unavailable rather than rejected', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, { status: 'completed', summary: 'work', changes: [{ file: 'a.ts', description: 'd' }] });
+      fs.writeFileSync(path.join(dir, '.ai-agent', 'review.json'), '{ this is not json', 'utf8');
+      expect(runJson(capture, { WT: dir }, dir).verdict).toBe('review_unavailable');
+      expect(runScript(readVerdict, { WT: dir }, dir)).toBe('review_unavailable');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('tells the ticket WHY a run did not publish, distinguishing rejection from no review', () => {
+    const narrative = scriptOf('readReviewOutcomeNarrative');
+
+    const rejectedDir = repoWithWork();
+    try {
+      writeReport(rejectedDir, { status: 'completed', summary: 'work', changes: [{ file: 'a.ts', description: 'd' }] });
+      writeReview(rejectedDir, rejectedWithBlockingFinding);
+      runJson(capture, { WT: rejectedDir }, rejectedDir);
+      runScript(publishable, { WT: rejectedDir }, rejectedDir);
+      const text = runScript(narrative, { WT: rejectedDir, HALT: 'false', CYCLES: '3' }, rejectedDir);
+      expect(text).toContain('REJECTED');
+      expect(text).toContain('3 review cycle(s)');
+      expect(text).not.toContain('COULD NOT BE REVIEWED');
+    } finally {
+      removeDir(rejectedDir);
+    }
+
+    const unavailableDir = repoWithWork();
+    try {
+      writeReport(unavailableDir, { status: 'completed', summary: 'work', changes: [{ file: 'a.ts', description: 'd' }] });
+      runJson(capture, { WT: unavailableDir }, unavailableDir);
+      runScript(publishable, { WT: unavailableDir }, unavailableDir);
+      const text = runScript(narrative, { WT: unavailableDir, HALT: 'true', CYCLES: '1' }, unavailableDir);
+      expect(text).toContain('COULD NOT BE REVIEWED');
+      expect(text).toContain('operational fault');
+      expect(text).not.toContain('REJECTED the work');
+    } finally {
+      removeDir(unavailableDir);
+    }
+  });
+});
+/**
+ * REACTORY-302016408 review findings RC-2 / RC-3 / RC-4.
+ *
+ * These execute the scripts, because all three are runtime behaviours:
+ *  - an engineer that pushes before the review must be REPORTED, not adopted;
+ *  - the reviewer must see committed work (the evidence used to diff against HEAD);
+ *  - a code change without a rewritten report must still trigger the confirmation pass.
+ */
+describe('ProcessAITicket review-time guards (RC-2, RC-3, RC-4)', () => {
+  /** Age a run artefact so the mtime comparison is deterministic, not timing luck. */
+  const age = (dir: string, file: string, secondsAgo: number): void => {
+    const target = path.join(dir, '.ai-agent', file);
+    const stamp = new Date(Date.now() - secondsAgo * 1000);
+    fs.utimesSync(target, stamp, stamp);
+  };
+
+  /** A repo with a bare `origin` and master pushed, so remote refs are real. */
+  const repoWithRemote = (): { dir: string; origin: string } => {
+    const origin = tempDir('pa-origin-');
+    sh('git init -q --bare -b master .', origin);
+    const dir = tempDir('pa-work-');
+    initRepo(dir);
+    sh('git remote add origin "' + origin + '"', dir);
+    sh('git push -q -u origin master', dir);
+    sh('git checkout -q -b feature/test', dir);
+    fs.mkdirSync(path.join(dir, 'src', 'modules', 'fixture'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'src', 'modules', 'fixture', 'index.ts'), 'export const value = 2;\n', 'utf8');
+    fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+    sh('git add -A && git commit -qm "AI engineering run: REF-1"', dir);
+    return { dir: dir, origin: origin };
+  };
+
+  it('detects a branch that already exists on origin and names the open pull request', () => {
+    const detect = scriptOf('detectPrematurePublish');
+    const summary = scriptOf('readPrematurePublishSummary');
+    const verdict = scriptOf('readPrematurePublish');
+
+    const clean = repoWithRemote();
+    try {
+      // Not pushed yet: the normal state at review time.
+      const before = runJson(detect, { WT: clean.dir, BRANCH: 'feature/test' }, clean.dir);
+      expect(before.remoteBranchExists).toBe(false);
+      expect(before.checked).toBe(true);
+      expect(runScript(verdict, { PRE: JSON.stringify(before) }, clean.dir)).toBe('no');
+      expect(runScript(summary, { PRE: JSON.stringify(before) }, clean.dir)).toContain('publication has not happened yet');
+
+      // The engineer pushes its own branch before review - this is RC-2.
+      sh('git push -q -u origin feature/test', clean.dir);
+      const after = runJson(detect, { WT: clean.dir, BRANCH: 'feature/test' }, clean.dir);
+      expect(after.remoteBranchExists).toBe(true);
+      expect(after.remoteSha).toMatch(/^[0-9a-f]{40}$/);
+      expect(runScript(verdict, { PRE: JSON.stringify(after) }, clean.dir)).toBe('yes');
+
+      const text = runScript(summary, { PRE: JSON.stringify(after) }, clean.dir);
+      expect(text).toContain('ALREADY EXISTS on origin');
+      expect(text).toContain('BEFORE the review ran');
+      expect(text).toContain('UNREVIEWED');
+    } finally {
+      removeDir(clean.dir);
+      removeDir(clean.origin);
+    }
+  });
+
+  it('reports an unknown branch as unchecked rather than as clean', () => {
+    const detect = scriptOf('detectPrematurePublish');
+    const summary = scriptOf('readPrematurePublishSummary');
+    const dir = repoWithWork();
+    try {
+      const state = runJson(detect, { WT: dir, BRANCH: '' }, dir);
+      expect(state.checked).toBe(false);
+      expect(state.warnings.length).toBeGreaterThan(0);
+      expect(runScript(summary, { PRE: JSON.stringify(state) }, dir)).toContain('did not run');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('shows committed work to the reviewer instead of "no changes detected"', () => {
+    const diffstat = scriptOf('diffstat');
+    const dir = repoWithWork();
+    try {
+      // Everything is committed, which is exactly the state that used to report nothing.
+      expect(sh('git status --porcelain -- . ":(exclude).ai-agent"', dir)).toBe('');
+
+      const out = runScript(diffstat, { WT: dir }, dir);
+      expect(out).toContain('Committed work against');
+      expect(out).toContain('src/modules/fixture/index.ts');
+      expect(out).not.toContain('no changes detected');
+      expect(out).toContain('Uncommitted worktree changes: none');
+
+      // An uncommitted revision is listed separately, because that is where a
+      // hand-back lands until the pipeline commits it.
+      fs.writeFileSync(path.join(dir, 'src', 'modules', 'fixture', 'index.ts'), 'export const value = 3;\n', 'utf8');
+      const dirty = runScript(diffstat, { WT: dir }, dir);
+      expect(dirty).toContain('Uncommitted worktree changes');
+      expect(dirty).toContain('src/modules/fixture/index.ts');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('treats a changed file newer than the review as a revision even without a new report', () => {
+    const assess = scriptOf('assessConfirmationNeed');
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, { status: 'completed', summary: 'first attempt', changes: [{ file: 'a.ts', description: 'd' }] });
+      writeReview(dir, { verdict: 'rejected', findings: [{ id: 'F1', title: 'blocking', blocking: true }] });
+      // The report is older than the review and nothing is dirty: no revision.
+      age(dir, 'report.json', 120);
+      expect(runScript(assess, { WT: dir }, dir)).toBe('skip');
+
+      // The engineer changes a FILE but never rewrites the report. mtime-alone would
+      // miss this and leave the pre-fix rejection as the authoritative verdict.
+      fs.writeFileSync(path.join(dir, 'src', 'modules', 'fixture', 'index.ts'), 'export const value = 4;\n', 'utf8');
+      expect(runScript(assess, { WT: dir }, dir)).toBe('run');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
