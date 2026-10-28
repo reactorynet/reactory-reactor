@@ -187,9 +187,61 @@ describe('ProcessAITicket report status normalisation (all four paths)', () => {
   });
 });
 
-describe('ProcessAITicket PR template merge', () => {
-  const script = scriptOf('createPullRequest');
+/** The PR body is built by `createPullRequest`; these helpers drive that script
+ *  against a throwaway repository with a fake `gh` on PATH. */
+const fakeGh = (dir: string): string => {
+  const bin = path.join(dir, '.fake-bin');
+  fs.mkdirSync(bin, { recursive: true });
+  const bodyPath = path.join(dir, '.fake-bin', 'body.md');
+  fs.writeFileSync(
+    path.join(bin, 'gh'),
+    [
+      '#!/bin/sh',
+      'if [ "$1" = "pr" ] && [ "$2" = "create" ]; then',
+      '  prev=""',
+      '  for arg in "$@"; do',
+      '    if [ "$prev" = "--body-file" ]; then cp "$arg" ' + JSON.stringify(bodyPath) + '; fi',
+      '    prev="$arg"',
+      '  done',
+      '  echo "https://github.com/example/repo/pull/42"',
+      '  exit 0',
+      'fi',
+      'if [ "$1" = "pr" ] && [ "$2" = "view" ]; then',
+      '  echo \'{"url":"https://github.com/example/repo/pull/42","number":42,"state":"OPEN","mergedAt":null}\'',
+      '  exit 0',
+      'fi',
+      'if [ "$1" = "repo" ]; then echo master; exit 0; fi',
+      'exit 1',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  fs.chmodSync(path.join(bin, 'gh'), 0o755);
+  return bin;
+};
 
+const runCreate = (dir: string, extraEnv: Record<string, string> = {}): { result: any; body: string } => {
+  const bin = fakeGh(dir);
+  const result = runJson(
+    scriptOf('createPullRequest'),
+    Object.assign({
+      WT: dir,
+      BRANCH: 'feature/test',
+      REF: 'REACTORY-302016408/20261021/3847124067',
+      REQUEST: 'Fixture ticket',
+      REQUEST_TYPE: 'bug',
+      CYCLES: '1',
+      REVIEWER: 'QualityQuinn',
+      TICKET_ID: 'fixture-ticket-id',
+      PATH: bin + ':' + process.env.PATH,
+    }, extraEnv),
+    dir,
+  );
+  const body = fs.readFileSync(path.join(dir, '.fake-bin', 'body.md'), 'utf8');
+  return { result, body };
+};
+
+describe('ProcessAITicket PR template merge', () => {
   const TEMPLATE = [
     '<!-- author guidance that must be stripped -->',
     '',
@@ -258,57 +310,6 @@ describe('ProcessAITicket PR template merge', () => {
     '',
   ].join('\n');
 
-  const fakeGh = (dir: string): string => {
-    const bin = path.join(dir, '.fake-bin');
-    fs.mkdirSync(bin, { recursive: true });
-    const bodyPath = path.join(dir, '.fake-bin', 'body.md');
-    fs.writeFileSync(
-      path.join(bin, 'gh'),
-      [
-        '#!/bin/sh',
-        'if [ "$1" = "pr" ] && [ "$2" = "create" ]; then',
-        '  prev=""',
-        '  for arg in "$@"; do',
-        '    if [ "$prev" = "--body-file" ]; then cp "$arg" ' + JSON.stringify(bodyPath) + '; fi',
-        '    prev="$arg"',
-        '  done',
-        '  echo "https://github.com/example/repo/pull/42"',
-        '  exit 0',
-        'fi',
-        'if [ "$1" = "pr" ] && [ "$2" = "view" ]; then',
-        '  echo \'{"url":"https://github.com/example/repo/pull/42","number":42,"state":"OPEN","mergedAt":null}\'',
-        '  exit 0',
-        'fi',
-        'if [ "$1" = "repo" ]; then echo master; exit 0; fi',
-        'exit 1',
-        '',
-      ].join('\n'),
-      'utf8',
-    );
-    fs.chmodSync(path.join(bin, 'gh'), 0o755);
-    return bin;
-  };
-
-  const runCreate = (dir: string, extraEnv: Record<string, string> = {}): { result: any; body: string } => {
-    const bin = fakeGh(dir);
-    const result = runJson(
-      script,
-      Object.assign({
-        WT: dir,
-        BRANCH: 'feature/test',
-        REF: 'REACTORY-302016408/20261021/3847124067',
-        REQUEST: 'Fixture ticket',
-        REQUEST_TYPE: 'bug',
-        CYCLES: '1',
-        REVIEWER: 'QualityQuinn',
-        TICKET_ID: 'fixture-ticket-id',
-        PATH: bin + ':' + process.env.PATH,
-      }, extraEnv),
-      dir,
-    );
-    const body = fs.readFileSync(path.join(dir, '.fake-bin', 'body.md'), 'utf8');
-    return { result, body };
-  };
 
   it('keeps every template heading, in order, verbatim', () => {
     const dir = repoWithWork();
@@ -696,6 +697,9 @@ describe('ProcessAITicket reviewer findings are rendered losslessly', () => {
 
     const shared = blockOf(capture);
     expect(blockOf(briefing)).toBe(shared);
+    // The PR body generator is the third consumer: it must reuse the proven renderer,
+    // not grow a variant of its own (that is how six defects accumulated here).
+    expect(blockOf(scriptOf('createPullRequest'))).toBe(shared);
 
     // asText/asList are captureReport's canonical pair, copied in verbatim rather
     // than reimplemented. captureReport itself is untouched.
@@ -1791,5 +1795,638 @@ describe('ProcessAITicket review-time guards (RC-2, RC-3, RC-4)', () => {
     } finally {
       removeDir(dir);
     }
+  });
+});
+
+/**
+ * Six defects in the PR body generator accumulated because the body builder is
+ * inline JS inside a YAML `cli_command` and no test ever executed it. Every test
+ * here runs the real script against a throwaway repository, the way
+ * `ProcessAITicket reviewer findings are rendered losslessly` does.
+ *
+ * The root cause was one asymmetry: `changes` and `tests` handled strings and
+ * objects, `risks`, `followUps`, `verification`, `implementation` and
+ * `acceptanceCriteria` were cast with `String()`, which turns every object into
+ * "[object Object]" — or, for `text()`, into nothing at all.
+ */
+describe('ProcessAITicket PR body renders the engineer report losslessly', () => {
+  const prScript = scriptOf('createPullRequest');
+
+  /** The seven distinct risk shapes found across 30 archived reports, plus a string. */
+  const RISK_SHAPES: any[] = [
+    'Plain string risk about the provider contract',
+    { id: 'R1', impact: 'high', mitigation: 'guarded by a flag', risk: 'Provider contract drift' },
+    { detail: 'retry loop could spin on a 429', id: 'R2', risk: 'Retry storm' },
+    { risk: 'SMS cost overrun', why: 'no budget alarm' },
+    { detail: 'env var default differs in staging', risk: 'Wiring mismatch' },
+    { impact: 'medium', mitigation: 'feature flag', risk: 'Shared rate limit' },
+    { dependency: 'twilio', id: 'R3', risk: 'Vendor outage', why: 'no fallback provider' },
+    { detail: 'the seam is optional today', id: 'R4', resolves_with: 'ticket 2311', risk: 'Partial receipts' },
+  ];
+
+  const sectionOf = (body: string, heading: string): string => {
+    const lines = body.split('\n');
+    const start = lines.findIndex((line) => line.trim() === heading);
+    if (start === -1) return '';
+    const out: string[] = [];
+    for (let i = start + 1; i < lines.length; i += 1) {
+      const line = lines[i];
+      if (line.startsWith('## ') || line.startsWith('### ')) break;
+      out.push(line);
+    }
+    return out.join('\n');
+  };
+
+  const bulletsOf = (section: string): string[] => section.split('\n').filter((line) => line.startsWith('- '));
+
+  it('renders all seven observed risk shapes without dropping or collapsing any', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, { status: 'completed', summary: 'Did the work.', risks: RISK_SHAPES });
+
+      const { body } = runCreate(dir);
+      const risks = sectionOf(body, '### Risks');
+
+      expect(body).not.toContain('[object Object]');
+      expect(risks).not.toBe('');
+      // Anti-collapse: eight distinct entries must stay eight bullets. The old code
+      // produced one identical "[object Object]" bullet for all seven objects.
+      expect(bulletsOf(risks)).toHaveLength(RISK_SHAPES.length);
+      // Every headline survives...
+      [
+        'Plain string risk about the provider contract',
+        'Provider contract drift',
+        'Retry storm',
+        'SMS cost overrun',
+        'Wiring mismatch',
+        'Shared rate limit',
+        'Vendor outage',
+        'Partial receipts',
+      ].forEach((headline) => expect(risks).toContain(headline));
+      // ...and so does every detail key the shapes carry.
+      [
+        'guarded by a flag',
+        'retry loop could spin on a 429',
+        'no budget alarm',
+        'env var default differs in staging',
+        'twilio',
+        'no fallback provider',
+        'ticket 2311',
+        'the seam is optional today',
+      ].forEach((detail) => expect(risks).toContain(detail));
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('emits a Follow-ups section, including object-shaped follow-ups', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        followUps: ['Backfill is deliberately out of scope', { item: 'Bulk replay tooling', reason: 'not needed yet' }],
+      });
+
+      const { body } = runCreate(dir);
+      const followUps = sectionOf(body, '### Follow-ups');
+
+      expect(followUps).not.toBe('');
+      expect(bulletsOf(followUps)).toHaveLength(2);
+      expect(followUps).toContain('Backfill is deliberately out of scope');
+      expect(followUps).toContain('Bulk replay tooling');
+      expect(followUps).toContain('not needed yet');
+      expect(body).not.toContain('[object Object]');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('emits Verification when verification is a nested object and there is no testsRun', () => {
+    const dir = repoWithWork();
+    try {
+      // The W9b shape: no `testsRun` key at all, evidence only under `verification`.
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        verification: {
+          baseline: { command: 'npx jest pipeline', result: 'failed: 3 tests', note: 'pre-change' },
+          delta: { command: 'npx jest pipeline', result: 'passed: 16 tests' },
+        },
+      });
+
+      const { body } = runCreate(dir);
+      const verification = sectionOf(body, '### Verification');
+
+      expect(verification).not.toBe('');
+      expect(verification).toContain('baseline');
+      expect(verification).toContain('delta');
+      expect(verification).toContain('npx jest pipeline');
+      expect(verification).toContain('failed: 3 tests');
+      expect(verification).toContain('pre-change');
+      expect(verification).toContain('passed: 16 tests');
+      // The section must sit below Changes, i.e. the body does not jump straight to Risks.
+      expect(body.indexOf('### Verification')).toBeGreaterThan(body.indexOf('### Changes'));
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('renders Acceptance criteria for the object-map shape, with unmet visible', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        acceptanceCriteria: {
+          partAExistsAndFailsWithoutSubject: 'Met. 3 tests added; two independent revert-and-observe experiments',
+          partACoversThreeCases: 'Met. delivered-on-real-persisted-id, replay is a no-op',
+          partBRegisteredAndResolved: { status: 'fail', evidence: 'no replay test yet' },
+        },
+      });
+
+      const { body } = runCreate(dir);
+      const criteria = sectionOf(body, '### Acceptance criteria');
+
+      expect(criteria).not.toBe('');
+      expect(criteria).toContain('partAExistsAndFailsWithoutSubject');
+      expect(criteria).toContain('Met');
+      expect(criteria).toContain('3 tests added; two independent revert-and-observe experiments');
+      // The unmet criterion is the one a reviewer must see; it must not be omitted.
+      expect(criteria).toContain('partBRegisteredAndResolved');
+      expect(criteria).toContain('Unmet');
+      expect(criteria).toContain('no replay test yet');
+      expect(body).not.toContain('[object Object]');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('renders Acceptance criteria for the array shape', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        acceptanceCriteria: [
+          { criterion: 'switching organization refetches', status: 'pass', evidence: 'manual check' },
+          { criterion: 'stale scope is cleared', status: 'unmet' },
+        ],
+      });
+
+      const { body } = runCreate(dir);
+      const criteria = sectionOf(body, '### Acceptance criteria');
+
+      expect(criteria).toContain('switching organization refetches');
+      expect(criteria).toContain('manual check');
+      expect(criteria).toContain('stale scope is cleared');
+      expect(criteria).toContain('Unmet');
+      expect(body).not.toContain('[object Object]');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('renders one report carrying every problem shape in a single body', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        risks: RISK_SHAPES,
+        followUps: [{ item: 'Bulk replay tooling', reason: 'not needed yet' }],
+        implementation: { approach: 'seam injected at the provider boundary', notes: ['no schema change'] },
+        verification: { baseline: { command: 'npx jest', result: 'failed' }, delta: { command: 'npx jest', result: 'passed' } },
+        acceptanceCriteria: { existsAndFailsWithoutSubject: 'Met. two revert-and-observe runs' },
+      });
+
+      const { body, result } = runCreate(dir);
+
+      expect(body).not.toContain('[object Object]');
+      expect(sectionOf(body, '### Risks')).not.toBe('');
+      expect(sectionOf(body, '### Follow-ups')).not.toBe('');
+      expect(sectionOf(body, '### Verification')).not.toBe('');
+      expect(sectionOf(body, '### Acceptance criteria')).not.toBe('');
+      // The scrubbing guard is a last resort: it must not have fired for this report.
+      expect(result.warnings.join(' ')).not.toContain('[object Object]');
+      expect(result.warnings.join(' ')).not.toContain('could not be rendered');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('renders an object-shaped implementation in the change list', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        implementation: { approach: 'seam injected at the provider boundary', files: ['services/index.ts'] },
+      });
+
+      const { body } = runCreate(dir);
+      const changes = sectionOf(body, '### Changes');
+
+      expect(changes).toContain('seam injected at the provider boundary');
+      expect(body).not.toContain('[object Object]');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('never lists the previous commit when the branch has no commits of its own', () => {
+    const dir = tempDir('pa-nocommit-');
+    try {
+      initRepo(dir);
+      // A commit belonging to unrelated work: the old HEAD~1 fallback listed this file
+      // for a branch that had no commits of its own (PR #12, 15 of 16 files wrong).
+      fs.writeFileSync(path.join(dir, 'previous-work.ts'), 'export const previous = true;\n', 'utf8');
+      sh('git add -A && git commit -qm "previous merge"', dir);
+      sh('git checkout -q -b feature/test', dir);
+      writeReport(dir, { status: 'completed', summary: 'Did the work.' });
+
+      const { body } = runCreate(dir);
+      const changes = sectionOf(body, '### Changes');
+
+      expect(body).not.toContain('previous-work.ts');
+      expect(changes).toContain('No commits exist on');
+      // The fallback must not exist in the generator at all.
+      expect(prScript).not.toContain('HEAD~1..HEAD');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('still renders a plain string-only report exactly as before', () => {
+    const dir = repoWithWork();
+    try {
+      // The shape nine of the twelve archived reports used; the fix must not regress it.
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        changes: [{ file: 'services/index.ts', description: 'exported the receipt seam' }],
+        testsRun: [
+          { command: 'npx jest services', result: 'passed' },
+          'yarn lint',
+        ],
+        verification: 'Confirmed against the staging provider sandbox.',
+        risks: ['Provider contract may drift again'],
+      });
+
+      const { body } = runCreate(dir);
+
+      expect(sectionOf(body, '### Changes')).toContain('`services/index.ts` exported the receipt seam');
+      const verification = sectionOf(body, '### Verification');
+      expect(verification).toContain('`npx jest services` -> passed');
+      expect(verification).toContain('`yarn lint` -> not recorded');
+      expect(verification).toContain('Confirmed against the staging provider sandbox.');
+      expect(sectionOf(body, '### Risks')).toContain('- Provider contract may drift again');
+      expect(body).not.toContain('[object Object]');
+      // Sections the report did not supply are not invented.
+      expect(body).not.toContain('### Follow-ups');
+      expect(body).not.toContain('### Acceptance criteria');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('appends follow-ups and acceptance criteria to a rendered template, keeping its headings', () => {
+    const dir = repoWithWork();
+    try {
+      fs.mkdirSync(path.join(dir, '.github'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.github', 'pull_request_template.md'),
+        ['## Summary', '', '- **Reviewer focus:**', '', '## How was this tested?', '', '**Result:**', ''].join('\n'),
+        'utf8',
+      );
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        followUps: ['Backfill is out of scope'],
+        verification: { baseline: { command: 'npx jest pipeline', result: 'failed' }, delta: { command: 'npx jest pipeline', result: 'passed' } },
+        acceptanceCriteria: { onlyCriterion: 'Met. proved by a revert-and-observe test' },
+      });
+
+      const { result, body } = runCreate(dir);
+
+      expect(result.templateUsed).toBe(true);
+      // The template contract survives: its own level-2 headings are untouched.
+      expect(body).toContain('## Summary');
+      expect(body).toContain('## How was this tested?');
+      // The sections a template has no heading for are appended, not dropped.
+      expect(body).toContain('### Follow-ups');
+      expect(body).toContain('### Acceptance criteria');
+      expect(body).toContain('onlyCriterion');
+      expect(body).toContain('proved by a revert-and-observe test');
+      // The object-shaped verification reaches "How was this tested?".
+      expect(body).toContain('npx jest pipeline');
+      expect(body).not.toContain('[object Object]');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('renders prose that mentions [object Object] verbatim and invents no failure', () => {
+    const dir = repoWithWork();
+    try {
+      // A report ABOUT this class of defect necessarily quotes the placeholder. Rewriting
+      // it is not a cosmetic problem: the previous body-wide scrub corrupted six legitimate
+      // strings in one archived report and raised a warning that was simply false.
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Fixed the [object Object] corruption in the PR body generator.',
+        changes: [{ file: 'workflow/ProcessAITicket.yaml', description: 'removed the [object Object] scrub' }],
+        risks: [{ risk: 'prose mentioning [object Object] must survive', detail: 'the scrub rewrote it' }],
+        verification: { baseline: { command: 'npx jest', result: 'passed', note: 'no [object Object] left' } },
+        acceptanceCriteria: { literalPlaceholderIsProse: 'Met. a body may contain the words [object Object]' },
+      });
+
+      const { body, result } = runCreate(dir);
+
+      // Verbatim, in every field that carried it: summary, change description, risk,
+      // verification note and acceptance criterion.
+      expect(body).toContain('Fixed the [object Object] corruption in the PR body generator.');
+      expect(body).toContain('removed the [object Object] scrub');
+      expect(body).toContain('prose mentioning [object Object] must survive');
+      expect(body).toContain('no [object Object] left');
+      expect(body).toContain('a body may contain the words [object Object]');
+      expect(body).not.toContain('[unrenderable report value]');
+      // No false renderer-failure warning.
+      expect(result.warnings.join(' ')).not.toContain('[object Object]');
+      expect(result.warnings.join(' ')).not.toContain('could not be rendered');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('never rewrites the body wholesale for the [object Object] placeholder', () => {
+    // The class guard for F1: the promise is that no renderer can EMIT the placeholder,
+    // not that every occurrence in the finished prose gets rewritten.
+    expect(prScript).not.toMatch(/replace\(\/\\\[object Object\\\]\/g/);
+    expect(prScript).not.toContain('[unrenderable report value]');
+  });
+
+  it('leads a {risk, detail} entry with the risk, not the detail', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        // The shape all four W9b risks use. `detail` is the renderer's detail slot, so a
+        // naively shared renderer made the long paragraph the headline.
+        risks: [{ risk: 'Provider contract may drift', detail: 'the seam is versioned by hand' }],
+      });
+
+      const { body } = runCreate(dir);
+      const bullets = bulletsOf(sectionOf(body, '### Risks'));
+
+      expect(bullets).toHaveLength(1);
+      // The risk is the FIRST line of the bullet; the detail follows as an indented row.
+      expect(bullets[0]).toBe('- Provider contract may drift');
+      const riskSection = sectionOf(body, '### Risks');
+      expect(riskSection).toContain('  detail: the seam is versioned by hand');
+      expect(riskSection.indexOf('Provider contract may drift')).toBeLessThan(riskSection.indexOf('the seam is versioned by hand'));
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('states the no-commits fact exactly once', () => {
+    const dir = tempDir('pa-nocommit-once-');
+    try {
+      initRepo(dir);
+      sh('git checkout -q -b feature/test', dir);
+      writeReport(dir, { status: 'completed', summary: 'Did the work.' });
+
+      const { body } = runCreate(dir);
+      const sentence = 'so this branch carries no change of its own';
+      const occurrences = body.split(sentence).length - 1;
+
+      expect(occurrences).toBe(1);
+      expect(body).toContain('No commits exist on');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('names the field when a value has content but renders to nothing', () => {
+    const dir = repoWithWork();
+    try {
+      // Two empty objects are content the renderer cannot express; the marker must name
+      // the field rather than leaving a blank bullet or a bare placeholder.
+      writeReport(dir, { status: 'completed', summary: 'Did the work.', implementation: [{}, {}] });
+
+      const { body, result } = runCreate(dir);
+
+      expect(body).toContain('[implementation could not be rendered');
+      expect(result.warnings.join(' ')).toContain('report field "implementation" could not be rendered');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('reads an explicitly unmet criterion as Unmet in every spelling the reports use', () => {
+    const dir = repoWithWork();
+    try {
+      // The archived W1 report records `status: "not_met"`; W3 records
+      // `"not_executed_blocked"`. Neither form means met, and 'not satisfied' must never
+      // reach a /\bsatisfied\b/ branch: a false Met is worse than an omission, because it
+      // tells the approver the opposite of what the engineer recorded.
+      // Unmet and partially-met are bolded; a plain Met is not. Either way the rendered
+      // verdict must be the one the engineer recorded.
+      const CASES: Array<[string, string]> = [
+        ['not_met', '**Unmet**'],
+        ['NOT_MET', '**Unmet**'],
+        ['NOT-MET', '**Unmet**'],
+        ['not met', '**Unmet**'],
+        ['not-satisfied', '**Unmet**'],
+        ['not satisfied', '**Unmet**'],
+        ['not_executed_blocked', '**Unmet**'],
+        ['unmet', '**Unmet**'],
+        ['fail', '**Unmet**'],
+        ['partially met', '**Partially met**'],
+        ['met', 'Met'],
+        ['passed', 'Met'],
+      ];
+
+      for (const [status, expected] of CASES) {
+        writeReport(dir, {
+          status: 'completed',
+          summary: 'Did the work.',
+          acceptanceCriteria: [{ criterion: 'the criterion under test', status, evidence: 'some evidence' }],
+        });
+        const { body } = runCreate(dir);
+        const criteria = sectionOf(body, '### Acceptance criteria');
+        expect(criteria).toContain('the criterion under test** — ' + expected);
+      }
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('never infers Met from negated evidence prose', () => {
+    const dir = repoWithWork();
+    try {
+      // The exact W1 shape: status "not_met" plus an evidence paragraph whose last
+      // sentence reads "This criterion is NOT satisfied". The old renderer matched the
+      // word "satisfied" inside that sentence and printed Met underneath it.
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        acceptanceCriteria: [
+          {
+            criterion: 'tsc reports 0 errors for types/, services/, services/providers/, workflows/',
+            status: 'not_met',
+            evidence: 'types/ 0, workflows/ 0, services/providers/ 1 (SMTPProvider TS7016 nodemailer typings), services/ 28. '
+              + 'Every one is pre-existing and outside W1. This criterion is NOT satisfied; it needs those work packages, not a W1 change.',
+          },
+        ],
+      });
+
+      const { body } = runCreate(dir);
+      const criteria = sectionOf(body, '### Acceptance criteria');
+
+      expect(criteria).toContain('**Unmet**');
+      expect(criteria).not.toMatch(/— Met\b/);
+      // The tally is the number an approver actually reads.
+      expect(criteria).toContain('0 met, 1 unmet');
+      expect(criteria).not.toContain('0 unmet');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('leaves prose with no leading verdict as "status not recorded" rather than guessing', () => {
+    const dir = repoWithWork();
+    try {
+      // No status field at all. The evidence mentions both satisfaction and failure in
+      // passing; neither may be promoted to a verdict.
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        acceptanceCriteria: [
+          { criterion: 'audit the rate limiter', evidence: 'types/ 0, workflows/ 0; this criterion is NOT satisfied yet.' },
+        ],
+      });
+
+      const { body } = runCreate(dir);
+      const criteria = sectionOf(body, '### Acceptance criteria');
+
+      expect(criteria).not.toMatch(/— Met\b/);
+      expect(criteria).toContain('status not recorded');
+      expect(criteria).toContain('1 without a recorded status');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('renders risks under a template Risks heading instead of leaving the placeholder', () => {
+    const dir = repoWithWork();
+    try {
+      fs.mkdirSync(path.join(dir, '.github'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.github', 'pull_request_template.md'),
+        ['## Summary', '', '## Risks', '', '-', '', '## How was this tested?', '', '**Result:**', ''].join('\n'),
+        'utf8',
+      );
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        risks: ['Provider contract may drift', { risk: 'Retry storm', detail: 'no backoff cap' }],
+      });
+
+      const { result, body } = runCreate(dir);
+
+      expect(result.templateUsed).toBe(true);
+      // The template's own heading is reused - not duplicated by an appendix.
+      expect(body.split('## Risks').length - 1).toBe(1);
+      const risks = sectionOf(body, '## Risks');
+      expect(risks).toContain('Provider contract may drift');
+      expect(risks).toContain('Retry storm');
+      expect(risks).not.toMatch(/^\s*-\s*$/m);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('appends Risks when the template has no heading for them', () => {
+    const dir = repoWithWork();
+    try {
+      fs.mkdirSync(path.join(dir, '.github'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.github', 'pull_request_template.md'),
+        ['## Summary', '', '- **Reviewer focus:**', ''].join('\n'),
+        'utf8',
+      );
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        risks: ['Provider contract may drift'],
+        verification: { baseline: { command: 'npx jest', result: 'passed' } },
+      });
+
+      const { body } = runCreate(dir);
+
+      // No risks heading, no "How was this tested?" heading: both are appended, so the
+      // report content cannot vanish behind a template.
+      expect(sectionOf(body, '### Risks')).toContain('Provider contract may drift');
+      expect(sectionOf(body, '### Verification')).toContain('npx jest');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('does not duplicate Verification when the template already carries the evidence', () => {
+    const dir = repoWithWork();
+    try {
+      fs.mkdirSync(path.join(dir, '.github'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.github', 'pull_request_template.md'),
+        ['## Summary', '', '## How was this tested?', '', '**Result:**', ''].join('\n'),
+        'utf8',
+      );
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        verification: { baseline: { command: 'npx jest pipeline', result: 'passed' } },
+      });
+
+      const { body } = runCreate(dir);
+
+      expect(body.split('npx jest pipeline').length - 1).toBe(1);
+      expect(body).not.toContain('### Verification');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('uses a revision summary when the report has no plain `summary` field', () => {
+    const dir = repoWithWork();
+    try {
+      // Both merged W1 and W3 bodies read "No summary field supplied" while the report
+      // held a full paragraph under revision_2_summary.
+      writeReport(dir, {
+        status: 'completed',
+        revision_2_summary: 'Both blocking defects are fixed and each was proven by mutation.',
+        risks: ['one risk'],
+      });
+
+      const { body } = runCreate(dir);
+
+      expect(sectionOf(body, '### Summary')).toContain('Both blocking defects are fixed');
+      expect(body).not.toContain('No summary supplied by the engineer.');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('routes the PR body through the shared renderer rather than a third variant', () => {
+    // The class guard: a blind `String()` in this script is how every defect here
+    // started, and `HEAD~1..HEAD` is how the file list went wrong.
+    expect(prScript).toContain('// >>> shared findings rendering');
+    expect(prScript).not.toContain('HEAD~1..HEAD');
+    expect(prScript).not.toMatch(/\.map\(\(r\) => String\(r\)\)/);
+    expect(prScript).not.toMatch(/\.map\(String\)/);
+    expect(prScript).toContain('const entryText = (value) => {');
   });
 });
