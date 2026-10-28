@@ -960,18 +960,27 @@ steps:
 
                 const changedFiles = () => {
                   const base = String(runStatus.runEvidence && runStatus.runEvidence.base || 'master');
+                  const runGit = (cmd) => execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString().trim();
+                  const tryGit = (cmd) => { try { return runGit(cmd); } catch (e) { return ''; } };
+                  // A branch with no commits of its own has nothing of its own to list. The
+                  // third command here used to be a historical one-commit diff (HEAD minus
+                  // one), which on such a branch returns the files of the PREVIOUS commit -
+                  // so the note described an unrelated change. History is never a substitute
+                  // for the branch diff, so that fallback is gone and the note says so
+                  // explicitly instead.
+                  const commitCount = Number(tryGit('git rev-list --count origin/' + base + '..HEAD') || tryGit('git rev-list --count ' + base + '..HEAD')) || 0;
                   const commands = [
                     'git diff --name-only origin/' + base + '...HEAD',
                     'git diff --name-only ' + base + '...HEAD',
-                    'git diff --name-only HEAD~1..HEAD',
                   ];
-                  for (let i = 0; i < commands.length; i += 1) {
-                    try {
-                      const value = execSync(commands[i], { cwd: wt, stdio: 'pipe' }).toString().trim();
-                      if (value) return value.split('\n').filter(Boolean);
-                    } catch (e) { /* try the next form */ }
+                  let files = [];
+                  if (commitCount > 0) {
+                    for (let i = 0; i < commands.length; i += 1) {
+                      const value = tryGit(commands[i]);
+                      if (value) { files = value.split('\n').map((line) => line.trim()).filter(Boolean); break; }
+                    }
                   }
-                  return [];
+                  return { base: base, commitCount: commitCount, files: files };
                 };
 
                 const verificationLines = () => {
@@ -994,7 +1003,7 @@ steps:
 
                 const outcomeSection = () => {
                   const summary = String(runStatus.summary || keyOf(report, ['summary']) || '').trim() || 'No outcome summary recorded.';
-                  const files = changedFiles();
+                  const diff = changedFiles();
                   const lines = [
                     '',
                     '## Outcome',
@@ -1004,8 +1013,14 @@ steps:
                     '## Files touched',
                     '',
                   ];
-                  if (files.length) files.forEach((file) => lines.push('- `' + file + '`'));
-                  else lines.push('- No changed files detected in the branch diff.');
+                  if (diff.commitCount <= 0) {
+                    // Once, not twice: an explicit sentence instead of a file list.
+                    lines.push('- No commits exist on branch ' + (branch || '(unnamed branch)') + ' ahead of ' + diff.base + ', so this note records no changed files.');
+                  } else if (diff.files.length) {
+                    diff.files.forEach((file) => lines.push('- `' + file + '`'));
+                  } else {
+                    lines.push('- No changed files detected in the branch diff.');
+                  }
                   lines.push('');
                   lines.push('## Verification');
                   lines.push('');
@@ -3715,6 +3730,16 @@ steps:
                       const verdict = String(review.verdict || '').trim() || 'not_reviewed';
                       const asArray = (value) => (Array.isArray(value) ? value : []);
 
+                      // This step runs BEFORE the engineer's work is committed (commitChanges
+                      // lives inside the publish branch, which this decision gates), so git
+                      // state here is the pre-commit state: the branch is still identical to its
+                      // base and a commit count against the base is legitimately zero on every
+                      // ordinary first publication. Git state here is therefore NOT evidence
+                      // about publishability and must never be used as a gate - an earlier
+                      // revision of this step did exactly that and classified every normal run
+                      // as 'no commits', so nothing was ever published. The zero-commit check
+                      // belongs after the commit, in publishReadinessGate.
+
                       const entries = [];
                       asArray(review.requiredChanges).forEach((finding) => entries.push({ finding: finding, list: 'requiredChanges' }));
                       asArray(review.blockingFindings).forEach((finding) => entries.push({ finding: finding, list: 'blockingFindings' }));
@@ -4023,6 +4048,15 @@ steps:
                             const wt = String(process.env.WT || '').trim();
                             const ref = String(process.env.REF || '').trim();
                             const run = (cmd) => execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString();
+                            // One place that turns a child-process error into a reason, so a
+                            // failed git command never reports a bare exit code with no cause.
+                            const describe = (e) => {
+                              const detail = [
+                                e && e.stderr ? String(e.stderr).trim() : '',
+                                e && e.message ? String(e.message) : String(e),
+                              ].filter(Boolean).join(' | ');
+                              return detail || 'unknown git error';
+                            };
 
                             let dirty = '';
                             // The agent is told never to commit, but it sometimes does. If so, the run
@@ -4052,16 +4086,45 @@ steps:
                             const identity = email ? '' : ' -c user.name="Reactory AI" -c user.email="ai@reactory.net"';
                             const safe = ('AI engineering run: ' + ref).replace(/["'`$\\]/g, ' ');
 
+                            // Stage everything, then take the run artefacts back out of the
+                            // index. The pipeline writes .ai-agent/report.json and review.json
+                            // into the worktree, and a bare 'git add -A' would publish those
+                            // run internals in the pull request when the target repository does
+                            // not gitignore the path.
+                            //
+                            // This used to be ONE CHAINED invocation:
+                            //   git add -A -- . ":(exclude).ai-agent" && git commit ...
+                            // A negative pathspec does NOT suppress git's ignored-file check:
+                            // git expands '.' to include .ai-agent, sees that it matches an
+                            // ignore rule, and exits 1 with 'The following paths are ignored by
+                            // one of your .gitignore files'. Because the two commands were
+                            // joined with &&, git commit NEVER RAN: W4 and W9b each left an
+                            // approved, reviewed change staged but uncommitted while the publish
+                            // path carried on to push a branch identical to its base.
+                            // ('git -c advice.addIgnoredFile=false' silences only the hint, not
+                            // the error, so it is not a fix on its own.)
+                            //
+                            // Plain 'git add -A' skips ignored paths silently. The following
+                            // 'git rm -r --cached' keeps the artefacts out of the commit in both
+                            // worlds: it un-stages them in a repository that does not ignore
+                            // them, and it still records their removal when an agent has already
+                            // committed them onto this branch.
                             try {
-                              // The pipeline writes .ai-agent/report.json and review.json into
-                              // the worktree and no target repository gitignores that path, so
-                              // a bare 'git add -A' would publish run internals in the pull
-                              // request. Exclude it here rather than editing the repo's
-                              // .git/info/exclude, which is shared with the main checkout.
-                              execSync('git add -A -- . ":(exclude).ai-agent" && git commit' + identity + " -m '" + safe + "'", { cwd: wt, stdio: 'pipe' });
+                              run('git add -A');
                             } catch (e) {
-                              process.stderr.write('git commit failed: ' + (e && e.message ? e.message : String(e)) + '\n');
-                              if (e && e.stderr) process.stderr.write(String(e.stderr) + '\n');
+                              const detail = describe(e);
+                              console.error('git add failed: ' + detail);
+                              process.stdout.write(JSON.stringify({ committed: false, reason: 'git add failed', error: detail.slice(0, 1500) }));
+                              process.exit(1);
+                            }
+                            try { run('git rm -r --cached --quiet --ignore-unmatch -- .ai-agent'); } catch (e) { /* nothing staged under .ai-agent */ }
+
+                            try {
+                              execSync('git commit' + identity + " -m '" + safe + "'", { cwd: wt, stdio: 'pipe' });
+                            } catch (e) {
+                              const detail = describe(e);
+                              console.error('git commit failed: ' + detail);
+                              process.stdout.write(JSON.stringify({ committed: false, reason: 'git commit failed', error: detail.slice(0, 1500) }));
                               process.exit(1);
                             }
 
@@ -4072,16 +4135,260 @@ steps:
                         env:
                           WT: ${steps.readWorktreePath.outputs.stdout}
                           REF: ${steps.loadTicket.result.reference}
+                        # Soft on purpose. A commit that did not happen must abort the
+                        # PUBLISH path, not the workflow instance: failOnError: true would
+                        # terminate the instance with no ticket comment, no human task and a
+                        # runStatus that never becomes terminal - the same 'pinned run' shape
+                        # this ticket complains about. The step reports what happened in its
+                        # stdout, and publishReadinessGate (below, after the commit) turns a
+                        # failure into a comment, a human task, a terminal runStatus and a hard
+                        # stop before pushBranch.
                         failOnError: false
                         timeout: 300000
                         output:
                           captureStdout: true
                           captureStderr: true
 
+                    # ── Publish readiness ────────────────────────
+                    # This gate runs AFTER commitChanges, which is the only point at which
+                    # git can answer "is there a commit to publish?". Evaluated earlier (in
+                    # readPublishable, before the commit existed) it read 0 commits on every
+                    # ordinary first publication and refused to publish anything.
+                    #
+                    # An unresolvable base is NOT treated as zero commits: on a repository
+                    # whose default branch is not main/master the old resolution produced
+                    # 'master', the rev-list failed, and the failure was read as 'no commits'.
+                    # Unknown now fails OPEN - a git/environment quirk must never be able to
+                    # strand approved work.
+                    - id: readPublishReadiness
+                      name: Check the branch really carries the committed work
+                      type: cli_command
+                      dependsOn: commitChanges
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const fs = require('fs');
+                            const path = require('path');
+                            const { execSync } = require('child_process');
+
+                            const wt = String(process.env.WT || '').trim();
+                            const dir = path.join(wt, '.ai-agent');
+                            const branch = String(process.env.BRANCH || '').trim();
+                            const tryRun = (cmd) => {
+                              try { return execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString().trim(); } catch (e) { return ''; }
+                            };
+
+                            let commit = {};
+                            try { commit = JSON.parse(process.env.COMMIT || '{}') || {}; } catch (e) { commit = {}; }
+                            let runStatus = {};
+                            try { runStatus = JSON.parse(fs.readFileSync(path.join(dir, 'run-status.json'), 'utf8')) || {}; } catch (e) { runStatus = {}; }
+
+                            // Resolve the base the way createPullRequest does, including the gh
+                            // fallback, and verify every candidate instead of assuming it.
+                            const resolveBase = () => {
+                              const fromHead = tryRun('git symbolic-ref --short refs/remotes/origin/HEAD').replace('origin/', '');
+                              if (fromHead) return fromHead;
+                              const fromGh = tryRun('gh repo view --json defaultBranchRef -q .defaultBranchRef.name');
+                              if (fromGh) return fromGh;
+                              const candidates = ['origin/main', 'origin/master', 'main', 'master', 'develop', 'trunk'];
+                              for (let i = 0; i < candidates.length; i += 1) {
+                                if (tryRun('git rev-parse --verify --quiet ' + candidates[i])) return candidates[i].replace('origin/', '');
+                              }
+                              const fromEvidence = String((runStatus.runEvidence && runStatus.runEvidence.base) || '').trim();
+                              if (fromEvidence && tryRun('git rev-parse --verify --quiet ' + fromEvidence)) return fromEvidence;
+                              return '';
+                            };
+
+                            const base = resolveBase();
+                            let commitsAhead = null;
+                            if (base) {
+                              const raw = tryRun('git rev-list --count ' + base + '..HEAD') || tryRun('git rev-list --count ' + base);
+                              if (/^[0-9]+$/.test(raw)) commitsAhead = Number(raw);
+                            }
+                            const dirty = tryRun('git status --porcelain -- . ":(exclude).ai-agent"');
+
+                            const committed = commit.committed === true;
+                            const reason = String(commit.reason || '').trim();
+                            const commitFailed = !committed && /fail/i.test(reason);
+
+                            let state = 'ok';
+                            let detail = '';
+                            if (commitFailed) {
+                              // A genuine failed commit. Only this case may tell a human the
+                              // work needs recovering: nothing was committed and nothing was
+                              // pushed, so the worktree holds the only copy.
+                              state = 'blocked';
+                              detail = 'the commit step FAILED (' + reason + '), so no commit exists for this work. The change is still in the worktree at ' + wt + ' and it was NOT pushed. Recover it before the worktree is cleaned up.';
+                            } else if (commitsAhead === 0) {
+                              state = 'blocked';
+                              if (committed) {
+                                detail = 'the commit step reported a commit (' + String(commit.sha || 'unknown sha') + '), but branch ' + branch + ' still has no commits ahead of ' + base + '. Nothing was pushed.';
+                              } else {
+                                detail = 'the commit step ran and reported "' + (reason || 'no commit needed') + '", and branch ' + branch + ' has no commits ahead of ' + base + '. There was nothing to publish, so nothing was pushed.';
+                              }
+                            } else if (commitsAhead === null) {
+                              // Fail open. An unresolvable base or an unreadable count says
+                              // nothing about the branch, so it must not block publication.
+                              state = 'ok';
+                              detail = 'the base branch could not be resolved (or the commit count was unreadable), so the commit count was not used as a gate';
+                            }
+
+                            try {
+                              fs.mkdirSync(dir, { recursive: true });
+                              fs.writeFileSync(path.join(dir, 'publish-readiness.json'), JSON.stringify({
+                                state: state,
+                                detail: detail,
+                                base: base,
+                                baseResolved: !!base,
+                                commitsAhead: commitsAhead,
+                                committed: committed,
+                                commitReason: reason,
+                                worktreeDirty: !!dirty,
+                                checkedAt: new Date().toISOString(),
+                              }, null, 2), 'utf8');
+                            } catch (e) { /* best effort */ }
+
+                            process.stdout.write(state);
+                        env:
+                          WT: ${steps.readWorktreePath.outputs.stdout}
+                          BRANCH: ${steps.readBranch.outputs.stdout}
+                          COMMIT: ${steps.commitChanges.outputs.stdout}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+                          captureStderr: true
+
+                    - id: publishReadinessGate
+                      name: Is there a commit to publish
+                      type: condition
+                      dependsOn: readPublishReadiness
+                      config:
+                        condition: steps.readPublishReadiness.stdout !== 'blocked'
+                        thenSteps:
+                          - id: publishReadinessOkLog
+                            name: Log publish readiness
+                            type: log
+                            config:
+                              level: info
+                              message: Branch ${steps.readBranch.outputs.stdout} carries a commit
+                                to publish for ${steps.loadTicket.result.reference}.
+                        elseSteps:
+                          - id: describePublishBlock
+                            name: Describe why there is nothing to publish
+                            type: cli_command
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - |
+                                  const fs = require('fs');
+                                  const path = require('path');
+                                  const wt = String(process.env.WT || '').trim();
+                                  let state = {};
+                                  try { state = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'publish-readiness.json'), 'utf8')); } catch (e) { state = {}; }
+                                  process.stdout.write(String(state.detail || 'the branch carries no commit that could be published'));
+                              env:
+                                WT: ${steps.readWorktreePath.outputs.stdout}
+                              failOnError: false
+                              output:
+                                captureStdout: true
+                                captureStderr: true
+                          - id: publishBlockComment
+                            name: Comment the publish block on the ticket
+                            type: service_invoke
+                            dependsOn: describePublishBlock
+                            config:
+                              service: core.ReactorySupportWorkflowService@1.0.0
+                              method: addComment
+                              params:
+                                ticketId: ${steps.loadTicket.result.id}
+                                comment: "AI engineering run was reviewed but NOTHING WAS
+                                  PUBLISHED on branch ${steps.readBranch.outputs.stdout}:
+                                  ${steps.describePublishBlock.outputs.stdout} No pull request
+                                  was opened and the branch was not pushed. This is not a
+                                  review rejection and not a pull-request failure."
+                          - id: retainWorkspaceNotePublishBlock
+                            name: Keep the workspace note in progress
+                            type: cli_command
+                            dependsOn: publishBlockComment
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - *workspaceNoteScript
+                              env:
+                                MODE: retain
+                                NOTE_STATUS: blocked
+                                REASON: ${steps.describePublishBlock.outputs.stdout}
+                                WT: ${steps.readWorktreePath.outputs.stdout}
+                                REF: ${steps.loadTicket.result.reference}
+                                TICKET_ID: ${steps.loadTicket.result.id}
+                                REPO: ${steps.resolveWorkdir.outputs.stdout}
+                                BRANCH: ${steps.readBranch.outputs.stdout}
+                                PERSONA: ${input.agentId}
+                                CYCLES: ${variables.reviewCycle}
+                              failOnError: false
+                              output:
+                                captureStdout: true
+                          - id: setRunStatusPublishBlocked
+                            name: Record the terminal run status (nothing to publish)
+                            type: set_variable
+                            dependsOn: retainWorkspaceNotePublishBlock
+                            config:
+                              action: set
+                              key: runStatus
+                              value: blocked
+                          - id: setPrStatePublishBlocked
+                            name: Record that no pull request was opened
+                            type: set_variable
+                            dependsOn: setRunStatusPublishBlocked
+                            config:
+                              action: set
+                              key: prState
+                              value: NOT_OPENED
+                          - id: publishBlockTask
+                            name: Human follow-up for the unpublished branch
+                            type: user_activity
+                            dependsOn: setPrStatePublishBlocked
+                            config:
+                              activityType: approval
+                              assignee: ${steps.loadTicket.result.assignedToEmail}
+                              message: ${steps.loadTicket.result.reference} was approved but
+                                nothing could be published - see the ticket comment
+                              props:
+                                ticketReference: ${steps.loadTicket.result.reference}
+                                ticketId: ${steps.loadTicket.result.id}
+                                branch: ${steps.readBranch.outputs.stdout}
+                                worktree: ${steps.readWorktreePath.outputs.stdout}
+                                publishReadiness: ${steps.readPublishReadiness.outputs.stdout}
+                                detail: ${steps.describePublishBlock.outputs.stdout}
+                                commitResult: ${steps.commitChanges.outputs.stdout}
+                          # Hard stop: pushBranch and createPullRequest must never run for a
+                          # branch that carries no commit of its own. The comment, the task
+                          # and the terminal runStatus are already in place, so this abort
+                          # cannot leave a run pinned or a ticket uninformed.
+                          - id: publishBlockHalt
+                            name: Stop the publish path
+                            type: cli_command
+                            dependsOn: publishBlockTask
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - |
+                                  const why = String(process.env.DETAIL || 'the branch carries no commit that could be published');
+                                  process.stderr.write('Publish path stopped: ' + why);
+                                  process.exit(1);
+                              env:
+                                DETAIL: ${steps.describePublishBlock.outputs.stdout}
+                              failOnError: true
+
                     - id: pushBranch
                       name: Push branch to origin
                       type: cli_command
-                      dependsOn: commitChanges
+                      dependsOn: publishReadinessGate
                       config:
                         command: node
                         args:

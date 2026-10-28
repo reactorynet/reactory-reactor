@@ -93,8 +93,8 @@ const removeDir = (dir: string): void => {
   }
 };
 
-const initRepo = (dir: string): void => {
-  sh('git init -q -b master .', dir);
+const initRepo = (dir: string, baseBranch: string = 'master'): void => {
+  sh('git init -q -b ' + baseBranch + ' .', dir);
   sh('git config user.email test@example.com', dir);
   sh('git config user.name Test', dir);
   sh('git config commit.gpgsign false', dir);
@@ -2428,5 +2428,385 @@ describe('ProcessAITicket PR body renders the engineer report losslessly', () =>
     expect(prScript).not.toMatch(/\.map\(\(r\) => String\(r\)\)/);
     expect(prScript).not.toMatch(/\.map\(String\)/);
     expect(prScript).toContain('const entryText = (value) => {');
+  });
+});
+
+describe('ProcessAITicket commits the work before it publishes (D1)', () => {
+  const commitScript = scriptOf('commitChanges');
+  const commitStep = byId('commitChanges');
+
+  /**
+   * The exact trigger condition from W4/W9b: a repository whose .gitignore contains
+   * `.ai-agent/`. Without this fixture the old code passes for the wrong reason, because
+   * git only rejects the negative-pathspec `git add` when the path matches an ignore rule.
+   */
+  const repoWithIgnoredRunArtefacts = (): string => {
+    const dir = tempDir('pa-commit-');
+    initRepo(dir);
+    fs.writeFileSync(path.join(dir, '.gitignore'), ['.ai-agent/', ''].join('\n'), 'utf8');
+    sh('git add -A && git commit -qm "ignore run artefacts"', dir);
+    sh('git checkout -q -b feature/test', dir);
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'src', 'real-work.ts'), 'export const x = 1;\n', 'utf8');
+    fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+    fs.writeFileSync(path.join(dir, '.ai-agent', 'report.json'), '{"status":"completed"}\n', 'utf8');
+    return dir;
+  };
+
+  it('commits the work when the repository gitignores .ai-agent (W4/W9b)', () => {
+    const dir = repoWithIgnoredRunArtefacts();
+    try {
+      const result = runJson(commitScript, { WT: dir, REF: 'REF-1' }, dir);
+
+      expect(result.committed).toBe(true);
+      expect(result.sha).toMatch(/^[0-9a-f]{40}$/);
+      // The commit really happened. Before the fix `git add` exited 1, `git commit`
+      // never ran, and the branch stayed identical to its base.
+      expect(sh('git rev-list --count master..HEAD', dir)).toBe('1');
+      const files = sh('git show --name-only --pretty=format: HEAD', dir).split('\n').filter(Boolean);
+      expect(files).toContain('src/real-work.ts');
+      // Run internals must still never reach the branch.
+      expect(files.join(' ')).not.toContain('.ai-agent');
+      // Nothing is left staged-but-uncommitted for worktree hygiene to destroy.
+      expect(sh('git status --porcelain', dir)).toBe('');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('still reports a clean worktree as clean instead of inventing a commit', () => {
+    const dir = tempDir('pa-commit-clean-');
+    try {
+      initRepo(dir);
+      fs.writeFileSync(path.join(dir, '.gitignore'), ['.ai-agent/', ''].join('\n'), 'utf8');
+      sh('git add -A && git commit -qm "ignore run artefacts"', dir);
+      sh('git checkout -q -b feature/test', dir);
+      // Only run artefacts changed, and they are ignored: there is no work to commit.
+      fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.ai-agent', 'report.json'), '{}\n', 'utf8');
+
+      const result = runJson(commitScript, { WT: dir, REF: 'REF-1' }, dir);
+
+      expect(result.committed).toBe(false);
+      expect(result.reason).toBe('worktree clean');
+      expect(sh('git rev-list --count master..HEAD', dir)).toBe('0');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('fails the step loudly when the commit cannot be made', () => {
+    const dir = tempDir('pa-commit-fail-');
+    try {
+      initRepo(dir);
+      sh('git checkout -q -b feature/test', dir);
+      fs.writeFileSync(path.join(dir, 'work.ts'), 'export const x = 1;\n', 'utf8');
+      // Make the commit itself fail after staging succeeded - the W4 shape exactly
+      // (changes staged, nothing committed).
+      const hook = path.join(dir, '.git', 'hooks', 'pre-commit');
+      fs.writeFileSync(hook, ['#!/bin/sh', 'exit 1', ''].join('\n'), 'utf8');
+      fs.chmodSync(hook, 0o755);
+
+      let failure: any = null;
+      try {
+        runScript(commitScript, { WT: dir, REF: 'REF-1' }, dir);
+      } catch (e) {
+        failure = e;
+      }
+
+      // A non-zero exit is what makes the run abort instead of pushing an empty branch.
+      expect(failure).not.toBeNull();
+      expect(failure.status).toBe(1);
+      // The reason must be in the step OUTPUT, not only on stderr, so a failed publish
+      // can be told apart from a failed pull request.
+      const reported = JSON.parse(String(failure.stdout));
+      expect(reported.committed).toBe(false);
+      expect(reported.reason).toBe('git commit failed');
+      expect(String(failure.stderr)).toContain('git commit failed');
+      expect(sh('git rev-list --count master..HEAD', dir)).toBe('0');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('keeps the commit step soft so a failure cannot pin the run', () => {
+    // failOnError: true was the ticket's first suggestion, but the engine terminates the
+    // instance on a failed step, and this workflow has no failure handler: the ticket got
+    // no comment, no human task and no terminal runStatus. The step is therefore soft and
+    // publishReadinessGate routes the failure. `failOnError` is written explicitly so the
+    // intent survives an engine default change.
+    expect('failOnError' in (commitStep.config as any)).toBe(true);
+    expect(commitStep.config?.failOnError).toBe(false);
+  });
+
+  it('hard-stops the publish path when there is no commit to publish', () => {
+    // The abort is still there, just after the human side has been handled: comment,
+    // human task, terminal runStatus, then a fatal step that cannot be ignored.
+    expect((byId('pushBranch') as any).dependsOn).toBe('publishReadinessGate');
+    expect(byId('publishBlockHalt').config?.failOnError).toBe(true);
+    expect(byId('publishBlockComment').type).toBe('service_invoke');
+    expect(byId('publishBlockTask').type).toBe('user_activity');
+    expect(String(byId('setRunStatusPublishBlocked').config?.value)).toBe('blocked');
+  });
+
+  it('stages without the negative pathspec git rejects on an ignored path', () => {
+    // The class guard: the chained form is how the commit silently stopped happening.
+    expect(commitScript).not.toContain("execSync('git add -A -- . ");
+    expect(commitScript).not.toContain('advice.addIgnoredFile=true');
+    expect(commitScript).toContain("run('git add -A')");
+    expect(commitScript).toContain('git rm -r --cached --quiet --ignore-unmatch -- .ai-agent');
+    // Staging and committing must be separate invocations, so a failed add cannot
+    // suppress the commit, and a failed commit cannot be mistaken for a failed push.
+    expect(commitScript).toContain("execSync('git commit' + identity");
+  });
+});
+
+describe('ProcessAITicket gates publication on the commit it actually made (D1c)', () => {
+  const capture = scriptOf('captureReview');
+  const publishable = scriptOf('readPublishable');
+  const readiness = scriptOf('readPublishReadiness');
+  const commitScript = scriptOf('commitChanges');
+
+  /** The steps of the publish branch, in declaration order. */
+  const outcomeThenSteps = (): any[] => ((byId('outcome').config?.thenSteps || []) as any[]);
+
+  const decisionOf = (dir: string): any =>
+    JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'publish-decision.json'), 'utf8'));
+  const readinessOf = (dir: string): any =>
+    JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'publish-readiness.json'), 'utf8'));
+
+  /**
+   * The real production precondition, which no fixture modelled before: a run that has
+   * been reviewed and approved while the engineer's work is still UNCOMMITTED. The
+   * engineer is instructed never to commit; commitChanges is what commits.
+   */
+  const repoWithUncommittedApprovedWork = (baseBranch: string = 'master'): string => {
+    const dir = tempDir('pa-preseq-');
+    initRepo(dir, baseBranch);
+    fs.writeFileSync(path.join(dir, '.gitignore'), ['.ai-agent/', ''].join('\n'), 'utf8');
+    sh('git add -A && git commit -qm "ignore run artefacts"', dir);
+    sh('git checkout -q -b feature/test', dir);
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'src', 'real-work.ts'), 'export const x = 1;\n', 'utf8');
+    writeReport(dir, { status: 'completed', summary: 'Did the work.' });
+    writeReview(dir, { verdict: 'approved', summary: 'looks right', findings: [] });
+    runJson(capture, { WT: dir }, dir);
+    return dir;
+  };
+
+  it('still publishes when the work is uncommitted at the publish decision (W4 sequence)', () => {
+    const dir = repoWithUncommittedApprovedWork();
+    try {
+      // This is the state the workflow is really in when it decides: zero commits ahead
+      // of base, because the commit step has not run yet.
+      expect(sh('git rev-list --count master..HEAD', dir)).toBe('0');
+
+      // 1. The review decision must NOT read git state here. An earlier revision gated
+      //    on commitCount in this step and classified every normal run as 'no commits',
+      //    so nothing was ever published.
+      expect(runScript(publishable, { WT: dir }, dir)).toBe('true');
+      expect(decisionOf(dir).outcome).toBe('approved');
+
+      // 2. The commit step then does its job.
+      const committed = runJson(commitScript, { WT: dir, REF: 'REF-1' }, dir);
+      expect(committed.committed).toBe(true);
+      expect(sh('git rev-list --count master..HEAD', dir)).toBe('1');
+
+      // 3. Only now is git asked whether there is something to publish.
+      expect(runScript(readiness, { WT: dir, BRANCH: 'feature/test', COMMIT: JSON.stringify(committed) }, dir)).toBe('ok');
+      expect(readinessOf(dir).commitsAhead).toBe(1);
+      expect(readinessOf(dir).state).toBe('ok');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('runs the readiness gate after the commit, never before it', () => {
+    // The ordering IS the fix, so assert it structurally rather than by prose.
+    const publishBranch = outcomeThenSteps();
+    const ids = publishBranch.map((step: any) => step.id);
+    expect(ids).toContain('commitChanges');
+    expect(ids.indexOf('commitChanges')).toBeLessThan(ids.indexOf('readPublishReadiness'));
+    expect(ids.indexOf('readPublishReadiness')).toBeLessThan(ids.indexOf('publishReadinessGate'));
+    expect(ids.indexOf('publishReadinessGate')).toBeLessThan(ids.indexOf('pushBranch'));
+    // ...and the review decision happens before the publish branch, so it cannot see the
+    // commit. It therefore must not consult commitCount at all.
+    expect(scriptOf('readPublishable')).not.toContain('commitCount');
+    expect(scriptOf('readPublishable')).not.toContain('rev-list');
+    expect(String(byId('outcome').config?.condition)).toBe("variables.publishable === 'true'");
+  });
+
+  it('blocks the publish path on a genuine commit failure, naming the worktree', () => {
+    const dir = tempDir('pa-ready-fail-');
+    try {
+      initRepo(dir);
+      sh('git checkout -q -b feature/test', dir);
+      fs.writeFileSync(path.join(dir, 'work.ts'), 'export const x = 1;\n', 'utf8');
+      const hook = path.join(dir, '.git', 'hooks', 'pre-commit');
+      fs.writeFileSync(hook, ['#!/bin/sh', 'exit 1', ''].join('\n'), 'utf8');
+      fs.chmodSync(hook, 0o755);
+
+      let failure: any = null;
+      try {
+        runScript(commitScript, { WT: dir, REF: 'REF-1' }, dir);
+      } catch (e) {
+        failure = e;
+      }
+      expect(failure).not.toBeNull();
+
+      const state = runScript(readiness, { WT: dir, BRANCH: 'feature/test', COMMIT: String(failure.stdout) }, dir);
+      expect(state).toBe('blocked');
+
+      const evidence = readinessOf(dir);
+      expect(evidence.state).toBe('blocked');
+      expect(evidence.committed).toBe(false);
+      // A failed commit is the ONLY case allowed to tell a human to recover the worktree.
+      expect(evidence.detail).toContain('FAILED');
+      expect(evidence.detail).toContain(dir);
+      expect(evidence.detail).toContain('Recover it before the worktree is cleaned up');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('says there was nothing to publish when the commit step found a clean worktree', () => {
+    const dir = tempDir('pa-ready-clean-');
+    try {
+      initRepo(dir);
+      fs.writeFileSync(path.join(dir, '.gitignore'), ['.ai-agent/', ''].join('\n'), 'utf8');
+      sh('git add -A && git commit -qm "ignore run artefacts"', dir);
+      sh('git checkout -q -b feature/test', dir);
+      writeReport(dir, { status: 'completed', summary: 'no work' });
+
+      const committed = runJson(commitScript, { WT: dir, REF: 'REF-1' }, dir);
+      expect(committed.reason).toBe('worktree clean');
+
+      expect(runScript(readiness, { WT: dir, BRANCH: 'feature/test', COMMIT: JSON.stringify(committed) }, dir)).toBe('blocked');
+
+      const evidence = readinessOf(dir);
+      expect(evidence.detail).toContain('There was nothing to publish');
+      // Q2: the recovery instruction must not appear when no commit was ever attempted.
+      expect(evidence.detail).not.toContain('Recover it');
+      expect(evidence.detail).not.toContain('FAILED');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('resolves a non-main default branch instead of reading it as zero commits (Q3)', () => {
+    const dir = repoWithUncommittedApprovedWork('develop');
+    try {
+      const committed = runJson(commitScript, { WT: dir, REF: 'REF-1' }, dir);
+      expect(committed.committed).toBe(true);
+
+      // Before the fix the base fell back to 'master', rev-list failed, and the failure
+      // was read as 'no commits'. The candidate list is now verified, not assumed.
+      expect(runScript(readiness, { WT: dir, BRANCH: 'feature/test', COMMIT: JSON.stringify(committed) }, dir)).toBe('ok');
+      const evidence = readinessOf(dir);
+      expect(evidence.base).toBe('develop');
+      expect(evidence.baseResolved).toBe(true);
+      expect(evidence.commitsAhead).toBe(1);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('fails open when the base branch cannot be resolved at all (Q3)', () => {
+    const dir = tempDir('pa-ready-nobase-');
+    try {
+      initRepo(dir, 'work');
+      sh('git checkout -q -b feature/test', dir);
+      fs.writeFileSync(path.join(dir, 'work.ts'), 'x\n', 'utf8');
+      sh('git add -A && git commit -qm work', dir);
+
+      // No origin/HEAD, no gh, and 'work' is not one of the conventional names.
+      const state = runScript(
+        readiness,
+        { WT: dir, BRANCH: 'feature/test', COMMIT: JSON.stringify({ committed: true, sha: 'deadbeef' }) },
+        dir,
+      );
+      expect(state).toBe('ok');
+      const evidence = readinessOf(dir);
+      expect(evidence.baseResolved).toBe(false);
+      expect(evidence.commitsAhead).toBeNull();
+      // An unknown base must never be reported as a zero-commit branch.
+      expect(evidence.detail).toContain('could not be resolved');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
+
+describe('ProcessAITicket workspace note describes its own change (D2 follow-up)', () => {
+  const noteScript = scriptOf('openWorkspaceNote');
+
+  const noteSetup = (dir: string, data: string): Record<string, string> => {
+    fs.mkdirSync(path.join(data, 'profiles', 'reactor', 'personas', 'FixturePersona'), { recursive: true });
+    return {
+      WT: dir,
+      REACTORY_DATA: data,
+      REF: 'REACTORY-302016408/20261021/3847124067',
+      TICKET_ID: 'fixture-ticket-id',
+      REPO: dir,
+      BRANCH: 'feature/test',
+      PERSONA: 'FixturePersona',
+    };
+  };
+
+  it('never lists the previous commit when the branch has no commits of its own', () => {
+    const dir = tempDir('pa-note-nocommit-');
+    const data = tempDir('pa-note-data-');
+    try {
+      initRepo(dir);
+      // Unrelated work from the previous ticket: the old historical-diff fallback
+      // listed this file for a branch that had no commits of its own.
+      fs.writeFileSync(path.join(dir, 'previous-work.ts'), 'export const previous = true;\n', 'utf8');
+      sh('git add -A && git commit -qm "previous merge"', dir);
+      sh('git checkout -q -b feature/test', dir);
+      writeReport(dir, { status: 'completed', summary: 'Did the work.' });
+
+      const env = noteSetup(dir, data);
+      runJson(noteScript, Object.assign({ MODE: 'open' }, env), dir);
+      runJson(noteScript, Object.assign({ MODE: 'close', PR_URL: 'https://example.test/pr/1', CYCLES: '1' }, env), dir);
+
+      const complete = path.join(
+        data, 'profiles', 'reactor', 'personas', 'FixturePersona', 'workspace', 'complete',
+        'reactory-302016408-20261021-3847124067.md',
+      );
+      const text = fs.readFileSync(complete, 'utf8');
+
+      expect(text).not.toContain('previous-work.ts');
+      expect(text).toContain('No commits exist on branch feature/test ahead of master');
+      // Stated once, not once per code path.
+      expect(text.split('No commits exist on branch').length - 1).toBe(1);
+      // The fallback must not exist in the script at all.
+      expect(noteScript).not.toContain('HEAD~1');
+    } finally {
+      removeDir(dir);
+      removeDir(data);
+    }
+  });
+
+  it('still lists the branch diff when the branch does have commits', () => {
+    const dir = repoWithWork();
+    const data = tempDir('pa-note-data-');
+    try {
+      writeReport(dir, { status: 'completed', summary: 'Did the work.' });
+      const env = noteSetup(dir, data);
+      runJson(noteScript, Object.assign({ MODE: 'open' }, env), dir);
+      runJson(noteScript, Object.assign({ MODE: 'close', PR_URL: 'https://example.test/pr/1', CYCLES: '1' }, env), dir);
+
+      const complete = path.join(
+        data, 'profiles', 'reactor', 'personas', 'FixturePersona', 'workspace', 'complete',
+        'reactory-302016408-20261021-3847124067.md',
+      );
+      const text = fs.readFileSync(complete, 'utf8');
+
+      expect(text).toContain('src/modules/fixture/index.ts');
+      expect(text).not.toContain('No commits exist on branch');
+    } finally {
+      removeDir(dir);
+      removeDir(data);
+    }
   });
 });
