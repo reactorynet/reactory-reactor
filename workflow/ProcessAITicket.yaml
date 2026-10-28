@@ -4229,7 +4229,12 @@ steps:
                             }).filter(Boolean)));
 
                             // --- report content --------------------------------------------------------
-                            const summaryValue = keyOf(report, ['summary']) != null ? keyOf(report, ['summary']) : keyOf(runStatus, ['summary']);
+                            // A revision report names its summary `revision_2_summary`, not `summary`.
+                            // Two merged pull requests carried "No summary field supplied" while the
+                            // report held a full paragraph under that key - the same silent degradation
+                            // of a richer report that this generator exists to stop.
+                            const SUMMARY_KEYS = ['summary', 'revision_2_summary', 'revisionSummary', 'revision_summary', 'summaryOfChanges'];
+                            const summaryValue = keyOf(report, SUMMARY_KEYS) != null ? keyOf(report, SUMMARY_KEYS) : keyOf(runStatus, SUMMARY_KEYS);
 
                             // >>> shared findings rendering (byte-identical in captureReview,
                             // handBackBriefing and createPullRequest — pinned by a test; do not fork it.
@@ -4469,21 +4474,42 @@ steps:
                               }
                               return '';
                             };
+                            // A criterion's verdict. The order of these steps is the whole point:
+                            //  1. normalise separators first. 'not_met', 'NOT-MET' and 'not met' are
+                            //     ONE verdict, and the underscore form is what archived reports use;
+                            //  2. test NEGATION before any positive token, so 'not satisfied' can never
+                            //     reach a /satisfied/ branch. That bug reported an explicitly unmet
+                            //     criterion as "Met", which is worse than omitting it: it tells the
+                            //     approver the opposite of what the engineer recorded;
+                            //  3. 'partially' is its own state - neither Met nor silently dropped.
+                            const NEGATED_VERDICT = /\b(not|never|cannot|isn't|wasn't|doesn't|didn't)\s+(met|satisfied|done|complete|completed|passing|passed|executed|verified|achieved)\b/;
                             const metState = (value) => {
-                              const state = asText(value).toLowerCase();
-                              if (!state) return '';
-                              if (/^(met|pass|passed|passing|done|complete|completed|satisfied|ok|yes|true|green|delivered)\b/.test(state)) return 'Met';
-                              if (/^(unmet|notmet|fail|failed|failing|incomplete|todo|pending|open|missing|partial|no|false|outstanding)\b/.test(state)) return 'Unmet';
-                              if (/\b(not met|unmet|failed|incomplete|outstanding)\b/.test(state)) return 'Unmet';
-                              if (/\b(met|satisfied|passing|passed)\b/.test(state)) return 'Met';
+                              const raw = asText(value).toLowerCase();
+                              if (!raw) return '';
+                              const flat = raw.replace(/[^a-z0-9]+/g, ' ').trim();
+                              if (!flat) return '';
+                              if (NEGATED_VERDICT.test(flat)) return 'Unmet';
+                              if (/^(unmet|notmet|unsatisfied|incomplete|blocked|skipped|deferred|outstanding|todo|pending|missing)\b/.test(flat)) return 'Unmet';
+                              if (/^partial(ly)?\b/.test(flat)) return 'Partial';
+                              if (/^(met|pass|passed|passing|done|complete|completed|satisfied|ok|yes|true|green|delivered|verified)\b/.test(flat)) return 'Met';
+                              if (/^(fail|failed|failing|no|false|open)\b/.test(flat)) return 'Unmet';
                               return '';
+                            };
+                            // Only a LEADING verdict may be inferred from prose, and only the first few
+                            // words of it. Scanning a whole paragraph is what turned the W1 evidence
+                            // "This criterion is NOT satisfied" into a false "Met".
+                            const leadVerdict = (value) => {
+                              const lead = asText(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(' ').slice(0, 4).join(' ');
+                              return lead ? metState(lead) : '';
                             };
                             const criterionRows = [];
                             const addCriterion = (label, statusValue, detailValue) => {
                               const labelText = asText(label);
                               const statusText = asText(statusValue);
                               let detail = asText(detailValue);
-                              const state = metState(statusText) || metState(detail);
+                              // The recorded status wins. Prose is only consulted when there is no
+                              // status at all, and then only its leading verdict counts.
+                              const state = metState(statusText) || leadVerdict(detail);
                               if (state && detail) {
                                 // "Met. 3 tests added ..." becomes "3 tests added ...": the status is already
                                 // printed on the bullet, and repeating it wastes the reviewer's attention.
@@ -4544,16 +4570,24 @@ steps:
                             addCriterionEntry(criteriaSource, '');
                             const criteriaLines = criterionRows.map((row) => {
                               const status = row.state || row.status || 'status not recorded';
-                              const shown = row.state === 'Unmet' ? '**Unmet**' : status;
+                              const shown = row.state === 'Unmet'
+                                ? '**Unmet**'
+                                : (row.state === 'Partial' ? '**Partially met**' : status);
                               const out = [row.label ? '- **' + row.label + '** — ' + shown : '- ' + shown];
                               if (row.detail) row.detail.split('\n').forEach((line) => { if (line.trim()) out.push('  ' + line.trim()); });
                               return out.join('\n');
                             });
                             const criteriaMet = criterionRows.filter((row) => row.state === 'Met').length;
                             const criteriaUnmet = criterionRows.filter((row) => row.state === 'Unmet').length;
-                            const criteriaUnknown = criterionRows.length - criteriaMet - criteriaUnmet;
+                            const criteriaPartial = criterionRows.filter((row) => row.state === 'Partial').length;
+                            const criteriaUnknown = criterionRows.length - criteriaMet - criteriaUnmet - criteriaPartial;
+                            // The tally must never be able to say "0 unmet" while a criterion is not
+                            // met: that is the one number a human approver reads.
                             const criteriaSummary = criterionRows.length
-                              ? '_Acceptance criteria: ' + criteriaMet + ' met, ' + criteriaUnmet + ' unmet' + (criteriaUnknown ? ', ' + criteriaUnknown + ' without a recorded status' : '') + ' (of ' + criterionRows.length + '). Only a human can confirm these._'
+                              ? '_Acceptance criteria: ' + criteriaMet + ' met, ' + criteriaUnmet + ' unmet'
+                                + (criteriaPartial ? ', ' + criteriaPartial + ' partially met' : '')
+                                + (criteriaUnknown ? ', ' + criteriaUnknown + ' without a recorded status' : '')
+                                + ' (of ' + criterionRows.length + '). Only a human can confirm these._'
                               : '';
 
 
@@ -4670,6 +4704,17 @@ steps:
                                 return bullets.join('\n') + '\n\n' + withoutPlaceholders + (commitCount ? '' : '\n\n> ' + noCommitNote);
                               },
 
+                              risks: (body) => {
+                                // Without this handler a repository template with a "## Risks" heading
+                                // kept its placeholder text and the report's risks never reached the
+                                // body at all - the field this whole ticket is about.
+                                const withoutPlaceholders = body.split('\n').filter((line) => !/^\s*-\s*$/.test(line)).join('\n');
+                                const bullets = risks.length
+                                  ? bulletise(risks)
+                                  : ['- _No risks were recorded by the engineer._'];
+                                return bullets.join('\n') + '\n\n' + withoutPlaceholders;
+                              },
+
                               howwasthistested: (body) => {
                                 const has = (pattern) => tests.some((entry) => pattern.test(entry.command));
                                 let out = applyTicks(body, [
@@ -4778,7 +4823,11 @@ steps:
                                 }
                                 return section.heading + '\n\n' + tidy(body);
                               });
-                              return { body: rendered.join('\n\n'), warnings: warnings };
+                              return {
+                                body: rendered.join('\n\n'),
+                                warnings: warnings,
+                                headings: parsed.sections.map((section) => headingSlug(section.heading)),
+                              };
                             };
 
                             // --- legacy body (fail-soft path) -----------------------------------------
@@ -4834,6 +4883,7 @@ steps:
                             let templateUsed = false;
                             let templatePath = '';
                             let body = '';
+                            let templateHeadings = [];
 
                             const templateFile = findTemplate();
                             if (templateFile) {
@@ -4841,6 +4891,7 @@ steps:
                               try {
                                 const rendered = renderTemplate(fs.readFileSync(templateFile, 'utf8'));
                                 body = rendered.body;
+                                templateHeadings = rendered.headings || [];
                                 rendered.warnings.forEach((warning) => warnings.push(warning));
                                 if (!/^##\s+\S/m.test(body)) throw new Error('rendered body lost every level-2 heading');
                                 templateUsed = true;
@@ -4853,11 +4904,24 @@ steps:
                             }
 
                             // Sections the repository template has no heading for. They are appended
-                            // rather than dropped: a reviewer must see the follow-ups and the
-                            // acceptance criteria even when the template predates them.
+                            // rather than dropped: a reviewer must see the risks, the evidence, the
+                            // follow-ups and the criteria even when the template predates them. Each
+                            // one is gated on the template ACTUALLY lacking that heading, so a template
+                            // that has one gets the handler output and not a duplicate.
+                            const hasHeading = (slug) => templateHeadings.indexOf(slug) !== -1;
                             const appendices = [];
-                            if (followUps.length) appendices.push('### Follow-ups\n\n' + bulletise(followUps).join('\n'));
-                            if (criteriaLines.length) appendices.push('### Acceptance criteria\n\n' + (criteriaSummary ? criteriaSummary + '\n\n' : '') + criteriaLines.join('\n'));
+                            if (risks.length && !hasHeading('risks')) {
+                              appendices.push('### Risks\n\n' + bulletise(risks).join('\n'));
+                            }
+                            if (verificationLines.length && !hasHeading('howwasthistested') && !hasHeading('verification') && !hasHeading('testing')) {
+                              appendices.push('### Verification\n\n' + verificationLines.join('\n'));
+                            }
+                            if (followUps.length && !hasHeading('followups')) {
+                              appendices.push('### Follow-ups\n\n' + bulletise(followUps).join('\n'));
+                            }
+                            if (criteriaLines.length && !hasHeading('acceptancecriteria')) {
+                              appendices.push('### Acceptance criteria\n\n' + (criteriaSummary ? criteriaSummary + '\n\n' : '') + criteriaLines.join('\n'));
+                            }
 
                             if (!templateUsed) {
                               body = legacyBody() + '\n\n> **PR template not applied:** ' + warnings.join('; ');

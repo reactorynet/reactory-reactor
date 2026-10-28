@@ -2225,6 +2225,201 @@ describe('ProcessAITicket PR body renders the engineer report losslessly', () =>
     }
   });
 
+  it('reads an explicitly unmet criterion as Unmet in every spelling the reports use', () => {
+    const dir = repoWithWork();
+    try {
+      // The archived W1 report records `status: "not_met"`; W3 records
+      // `"not_executed_blocked"`. Neither form means met, and 'not satisfied' must never
+      // reach a /\bsatisfied\b/ branch: a false Met is worse than an omission, because it
+      // tells the approver the opposite of what the engineer recorded.
+      // Unmet and partially-met are bolded; a plain Met is not. Either way the rendered
+      // verdict must be the one the engineer recorded.
+      const CASES: Array<[string, string]> = [
+        ['not_met', '**Unmet**'],
+        ['NOT_MET', '**Unmet**'],
+        ['NOT-MET', '**Unmet**'],
+        ['not met', '**Unmet**'],
+        ['not-satisfied', '**Unmet**'],
+        ['not satisfied', '**Unmet**'],
+        ['not_executed_blocked', '**Unmet**'],
+        ['unmet', '**Unmet**'],
+        ['fail', '**Unmet**'],
+        ['partially met', '**Partially met**'],
+        ['met', 'Met'],
+        ['passed', 'Met'],
+      ];
+
+      for (const [status, expected] of CASES) {
+        writeReport(dir, {
+          status: 'completed',
+          summary: 'Did the work.',
+          acceptanceCriteria: [{ criterion: 'the criterion under test', status, evidence: 'some evidence' }],
+        });
+        const { body } = runCreate(dir);
+        const criteria = sectionOf(body, '### Acceptance criteria');
+        expect(criteria).toContain('the criterion under test** — ' + expected);
+      }
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('never infers Met from negated evidence prose', () => {
+    const dir = repoWithWork();
+    try {
+      // The exact W1 shape: status "not_met" plus an evidence paragraph whose last
+      // sentence reads "This criterion is NOT satisfied". The old renderer matched the
+      // word "satisfied" inside that sentence and printed Met underneath it.
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        acceptanceCriteria: [
+          {
+            criterion: 'tsc reports 0 errors for types/, services/, services/providers/, workflows/',
+            status: 'not_met',
+            evidence: 'types/ 0, workflows/ 0, services/providers/ 1 (SMTPProvider TS7016 nodemailer typings), services/ 28. '
+              + 'Every one is pre-existing and outside W1. This criterion is NOT satisfied; it needs those work packages, not a W1 change.',
+          },
+        ],
+      });
+
+      const { body } = runCreate(dir);
+      const criteria = sectionOf(body, '### Acceptance criteria');
+
+      expect(criteria).toContain('**Unmet**');
+      expect(criteria).not.toMatch(/— Met\b/);
+      // The tally is the number an approver actually reads.
+      expect(criteria).toContain('0 met, 1 unmet');
+      expect(criteria).not.toContain('0 unmet');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('leaves prose with no leading verdict as "status not recorded" rather than guessing', () => {
+    const dir = repoWithWork();
+    try {
+      // No status field at all. The evidence mentions both satisfaction and failure in
+      // passing; neither may be promoted to a verdict.
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        acceptanceCriteria: [
+          { criterion: 'audit the rate limiter', evidence: 'types/ 0, workflows/ 0; this criterion is NOT satisfied yet.' },
+        ],
+      });
+
+      const { body } = runCreate(dir);
+      const criteria = sectionOf(body, '### Acceptance criteria');
+
+      expect(criteria).not.toMatch(/— Met\b/);
+      expect(criteria).toContain('status not recorded');
+      expect(criteria).toContain('1 without a recorded status');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('renders risks under a template Risks heading instead of leaving the placeholder', () => {
+    const dir = repoWithWork();
+    try {
+      fs.mkdirSync(path.join(dir, '.github'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.github', 'pull_request_template.md'),
+        ['## Summary', '', '## Risks', '', '-', '', '## How was this tested?', '', '**Result:**', ''].join('\n'),
+        'utf8',
+      );
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        risks: ['Provider contract may drift', { risk: 'Retry storm', detail: 'no backoff cap' }],
+      });
+
+      const { result, body } = runCreate(dir);
+
+      expect(result.templateUsed).toBe(true);
+      // The template's own heading is reused - not duplicated by an appendix.
+      expect(body.split('## Risks').length - 1).toBe(1);
+      const risks = sectionOf(body, '## Risks');
+      expect(risks).toContain('Provider contract may drift');
+      expect(risks).toContain('Retry storm');
+      expect(risks).not.toMatch(/^\s*-\s*$/m);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('appends Risks when the template has no heading for them', () => {
+    const dir = repoWithWork();
+    try {
+      fs.mkdirSync(path.join(dir, '.github'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.github', 'pull_request_template.md'),
+        ['## Summary', '', '- **Reviewer focus:**', ''].join('\n'),
+        'utf8',
+      );
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        risks: ['Provider contract may drift'],
+        verification: { baseline: { command: 'npx jest', result: 'passed' } },
+      });
+
+      const { body } = runCreate(dir);
+
+      // No risks heading, no "How was this tested?" heading: both are appended, so the
+      // report content cannot vanish behind a template.
+      expect(sectionOf(body, '### Risks')).toContain('Provider contract may drift');
+      expect(sectionOf(body, '### Verification')).toContain('npx jest');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('does not duplicate Verification when the template already carries the evidence', () => {
+    const dir = repoWithWork();
+    try {
+      fs.mkdirSync(path.join(dir, '.github'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.github', 'pull_request_template.md'),
+        ['## Summary', '', '## How was this tested?', '', '**Result:**', ''].join('\n'),
+        'utf8',
+      );
+      writeReport(dir, {
+        status: 'completed',
+        summary: 'Did the work.',
+        verification: { baseline: { command: 'npx jest pipeline', result: 'passed' } },
+      });
+
+      const { body } = runCreate(dir);
+
+      expect(body.split('npx jest pipeline').length - 1).toBe(1);
+      expect(body).not.toContain('### Verification');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('uses a revision summary when the report has no plain `summary` field', () => {
+    const dir = repoWithWork();
+    try {
+      // Both merged W1 and W3 bodies read "No summary field supplied" while the report
+      // held a full paragraph under revision_2_summary.
+      writeReport(dir, {
+        status: 'completed',
+        revision_2_summary: 'Both blocking defects are fixed and each was proven by mutation.',
+        risks: ['one risk'],
+      });
+
+      const { body } = runCreate(dir);
+
+      expect(sectionOf(body, '### Summary')).toContain('Both blocking defects are fixed');
+      expect(body).not.toContain('No summary supplied by the engineer.');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
   it('routes the PR body through the shared renderer rather than a third variant', () => {
     // The class guard: a blind `String()` in this script is how every defect here
     // started, and `HEAD~1..HEAD` is how the file list went wrong.
