@@ -183,13 +183,16 @@ describe('core.ProcessAITicket ticket status transitions', () => {
 });
 
 describe('core.ProcessAITicket publish and merge flow', () => {
-  it('commits, pushes and opens a pull request in that order', () => {
-    expect(indexOf('commitChanges')).toBeLessThan(indexOf('pushBranch'));
+  it('commits, gates on the commit, pushes and opens a pull request in that order', () => {
+    expect(indexOf('commitChanges')).toBeLessThan(indexOf('readPublishReadiness'));
+    // The readiness gate sits between the commit and the push: it is the only point at
+    // which git can answer "is there a commit to publish?".
+    expect(indexOf('readPublishReadiness')).toBeLessThan(indexOf('publishReadinessGate'));
+    expect(indexOf('publishReadinessGate')).toBeLessThan(indexOf('pushBranch'));
     expect(indexOf('pushBranch')).toBeLessThan(indexOf('createPullRequest'));
     expect(byId('pushBranch').config.args[1]).toContain('git push --set-upstream origin');
     expect(byId('createPullRequest').config.args[1]).toContain('gh pr create');
   });
-
   it('keeps the engineer agent from pushing', () => {
     const rules = String(byId('engineer').config.instructions);
     expect(rules).toMatch(/never commit, never push/i);
@@ -236,8 +239,28 @@ describe('core.ProcessAITicket publish and merge flow', () => {
     expect(comment).toContain('stays in_progress');
   });
 
-  it('reports a publish failure instead of aborting the run', () => {
-    expect(byId('commitChanges').config.failOnError).toBe(false);
+  it('keeps the commit soft and hard-stops the publish path after it', () => {
+    // Two deliberately separate guarantees. The COMMIT step is soft, because a fatal step
+    // terminates the instance with no ticket comment, no human task and a non-terminal
+    // runStatus - a pinned run, which is the failure this ticket exists to remove.
+    const commit = byId('commitChanges').config;
+    // Assert the key is written explicitly; CliCommandStep treats anything but an exact
+    // `false` as fatal, so a value-only assertion would pass either way.
+    expect('failOnError' in commit).toBe(true);
+    expect(commit.failOnError).toBe(false);
+
+    // The publish path is still hard-stopped, but only after the comment, the human task
+    // and the terminal runStatus are in place.
+    expect(byId('publishReadinessGate').type).toBe('condition');
+    expect((byId('pushBranch') as any).dependsOn).toBe('publishReadinessGate');
+    expect('failOnError' in byId('publishBlockHalt').config).toBe(true);
+    expect(byId('publishBlockHalt').config.failOnError).toBe(true);
+    expect(byId('publishBlockComment').type).toBe('service_invoke');
+    expect(byId('publishBlockTask').type).toBe('user_activity');
+    expect(byId('setRunStatusPublishBlocked').config.value).toBe('blocked');
+
+    // Talking to GitHub stays soft, so a failed push or PR still ends with a comment and
+    // a human task instead of a dead instance.
     expect(byId('pushBranch').config.failOnError).toBe(false);
     expect(byId('createPullRequest').config.failOnError).toBe(false);
     expect(byId('publishFailedTask').type).toBe('user_activity');
@@ -246,12 +269,14 @@ describe('core.ProcessAITicket publish and merge flow', () => {
 
 describe('core.ProcessAITicket commit hygiene', () => {
   it('keeps the run internals out of the commit', () => {
-    // .ai-agent/ holds report.json and review.json. No target repository
-    // gitignores it, so a bare 'git add -A' would publish them in the PR -
-    // and an agent that only wrote a report would look dirty and yield an
-    // empty commit.
+    // .ai-agent/ holds report.json and review.json. The step stages with a plain
+    // 'git add -A' and then unstages the artefacts: a negative pathspec on the add
+    // makes git fail on an ignored path (the W4/W9b data loss), while the rm
+    // --cached works whether or not the repository ignores the directory.
     const script = String(byId('commitChanges').config.args[1]);
-    expect(script).toContain(':(exclude).ai-agent');
+    expect(script).toContain("run('git add -A')");
+    expect(script).toContain('git rm -r --cached --quiet --ignore-unmatch -- .ai-agent');
+    expect(script).not.toContain("execSync('git add -A -- . ");
     expect(script).not.toContain("execSync('git add -A && git commit'");
   });
 
