@@ -2695,8 +2695,9 @@ steps:
                               }
                               return undefined;
                             };
-                            // >>> shared findings rendering (byte-identical in captureReport,
-                            // captureReview and handBackBriefing — pinned by a test; do not fork it)
+                            // >>> shared findings rendering (byte-identical in captureReview,
+                            // handBackBriefing and createPullRequest — pinned by a test; do not fork it.
+                            // captureReport shares asText/asList with this block but has no renderItem.)
                             //
                             // Every rendering defect in this workflow came from `String()` on a list
                             // item. An object coerces to "[object Object]", so the finding was DESTROYED
@@ -2940,8 +2941,9 @@ steps:
                             let review = {};
                             try { review = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { review = {}; }
 
-                            // >>> shared findings rendering (byte-identical in captureReport,
-                            // captureReview and handBackBriefing — pinned by a test; do not fork it)
+                            // >>> shared findings rendering (byte-identical in captureReview,
+                            // handBackBriefing and createPullRequest — pinned by a test; do not fork it.
+                            // captureReport shares asText/asList with this block but has no renderItem.)
                             //
                             // Every rendering defect in this workflow came from `String()` on a list
                             // item. An object coerces to "[object Object]", so the finding was DESTROYED
@@ -4177,18 +4179,25 @@ steps:
                             };
 
                             // --- diff evidence ---------------------------------------------------------
+                            // The branch is the only source of truth for what changed. The old list
+                            // ended with a "last resort" historical diff, which on a branch with
+                            // no commits of its own returned the PREVIOUS commit's files: PR #12
+                            // listed 15 of 16 files that belonged to an unrelated merge. History is
+                            // never a substitute for the branch diff, so that fallback is gone and a
+                            // branch with no commits says exactly that.
+                            const commitCount = Number(tryRun('git rev-list --count origin/' + base + '..HEAD') || tryRun('git rev-list --count ' + base + '..HEAD')) || 0;
                             const diffCommands = [
                               'git diff --name-only origin/' + base + '...HEAD',
                               'git diff --name-only ' + base + '...HEAD',
-                              'git diff --name-only HEAD~1..HEAD',
                             ];
                             let changedFiles = [];
-                            for (let i = 0; i < diffCommands.length; i += 1) {
-                              const value = tryRun(diffCommands[i]);
-                              if (value) { changedFiles = value.split('\n').map((s) => s.trim()).filter(Boolean); break; }
+                            if (commitCount > 0) {
+                              for (let i = 0; i < diffCommands.length; i += 1) {
+                                const value = tryRun(diffCommands[i]);
+                                if (value) { changedFiles = value.split('\n').map((s) => s.trim()).filter(Boolean); break; }
+                              }
                             }
                             const diffText = (tryRun('git diff origin/' + base + '...HEAD') || tryRun('git diff ' + base + '...HEAD') || '').slice(0, 400000);
-                            const commitCount = Number(tryRun('git rev-list --count origin/' + base + '..HEAD') || tryRun('git rev-list --count ' + base + '..HEAD')) || 0;
                             const commitSubject = tryRun('git log -1 --pretty=%s');
                             const submodulePointers = tryRun('git diff --raw origin/' + base + '...HEAD')
                               .split('\n')
@@ -4220,38 +4229,333 @@ steps:
                             }).filter(Boolean)));
 
                             // --- report content --------------------------------------------------------
-                            const summaryText = text(report.summary) || text(runStatus.summary) || 'No summary supplied by the engineer.';
-                            const risks = list(keyOf(report, ['risks', 'risk'])).map((r) => String(r));
-                            const followUps = list(keyOf(report, ['followUps', 'follow_ups'])).map((r) => String(r));
+                            const summaryValue = keyOf(report, ['summary']) != null ? keyOf(report, ['summary']) : keyOf(runStatus, ['summary']);
+
+                            // >>> shared findings rendering (byte-identical in captureReview,
+                            // handBackBriefing and createPullRequest — pinned by a test; do not fork it.
+                            // captureReport shares asText/asList with this block but has no renderItem.)
+                            //
+                            // Every rendering defect in this workflow came from `String()` on a list
+                            // item. An object coerces to "[object Object]", so the finding was DESTROYED
+                            // when written to review-normalised.json, and because every object produced
+                            // that same string, every finding collapsed onto one dedupe key.
+                            // `asText` JSON.stringifies an object instead of coercing it: lossless.
+                            const asText = (v) => {
+                              if (v == null) return '';
+                              if (typeof v === 'string') return v.trim();
+                              if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+                              if (Array.isArray(v)) return v.map(asText).filter(Boolean).join('\n');
+                              try { return JSON.stringify(v); } catch (e) { return ''; }
+                            };
+                            const asList = (v) => {
+                              if (v == null) return [];
+                              if (Array.isArray(v)) return v.filter((x) => x != null);
+                              if (typeof v === 'string') return v.trim() ? [v.trim()] : [];
+                              if (typeof v === 'object') return Object.keys(v).length ? [v] : [];
+                              return [];
+                            };
+                            // Render one review entry as text without dropping a field. A reviewer's
+                            // finding is an object, so {id, severity, title, detail} reads as
+                            // "F1 [high] title \u2014 detail"; every field that form does not name is
+                            // appended as "key: value"; anything else falls back to JSON. The same
+                            // function is the dedupe key, so "identical" means identical CONTENT.
+                            const renderKey = (k) => String(k == null ? '' : k).toLowerCase().replace(/[^a-z0-9]/g, '');
+                            const renderItem = (v) => {
+                              if (v == null) return '';
+                              if (typeof v === 'string') return v.trim();
+                              if (typeof v === 'number' || typeof v === 'boolean') return String(v);
+                              if (Array.isArray(v)) return v.map(renderItem).filter(Boolean).join('\n');
+                              if (typeof v !== 'object') return asText(v);
+                              const keys = Object.keys(v);
+                              const used = {};
+                              const take = (names) => {
+                                for (let i = 0; i < names.length; i += 1) {
+                                  for (let j = 0; j < keys.length; j += 1) {
+                                    if (used[keys[j]]) continue;
+                                    if (renderKey(keys[j]) === renderKey(names[i])) {
+                                      used[keys[j]] = true;
+                                      return v[keys[j]];
+                                    }
+                                  }
+                                }
+                                return undefined;
+                              };
+                              const id = take(['id', 'key', 'ref', 'reference']);
+                              const severity = take(['severity', 'level']);
+                              const title = take(['title', 'summary', 'finding', 'issue']);
+                              const detail = take(['detail', 'details', 'description']);
+                              const head = [];
+                              if (asText(id)) head.push(asText(id));
+                              if (asText(severity)) head.push('[' + asText(severity) + ']');
+                              if (asText(title)) head.push(asText(title));
+                              const detailText = asText(detail);
+                              let line = head.join(' ');
+                              if (detailText) line = line ? line + ' \u2014 ' + detailText : detailText;
+                              const rows = keys.filter((k) => !used[k]).map((k) => k + ': ' + asText(v[k]));
+                              return [line].concat(rows).filter((part) => part !== '').join('\n');
+                            };
+                            // <<< shared findings rendering
+
+                            // Every report entry is rendered through the reviewer-path renderer above, which is
+                            // key-name agnostic: {risk}, {risk,detail}, {risk,why}, {detail,risk},
+                            // {id,impact,mitigation,risk} and every other shape the engineers actually emit
+                            // survive intact. The old blind String() cast did not: every object became the
+                            // literal "[object Object]", so the risk was destroyed on write. Six defects came
+                            // from this one blind cast, which is why it must never be reintroduced.
+                            // A risk entry names its headline `risk`, a follow-up `item`, a change `what`.
+                            // The shared renderer puts {title, summary, finding, issue} in the headline slot
+                            // and appends everything else as "key: value". That is lossless, but an entry
+                            // whose only headline-able field is `risk` renders as "risk: ..." (or, when it
+                            // carries an id, as the bare id). Re-slot the headline here rather than changing
+                            // the shared renderer, which the review path depends on verbatim.
+                            const HEADLINE_KEYS = ['risk', 'item', 'action', 'task', 'change', 'what', 'note'];
+                            const entryText = (value) => {
+                              const base = renderItem(value);
+                              if (!value || typeof value !== 'object' || Array.isArray(value)) return base;
+                              const keys = Object.keys(value);
+                              const id = asText(keyOf(value, ['id', 'key', 'ref', 'reference']));
+                              // ALWAYS lead with a domain headline when the object has one. The shared
+                              // renderer consumes `detail` as its detail slot, so {risk, detail} came out
+                              // detail-first with the risk demoted to an indented sub-row - lossless, but
+                              // backwards for a risk, and {risk, detail} is the shape most reports use.
+                              let headKey = '';
+                              for (let i = 0; i < HEADLINE_KEYS.length && !headKey; i += 1) {
+                                for (let j = 0; j < keys.length; j += 1) {
+                                  if (renderKey(keys[j]) === HEADLINE_KEYS[i] && asText(value[keys[j]])) { headKey = keys[j]; break; }
+                                }
+                              }
+                              if (!headKey) return base;
+                              const head = asText(value[headKey]);
+                              const rows = keys
+                                .filter((k) => k !== headKey && renderKey(k) !== 'id' && asText(value[k]))
+                                .map((k) => k + ': ' + asText(value[k]));
+                              return [id ? id + ' — ' + head : head].concat(rows).join('\n');
+                            };
+                            const entries = (value) => asList(value).map(entryText).filter(Boolean);
+                            const renderFailures = [];
+                            // A field is a render failure only when it HAS content that rendered to
+                            // nothing. Testing the output for the "[object Object]" placeholder would
+                            // make the marker fire on a report that legitimately mentions it.
+                            const isEmptyValue = (v) => {
+                              if (v == null) return true;
+                              if (typeof v === 'string') return !v.trim();
+                              if (Array.isArray(v)) return v.filter((x) => x != null).length === 0;
+                              if (typeof v === 'object') return Object.keys(v).length === 0;
+                              return false;
+                            };
+                            const rendered = (field, value, fallback) => {
+                              const out = String(fallback == null ? '' : fallback);
+                              if (out) return out;
+                              if (isEmptyValue(value)) return '';
+                              renderFailures.push(field);
+                              return '_[' + field + ' could not be rendered - see .ai-agent/report.json]_';
+                            };
+                            const bulletise = (values) => values.map((value) => '- ' + value.split('\n').join('\n  '));
+                            const summaryRendered = asList(summaryValue).map(renderItem).filter(Boolean).join('\n');
+                            const summaryText = rendered('summary', summaryValue, summaryRendered) || 'No summary supplied by the engineer.';
+
+                            const risks = entries(keyOf(report, ['risks', 'risk']));
+                            const followUps = entries(keyOf(report, ['followUps', 'follow_ups']));
 
                             const rawChanges = list(keyOf(report, ['changes', 'files', 'fileList']));
                             const changeBullets = [];
+                            let changeSource = 'report';
                             rawChanges.forEach((entry) => {
                               if (typeof entry === 'string') { changeBullets.push('- ' + entry); return; }
                               if (!entry || typeof entry !== 'object') return;
-                              const file = String(keyOf(entry, ['file', 'path', 'filename']) || '').trim();
-                              const description = String(keyOf(entry, ['description', 'summary', 'change', 'what']) || '').trim();
+                              const file = asText(keyOf(entry, ['file', 'path', 'filename']));
+                              const description = asText(keyOf(entry, ['description', 'summary', 'change', 'what']));
                               if (file || description) changeBullets.push('- `' + file + '` ' + description);
                             });
-                            if (!changeBullets.length && changedFiles.length) {
-                              changedFiles.slice(0, 40).forEach((file) => changeBullets.push('- `' + file + '`'));
-                              if (changedFiles.length > 40) changeBullets.push('- … and ' + (changedFiles.length - 40) + ' more file(s)');
+                            // Never infer the change list from history: the removed "last resort" diff
+                            // reported the PREVIOUS commit's files when the branch had no commits of its
+                            // own, which is why PR #12 listed 15 of 16 files that belonged to an unrelated
+                            // merge. A branch with no commits says exactly that instead.
+                            const noCommitNote = '**No commits exist on `' + branch + '` ahead of `' + base + '`, so this branch carries no change of its own.**';
+                            const implementation = rendered('implementation', keyOf(report, ['implementation']), entries(keyOf(report, ['implementation'])).join('\n'));
+                            if (!changeBullets.length) {
+                              if (changedFiles.length) {
+                                changeSource = 'diff';
+                                changedFiles.slice(0, 40).forEach((file) => changeBullets.push('- `' + file + '`'));
+                                if (changedFiles.length > 40) changeBullets.push('- ... and ' + (changedFiles.length - 40) + ' more file(s)');
+                              } else if (implementation) {
+                                changeSource = 'implementation';
+                                changeBullets.push('- ' + implementation.split('\n').join('\n  '));
+                              } else if (commitCount) {
+                                changeBullets.push('- _No change list was recorded by the engineer; review the diff on `' + branch + '` directly._');
+                              } else {
+                                // The no-commit note is emitted once, by the body builder that owns the
+                                // Changes section. Repeating it here printed the same sentence twice.
+                                changeBullets.push('- _No change list was recorded by the engineer._');
+                              }
                             }
-                            const implementation = text(keyOf(report, ['implementation'])) || (list(keyOf(report, ['implementation'])).length ? list(keyOf(report, ['implementation'])).map(String).join('\n') : '');
-                            if (implementation && !changeBullets.length) changeBullets.push('- ' + implementation.split('\n').join('\n  '));
 
                             const tests = list(keyOf(report, ['testsRun', 'tests_run', 'tests'])).map((entry) => {
-                              if (typeof entry === 'string') return { command: entry, result: 'not recorded' };
+                              if (typeof entry === 'string') return { command: entry, result: 'not recorded', output: '' };
                               if (entry && typeof entry === 'object') {
                                 return {
-                                  command: String(keyOf(entry, ['command', 'cmd']) || '').trim(),
-                                  result: String(keyOf(entry, ['result', 'status', 'outcome']) || 'not recorded').trim(),
-                                  output: String(keyOf(entry, ['output', 'stdout', 'detail']) || '').trim(),
+                                  command: asText(keyOf(entry, ['command', 'cmd', 'script', 'suite', 'test'])),
+                                  result: asText(keyOf(entry, ['result', 'status', 'outcome'])) || 'not recorded',
+                                  output: asText(keyOf(entry, ['output', 'stdout', 'detail'])),
                                 };
                               }
                               return null;
                             }).filter((entry) => entry && entry.command);
-                            const verificationText = text(keyOf(report, ['verification', 'evidence', 'howVerified']));
+
+                            // `verification` is the documented alternative to `testsRun`, and engineers supply
+                            // it as a nested object: {baseline: {command, result, note}, delta: {...}}. The old
+                            // `text()` helper returned '' for every non-string, so such a report emitted NO
+                            // Verification section at all - PR #12 went straight from Changes to Risks and the
+                            // evidence of what was actually run was lost.
+                            const verificationLines = [];
+                            const addVerification = (value, label) => {
+                              if (value == null) return;
+                              if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+                                const body = asText(value);
+                                if (!body) return;
+                                verificationLines.push('- ' + (label ? '**' + label + '** — ' : '') + body.split('\n').join('\n  '));
+                                return;
+                              }
+                              if (Array.isArray(value)) {
+                                value.forEach((item, index) => addVerification(item, label ? label + ' ' + (index + 1) : ''));
+                                return;
+                              }
+                              if (typeof value !== 'object') return;
+                              const keys = Object.keys(value);
+                              const command = asText(keyOf(value, ['command', 'cmd', 'script']));
+                              const result = asText(keyOf(value, ['result', 'outcome', 'status']));
+                              const note = asText(keyOf(value, ['note', 'notes', 'detail', 'details', 'output', 'stdout', 'why']));
+                              if (command || result) {
+                                const parts = [];
+                                if (command) parts.push('`' + command.replace(/\s*\n\s*/g, ' ') + '`');
+                                if (result) parts.push((command ? '-> ' : '') + result.replace(/\s*\n\s*/g, ' '));
+                                if (note) parts.push('(' + note.replace(/\s*\n\s*/g, ' ') + ')');
+                                verificationLines.push('- ' + (label ? '**' + label + '** — ' : '') + parts.join(' '));
+                                return;
+                              }
+                              const before = verificationLines.length;
+                              keys.forEach((key) => addVerification(value[key], label ? label + ' / ' + key : key));
+                              if (verificationLines.length === before) {
+                                const fallback = renderItem(value);
+                                if (fallback) verificationLines.push('- ' + (label ? '**' + label + '** — ' : '') + fallback.split('\n').join('\n  '));
+                              }
+                            };
+                            const verificationValue = keyOf(report, ['verification', 'evidence', 'howVerified']);
+                            addVerification(verificationValue, '');
+                            const flatten = (value) => {
+                              if (value == null) return '';
+                              if (typeof value === 'string') return value.trim();
+                              if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+                              if (Array.isArray(value)) return value.map(flatten).filter(Boolean).join('; ');
+                              if (typeof value === 'object') return Object.keys(value).map((key) => flatten(value[key])).filter(Boolean).join('; ');
+                              return '';
+                            };
+                            const verificationText = flatten(verificationValue).replace(/\s*\n\s*/g, ' ').slice(0, 600);
+
+                            // Acceptance criteria were never rendered into the PR body at all, although they are
+                            // the single most reviewer-relevant artefact the engineer produces. Two shapes are
+                            // accepted: an array of {criterion, status, evidence} entries, and an object map of
+                            // criterion -> status/evidence (the shape the W9b report emitted, which was silently
+                            // dropped). Unmet criteria are ALWAYS shown: omitting one hides the only thing the
+                            // human approving the pull request has to decide.
+                            const CRITERION_LABEL_KEYS = ['criterion', 'criteria', 'acceptancecriterion', 'name', 'title', 'label', 'ac', 'id'];
+                            const CRITERION_STATUS_KEYS = ['status', 'result', 'outcome', 'state', 'met', 'satisfied', 'done'];
+                            const CRITERION_EVIDENCE_KEYS = ['evidence', 'detail', 'details', 'note', 'notes', 'why', 'proof', 'how', 'verified'];
+                            const matchingKey = (keys, names) => {
+                              for (let i = 0; i < names.length; i += 1) {
+                                for (let j = 0; j < keys.length; j += 1) {
+                                  if (renderKey(keys[j]) === names[i]) return keys[j];
+                                }
+                              }
+                              return '';
+                            };
+                            const metState = (value) => {
+                              const state = asText(value).toLowerCase();
+                              if (!state) return '';
+                              if (/^(met|pass|passed|passing|done|complete|completed|satisfied|ok|yes|true|green|delivered)\b/.test(state)) return 'Met';
+                              if (/^(unmet|notmet|fail|failed|failing|incomplete|todo|pending|open|missing|partial|no|false|outstanding)\b/.test(state)) return 'Unmet';
+                              if (/\b(not met|unmet|failed|incomplete|outstanding)\b/.test(state)) return 'Unmet';
+                              if (/\b(met|satisfied|passing|passed)\b/.test(state)) return 'Met';
+                              return '';
+                            };
+                            const criterionRows = [];
+                            const addCriterion = (label, statusValue, detailValue) => {
+                              const labelText = asText(label);
+                              const statusText = asText(statusValue);
+                              let detail = asText(detailValue);
+                              const state = metState(statusText) || metState(detail);
+                              if (state && detail) {
+                                // "Met. 3 tests added ..." becomes "3 tests added ...": the status is already
+                                // printed on the bullet, and repeating it wastes the reviewer's attention.
+                                const stripped = detail.replace(/^(met|passed|passing|done|complete|completed|satisfied|ok|yes|true|unmet|not met|failed|failing|incomplete|pending|open|missing|partial)[\s*_:.,\-]+/i, '');
+                                if (stripped && stripped !== detail) detail = stripped;
+                              }
+                              if (!labelText && !detail) return;
+                              if (!labelText && detail) { criterionRows.push({ label: detail, state: state, status: statusText, detail: '' }); return; }
+                              criterionRows.push({ label: labelText, state: state, status: statusText, detail: detail });
+                            };
+                            const addCriterionDetail = (entry) => {
+                              if (entry == null) return '';
+                              if (typeof entry === 'string' || typeof entry === 'number' || typeof entry === 'boolean') return asText(entry);
+                              if (Array.isArray(entry)) return entry.map(addCriterionDetail).filter(Boolean).join(' / ');
+                              if (typeof entry !== 'object') return '';
+                              const keys = Object.keys(entry);
+                              const statusKey = matchingKey(keys, CRITERION_STATUS_KEYS);
+                              const evidenceKey = matchingKey(keys, CRITERION_EVIDENCE_KEYS);
+                              const used = {};
+                              if (statusKey) used[statusKey] = true;
+                              if (evidenceKey) used[evidenceKey] = true;
+                              const parts = [];
+                              if (evidenceKey) parts.push(asText(entry[evidenceKey]));
+                              keys.filter((key) => !used[key]).forEach((key) => {
+                                const value = asText(entry[key]);
+                                if (value) parts.push(key + ': ' + value);
+                              });
+                              return parts.filter(Boolean).join(' / ');
+                            };
+                            const addCriterionEntry = (entry, label) => {
+                              if (entry == null) return;
+                              if (Array.isArray(entry)) { entry.forEach((item) => addCriterionEntry(item, label)); return; }
+                              if (typeof entry !== 'object') { addCriterion(label, '', entry); return; }
+                              const keys = Object.keys(entry);
+                              const labelKey = matchingKey(keys, CRITERION_LABEL_KEYS);
+                              const statusKey = matchingKey(keys, CRITERION_STATUS_KEYS);
+                              const evidenceKey = matchingKey(keys, CRITERION_EVIDENCE_KEYS);
+                              if (!labelKey && !statusKey && !evidenceKey) {
+                                // A map of criterion -> status/evidence. This is the shape that was dropped.
+                                keys.forEach((key) => {
+                                  const value = entry[key];
+                                  if (value && typeof value === 'object' && !Array.isArray(value)) {
+                                    const subKeys = Object.keys(value);
+                                    const subStatus = matchingKey(subKeys, CRITERION_STATUS_KEYS);
+                                    const subEvidence = matchingKey(subKeys, CRITERION_EVIDENCE_KEYS);
+                                    addCriterion(key, subStatus ? value[subStatus] : '', subEvidence ? value[subEvidence] : addCriterionDetail(value));
+                                    return;
+                                  }
+                                  addCriterion(key, '', value);
+                                });
+                                return;
+                              }
+                              addCriterion(labelKey ? entry[labelKey] : label, statusKey ? entry[statusKey] : '', evidenceKey ? entry[evidenceKey] : addCriterionDetail(entry));
+                            };
+                            const criteriaSource = keyOf(report, ['acceptanceCriteria', 'acceptance_criteria']) !== undefined
+                              ? keyOf(report, ['acceptanceCriteria', 'acceptance_criteria'])
+                              : keyOf(report.ticket || {}, ['acceptanceCriteria', 'acceptance_criteria']);
+                            addCriterionEntry(criteriaSource, '');
+                            const criteriaLines = criterionRows.map((row) => {
+                              const status = row.state || row.status || 'status not recorded';
+                              const shown = row.state === 'Unmet' ? '**Unmet**' : status;
+                              const out = [row.label ? '- **' + row.label + '** — ' + shown : '- ' + shown];
+                              if (row.detail) row.detail.split('\n').forEach((line) => { if (line.trim()) out.push('  ' + line.trim()); });
+                              return out.join('\n');
+                            });
+                            const criteriaMet = criterionRows.filter((row) => row.state === 'Met').length;
+                            const criteriaUnmet = criterionRows.filter((row) => row.state === 'Unmet').length;
+                            const criteriaUnknown = criterionRows.length - criteriaMet - criteriaUnmet;
+                            const criteriaSummary = criterionRows.length
+                              ? '_Acceptance criteria: ' + criteriaMet + ' met, ' + criteriaUnmet + ' unmet' + (criteriaUnknown ? ', ' + criteriaUnknown + ' without a recorded status' : '') + ' (of ' + criterionRows.length + '). Only a human can confirm these._'
+                              : '';
+
 
                             // --- template discovery ----------------------------------------------------
                             const templateDirs = ['.github', '.', 'docs'];
@@ -4339,7 +4643,7 @@ steps:
                                 const related = commitCount
                                   ? commitCount + ' commit(s) on `' + branch + '`' + (commitSubject ? ' — latest: ' + commitSubject : '')
                                   : 'none recorded';
-                                const focus = risks[0] || followUps[0] || 'Correctness of the change and the recorded verification evidence.';
+                                const focus = String(risks[0] || followUps[0] || 'Correctness of the change and the recorded verification evidence.').split('\n')[0];
                                 let out = body;
                                 out = out.replace(/^-\s*\*\*Ticket \/ issue:\*\*.*$/m, '- **Ticket / issue:** `' + ref + '`');
                                 out = out.replace(/^-\s*\*\*Related PRs \/ commits:\*\*.*$/m, '- **Related PRs / commits:** ' + related);
@@ -4360,8 +4664,10 @@ steps:
                                 const withoutPlaceholders = body.split('\n').filter((line) => !/^\s*-\s*$/.test(line)).join('\n');
                                 const bullets = changeBullets.length
                                   ? changeBullets
-                                  : ['- _No change list was recorded by the engineer; review the diff on `' + branch + '` directly._'];
-                                return bullets.join('\n') + '\n\n' + withoutPlaceholders;
+                                  : [(commitCount
+                                    ? '- _No change list was recorded by the engineer; review the diff on `' + branch + '` directly._'
+                                    : '- _No change list was recorded by the engineer._')];
+                                return bullets.join('\n') + '\n\n' + withoutPlaceholders + (commitCount ? '' : '\n\n> ' + noCommitNote);
                               },
 
                               howwasthistested: (body) => {
@@ -4378,6 +4684,11 @@ steps:
                                 out = out.replace(/(Unit tests[^\n]*?)suites touched:[^\n]*/m, '$1suites touched: ' + (suites || 'no test files changed'));
 
                                 const manual = tests.slice(0, 8).map((entry, index) => (index + 1) + '. `' + entry.command + '` — ' + (entry.result || 'result not recorded'));
+                                if (!manual.length && verificationLines.length) {
+                                  // `verification` is the documented alternative to `testsRun`; its evidence
+                                  // must reach the template too, not only the legacy body.
+                                  verificationLines.slice(0, 8).forEach((line, index) => manual.push((index + 1) + '. ' + line.replace(/^- /, '')));
+                                }
                                 if (!manual.length) manual.push('1. No verification commands were recorded in the completion report — treat this change as unverified.');
                                 out = out.split('\n').filter((line) => !/^\d+\.\s*$/.test(line)).join('\n');
 
@@ -4385,7 +4696,7 @@ steps:
                                 const failed = tests.length - passed;
                                 const resultText = tests.length
                                   ? passed + ' of ' + tests.length + ' recorded command(s) passed' + (failed ? ', ' + failed + ' did not' : '') + '.' + (verificationText ? ' ' + verificationText : '')
-                                  : 'No automated verification was recorded by the engineer.';
+                                  : (verificationLines.length ? 'No tabulated test results were recorded; the engineer recorded verification evidence (see above).' : 'No automated verification was recorded by the engineer.');
 
                                 return out.replace(/^\*\*Result:\*\*.*$/m, manual.join('\n') + '\n\n**Result:** ' + resultText);
                               },
@@ -4484,20 +4795,33 @@ steps:
                                 lines.push('');
                                 lines.push('### Changes');
                                 changeBullets.forEach((line) => lines.push(line));
+                                if (changeSource === 'diff' && implementation) { lines.push(''); lines.push(implementation); }
+                                if (!commitCount) { lines.push(''); lines.push('> ' + noCommitNote); }
                               }
-                              if (tests.length) {
-                                lines.push('');
-                                lines.push('### Verification');
-                                tests.forEach((entry) => lines.push('- `' + entry.command + '` -> ' + entry.result));
-                              }
-                              if (verificationText) {
-                                lines.push('');
-                                lines.push(verificationText);
-                              }
+                              // Verification is emitted whenever EITHER source exists, and says so
+                              // when neither does. It used to vanish silently when the engineer
+                              // supplied `verification` as an object instead of `testsRun` (PR #12).
+                              lines.push('');
+                              lines.push('### Verification');
+                              if (tests.length) tests.forEach((entry) => lines.push('- `' + entry.command + '` -> ' + entry.result));
+                              if (verificationLines.length) verificationLines.forEach((line) => lines.push(line));
+                              if (!tests.length && !verificationLines.length) lines.push('- _No verification was recorded in the completion report._');
                               if (risks.length) {
                                 lines.push('');
                                 lines.push('### Risks');
-                                risks.forEach((risk) => lines.push('- ' + risk));
+                                bulletise(risks).forEach((line) => lines.push(line));
+                              }
+                              if (followUps.length) {
+                                lines.push('');
+                                lines.push('### Follow-ups');
+                                bulletise(followUps).forEach((line) => lines.push(line));
+                              }
+                              if (criteriaLines.length) {
+                                lines.push('');
+                                lines.push('### Acceptance criteria');
+                                lines.push('');
+                                if (criteriaSummary) lines.push(criteriaSummary);
+                                criteriaLines.forEach((line) => lines.push(line));
                               }
                               lines.push('');
                               lines.push('### Review');
@@ -4528,9 +4852,30 @@ steps:
                               warnings.push('no pull request template found (.github/, repository root and docs/ were checked, case-insensitively)');
                             }
 
+                            // Sections the repository template has no heading for. They are appended
+                            // rather than dropped: a reviewer must see the follow-ups and the
+                            // acceptance criteria even when the template predates them.
+                            const appendices = [];
+                            if (followUps.length) appendices.push('### Follow-ups\n\n' + bulletise(followUps).join('\n'));
+                            if (criteriaLines.length) appendices.push('### Acceptance criteria\n\n' + (criteriaSummary ? criteriaSummary + '\n\n' : '') + criteriaLines.join('\n'));
+
                             if (!templateUsed) {
                               body = legacyBody() + '\n\n> **PR template not applied:** ' + warnings.join('; ');
+                            } else if (appendices.length) {
+                              body = body.replace(/\s+$/, '') + '\n\n' + appendices.join('\n\n');
                             }
+
+                            // There is deliberately NO whole-body scrub for the "[object Object]"
+                            // placeholder. That string is indistinguishable from an engineer WRITING
+                            // those words, and a report about this very defect does exactly that: an
+                            // unconditional replace corrupted six legitimate strings in one archived
+                            // report (the summary, a change description and two acceptance criteria) and
+                            // raised a warning that was simply false. Rewriting prose is the same silent
+                            // degradation of a richer report that this generator exists to stop.
+                            // The guarantee lives in the renderers instead: renderItem JSON.stringifies
+                            // an object rather than coercing it, so no renderer can emit the placeholder.
+                            // renderFailures names the fields that genuinely rendered to nothing.
+                            renderFailures.forEach((field) => warnings.push('report field "' + field + '" could not be rendered; a visible marker was written instead'));
 
                             body = body.replace(/\s+$/, '') + '\n\n---\nGenerated by core.ProcessAITicket@1.4.6\n';
 
