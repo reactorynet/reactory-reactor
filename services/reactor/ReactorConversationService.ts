@@ -6242,6 +6242,16 @@ export default class ReactorConversationService
             throw new Error(errorResponse.message);
           }
 
+          // Reconcile client-tool calls that have already blown their deadline, BEFORE
+          // this turn's payload is built. See
+          // `reconcileAbandonedClientToolsBeforeDispatch` for why this observation point
+          // is the one that matters.
+          await this.reconcileAbandonedClientToolsBeforeDispatch(
+            conversation as any,
+            conversation._id.toString(),
+            personaId
+          );
+
           // Update token count and check limits in single atomic operation
           const tokenStatus = await this.updateTokenCountAndCheckLimits(
             conversation._id.toString()
@@ -10505,6 +10515,76 @@ export default class ReactorConversationService
    * the public entry point stays a thin wrapper that only adds the fetch and the
    * permission filter.
    */
+  /**
+   * Reconcile abandoned client-tool calls at the start of a turn, before dispatch.
+   *
+   * WHY THIS OBSERVATION POINT EXISTS AT ALL
+   *
+   * The client-tool deadline is *derived* from state, not scheduled — there is
+   * deliberately no sweeper (see `reconcileExpiredClientToolCalls`). But a deadline
+   * that nothing evaluates is not a deadline, and the first live test of this fix
+   * proved it in this very conversation:
+   *
+   *   13:18:42.858  `side_panel_state` forwarded; `awaiting_client_tool` emitted
+   *   13:23:56.846  the user's next message — 5 min 14 s later, no event between
+   *
+   * The reconciler was reachable only from `getPendingClientToolCalls` and
+   * `completeClientToolCalls`. The browser called neither, so the abandoned call was
+   * never examined: its `[Client-side tool …]` placeholder was carried into the next
+   * turn and the provider reported "tool call(s) had no result anywhere in the
+   * transcript". The deadline existed on paper and never ran.
+   *
+   * A new user message is the one event guaranteed to follow an abandoned pause, so the
+   * turn boundary is the reliable observation point. Running it here converts "silently
+   * carried a placeholder forward" into "recorded a named timeout failure, plus a WARN
+   * naming the tool and how long it waited" — the outcome the ticket asked for.
+   *
+   * NEVER BLOCKS THE TURN. A reconciler failure is warned and swallowed: the user's
+   * message must still be sent, and the worst case degrades to the previous behaviour,
+   * where the deadline simply is not applied on this request.
+   */
+  private async reconcileAbandonedClientToolsBeforeDispatch(
+    conversation: any,
+    conversationId: string,
+    personaId?: string,
+  ): Promise<Array<{ toolCallId: string; toolName: string; ageMs: number }>> {
+    try {
+      const expired = await this.reconcileExpiredClientToolCallsWithin(
+        conversation,
+        conversationId,
+        personaId
+      );
+
+      if (expired.length > 0) {
+        this.sessionLog(
+          "warn",
+          `[sendMessage] ${expired.length} abandoned client tool call(s) had timed out before this turn was dispatched`,
+          {
+            conversationId,
+            toolCalls: expired.map((call) => ({
+              toolName: call.toolName,
+              toolCallId: call.toolCallId,
+              ageMs: call.ageMs,
+            })),
+          },
+          conversationId,
+          personaId
+        );
+      }
+
+      return expired;
+    } catch (reconcileErr: any) {
+      this.sessionLog(
+        "warn",
+        `[sendMessage] failed to reconcile expired client tool calls: ${reconcileErr.message}`,
+        { conversationId },
+        conversationId,
+        personaId
+      );
+      return [];
+    }
+  }
+
   private async reconcileExpiredClientToolCallsWithin(
     conversation: any,
     conversationId: string,

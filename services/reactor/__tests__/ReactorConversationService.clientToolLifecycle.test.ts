@@ -364,6 +364,105 @@ describe("ReactorConversationService - client tool call lifecycle", () => {
     });
   });
 
+  describe("the turn-boundary reconciler", () => {
+    /**
+     * The gap the first live test of this fix exposed.
+     *
+     * The deadline is derived, not scheduled, so it only bites where something looks.
+     * In the live session `side_panel_state` was forwarded at 13:18:42.858 and the very
+     * next log entry was the user's message 5 min 14 s later, because the browser never
+     * called either endpoint that ran the reconciler. The abandoned call was therefore
+     * never examined and its placeholder travelled into the next turn.
+     *
+     * A new user message is the one event guaranteed to follow an abandoned pause, so
+     * the turn boundary is where the reconciler has to run.
+     */
+    it("fails an abandoned call before the next turn is dispatched", async () => {
+      build({ ageMs: 10 * 60_000 });
+      await pauseTurn();
+
+      const closed = await service.reconcileAbandonedClientToolsBeforeDispatch(
+        conversation,
+        conversationId,
+        PERSONA
+      );
+
+      expect(closed).toHaveLength(1);
+
+      // The placeholder is gone, replaced by a named timeout failure. This is the
+      // difference between "the model was told nothing happened" and "the model was
+      // told the tool timed out".
+      const rows = toolRowsFor(CALL_ID);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].content).toMatch(/timed out/i);
+      expect(rows[0].content).not.toContain(placeholderMarker);
+
+      // And the turn boundary says so out loud, naming the tool and the wait.
+      expect(service.sessionLog).toHaveBeenCalledWith(
+        "warn",
+        expect.stringMatching(/abandoned client tool call\(s\) had timed out before this turn was dispatched/),
+        expect.objectContaining({
+          conversationId,
+          toolCalls: [
+            expect.objectContaining({ toolName: TOOL_NAME, toolCallId: CALL_ID }),
+          ],
+        }),
+        conversationId,
+        PERSONA
+      );
+    });
+
+    it("leaves a call that is still inside its deadline alone", async () => {
+      // The control. Without it, a reconciler that failed everything at the turn
+      // boundary would pass the test above and break every live client tool.
+      build({ ageMs: 1_000 });
+      await pauseTurn();
+
+      const closed = await service.reconcileAbandonedClientToolsBeforeDispatch(
+        conversation,
+        conversationId,
+        PERSONA
+      );
+
+      expect(closed).toEqual([]);
+      expect(toolRowsFor(CALL_ID)[0].content).toContain(placeholderMarker);
+      expect(service.sessionLog).not.toHaveBeenCalledWith(
+        "warn",
+        expect.stringMatching(/abandoned client tool call/),
+        expect.anything(),
+        expect.anything(),
+        expect.anything()
+      );
+    });
+
+    it("never blocks the user's message when reconciliation fails", async () => {
+      // The most important property of the call site: housekeeping must not cost the
+      // user their prompt. A throw here would fail `sendMessage` outright, which is
+      // strictly worse than the bug being fixed.
+      build({ ageMs: 10 * 60_000 });
+      await pauseTurn();
+
+      service.reconcileExpiredClientToolCallsWithin = jest.fn(async () => {
+        throw new Error("store unavailable");
+      });
+
+      const closed = await service.reconcileAbandonedClientToolsBeforeDispatch(
+        conversation,
+        conversationId,
+        PERSONA
+      );
+
+      expect(closed).toEqual([]);
+      expect(service.sessionLog).toHaveBeenCalledWith(
+        "warn",
+        expect.stringMatching(/failed to reconcile expired client tool calls: store unavailable/),
+        expect.objectContaining({ conversationId }),
+        conversationId,
+        PERSONA
+      );
+    });
+  });
+
   describe("the duplicate toolCallId", () => {
     it("is rejected and persisted exactly once, even within one submission", async () => {
       build();
