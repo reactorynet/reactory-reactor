@@ -8510,7 +8510,61 @@ export default class ReactorConversationService
     // The write itself lives in `persistClientToolResultRow` because the timeout
     // reconciler needs the identical sequence; see that method for why the append
     // fallback and the mirror are load-bearing.
+    // Submissions this request refused, in arrival order.
+    //
+    // Reported in the returned value so a client can tell a rejected report from a
+    // persisted one — silence is what let the duplicate go unnoticed.
+    const rejectedResults: Array<{
+      toolCallId: string;
+      toolName: string;
+      reason: string;
+      message: string;
+    }> = [];
+
     for (const toolResult of results) {
+      const submittedCallId = toolResult?.toolCallId ? String(toolResult.toolCallId) : "";
+
+      // A call is answered once.
+      //
+      // The loop had no such check, so a client that submitted the same result twice —
+      // observed 55 ms apart on the ticket — persisted it twice: the placeholder row was
+      // replaced twice and the owning message's `tool_results` gained two entries for one
+      // call id, leaving a transcript no provider will accept.
+      //
+      // `answered` comes from the same transcript read the pending query uses, so "already
+      // answered" means the same thing here as it does there, including the placeholder
+      // rule (`isClientToolPlaceholderEntry`): a forwarded call whose placeholder still
+      // holds the un-replaced marker is NOT answered, which is what lets the first
+      // legitimate result through. It is extended as this submission persists, so an id is
+      // written at most once even when it appears twice in one request.
+      if (!submittedCallId || clientToolState.answered.has(submittedCallId)) {
+        const reason = submittedCallId ? "already-answered" : "missing-tool-call-id";
+        const message = submittedCallId
+          ? `Tool "${toolResult.toolName}" (callId: ${submittedCallId}) already has a result recorded. The duplicate submission was ignored.`
+          : `A client tool result was submitted without a toolCallId and was ignored.`;
+
+        this.sessionLog(
+          "warn",
+          `[completeClientToolCalls] rejecting result for tool "${toolResult?.toolName}" (callId: ${submittedCallId || "(missing)"}) — a result is already recorded for this call, not persisting again`,
+          {
+            conversationId: chatSessionId,
+            toolName: toolResult?.toolName ?? null,
+            toolCallId: submittedCallId || null,
+            reason,
+          },
+          chatSessionId,
+          personaId
+        );
+
+        rejectedResults.push({
+          toolCallId: submittedCallId,
+          toolName: toolResult?.toolName ?? "(unknown)",
+          reason,
+          message,
+        });
+        continue;
+      }
+
       if (this.context?.telemetry) {
         const clientStatus = toolResult.isError ? 'error' : (toolResult.decision || 'success');
         this.context.telemetry.increment('reactor_tool_execution_total', 1, {
@@ -8566,6 +8620,62 @@ export default class ReactorConversationService
         hasPlaceholder: hadPlaceholder,
         conversationId: chatSessionId,
       }, chatSessionId, personaId);
+
+      // Now answered: a second submission for this id in the same request is refused
+      // above, and so is a later one that re-reads the transcript.
+      clientToolState.answered.add(submittedCallId);
+    }
+
+    // Nothing recorded and everything refused: do not continue.
+    //
+    // Continuing would ask the provider to answer a call whose only new information was
+    // rejected, which is the same dead end the empty-submission gate above refuses. A
+    // partial rejection still continues: real results were recorded and the agent should
+    // see them; the refusals are warned and returned.
+    if (rejectedResults.length > 0 && rejectedResults.length === results.length) {
+      this.sessionLog(
+        "warn",
+        `[completeClientToolCalls] no results recorded — all ${rejectedResults.length} submitted result(s) were rejected`,
+        {
+          conversationId: chatSessionId,
+          rejectedResults: rejectedResults.map((r) => ({
+            toolName: r.toolName,
+            toolCallId: r.toolCallId,
+            reason: r.reason,
+          })),
+        },
+        chatSessionId,
+        personaId
+      );
+
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "CLIENT_TOOL_RESULT_REJECTED",
+        message:
+          `No client tool results were recorded: ${rejectedResults
+            .map((r) => `${r.toolName} (${r.toolCallId || "missing id"}): ${r.reason}`)
+            .join("; ")}.`,
+        rejectedResults,
+        timestamp: new Date(),
+        recoverable: true,
+      };
+    }
+
+    if (rejectedResults.length > 0) {
+      this.sessionLog(
+        "warn",
+        `[completeClientToolCalls] recorded ${results.length - rejectedResults.length} result(s) and rejected ${rejectedResults.length} (duplicates or empty submissions); continuing with what was recorded`,
+        {
+          conversationId: chatSessionId,
+          rejectedResults: rejectedResults.map((r) => ({
+            toolName: r.toolName,
+            toolCallId: r.toolCallId,
+            reason: r.reason,
+          })),
+        },
+        chatSessionId,
+        personaId
+      );
     }
 
     if (!continueProcessing) {
