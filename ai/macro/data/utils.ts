@@ -10,6 +10,7 @@ import {
 } from './types';
 import logger from '@reactory/server-core/logging';
 import { validateReadOnlySql } from '@reactory/server-core/database/sqlGuard';
+import { normaliseDatabaseVariant } from './variants';
 /**
  * Get database connection from partner settings
  */
@@ -60,11 +61,27 @@ type PartnerSettingConnection = {
 const isConnectionSetting = (setting: PartnerSettingConnection): boolean =>
   setting?.settingType === 'connection' || setting?.type === 'connection';
 
+/**
+ * Resolve the variant a setting declares.
+ *
+ * The declared value is normalised to its canonical spelling, so a setting that
+ * says `mongodb` is reported as `mongo` — which is the spelling the macros
+ * accept and therefore what the listing must advertise. Anything that is not a
+ * known database variant (prometheus, loki, jaeger, ...) is passed through
+ * unchanged: `listDataConnections` is not a database-macro-only listing, and
+ * dropping those entries here would hide them from the agent.
+ */
 const resolveSettingVariant = (
   setting: PartnerSettingConnection,
-): DatabaseConnection['variant'] | undefined =>
-  (setting?.data?.variant as DatabaseConnection['variant']) ??
-  (setting?.variant as DatabaseConnection['variant']);
+): DatabaseConnection['variant'] | undefined => {
+  const declared =
+    (setting?.data?.variant as string | undefined) ??
+    (setting?.variant as string | undefined);
+
+  if (typeof declared !== 'string' || declared.trim().length === 0) return undefined;
+
+  return (normaliseDatabaseVariant(declared) ?? declared) as DatabaseConnection['variant'];
+};
 
 /**
  * Lists available data connections from partner settings, filtered by access.

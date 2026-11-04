@@ -9,6 +9,7 @@ import {
   validateQuery, 
   createQueryResult 
 } from '../utils';
+import { isDatabaseVariant } from '../variants';
 import logger from '@reactory/server-core/logging';
 
 /**
@@ -93,7 +94,7 @@ export const MsSqlMacro: Macro<DatabaseMacroResult, DatabaseMacroProps> = async 
     };
   }
 
-  if (connection.variant !== 'mssql') {
+  if (!isDatabaseVariant(connection.variant, 'mssql')) {
     return {
       success: false,
       error: `Connection '${connectionId}' is not a MSSQL connection (variant: ${connection.variant})`,

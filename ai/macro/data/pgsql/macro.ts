@@ -9,6 +9,7 @@ import {
   validateQuery, 
   createQueryResult 
 } from '../utils';
+import { isDatabaseVariant } from '../variants';
 import logger from '@reactory/server-core/logging';
 
 /**
@@ -93,7 +94,7 @@ export const PostgresMacro: Macro<DatabaseMacroResult, DatabaseMacroProps> = asy
     };
   }
 
-  if (connection.variant !== 'postgres') {
+  if (!isDatabaseVariant(connection.variant, 'postgres')) {
     return {
       success: false,
       error: `Connection '${connectionId}' is not a PostgreSQL connection (variant: ${connection.variant})`,
