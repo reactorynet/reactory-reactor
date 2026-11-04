@@ -8452,6 +8452,56 @@ export default class ReactorConversationService
       );
     }
 
+    // One read, after reconciliation, for both the empty-submission gate below and the
+    // duplicate guard inside the loop. It has to happen after the reconciler wrote its
+    // failures, or a call closed by the deadline would still look pending here.
+    const clientToolState = await this.readClientToolState(conversation as any, chatSessionId);
+
+    // Reject an empty submission while calls are outstanding.
+    //
+    // A submission that carries no result cannot move the turn, and the old behaviour —
+    // fall through to `sendMessage({ message: '', role: 'tool', continueAfterTools: true })` —
+    // re-entered the provider loop with nothing new to show it. The provider then either
+    // answered the same unanswered `tool_call` again (another pause, another empty
+    // submission, an infinite soft loop) or failed the turn, and the caller had no way to
+    // know its report had been empty.
+    //
+    // Rejected at the boundary, as a returned value rather than a throw: this method is
+    // called from the SSE continuation path, and an exception there becomes a stream error
+    // with no explanation of which calls are outstanding. A structured result lets the
+    // caller show the pending calls and re-report them.
+    //
+    // Zero results with NOTHING pending keeps the previous behaviour: that is a legitimate
+    // report-only call for a turn whose results all arrived already, and it must still be
+    // able to continue.
+    if (results.length === 0 && clientToolState.pending.length > 0) {
+      const pendingTools = clientToolState.pending.map((call) => ({
+        toolCallId: call.toolCallId,
+        toolName: call.toolName,
+        ageMs: call.ageMs,
+      }));
+
+      this.sessionLog(
+        "warn",
+        `[completeClientToolCalls] rejecting empty submission — ${pendingTools.length} client tool call(s) are still awaiting a result: ${pendingTools.map((c) => `${c.toolName} (${c.toolCallId})`).join(", ")}`,
+        { conversationId: chatSessionId, pendingToolCalls: pendingTools },
+        chatSessionId,
+        personaId
+      );
+
+      return {
+        __typename: "ReactorErrorResponse",
+        code: "CLIENT_TOOL_RESULT_REQUIRED",
+        message:
+          `No client tool results were submitted, but ${pendingTools.length} tool call(s) are ` +
+          `still awaiting a result: ${pendingTools.map((c) => c.toolName).join(", ")}. ` +
+          `Submit a result for each outstanding call before continuing.`,
+        pendingToolCalls: pendingTools,
+        timestamp: new Date(),
+        recoverable: true,
+      };
+    }
+
     // Persist each tool result: replace the placeholder history entry (if one
     // exists from the AUTO+SSE path) or insert a new tool message (for
     // PROMPT/SAFE_AUTO paths where no placeholder was created).
