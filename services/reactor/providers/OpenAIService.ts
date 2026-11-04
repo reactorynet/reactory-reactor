@@ -204,6 +204,20 @@ class OpenAIService extends AIProviderBase {
       if (persona.config.apiBaseURL) openAIArgs.baseURL = persona.config.apiBaseURL;
     }
 
+    // Bound time-to-first-byte and make retries observable.
+    //
+    // Before this, the client was constructed with `baseURL`/`apiKey` only, so the
+    // SDK defaults applied: a 10 minute timeout and 2 *silent* retries per request.
+    // A provider that accepted the connection and then never emitted a byte produced
+    // no log line for up to ~30 minutes — indistinguishable from a wedged process.
+    //
+    // `maxRetries: 0` moves retrying to the one layer that logs it
+    // (`chat()`'s loop, which already reports `Retry attempt N`), so there is exactly
+    // one retry policy in play and every attempt appears in the record. The timeout
+    // is applied to the response headers only, so long streams are unaffected.
+    openAIArgs.timeout = this.providerTimeoutMs();
+    openAIArgs.maxRetries = 0;
+
     this.ai = new OpenAI(openAIArgs);
   }
 
@@ -381,8 +395,30 @@ class OpenAIService extends AIProviderBase {
    * Both writes are guarded: logging must never be the thing that fails a request.
    */
   private warnToSessionLog(message: string, meta?: Record<string, unknown>): void {
+    this.logToSession("warn", message, meta);
+  }
+
+  /**
+   * Emit a provider diagnostic to the global context AND to this conversation's
+   * `session.log`.
+   *
+   * Why both: `this.context.*` lands in the server log, while the per-conversation
+   * `session.log` (owned by `ChatSessionResourceManager`) is the artefact an
+   * investigation of a wedged conversation actually reads. Until now only WARN
+   * crossed that boundary, so every INFO diagnostic a provider emitted about a
+   * request — whether it was dispatched, when the first byte arrived — was
+   * invisible in exactly the file where its absence was being interpreted as
+   * "the provider was silent". Both writes are guarded: logging must never be the
+   * thing that fails a request.
+   */
+  private logToSession(
+    level: "info" | "warn" | "error",
+    message: string,
+    meta?: Record<string, unknown>,
+  ): void {
     try {
-      this.context.warn(message, meta);
+      const logger = (this.context as any)?.[level];
+      if (typeof logger === "function") logger.call(this.context, message, meta);
     } catch {
       // Nothing useful left to do — never propagate out of a log call.
     }
@@ -391,10 +427,33 @@ class OpenAIService extends AIProviderBase {
     if (!conversationId) return;
 
     try {
-      ChatSessionResourceManager.forSession(conversationId)?.warn(message, meta);
+      const sessionLogger: any = ChatSessionResourceManager.forSession(conversationId);
+      const sessionLog = sessionLogger?.[level];
+      if (typeof sessionLog === "function") sessionLog.call(sessionLogger, message, meta);
     } catch {
       // as above
     }
+  }
+
+  /**
+   * Deadline for the provider to *start* answering, in milliseconds.
+   *
+   * This bounds time-to-first-byte, not the whole turn. The OpenAI SDK clears its
+   * own timer as soon as the fetch promise resolves (i.e. response headers), so a
+   * long stream is not truncated by it — see `fetchWithTimeout` in
+   * `openai/core.js`. The same is true of the `Promise.race` guards below, which
+   * only cover the pre-stream phase.
+   *
+   * Why this exists: with no timeout configured the SDK default is 10 minutes per
+   * attempt with 2 silent retries, so a provider that accepts a request and never
+   * answers looks exactly like a hung process for up to ~30 minutes. That is the
+   * observation that opened REACTORY-302016408/20261104/523706518 — 4 min 17 s of
+   * total silence with no log line either way.
+   */
+  private providerTimeoutMs(): number {
+    const configured = Number(process.env.REACTOR_PROVIDER_TIMEOUT_MS);
+    if (Number.isFinite(configured) && configured > 0) return configured;
+    return 180_000;
   }
 
   /**
@@ -635,12 +694,70 @@ class OpenAIService extends AIProviderBase {
     });
 
     // -- Open the streaming API connection --
-    let stream: Awaited<ReturnType<typeof this.ai.chat.completions.create>>;
+    //
+    // Everything from here to the first byte used to be unobservable: no line
+    // before the request, none when the first chunk arrived, none at completion.
+    // A provider that accepted the request and then never answered therefore
+    // produced total silence for as long as the SDK permitted (10 minutes × 2
+    // silent retries), which is indistinguishable from a wedged process. These
+    // three lines are the measurement that splits that question in half.
+    const requestStartedAt = Date.now();
+    const requestId = new ObjectId().toString().slice(-8);
+    const timeoutMs = this.providerTimeoutMs();
+    const providerId = this.chatState?.persona?.providerId ?? null;
+    const requestMessages = (prompt as any)?.messages;
+    const requestModel = (prompt as any)?.model ?? this.chatState?.modelId ?? null;
+
+    let payloadBytes: number | null = null;
     try {
-      stream = await this.ai.chat.completions.create({
-        ...prompt,
-        stream: true,
-        stream_options: { include_usage: true },
+      payloadBytes = Buffer.byteLength(JSON.stringify(prompt), "utf8");
+    } catch {
+      payloadBytes = null;
+    }
+
+    this.logToSession("info", "[provider-request] dispatching streaming request", {
+      requestId,
+      provider: providerId,
+      model: requestModel,
+      messageCount: Array.isArray(requestMessages) ? requestMessages.length : null,
+      lastMessageRole: Array.isArray(requestMessages) && requestMessages.length > 0
+        ? requestMessages[requestMessages.length - 1]?.role ?? null
+        : null,
+      toolCount: Array.isArray((prompt as any)?.tools) ? (prompt as any).tools.length : 0,
+      payloadBytes,
+      estimatedPromptTokens: payloadBytes === null ? null : Math.ceil(payloadBytes / 4),
+      timeoutMs,
+      sessionId,
+    });
+
+    let stream: Awaited<ReturnType<typeof this.ai.chat.completions.create>>;
+    let headersTimer: NodeJS.Timeout | undefined;
+    try {
+      stream = await Promise.race([
+        this.ai.chat.completions.create({
+          ...prompt,
+          stream: true,
+          stream_options: { include_usage: true },
+        }),
+        // Belt and braces over the SDK's own timeout: that one only starts once
+        // `fetch` is called, so a stall before dispatch would still be silent.
+        new Promise<never>((_, reject) => {
+          headersTimer = setTimeout(() => {
+            reject(
+              new AIProviderError(
+                `Provider ${providerId ?? "unknown"} did not respond within ${timeoutMs} ms ` +
+                `(no response headers; model=${String(requestModel)}).`,
+              ),
+            );
+          }, timeoutMs);
+        }),
+      ]);
+      this.logToSession("info", "[provider-request] response headers received", {
+        requestId,
+        provider: providerId,
+        model: requestModel,
+        elapsedMs: Date.now() - requestStartedAt,
+        sessionId,
       });
     } catch (error: any) {
       const errorEvent = StreamingEventFactory.createErrorEvent(
@@ -655,6 +772,8 @@ class OpenAIService extends AIProviderBase {
       throw new AIProviderError(
         `Failed to connect to AI provider: ${error.message || error.toString()}`,
       );
+    } finally {
+      if (headersTimer) clearTimeout(headersTimer);
     }
 
     const toolCalls: Array<{ id: string; name: string; arguments: string }> = [];
@@ -664,8 +783,68 @@ class OpenAIService extends AIProviderBase {
     let model = "";
     let streamUsage: { prompt_tokens: number; completion_tokens: number; total_tokens: number } | null = null;
 
+    // Idle watchdog. Headers are not an answer: a provider can accept the
+    // request, send 200, and then emit nothing — and it can also go silent part
+    // way through a stream. Either way the turn hangs for as long as the socket
+    // lives. The timer is armed at dispatch and re-armed on every chunk, so it
+    // measures silence rather than total duration.
+    //
+    // When the deadline expires the request is aborted and the turn is *ended*
+    // (with an error event the client can act on) instead of left to the SDK.
+    let chunkCount = 0;
+    let firstChunkAt: number | null = null;
+    let lastChunkAt: number | null = null;
+    let timedOut = false;
+    let watchdog: NodeJS.Timeout | undefined;
+
+    const armWatchdog = (delayMs: number) => {
+      if (watchdog) clearTimeout(watchdog);
+      watchdog = setTimeout(() => {
+        timedOut = true;
+        this.warnToSessionLog(
+          chunkCount === 0
+            ? "[provider-stream] no chunk received before the deadline; aborting the provider request and ending the turn"
+            : "[provider-stream] stream went silent mid-response; aborting the provider request and ending the turn",
+          {
+            requestId,
+            provider: providerId,
+            model: requestModel,
+            sessionId,
+            chunkCount,
+            silentForMs: lastChunkAt === null ? null : Date.now() - lastChunkAt,
+            elapsedMs: Date.now() - requestStartedAt,
+            timeoutMs,
+          },
+        );
+        try {
+          (stream as any)?.controller?.abort?.();
+        } catch {
+          // best effort — the iterator also ends when the socket closes
+        }
+      }, delayMs);
+    };
+
+    armWatchdog(Math.max(1_000, timeoutMs - (Date.now() - requestStartedAt)));
+
     try {
       for await (const chunk of stream) {
+        chunkCount += 1;
+        lastChunkAt = Date.now();
+        // Re-arm against silence, not against total duration: a long answer is
+        // not a stalled one.
+        armWatchdog(timeoutMs);
+        if (firstChunkAt === null) {
+          firstChunkAt = Date.now();
+          this.logToSession("info", "[provider-stream] first chunk received", {
+            requestId,
+            provider: providerId,
+            model: requestModel,
+            sessionId,
+            elapsedMs: firstChunkAt - requestStartedAt,
+            chunkCount,
+          });
+        }
+
         const choice = chunk.choices[0];
         if (!choice) continue;
 
@@ -745,9 +924,44 @@ class OpenAIService extends AIProviderBase {
         `AI provider stream interrupted: ${streamError.message || streamError.toString()}`,
       );
     } finally {
+      if (watchdog) {
+        clearTimeout(watchdog);
+        watchdog = undefined;
+      }
       tokenPacer.destroy();
       reasoningPacer.destroy();
     }
+
+    if (timedOut && !finishReason) {
+      finishReason = "provider_timeout";
+      const timeoutEvent = StreamingEventFactory.createErrorEvent(
+        "PROVIDER_TIMEOUT",
+        `Provider ${providerId ?? "unknown"} produced no output within ${timeoutMs} ms; ` +
+        `the request was aborted and the turn was ended. Retrying usually succeeds.`,
+        { recoverable: true },
+        ids,
+      );
+      try {
+        await this.streamingTransportManager.sendEventToSession(sessionId, timeoutEvent);
+      } catch (_) { /* best effort */ }
+    }
+
+    this.logToSession(timedOut ? "warn" : "info", "[provider-stream] stream finished", {
+      requestId,
+      provider: providerId,
+      model: requestModel,
+      sessionId,
+      elapsedMs: Date.now() - requestStartedAt,
+      chunkCount,
+      firstChunkMs: firstChunkAt === null ? null : firstChunkAt - requestStartedAt,
+      finishReason,
+      timedOut,
+      textLength: accumulatedText.length,
+      reasoningLength: accumulatedReasoning.length,
+      toolCallCount: toolCalls.length,
+      promptTokens: streamUsage?.prompt_tokens ?? null,
+      completionTokens: streamUsage?.completion_tokens ?? null,
+    });
 
     // Flush final tool call
     if (currentToolCall?.id && currentToolCall?.name) {
@@ -901,7 +1115,41 @@ class OpenAIService extends AIProviderBase {
       });
     }
 
-    return await this.ai.chat.completions.create(prompt) as OpenAI.Chat.Completions.ChatCompletion;
+    // Same request boundary as the streaming path: log before dispatch and after
+    // the response, so a silent non-streaming call is attributable rather than
+    // inferred. The timeout comes from the client (`initializeClient`) and covers
+    // headers only.
+    const requestStartedAt = Date.now();
+    const requestId = new ObjectId().toString().slice(-8);
+    const requestMessages = (prompt as any)?.messages;
+    let payloadBytes: number | null = null;
+    try {
+      payloadBytes = Buffer.byteLength(JSON.stringify(prompt), "utf8");
+    } catch {
+      payloadBytes = null;
+    }
+
+    this.logToSession("info", "[provider-request] dispatching non-streaming request", {
+      requestId,
+      provider: this.chatState?.persona?.providerId ?? null,
+      model: (prompt as any)?.model ?? this.chatState?.modelId ?? null,
+      messageCount: Array.isArray(requestMessages) ? requestMessages.length : null,
+      payloadBytes,
+      estimatedPromptTokens: payloadBytes === null ? null : Math.ceil(payloadBytes / 4),
+      timeoutMs: this.providerTimeoutMs(),
+      sessionId: this.chatState.id ?? "",
+    });
+
+    const response = await this.ai.chat.completions.create(prompt) as OpenAI.Chat.Completions.ChatCompletion;
+
+    this.logToSession("info", "[provider-request] non-streaming response received", {
+      requestId,
+      elapsedMs: Date.now() - requestStartedAt,
+      finishReason: response?.choices?.[0]?.finish_reason ?? null,
+      sessionId: this.chatState.id ?? "",
+    });
+
+    return response;
   }
 
   // --- Normalize to AIChatCompletion ---
@@ -956,8 +1204,8 @@ class OpenAIService extends AIProviderBase {
     const msg = error.message?.toLowerCase() || "";
     const code = error.code?.toLowerCase() || "";
     const retryablePatterns = [
-      "rate limit", "timeout", "network", "connection",
-      "temporary", "service unavailable", "internal server error",
+      "rate limit", "timeout", "timed out", "network", "connection",
+      "econnreset", "temporary", "service unavailable", "internal server error",
       "bad gateway", "gateway timeout",
     ];
     if (retryablePatterns.some((p) => msg.includes(p) || code.includes(p))) {
@@ -1023,6 +1271,20 @@ class OpenAIService extends AIProviderBase {
     const maxRetries = 2;
     let lastError: any;
     this.streamingMode = streamingMode;
+
+    // Breadcrumb at the provider entry point. Without it, "LLM provider resolved"
+    // is the last line before the network call whether the turn died in prompt
+    // construction or in the provider itself — two very different defects.
+    this.logToSession("info", "[provider-chat] entering provider call", {
+      personaId,
+      chatSessionId: chatSessionId ?? null,
+      sessionId: this.chatState?.id ?? null,
+      role,
+      messageKind: typeof message === "string" ? "string" : Array.isArray(message) ? "parts" : typeof message,
+      messageLength: typeof message === "string" ? message.length : null,
+      streamingMode,
+      historyLength: this.chatState?.history?.length ?? null,
+    });
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
