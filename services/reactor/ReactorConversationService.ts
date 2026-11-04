@@ -10283,9 +10283,20 @@ export default class ReactorConversationService
     // reconciler hiccup must not take out the replay surface that repairs the
     // session.
     try {
+      // `personaId` is taken from the conversation, not from the caller. This method
+      // (the replay surface a reconnecting browser asks) has no personaId in its
+      // arguments, and `sessionLog` only writes to the per-conversation file when it
+      // can resolve a logger — either from its warm cache or from a personaId. Observed
+      // live 2026-11-04: the reconciler rewrote the timed-out `side_panel_state`
+      // placeholder at 13:41:26 and the WARN reached the global context only, so the
+      // session log showed nothing at all. The conversation is the authoritative source
+      // for its own persona, so passing it here means a failed call can never be
+      // invisible in the log an operator actually reads.
+      const reconcilePersonaId = (conversation as any)?.personaId;
       const expired = await this.reconcileExpiredClientToolCallsWithin(
         conversation as any,
-        chatSessionId
+        chatSessionId,
+        reconcilePersonaId
       );
       if (expired.length > 0) {
         this.sessionLog(
@@ -10295,7 +10306,8 @@ export default class ReactorConversationService
             conversationId: chatSessionId,
             toolCalls: expired.map((c) => ({ toolName: c.toolName, toolCallId: c.toolCallId, ageMs: c.ageMs })),
           },
-          chatSessionId
+          chatSessionId,
+          reconcilePersonaId
         );
       }
     } catch (reconcileError: any) {
@@ -10500,10 +10512,15 @@ export default class ReactorConversationService
       return [];
     }
 
+    // Fall back to the conversation's own persona when the caller did not supply one,
+    // so `sessionLog` can always resolve the per-conversation logger. Without this the
+    // reconcile WARN silently lands only in the global context (observed live
+    // 2026-11-04) and the whole point of the WARN — a failed tool call always leaving a
+    // trace where an operator looks — is lost.
     return this.reconcileExpiredClientToolCallsWithin(
       conversation as any,
       conversationId,
-      personaId
+      personaId ?? (conversation as any)?.personaId
     );
   }
 
@@ -10548,11 +10565,16 @@ export default class ReactorConversationService
     conversationId: string,
     personaId?: string,
   ): Promise<Array<{ toolCallId: string; toolName: string; ageMs: number }>> {
+    // The conversation is authoritative for its own persona; see the note in
+    // `reconcileExpiredClientToolCalls`. A turn-boundary reconcile that cannot resolve a
+    // session logger would report only to the global context, which is the invisibility
+    // this programme exists to remove.
+    const logPersonaId = personaId ?? (conversation as any)?.personaId;
     try {
       const expired = await this.reconcileExpiredClientToolCallsWithin(
         conversation,
         conversationId,
-        personaId
+        logPersonaId
       );
 
       if (expired.length > 0) {
@@ -10568,7 +10590,7 @@ export default class ReactorConversationService
             })),
           },
           conversationId,
-          personaId
+          logPersonaId
         );
       }
 
@@ -10579,7 +10601,7 @@ export default class ReactorConversationService
         `[sendMessage] failed to reconcile expired client tool calls: ${reconcileErr.message}`,
         { conversationId },
         conversationId,
-        personaId
+        logPersonaId
       );
       return [];
     }
