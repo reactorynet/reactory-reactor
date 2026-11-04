@@ -62,8 +62,10 @@ import {
 } from "../../ai/orchestration/toolScope";
 import {
   createAutoToolBatch,
+  describeAbandonedToolCalls,
   describeAutoToolBatch,
 } from "../../ai/orchestration/toolBatchReport";
+import { TurnInterruptLedger, IInterruptVerdict } from "../../ai/orchestration/turnInterrupt";
 import { applyChangedKeys, buildVarsUpdate, snapshotVars } from "./sessionVars";
 import { resolvePromptDirectives } from "../../ai/persona/loader/system-prompt";
 /**
@@ -428,11 +430,25 @@ export default class ReactorConversationService
   private sessionLoggers: Map<string, ChatSessionResourceManager> = new Map();
 
   /**
-   * Tracks sessions that have been flagged for interruption.
-   * Key: conversationId, Value: reason string (or empty).
-   * Checked at each iteration of the AUTO tool execution loop.
+   * Turn-scoped user interrupts for the AUTO tool execution loop.
+   *
+   * This used to be a plain `Map<conversationId, reason>` that
+   * `interruptToolExecution` SET and never cleared. The AUTO loop cleared it only if
+   * it happened to observe it, so an interrupt raised while no loop was running —
+   * the click arriving after the interrupted turn had already left its loop —
+   * survived its own turn and killed the *next* one at `iteration = 0`, before the
+   * batch was classified or executed. That is the whole of ticket
+   * REACTORY-302016408/20261104/2715764250: two `listSupportTickets` calls at
+   * 06:39:19.060, an interrupt observed 146 ms later, and no dispatch trace of any
+   * kind because the loop broke on the first statement it evaluates.
+   *
+   * The invariant now enforced is that an interrupt requested while turn N runs may
+   * only affect turn N. It is enforced by stamping each request with the epoch of the
+   * turn that was running when the user asked, and honouring it only in a loop whose
+   * own epoch matches — see `ai/orchestration/turnInterrupt.ts`, which documents why
+   * a plain "clear at turn start" is not equivalent.
    */
-  private static interruptedSessions: Map<string, string> = new Map();
+  private static turnInterrupts: TurnInterruptLedger = new TurnInterruptLedger();
 
   /**
    * Tracks pending visual neuron background graphing timeouts.
@@ -2723,25 +2739,135 @@ export default class ReactorConversationService
   }
 
   /**
-   * Checks whether a session has been flagged for interruption.
+   * The AUTO loop's per-iteration interrupt gate.
+   *
+   * Returns the ledger's verdict and reports a discarded leftover at WARN. Kept as a
+   * method rather than inlined in the loop so the two halves of the invariant can be
+   * asserted without standing up a provider, a transport and a database:
+   *
+   *   - an interrupt stamped with THIS turn's epoch stops the turn;
+   *   - an interrupt stamped with any other epoch is reported and ignored.
+   *
+   * The second case is the regression. Before epochs existed this branch did not exist
+   * at all, because "is a flag set?" has no notion of which turn set it.
    */
-  private isInterrupted(conversationId: string): boolean {
-    return ReactorConversationService.interruptedSessions.has(conversationId);
+  private takeTurnInterrupt(
+    conversationId: string,
+    turnEpoch: number,
+    personaId?: string
+  ): IInterruptVerdict {
+    const verdict = ReactorConversationService.turnInterrupts.verdict(conversationId, turnEpoch);
+
+    if (verdict.discarded) {
+      // Reported at WARN because it is a dropped user action, and because the only
+      // previous symptom of this state was a turn that silently executed nothing.
+      this.sessionLog(
+        "warn",
+        `[sendMessage] AUTO mode: ignoring an interrupt that belongs to an earlier turn (epoch ${verdict.discarded.epoch}, this turn is epoch ${turnEpoch}) — this turn's tool calls are dispatched normally`,
+        {
+          conversationId,
+          discardedReason: verdict.discarded.reason || null,
+          discardedEpoch: verdict.discarded.epoch,
+          discardedRequestedAt: new Date(verdict.discarded.requestedAt).toISOString(),
+          turnEpoch,
+        },
+        conversationId,
+        personaId
+      );
+    }
+
+    return verdict;
   }
 
   /**
-   * Clears the interruption flag for a session after it has been handled.
+   * Say, at WARN, exactly which tool calls are being thrown away and why.
+   *
+   * Called from every path that ends a turn with a call neither executed nor answered:
+   * the interrupt break, and the abort that any throw inside a batch causes. Without it
+   * those calls leave no trace whatsoever — which is the "no dispatch trace" in ticket
+   * REACTORY-302016408/20261104/2715764250, where two `listSupportTickets` calls were
+   * persisted at 06:39:19.060 and answered by nothing.
+   *
+   * Returns the rendered description so the caller can reuse the same `toolCallIds` in
+   * the accompanying summary line instead of recomputing them.
    */
-  private clearInterrupt(conversationId: string): string | undefined {
-    const reason = ReactorConversationService.interruptedSessions.get(conversationId);
-    ReactorConversationService.interruptedSessions.delete(conversationId);
-    return reason;
+  private reportAbandonedToolCalls(args: {
+    conversationId: string;
+    personaId?: string;
+    toolCalls: any[] | null | undefined;
+    iteration: number;
+    turnEpoch?: number;
+    reason?: string | null;
+    cause?: string | null;
+  }): { message: string; meta: Record<string, unknown> } {
+    const described = describeAbandonedToolCalls(args.toolCalls, args.iteration);
+
+    this.sessionLog(
+      "warn",
+      args.cause ? `${described.message} (cause: ${args.cause})` : described.message,
+      {
+        ...described.meta,
+        conversationId: args.conversationId,
+        turnEpoch: args.turnEpoch ?? null,
+        reason: args.reason ?? null,
+        cause: args.cause ?? null,
+      },
+      args.conversationId,
+      args.personaId
+    );
+
+    return described;
+  }
+
+  /**
+   * Open a turn's interrupt epoch and report any interrupt left over from a turn that
+   * is already over.
+   *
+   * Called exactly ONCE per turn, from `sendMessageUnlocked` — either at entry (when the
+   * conversation id is already known) or, for the first message of a new conversation,
+   * on the id the conversation was just created with. The "exactly once" matters: a
+   * second epoch inside the same turn would leave an interrupt raised during the first
+   * half of the turn stamped with an epoch no loop is using, i.e. silently ignored — the
+   * mirror image of the bug being fixed here.
+   *
+   * A leftover is discarded and reported at WARN rather than carried forward. Before
+   * this existed it was neither: it stayed armed, and the next turn's first loop
+   * iteration broke on it before classifying a single tool call.
+   */
+  private beginTurnInterruptEpoch(conversationId: string, personaId?: string): number {
+    const { epoch, discarded } = ReactorConversationService.turnInterrupts.beginTurn(conversationId);
+
+    if (discarded) {
+      this.sessionLog(
+        "warn",
+        `[sendMessage] Discarding an interrupt left over from an earlier turn — it was requested ${Date.now() - discarded.requestedAt}ms ago for turn epoch ${discarded.epoch}, this turn is epoch ${epoch}. It cannot stop this turn.`,
+        {
+          conversationId,
+          discardedReason: discarded.reason || null,
+          discardedEpoch: discarded.epoch,
+          discardedRequestedAt: new Date(discarded.requestedAt).toISOString(),
+          turnEpoch: epoch,
+        },
+        conversationId,
+        personaId
+      );
+    }
+
+    return epoch;
   }
 
   /**
    * Interrupts an in-progress auto tool execution loop.
    * Sets an interrupt flag so the server-side tool loop breaks at the next
    * iteration boundary, persists a summary message, and notifies the client via SSE.
+   *
+   * The flag is stamped with the epoch of the turn running at THIS moment, and the
+   * AUTO loop honours it only when its own epoch matches. That is what stops an
+   * interrupt which arrives while nothing is looping from surviving into, and
+   * silently disarming, the next turn (ticket
+   * REACTORY-302016408/20261104/2715764250). If no turn is running there is nothing
+   * to stop, and the request is recorded rather than queued for a turn that never
+   * asked for it.
    */
   async interruptToolExecution(
     chatSessionId: string,
@@ -2757,8 +2883,24 @@ export default class ReactorConversationService
       userId: this.context.user?._id,
     }, chatSessionId, personaId);
 
-    // Set the interrupt flag — the AUTO loop checks this at each iteration
-    ReactorConversationService.interruptedSessions.set(chatSessionId, reason || '');
+    // Record the interrupt, stamped with the epoch of the turn running right now.
+    //
+    // The stamp is taken here, synchronously, before any of the awaits below: the
+    // remaining work (clearing `processing`, cancelling approval tasks, SSE, the
+    // persisted notice) can take hundreds of milliseconds, and the turn this request
+    // was aimed at is the one that was running when the user asked — not whichever
+    // turn happens to be running when this method finally returns.
+    const interruptRecord = ReactorConversationService.turnInterrupts.request(chatSessionId, reason);
+    if (interruptRecord.epoch === 0) {
+      // No turn has ever opened an epoch for this conversation, so no AUTO loop can be
+      // inside a matching epoch. Say so instead of leaving a flag that will be
+      // discarded at the next turn's start with no explanation of where it came from.
+      this.sessionLog("warn", "Interrupt requested while no turn is running — recorded, and it cannot stop a future turn", {
+        chatSessionId,
+        personaId,
+        reason,
+      }, chatSessionId, personaId);
+    }
 
     // Clear processing flag immediately
     await ReactorConversationModel.findOneAndUpdate(
@@ -5747,12 +5889,30 @@ export default class ReactorConversationService
 
     const turnStartTime = Date.now();
 
+    // Open this turn's interrupt epoch before any provider work happens, and report
+    // anything left over from a previous turn.
+    //
+    // Opening the epoch here — not at the AUTO loop — is the point: the interrupt that
+    // killed this conversation in REACTORY-302016408/20261104/2715764250 was recorded
+    // twelve minutes before the turn it killed, and a check that only runs once a tool
+    // batch is already in flight cannot tell the difference between "the user wants to
+    // stop" and "the user wanted to stop a turn that is long gone".
+    //
+    // `turnEpoch` is 0 for a turn with no conversation id yet (the very first message of
+    // a new conversation); the epoch is opened on the new conversation's id further down,
+    // once it exists, exactly once per turn — never twice, because a second epoch inside
+    // one turn would orphan an interrupt raised during the first half of it.
+    let turnEpoch = chatSessionId
+      ? this.beginTurnInterruptEpoch(chatSessionId, personaId)
+      : 0;
+
     this.sessionLog("debug", "Sending message", {
       personaId,
       chatSessionId,
       messageLength: typeof message === "string" ? message.length : "object",
       role,
       userId: user?._id,
+      turnEpoch,
       timestamp: new Date().toISOString(),
     }, chatSessionId, personaId);
 
@@ -6196,6 +6356,14 @@ export default class ReactorConversationService
         // execute tools directly on the server instead of round-tripping to the client.
         const effectiveConversationId = chatSessionId || conversation._id.toString();
 
+        // The first message of a new conversation has no id at `sendMessage` entry, so
+        // its epoch could not be opened there. Open it now — once, on the id the
+        // conversation was created with. `turnEpoch === 0` is the marker for "not yet
+        // opened", and only that case opens one.
+        if (!turnEpoch) {
+          turnEpoch = this.beginTurnInterruptEpoch(effectiveConversationId, personaId);
+        }
+
         await ReactorConversationModel.findByIdAndUpdate(
           effectiveConversationId,
           { $set: { processing: true, updated: new Date() } }
@@ -6224,16 +6392,49 @@ export default class ReactorConversationService
             (response?.tool_calls?.length > 0 || response?.choices?.[0]?.message?.tool_calls?.length > 0) &&
             iteration < MAX_TOOL_ITERATIONS
           ) {
-            // Check for user-initiated interruption before each iteration
-            if (this.isInterrupted(effectiveConversationId)) {
-              const reason = this.clearInterrupt(effectiveConversationId);
-              this.sessionLog("info",
+            // Check for user-initiated interruption before each iteration.
+            //
+            // Epoch-scoped, and that is the whole fix. `takeTurnInterrupt` returns a stop
+            // verdict only for an interrupt stamped with THIS turn's epoch; one left over
+            // from an earlier turn is reported at WARN and ignored instead of breaking the
+            // loop. Asking "is a flag set?" — which is what this used to do — cannot tell
+            // the two apart, and is how a flag set twelve minutes earlier killed a turn at
+            // `iteration = 0` with nothing in the log but "interrupted by user after 0
+            // iteration(s)" (ticket REACTORY-302016408/20261104/2715764250).
+            //
+            // The check sits ahead of `iteration++` and ahead of any classification, so
+            // whatever it stops is never executed, deferred, refused, or given a result —
+            // hence the WARN naming every abandoned call below.
+            const interruptVerdict = this.takeTurnInterrupt(effectiveConversationId, turnEpoch, personaId);
+
+            if (interruptVerdict.stop) {
+              const reason = interruptVerdict.reason;
+
+              // Name every call being thrown away before leaving. This batch was never
+              // classified, so the per-iteration summary below will not run for it and
+              // these calls will never be answered: without this line the only trace is
+              // a line that reads exactly like a turn with nothing to do.
+              const abandoned = this.reportAbandonedToolCalls({
+                conversationId: effectiveConversationId,
+                personaId,
+                toolCalls: response?.tool_calls || response?.choices?.[0]?.message?.tool_calls || [],
+                iteration,
+                turnEpoch,
+                reason,
+                cause: "user interrupt",
+              });
+
+              this.sessionLog("warn",
                 `[sendMessage] AUTO mode: interrupted by user after ${iteration} iteration(s)`,
-                { conversationId: effectiveConversationId, reason },
+                {
+                  conversationId: effectiveConversationId,
+                  reason,
+                  turnEpoch,
+                  abandonedToolCallIds: abandoned.meta.abandonedToolCallIds,
+                },
                 effectiveConversationId, personaId
               );
 
-              // Send an updated interrupted SSE event with the real iteration count
               if (streamingMode === StreamingMode.SSE) {
                 const interruptEvent: InterruptedStreamingEvent = {
                   type: StreamingEventType.INTERRUPTED,
@@ -6309,9 +6510,39 @@ export default class ReactorConversationService
 
             for (const toolCall of toolCalls) {
               const toolName = toolCall.function?.name;
-              const toolArgs = typeof toolCall.function?.arguments === 'string'
-                ? JSON.parse(toolCall.function.arguments)
-                : toolCall.function?.arguments;
+
+              // Parse the model's arguments defensively.
+              //
+              // This is the one throwable statement ahead of the per-tool `try` below.
+              // A malformed `arguments` string therefore escaped the per-tool catch
+              // entirely, aborted the batch before any call was classified, and left the
+              // loop's own catch to report it as a failed *turn* — with nothing naming the
+              // call that was actually broken. Naming it here, at WARN, is what makes the
+              // abort attributable; the rethrow keeps the existing failure semantics
+              // (the turn still fails) rather than silently inventing a result shape for
+              // arguments nobody could read.
+              let toolArgs: any;
+              try {
+                toolArgs = typeof toolCall.function?.arguments === 'string'
+                  ? JSON.parse(toolCall.function.arguments)
+                  : toolCall.function?.arguments;
+              } catch (argumentError: any) {
+                this.sessionLog("warn",
+                  `[sendMessage] AUTO mode: abandoning tool call ${toolName || '(unnamed)'} (${toolCall.id || 'no-call-id'}) — its arguments are not valid JSON: ${argumentError.message}`,
+                  {
+                    toolName: toolName || null,
+                    toolCallId: toolCall.id || null,
+                    rawArguments: typeof toolCall.function?.arguments === 'string'
+                      ? toolCall.function.arguments.slice(0, 500)
+                      : null,
+                    conversationId: effectiveConversationId,
+                    iteration,
+                  },
+                  effectiveConversationId,
+                  personaId
+                );
+                throw argumentError;
+              }
 
               // Fail fast on a tool this conversation does not declare.
               //
@@ -6320,6 +6551,7 @@ export default class ReactorConversationService
               // opaque macro error the model cannot act on. A client-only tool
               // that was not registered for this session is called out by name,
               // because that is the actionable cause.
+
               if (toolName && !knownToolNames.has(toolName)) {
                 // Consult the macro registry as well as the session's own tools.
                 // The session's recorded set can be stale — see
@@ -6569,9 +6801,21 @@ export default class ReactorConversationService
                   }
                 }
               } catch (toolError: any) {
-                this.sessionLog("warn", `[sendMessage] AUTO tool execution failed for ${toolName}: ${toolError.message}`, {
+                // The dispatcher's own record of a macro failure.
+                //
+                // This is the ONLY place a tool that reached `executeMacro` can fail
+                // without the transcript noticing, so it names the tool AND the
+                // `tool_call_id` the provider will key the result on. Without the id the
+                // line could not be joined to the assistant message's `tool_calls`, which
+                // is precisely the question asked when a call has no result: was it never
+                // dispatched, or did it fail? Ticket
+                // REACTORY-302016408/20261104/2715764250 was diagnosed by hand because the
+                // answer was not in the log.
+                this.sessionLog("warn", `[sendMessage] AUTO tool execution failed for ${toolName} (${toolCall.id}): ${toolError.message}`, {
                   toolName,
+                  toolCallId: toolCall.id,
                   conversationId: effectiveConversationId,
+                  iteration,
                 });
                 await this.updateToolCallStatus(effectiveConversationId, toolCall.id, 'error');
                 // Add an error tool result to history so the AI knows the tool failed.
@@ -6863,6 +7107,26 @@ export default class ReactorConversationService
               }, effectiveConversationId, personaId);
             }
           }
+          } catch (toolLoopError: any) {
+            // Anything thrown out of the batch itself — an unparseable `arguments`
+            // string, a persistence failure, a refused oversize result that was not
+            // caught per tool — aborts the iteration with the remaining calls in the
+            // batch neither executed nor answered. Without this line the turn failed
+            // and those calls left no trace at all, which reads identically to "the
+            // model's tools were ignored".
+            //
+            // One line naming every call in the batch and the iteration it died in is
+            // the floor the ticket asks for: no tool call may end a turn with no result
+            // and no explanation.
+            this.reportAbandonedToolCalls({
+              conversationId: effectiveConversationId,
+              personaId,
+              toolCalls: response?.tool_calls || response?.choices?.[0]?.message?.tool_calls || [],
+              iteration,
+              turnEpoch,
+              cause: toolLoopError?.message || "unknown error",
+            });
+            throw toolLoopError;
           } finally {
             // Always clear the heartbeat interval when the tool loop exits
             if (heartbeatInterval) clearInterval(heartbeatInterval);

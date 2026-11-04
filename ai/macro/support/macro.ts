@@ -31,6 +31,31 @@ const isObjectIdString = (value: string): boolean =>
   ObjectId.isValid(value) && String(new ObjectId(value)) === value;
 
 /**
+ * WHY EVERY MACRO IN THIS FILE RESOLVES ITS SERVICE *INSIDE* THE `try`
+ *
+ * `state.context?.getService(...)` looks like a lookup and reads like one, but it is a
+ * call into the service registry and it can throw — an unresolvable dependency, a
+ * decorator/registry error, or a context that is present but broken. Every macro here
+ * had the lookup above the `try`, so that failure escaped the macro entirely: the
+ * caller saw a rejected promise instead of the `{ success: false, error }` envelope
+ * every other failure in these macros returns, and `executeMacro`'s per-tool catch
+ * reported it as a generic macro failure with no indication that the *service* was the
+ * problem rather than the ticket.
+ *
+ * Moving the lookup in is deliberately the smallest possible change:
+ *
+ *  - the `if (!supportService)` guard stays, because "the registry returned nothing" is
+ *    still a distinct, expected outcome that must read as such;
+ *  - the existing catch does the reporting, so a resolution failure reaches the model
+ *    as an ordinary tool error it can act on (or at least report) instead of failing
+ *    the turn;
+ *  - nothing else moves, so a macro that worked keeps working.
+ *
+ * The same shape was found in all eight macros and fixed in all eight — a pattern this
+ * uniform is only half fixed if the next one copied is left broken.
+ */
+
+/**
  * Retrieves a single support ticket by its ObjectId or human readable reference number.
  *
  * When the supplied identifier is a valid ObjectId the ticket is fetched directly;
@@ -53,25 +78,25 @@ export const GetSupportTicket: Macro<SupportMacroResult, GetSupportTicketProps> 
     };
   }
 
-  const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
-    "core.ReactorySupportService@1.0.0"
-  );
-
-  if (!supportService) {
-    return {
-      success: false,
-      error: "ReactorySupportService not found in execution context",
-      tool: "getSupportTicket",
-      params: props,
-      metadata: {
-        executionTime: Date.now() - startTime,
-        timestamp: new Date(),
-        user: state.user?.id,
-      },
-    };
-  }
-
   try {
+    const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
+      "core.ReactorySupportService@1.0.0"
+    );
+
+    if (!supportService) {
+      return {
+        success: false,
+        error: "ReactorySupportService not found in execution context",
+        tool: "getSupportTicket",
+        params: props,
+        metadata: {
+          executionTime: Date.now() - startTime,
+          timestamp: new Date(),
+          user: state.user?.id,
+        },
+      };
+    }
+
     const ticketId = id.trim();
     const isObjectId = isObjectIdString(ticketId);
 
@@ -207,25 +232,25 @@ export const ListSupportTickets: Macro<SupportMacroResult, ListSupportTicketsPro
     pageSize = 10,
   } = props || {};
 
-  const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
-    "core.ReactorySupportService@1.0.0"
-  );
-
-  if (!supportService) {
-    return {
-      success: false,
-      error: "ReactorySupportService not found in execution context",
-      tool: "listSupportTickets",
-      params: props,
-      metadata: {
-        executionTime: Date.now() - startTime,
-        timestamp: new Date(),
-        user: state.user?.id,
-      },
-    };
-  }
-
   try {
+    const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
+      "core.ReactorySupportService@1.0.0"
+    );
+
+    if (!supportService) {
+      return {
+        success: false,
+        error: "ReactorySupportService not found in execution context",
+        tool: "listSupportTickets",
+        params: props,
+        metadata: {
+          executionTime: Date.now() - startTime,
+          timestamp: new Date(),
+          user: state.user?.id,
+        },
+      };
+    }
+
     const filter: Partial<Reactory.Models.IReactorySupportTicketFilter> = {
       status,
       priority,
@@ -391,25 +416,25 @@ export const CreateSupportTicket: Macro<SupportMacroResult, CreateSupportTicketP
     };
   }
 
-  const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
-    "core.ReactorySupportService@1.0.0"
-  );
-
-  if (!supportService) {
-    return {
-      success: false,
-      error: "ReactorySupportService not found in execution context",
-      tool: "createSupportTicket",
-      params: props,
-      metadata: {
-        executionTime: Date.now() - startTime,
-        timestamp: new Date(),
-        user: state.user?.id,
-      },
-    };
-  }
-
   try {
+    const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
+      "core.ReactorySupportService@1.0.0"
+    );
+
+    if (!supportService) {
+      return {
+        success: false,
+        error: "ReactorySupportService not found in execution context",
+        tool: "createSupportTicket",
+        params: props,
+        metadata: {
+          executionTime: Date.now() - startTime,
+          timestamp: new Date(),
+          user: state.user?.id,
+        },
+      };
+    }
+
     const ticket = await supportService.createRequest(
       request.trim(),
       description.trim(),
@@ -535,25 +560,25 @@ export const UpdateSupportTicket: Macro<SupportMacroResult, UpdateSupportTicketP
     };
   }
 
-  const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
-    "core.ReactorySupportService@1.0.0"
-  );
-
-  if (!supportService) {
-    return {
-      success: false,
-      error: "ReactorySupportService not found in execution context",
-      tool: "updateSupportTicket",
-      params: props,
-      metadata: {
-        executionTime: Date.now() - startTime,
-        timestamp: new Date(),
-        user: state.user?.id,
-      },
-    };
-  }
-
   try {
+    const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
+      "core.ReactorySupportService@1.0.0"
+    );
+
+    if (!supportService) {
+      return {
+        success: false,
+        error: "ReactorySupportService not found in execution context",
+        tool: "updateSupportTicket",
+        params: props,
+        metadata: {
+          executionTime: Date.now() - startTime,
+          timestamp: new Date(),
+          user: state.user?.id,
+        },
+      };
+    }
+
     const updates: Reactory.Models.IReactorySupportTicketUpdate = {
       status,
       assignTo,
@@ -699,25 +724,25 @@ export const AddSupportTicketComment: Macro<SupportMacroResult, AddSupportTicket
     };
   }
 
-  const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
-    "core.ReactorySupportService@1.0.0"
-  );
-
-  if (!supportService) {
-    return {
-      success: false,
-      error: "ReactorySupportService not found in execution context",
-      tool: "addSupportTicketComment",
-      params: props,
-      metadata: {
-        executionTime: Date.now() - startTime,
-        timestamp: new Date(),
-        user: state.user?.id,
-      },
-    };
-  }
-
   try {
+    const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
+      "core.ReactorySupportService@1.0.0"
+    );
+
+    if (!supportService) {
+      return {
+        success: false,
+        error: "ReactorySupportService not found in execution context",
+        tool: "addSupportTicketComment",
+        params: props,
+        metadata: {
+          executionTime: Date.now() - startTime,
+          timestamp: new Date(),
+          user: state.user?.id,
+        },
+      };
+    }
+
     const commentDoc = await supportService.addComment(ticketId.trim(), comment.trim(), parentId, attachmentIds);
     const executionTime = Date.now() - startTime;
 
@@ -1243,24 +1268,24 @@ export const GetSupportTicketComments: Macro<SupportMacroResult, GetSupportTicke
     return supportMacroFailure("getSupportTicketComments", props, state, startTime, "No ticket ID provided");
   }
 
-  const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
-    "core.ReactorySupportService@1.0.0"
-  );
-
-  if (!supportService) {
-    return supportMacroFailure(
-      "getSupportTicketComments",
-      props,
-      state,
-      startTime,
-      "ReactorySupportService not found in execution context"
-    );
-  }
-
-  const service = (supportService as unknown) as SupportTicketReadService;
-  const candidate = identifier.trim();
-
   try {
+    const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
+      "core.ReactorySupportService@1.0.0"
+    );
+
+    if (!supportService) {
+      return supportMacroFailure(
+        "getSupportTicketComments",
+        props,
+        state,
+        startTime,
+        "ReactorySupportService not found in execution context"
+      );
+    }
+
+    const service = (supportService as unknown) as SupportTicketReadService;
+    const candidate = identifier.trim();
+
     const resolved = await resolveSupportTicket(service, candidate);
 
     if (!resolved) {
@@ -1388,24 +1413,24 @@ export const GetSupportTicketAttachments: Macro<SupportMacroResult, GetSupportTi
     return supportMacroFailure("getSupportTicketAttachments", props, state, startTime, "No ticket ID provided");
   }
 
-  const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
-    "core.ReactorySupportService@1.0.0"
-  );
-
-  if (!supportService) {
-    return supportMacroFailure(
-      "getSupportTicketAttachments",
-      props,
-      state,
-      startTime,
-      "ReactorySupportService not found in execution context"
-    );
-  }
-
-  const service = (supportService as unknown) as SupportTicketReadService;
-  const candidate = identifier.trim();
-
   try {
+    const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
+      "core.ReactorySupportService@1.0.0"
+    );
+
+    if (!supportService) {
+      return supportMacroFailure(
+        "getSupportTicketAttachments",
+        props,
+        state,
+        startTime,
+        "ReactorySupportService not found in execution context"
+      );
+    }
+
+    const service = (supportService as unknown) as SupportTicketReadService;
+    const candidate = identifier.trim();
+
     const resolved = await resolveSupportTicket(service, candidate);
 
     if (!resolved) {
@@ -1545,25 +1570,29 @@ export const AttachSupportTicketFile: Macro<SupportMacroResult, AttachSupportTic
     );
   }
 
-  const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
-    "core.ReactorySupportService@1.0.0"
-  );
-
-  if (!supportService) {
-    return supportMacroFailure(
-      "attachSupportTicketFile",
-      props,
-      state,
-      startTime,
-      "ReactorySupportService not found in execution context"
-    );
-  }
-
-  const service = (supportService as unknown) as SupportTicketReadService;
-  const candidate = identifier.trim();
+  // Declared OUTSIDE the try: the catch reports the file id that was uploaded before
+  // the failure, so an orphaned upload can be found and removed. Scoping it inside the
+  // try would make that report impossible — the very case this variable exists for.
   let uploaded: { fileId: string; filename: string | null; size: number | null; mimetype: string | null } | null = null;
 
   try {
+    const supportService = state.context?.getService<Reactory.Service.TReactorySupportService>(
+      "core.ReactorySupportService@1.0.0"
+    );
+
+    if (!supportService) {
+      return supportMacroFailure(
+        "attachSupportTicketFile",
+        props,
+        state,
+        startTime,
+        "ReactorySupportService not found in execution context"
+      );
+    }
+
+    const service = (supportService as unknown) as SupportTicketReadService;
+    const candidate = identifier.trim();
+
     // Vet the caller's file input before anything is read or looked up: a
     // hostile path or a malformed id must not cost a ticket lookup, and a ticket
     // that turns out not to exist must not leave an orphaned upload behind.

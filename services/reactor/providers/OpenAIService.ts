@@ -45,7 +45,7 @@ import { StreamingTransportManager } from "../StreamingTransportManager";
 import { StreamingEventFactory, StreamingEventIds } from "../streaming/StreamingEventFactory";
 import { TokenPacer } from "../streaming/TokenPacer";
 import { IReactorProviderService } from "../../../types/service.types";
-
+import { ChatSessionResourceManager } from "../ChatSessionResourceManager";
 
 @service({
   id: "reactor.OpenAIService@1.0.0",
@@ -362,6 +362,42 @@ class OpenAIService extends AIProviderBase {
   }
 
   /**
+   * Emit a provider warning to the global context AND to this conversation's
+   * `session.log`.
+   *
+   * WHY THIS EXISTS
+   * ---------------
+   * `this.context.warn(...)` goes to the server log. The per-conversation log
+   * (`REACTORY_DATA/profiles/{userId}/chats/{personaId}/{conversationId}/session.log`)
+   * is a *different* winston logger owned by `ChatSessionResourceManager`, and the two
+   * never cross. A provider has no reference to `ReactorConversationService`, so before
+   * this helper every diagnostic a provider emitted was invisible in the very file an
+   * investigation of a wedged conversation reads — which is how a synthetic "no result
+   * recorded" placeholder could be sent on every request of a stuck session with no
+   * trace in that session's log.
+   *
+   * `ChatSessionResourceManager` keeps a static registry keyed by conversationId, so the
+   * manager for `this.chatState.id` is reachable from here without a new dependency.
+   * Both writes are guarded: logging must never be the thing that fails a request.
+   */
+  private warnToSessionLog(message: string, meta?: Record<string, unknown>): void {
+    try {
+      this.context.warn(message, meta);
+    } catch {
+      // Nothing useful left to do — never propagate out of a log call.
+    }
+
+    const conversationId = this.chatState?.id ? String(this.chatState.id) : "";
+    if (!conversationId) return;
+
+    try {
+      ChatSessionResourceManager.forSession(conversationId)?.warn(message, meta);
+    } catch {
+      // as above
+    }
+  }
+
+  /**
    * Make the payload satisfy the tool-call closure invariant the provider enforces.
    *
    * THE INVARIANT IS ABOUT ORDER. THIS IS THE PART THAT IS EASY TO GET WRONG
@@ -497,11 +533,27 @@ class OpenAIService extends AIProviderBase {
     ];
 
     if (synthesised.length > 0) {
-      this.context.warn(
+      // This warning USED to go to the global context only, so it never reached
+      // `session.log` — the one file someone actually reads when a conversation wedges.
+      // A placeholder result is never a normal event: it means a tool call reached the
+      // provider with no result anywhere in the stored transcript, i.e. a turn discarded
+      // a batch (see `describeAbandonedToolCalls`) or a result was lost. The place that
+      // has to show that is the session's own log, next to the dispatch lines.
+      //
+      // Routing only — the closure logic above is untouched, the placeholder is still
+      // synthesised, and the stored transcript is still left alone so the defect stays
+      // visible in the store.
+      //
+      // The sibling warnings below (reordered / orphaned results) are deliberately left on
+      // context-only logging: they report duplicate and mis-ordered results, which a
+      // separate work package owns, and mixing that reporting in here would make two
+      // changes indistinguishable in review.
+      this.warnToSessionLog(
         "OpenAIService: tool call(s) had no result anywhere in the transcript; sent a synthetic 'no result recorded' result in-payload. The stored transcript was NOT modified — the gap is real and should be investigated.",
         {
           count: synthesised.length,
           toolCalls: synthesised.map((c) => `${c.name}(${c.id})`),
+          toolCallIds: synthesised.map((c) => c.id),
           sessionId: this.chatState?.id,
         }
       );
