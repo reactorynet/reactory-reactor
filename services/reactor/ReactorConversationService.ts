@@ -7159,7 +7159,12 @@ export default class ReactorConversationService
           const lastResponseToolCalls = response?.tool_calls || response?.choices?.[0]?.message?.tool_calls || [];
           const providerAlreadySentCompletion = lastResponseToolCalls.length === 0
             && (response?.content || response?.choices?.[0]?.message?.content);
-          if (streamingMode === StreamingMode.SSE && hasClientToolsPending) {
+          const streamTermination = this.resolveStreamTermination({
+            streamingMode,
+            hasClientToolsPending,
+            providerAlreadySentCompletion,
+          });
+          if (streamTermination === "paused_for_client_tool") {
             // The turn is PAUSED, not finished.
             //
             // The gate below used to test only `!providerAlreadySentCompletion`, so a
@@ -7205,7 +7210,7 @@ export default class ReactorConversationService
                 conversationId: effectiveConversationId,
               }, effectiveConversationId, personaId);
             }
-          } else if (streamingMode === StreamingMode.SSE && !providerAlreadySentCompletion) {
+          } else if (streamTermination === "complete") {
             // processAIResponse normalizes the response to { __typename, content, ... }
             // so response.choices no longer exists. Read content from both formats.
             let finalContent = response?.choices?.[0]?.message?.content
@@ -8376,6 +8381,39 @@ export default class ReactorConversationService
    * Replaces placeholder tool results in the conversation history with
    * the real results, then optionally continues the AI processing loop.
    */
+  /**
+   * Which end-of-turn signal the SSE emitter should send, if any.
+   *
+   * Extracted from the AUTO loop for the same reason `classifyUndeclaredToolCall` was:
+   * this is the branch that decides whether a turn is announced as finished, and BOTH ways
+   * of getting it wrong are silent.
+   *
+   *   - announcing `complete` while a client tool result is outstanding tells every caller
+   *     the turn ended, so the client never reports the result and the turn sits paused
+   *     until the deadline reconciler fails it. That is the defect.
+   *   - announcing nothing at all leaves the client waiting on a turn that is over.
+   *
+   * As a pure function of (streaming mode, pending state, provider state) the decision can
+   * be asserted without standing up a provider, an SSE transport and Mongo — which is the
+   * only way it can be asserted at all, since the AUTO loop has no other test harness.
+   *
+   * `providerAlreadySentCompletion` is passed in already evaluated (it is derived from the
+   * provider's last response) so the precedence is visible in one place: a paused turn wins
+   * over everything, because the outstanding result is the thing the client must act on.
+   */
+  private resolveStreamTermination(args: {
+    streamingMode?: StreamingMode;
+    hasClientToolsPending: boolean;
+    providerAlreadySentCompletion: any;
+  }): "paused_for_client_tool" | "complete" | "none" {
+    const { streamingMode, hasClientToolsPending, providerAlreadySentCompletion } = args;
+
+    if (streamingMode !== StreamingMode.SSE) return "none";
+    if (hasClientToolsPending) return "paused_for_client_tool";
+    if (providerAlreadySentCompletion) return "none";
+    return "complete";
+  }
+
   async completeClientToolCalls(args: {
     chatSessionId: string;
     personaId: string;
