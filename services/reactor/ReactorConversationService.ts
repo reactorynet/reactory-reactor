@@ -8423,6 +8423,12 @@ export default class ReactorConversationService
       result?: any;
       isError?: boolean;
       error?: string;
+      // Declared here because the body has always read them: the approval paths below
+      // predate this signature and were only reachable in a type check as errors.
+      // `IReactorConversationsService` already declares both, so this syncs the
+      // implementation with the contract callers are typed against.
+      decision?: 'approved' | 'declined' | 'instructed';
+      userInstruction?: string;
     }>;
     continueProcessing?: boolean;
     streamingMode?: StreamingMode;
