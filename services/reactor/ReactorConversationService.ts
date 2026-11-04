@@ -340,6 +340,117 @@ const DATABASE_CONSTANTS = {
   DUPLICATE_KEY_ERROR_CODE: 11000,
 } as const;
 
+/**
+ * Marker carried by the placeholder `tool` row written when a client-routed call
+ * is forwarded to the browser (see `persistClientToolForwarding`).
+ *
+ * A single constant rather than a repeated literal because it is now load-bearing
+ * in two places that MUST agree: the writer that stamps it, and
+ * `isClientToolPlaceholderEntry`, which reads it to decide whether a `tool` row is
+ * a real answer or merely the forwarding record. If those drift, every forwarded
+ * call looks answered — see that predicate for why that is fatal.
+ */
+const CLIENT_TOOL_PLACEHOLDER_PREFIX = '[Client-side tool "';
+
+/** Default deadline for a client-tool roundtrip. See `resolveClientToolTimeoutMs`. */
+const DEFAULT_CLIENT_TOOL_TIMEOUT_MS = 45_000;
+
+/**
+ * Floor for `REACTOR_CLIENT_TOOL_TIMEOUT_MS`.
+ *
+ * A too-small value is indistinguishable from a broken client: results that were
+ * milliseconds away get failed, and the model is told a tool it will never see
+ * again failed. Refusing anything under a second, rather than honouring it, also
+ * keeps a fat-fingered `REACTOR_CLIENT_TOOL_TIMEOUT_MS=45` (seconds, meaning 45 s)
+ * from becoming a 45 ms deadline that fails every client tool in the system.
+ */
+const MIN_CLIENT_TOOL_TIMEOUT_MS = 1_000;
+
+/**
+ * Resolve the client-tool deadline from its environment override.
+ *
+ * Pure and exported so the parsing rules — default, floor, and garbage handling —
+ * can be asserted without waiting 45 seconds or standing up the service. An
+ * unparseable value resolves to the default rather than to "no deadline":
+ * silently disabling the deadline is the defect this exists to remove.
+ */
+export function resolveClientToolTimeoutMs(
+  raw: string | undefined = process.env.REACTOR_CLIENT_TOOL_TIMEOUT_MS,
+): number {
+  if (raw === undefined || raw === null || String(raw).trim() === '') {
+    return DEFAULT_CLIENT_TOOL_TIMEOUT_MS;
+  }
+  const parsed = Number(String(raw).trim());
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_CLIENT_TOOL_TIMEOUT_MS;
+  }
+  return Math.max(MIN_CLIENT_TOOL_TIMEOUT_MS, Math.floor(parsed));
+}
+
+/**
+ * The effective client-tool deadline, parsed exactly once per process.
+ *
+ * It is read on every pending-tool scan and every result submission, so
+ * re-parsing and re-validating the environment on each of those would be pure
+ * waste. A change to the variable therefore needs a restart — the same contract
+ * every other `REACTOR_*` knob in this file has.
+ */
+let cachedClientToolTimeoutMs: number | null = null;
+function clientToolTimeoutMs(): number {
+  if (cachedClientToolTimeoutMs === null) {
+    cachedClientToolTimeoutMs = resolveClientToolTimeoutMs();
+  }
+  return cachedClientToolTimeoutMs;
+}
+
+/**
+ * Is this `tool` row a forward record rather than an answer?
+ *
+ * A forwarded client tool writes a `tool` row immediately — providers require one
+ * result row per `tool_call`, and the browser may take a while. That row is not a
+ * result: it carries the placeholder marker, `tool_results: []`, and nothing the
+ * model could act on. When the real answer arrives the *same* row is replaced, so
+ * the marker disappears, which is what makes "no marker" a reliable test for
+ * "answered".
+ *
+ * Treating the placeholder as an answer would break the lifecycle silently in two
+ * opposite directions, which is why the distinction is explicit rather than
+ * implied:
+ *
+ *  - the pending query would report nothing for every forwarded call, so a
+ *    reconnecting client would never learn what is outstanding; and
+ *  - the first *legitimate* submission would be rejected as a duplicate of its
+ *    own placeholder.
+ */
+function isClientToolPlaceholderEntry(entry: any): boolean {
+  if (!entry || entry.role !== 'tool') return false;
+  if (typeof entry.content !== 'string') return false;
+  if (!entry.content.startsWith(CLIENT_TOOL_PLACEHOLDER_PREFIX)) return false;
+  // Belt and braces: a row that carries results is an answer even if a future
+  // writer were to reuse the marker text.
+  return !Array.isArray(entry.tool_results) || entry.tool_results.length === 0;
+}
+
+/**
+ * One outstanding client-routed tool call.
+ *
+ * `ageMs`/`expired` are reported rather than enforced quietly so a caller can act
+ * on the deadline itself — the point of the reconciler is that the *server* stops
+ * waiting, but a client that reconnects earlier than that still gets to decide.
+ */
+export interface IPendingClientToolCall {
+  toolCallId: string;
+  toolName: string;
+  args: any;
+  status: string;
+  /** ISO timestamp of the owning assistant message, or null when it carries none. */
+  createdAt: string | null;
+  /** Milliseconds since `createdAt`, or null when the age cannot be established. */
+  ageMs: number | null;
+  /** True when the call has outlived the configured client-tool deadline. */
+  expired: boolean;
+}
+
 @service({
   id: "reactor.ReactorConversationService@1.0.0",
   name: "ReactorConversationService",
@@ -8246,10 +8357,53 @@ export default class ReactorConversationService
       conversationId: chatSessionId,
     }, chatSessionId, personaId);
 
+    // Reconcile BEFORE anything is persisted.
+    //
+    // A result that arrives after the deadline must be recognised, not silently
+    // duplicated. Closing expired calls first turns that race into a definite outcome:
+    // the timed-out call now has a `tool` row, so the late submission is rejected as
+    // already answered (see the duplicate guard in the loop below) instead of writing a
+    // second result row for the same call id.
+    //
+    // Warned and swallowed: a reconciler failure must not stop a result the browser has
+    // already produced from being recorded. The worst case is the old behaviour — the
+    // deadline simply is not applied on this request.
+    try {
+      const expired = await this.reconcileExpiredClientToolCallsWithin(
+        conversation as any,
+        chatSessionId,
+        personaId
+      );
+      if (expired.length > 0) {
+        this.sessionLog(
+          "warn",
+          `[completeClientToolCalls] ${expired.length} client tool call(s) had already timed out; the incoming results are treated as duplicates of those failures`,
+          {
+            conversationId: chatSessionId,
+            toolCalls: expired.map((c) => ({ toolName: c.toolName, toolCallId: c.toolCallId, ageMs: c.ageMs })),
+          },
+          chatSessionId,
+          personaId
+        );
+      }
+    } catch (reconcileError: any) {
+      this.sessionLog(
+        "warn",
+        `[completeClientToolCalls] deadline reconciliation failed, continuing: ${reconcileError?.message}`,
+        { conversationId: chatSessionId },
+        chatSessionId,
+        personaId
+      );
+    }
+
     // Persist each tool result: replace the placeholder history entry (if one
     // exists from the AUTO+SSE path) or insert a new tool message (for
     // PROMPT/SAFE_AUTO paths where no placeholder was created).
     // Also backfill into the assistant message's tool_results array.
+    //
+    // The write itself lives in `persistClientToolResultRow` because the timeout
+    // reconciler needs the identical sequence; see that method for why the append
+    // fallback and the mirror are load-bearing.
     for (const toolResult of results) {
       if (this.context?.telemetry) {
         const clientStatus = toolResult.isError ? 'error' : (toolResult.decision || 'success');
@@ -8290,108 +8444,20 @@ export default class ReactorConversationService
         timestamp: new Date(),
       };
 
-      // 1. Try to replace the placeholder tool message in history
-      const placeholderStore = this.getMessageStore();
-      let updateResult: any = null;
-      if (placeholderStore) {
-        // The lookup is by `tool_call_id` inside the frozen array; the row is found instead. A
-        // non-zero result means a placeholder existed, preserving the append-fallback decision below.
-        const replaced = await placeholderStore.replaceToolMessageByToolCallId(
-          chatSessionId,
-          toolResult.toolCallId,
-          { content, toolResults: [clientToolResultEntry], timestamp: new Date() }
-        );
-        updateResult = replaced > 0 ? { _id: chatSessionId } : null;
-      } else {
-        updateResult = await ReactorConversationModel.findOneAndUpdate(
-          {
-            _id: chatSessionId,
-            "history.tool_call_id": toolResult.toolCallId,
-            "history.role": "tool",
-          },
-          {
-            $set: {
-              "history.$.content": content,
-              "history.$.tool_results": [clientToolResultEntry],
-              "history.$.timestamp": new Date(),
-              updated: new Date(),
-            },
-          }
-        ).exec();
-      }
-
-      // If no placeholder was found (e.g. client tool executed via PROMPT mode
-      // where the server never created a placeholder), insert a new tool message.
-      if (!updateResult) {
-        // No placeholder row existed to replace, so the result is inserted fresh. The inserted
-        // item is hoisted and handed to the mirror: this is the *ordinary* path for a client tool
-        // reported for a batch the browser never received a placeholder for, and leaving the
-        // fallback undefined dropped the result — leaving the tool_call unanswered and the
-        // transcript permanently invalid.
-        const toolResultFallbackEntry = {
-          id: new ObjectId(),
-          role: 'tool',
-          content,
-          tool_call_id: toolResult.toolCallId,
-          tool_name: toolResult.toolName,
-          timestamp: new Date(),
-          tool_results: [{
-            id: toolResult.toolCallId,
-            name: toolResult.toolName,
-            content: toolResult.isError ? toolResult.error : toolResult.result,
-            timestamp: new Date(),
-          }],
-        };
-
-        const toolResultFallbackUpdated = await ReactorConversationModel.findOneAndUpdate(
-          { _id: chatSessionId },
-          {
-            $push: { history: toolResultFallbackEntry },
-            $set: { updated: new Date() },
-          },
-          { new: true },
-        ).exec();
-
-        await this.mirrorPersistedAppend(
-          chatSessionId,
-          toolResultFallbackUpdated,
-          toolResultFallbackEntry
-        );
-      }
-
-      // 2. Backfill tool_results in the original assistant message that had tool_calls
-      //
-      // The filter below is against the frozen array, so under the store source it matches nothing.
-      // The tool call id is not a row key, so the owning row is found by JSONB containment.
-      if (placeholderStore) {
-        await placeholderStore.appendToolResultToOwningMessage(
-          chatSessionId,
-          toolResult.toolCallId,
-          clientToolResultEntry
-        );
-      } else {
-        await ReactorConversationModel.findOneAndUpdate(
-          {
-            _id: chatSessionId,
-            "history.tool_calls.id": toolResult.toolCallId,
-          },
-          {
-            $push: {
-              "history.$.tool_results": clientToolResultEntry,
-            },
-          }
-        ).exec();
-      }
-
-      await this.updateToolCallStatus(
-        chatSessionId,
-        toolResult.toolCallId,
-        toolResult.isError ? 'error' : 'success'
-      );
+      const hadPlaceholder = await this.persistClientToolResultRow({
+        conversationId: chatSessionId,
+        toolCallId: toolResult.toolCallId,
+        toolName: toolResult.toolName,
+        content,
+        toolResultsEntry: clientToolResultEntry,
+        status: toolResult.isError ? "error" : "success",
+      });
 
       this.sessionLog("debug", `[completeClientToolCalls] Persisted result for tool "${toolResult.toolName}" (callId: ${toolResult.toolCallId})`, {
         isError: toolResult.isError,
-        hasPlaceholder: !!updateResult,
+        // `true` is the GOOD path: a placeholder row existed and this result replaced it.
+        // It is not evidence that a placeholder is still stored — see WP-B A5.
+        hasPlaceholder: hadPlaceholder,
         conversationId: chatSessionId,
       }, chatSessionId, personaId);
     }
@@ -9864,18 +9930,22 @@ export default class ReactorConversationService
    *   - it is client-routed (declared `runat: 'client'` on the session, or known
    *     to the macro registry as a client tool), and
    *   - no `tool` message exists for its `tool_call_id` yet.
+   *
+   * A placeholder `tool` row — the forwarding record `persistClientToolForwarding`
+   * writes — does NOT count as an answer (see `isClientToolPlaceholderEntry`): the
+   * call was handed to the browser and is still owed a result. Counting it would
+   * make every forwarded call invisible to this query, which is the opposite of
+   * what a replay surface is for.
+   *
+   * Each entry also carries `ageMs` and `expired`, derived from the owning
+   * assistant message's timestamp. They are reported so a caller can act on the
+   * deadline itself; the server also enforces it, but only lazily — see
+   * `reconcileExpiredClientToolCalls` for why there is no sweeper and what that
+   * costs.
    */
   async getPendingClientToolCalls(args: {
     chatSessionId: string;
-  }): Promise<
-    Array<{
-      toolCallId: string;
-      toolName: string;
-      args: any;
-      status: string;
-      createdAt: string | null;
-    }>
-  > {
+  }): Promise<IPendingClientToolCall[]> {
     const { chatSessionId } = args;
     this.validateChatSessionId(chatSessionId, "getPendingClientToolCalls");
 
@@ -9890,33 +9960,99 @@ export default class ReactorConversationService
       );
     }
 
-    const clientRouted = this.collectClientRoutedToolNames(conversation as any);
+    // Heal before reporting.
+    //
+    // A reconnecting client asks this question precisely because something went
+    // wrong, and the most likely thing is that the answer never arrived. Closing the
+    // expired calls *first* means the list a client is handed contains only calls it
+    // can still usefully run: one that timed out was already failed in the
+    // transcript, and re-running it would ask the browser to answer a call the model
+    // has since been told failed. Failure here is warned and swallowed — a
+    // reconciler hiccup must not take out the replay surface that repairs the
+    // session.
+    try {
+      const expired = await this.reconcileExpiredClientToolCallsWithin(
+        conversation as any,
+        chatSessionId
+      );
+      if (expired.length > 0) {
+        this.sessionLog(
+          "warn",
+          `[getPendingClientToolCalls] failed ${expired.length} expired client tool call(s) before reporting pending calls`,
+          {
+            conversationId: chatSessionId,
+            toolCalls: expired.map((c) => ({ toolName: c.toolName, toolCallId: c.toolCallId, ageMs: c.ageMs })),
+          },
+          chatSessionId
+        );
+      }
+    } catch (reconcileError: any) {
+      this.sessionLog(
+        "warn",
+        `[getPendingClientToolCalls] deadline reconciliation failed, reporting what is visible: ${reconcileError?.message}`,
+        { conversationId: chatSessionId },
+        chatSessionId
+      );
+    }
 
-    const store = this.getMessageStore();
-    const messages = store
-      ? store.toMessages(await store.getActiveMessages(chatSessionId))
-      : ((conversation as any).history || []);
+    // Re-read rather than filter: the reconciler has just written results, and the
+    // second read is what sees them. One extra transcript read on a recovery path is
+    // cheaper than a pending list that contradicts the transcript.
+    const { pending } = await this.readClientToolState(conversation as any, chatSessionId);
+    return pending;
+  }
 
-    // Everything already answered, regardless of role ordering.
+  /**
+   * Read the transcript once and derive everything the client-tool lifecycle needs.
+   *
+   * Three consumers disagree about nothing except what they look at, so they share
+   * this read instead of each growing its own predicate — the predicates have to
+   * agree, and the way to guarantee that is to have exactly one:
+   *
+   *   - `getPendingClientToolCalls` reports `pending` to a reconnecting client;
+   *   - `reconcileExpiredClientToolCalls` fails the `expired` subset;
+   *   - `completeClientToolCalls` uses `answered` to refuse a duplicate submission
+   *     and `pending` to refuse a submission that contains nothing at all.
+   *
+   * AGE IS DERIVED, NEVER STORED. `ageMs` is `now - owningMessage.timestamp`, so the
+   * deadline needs no timer, no per-call record and no sweeper state to survive a
+   * restart. A message with no readable timestamp yields `ageMs: null` and
+   * `expired: false` — an absent timestamp cannot prove a call is old, and failing a
+   * live call because its age is unknown would be worse than waiting.
+   */
+  private async readClientToolState(
+    conversation: any,
+    conversationId: string,
+    now: number = Date.now(),
+  ): Promise<{ pending: IPendingClientToolCall[]; answered: Set<string> }> {
+    const clientRouted = this.collectClientRoutedToolNames(conversation);
+    const messages = await this.resolveClientToolTranscript(conversation, conversationId);
+
+    // Everything already answered, regardless of role ordering. A placeholder row is
+    // deliberately not an answer — see `isClientToolPlaceholderEntry`.
     const answered = new Set<string>();
     for (const message of messages as any[]) {
-      if (message?.role === "tool" && message?.tool_call_id) {
+      if (
+        message?.role === "tool" &&
+        message?.tool_call_id &&
+        !isClientToolPlaceholderEntry(message)
+      ) {
         answered.add(String(message.tool_call_id));
       }
     }
 
-    const pending: Array<{
-      toolCallId: string;
-      toolName: string;
-      args: any;
-      status: string;
-      createdAt: string | null;
-    }> = [];
+    const timeoutMs = clientToolTimeoutMs();
+    const pending: IPendingClientToolCall[] = [];
 
     for (const message of messages as any[]) {
       if (message?.role !== "assistant" || !Array.isArray(message?.tool_calls)) {
         continue;
       }
+
+      const rawTimestamp = message?.timestamp ? new Date(message.timestamp) : null;
+      const createdAtMs =
+        rawTimestamp && Number.isFinite(rawTimestamp.getTime()) ? rawTimestamp.getTime() : null;
+      const ageMs = createdAtMs === null ? null : Math.max(0, now - createdAtMs);
 
       for (const call of message.tool_calls) {
         const callId = call?.id ? String(call.id) : null;
@@ -9930,14 +10066,320 @@ export default class ReactorConversationService
           toolName: name,
           args: call?.function?.arguments ?? call?.arguments ?? null,
           status: call?.status || "pending",
-          createdAt: message?.timestamp
-            ? new Date(message.timestamp).toISOString()
-            : null,
+          createdAt: createdAtMs === null ? null : new Date(createdAtMs).toISOString(),
+          ageMs,
+          expired: ageMs !== null && ageMs > timeoutMs,
         });
       }
     }
 
-    return pending;
+    return { pending, answered };
+  }
+
+  /**
+   * The transcript the client-tool predicates read.
+   *
+   * Store-backed when the mirror can answer — that is where writes land now — and the
+   * conversation's own `history` otherwise. The store was already preferred; the only
+   * change is that a store which throws falls through to the embedded array instead of
+   * taking the whole pending query down with it, because every caller here is a
+   * recovery path and a recovery path that throws is not a recovery path.
+   */
+  private async resolveClientToolTranscript(
+    conversation: any,
+    conversationId: string,
+  ): Promise<any[]> {
+    const store = this.getMessageStore();
+    if (
+      store &&
+      typeof (store as any).getActiveMessages === "function" &&
+      typeof (store as any).toMessages === "function"
+    ) {
+      try {
+        return store.toMessages(await store.getActiveMessages(conversationId));
+      } catch (err: any) {
+        this.sessionLog(
+          "warn",
+          `[clientTool] store transcript read failed, falling back to embedded history: ${err?.message}`,
+          { conversationId },
+          conversationId
+        );
+      }
+    }
+    return ((conversation as any)?.history || []) as any[];
+  }
+
+  /**
+   * Fail client-routed tool calls whose answer never arrived.
+   *
+   * WHY THIS EXISTS
+   *
+   * A client-side tool is answered by the browser, and nothing on the server can
+   * observe whether that answer is still coming. Before this method the roundtrip had
+   * no deadline at all: if the tab was closed, reloaded or navigated away after the
+   * call was forwarded, the assistant's `tool_call` kept its placeholder row forever
+   * and the turn never resumed. The conversation looked merely slow rather than
+   * broken, and the transcript stayed permanently malformed — a `tool_call` with no
+   * result is exactly the shape providers reject.
+   *
+   * WHY THERE IS NO TIMER, `setInterval` OR WAIT-EVENT SWEEPER
+   *
+   * That was the ticket owner's explicit constraint, and it is the right one. A timer
+   * would need state that outlives the request that created it, cancellation on every
+   * completion path, and an iteration over every live conversation; get any of those
+   * wrong and the process either leaks or fails live calls. So the deadline is
+   * *derived from state that already exists*: the placeholder row and the owning
+   * assistant message are already persisted and already carry a `timestamp`, so "is
+   * this call expired?" is a pure function of those rows and the clock, evaluated
+   * whenever something is already looking at the conversation.
+   *
+   * WHAT THAT COSTS — THE LIMITATION, STATED PLAINLY
+   *
+   * Without a background worker, an abandoned turn is only healed when something
+   * observes it: a reconnecting client calling `getPendingClientToolCalls`, or a late
+   * result arriving through `completeClientToolCalls`. Until then the call sits in the
+   * transcript unanswered, so:
+   *
+   *   - a conversation nobody ever reopens stays wedged (the row is there, the turn is
+   *     not running, and no request arrives to notice), and
+   *   - any *other* code path that builds a provider request from that transcript — a
+   *     later user message in the same conversation, for instance — can still hit the
+   *     unanswered `tool_call` before reconciliation runs.
+   *
+   * Both are acceptable for this fix because they are bounded and observable, whereas
+   * the sweeper is not: it needs a scheduler, a distributed lock (several node
+   * processes share these conversations), and a policy for a call that expires while a
+   * result is in flight. RECOMMENDED FOLLOW-UP, deliberately not built here: run this
+   * method on a schedule instead of on demand — a Reactory workflow with a cron trigger
+   * that walks conversations with a non-terminal client call, or a low-frequency
+   * service interval — which would need the lock and the in-flight policy above. That
+   * is a scheduling feature with its own failure modes, not a defect fix, so it does
+   * not belong in this change.
+   *
+   * WHAT IT WRITES
+   *
+   * A genuine **failure** result, not the `[Client-side tool ...]` placeholder: the
+   * content names the tool and says it timed out, the row replaces its placeholder, the
+   * call's status becomes `error`, and a WARN records tool name, call id and elapsed
+   * ms. The model therefore reads an honest failure it can act on, and the transcript
+   * becomes valid again.
+   */
+  async reconcileExpiredClientToolCalls(
+    conversationId: string,
+    personaId?: string,
+  ): Promise<Array<{ toolCallId: string; toolName: string; ageMs: number }>> {
+    this.validateChatSessionId(conversationId, "reconcileExpiredClientToolCalls");
+
+    const conversation = await ReactorConversationModel.findOne({
+      _id: conversationId,
+      user: this.context.user,
+    })
+      .lean()
+      .exec();
+
+    if (!conversation) {
+      this.sessionLog(
+        "warn",
+        "[reconcileExpiredClientToolCalls] conversation not found; nothing to reconcile",
+        { conversationId },
+        conversationId,
+        personaId
+      );
+      return [];
+    }
+
+    return this.reconcileExpiredClientToolCallsWithin(
+      conversation as any,
+      conversationId,
+      personaId
+    );
+  }
+
+  /**
+   * The reconciler itself, against a conversation the caller already holds.
+   *
+   * Split out so the two hot callers (`getPendingClientToolCalls` and
+   * `completeClientToolCalls`) do not pay a second conversation read to use it, and so
+   * the public entry point stays a thin wrapper that only adds the fetch and the
+   * permission filter.
+   */
+  private async reconcileExpiredClientToolCallsWithin(
+    conversation: any,
+    conversationId: string,
+    personaId?: string,
+  ): Promise<Array<{ toolCallId: string; toolName: string; ageMs: number }>> {
+    const timeoutMs = clientToolTimeoutMs();
+    const { pending } = await this.readClientToolState(conversation, conversationId);
+    const expired = pending.filter((call) => call.expired);
+
+    const closed: Array<{ toolCallId: string; toolName: string; ageMs: number }> = [];
+
+    for (const call of expired) {
+      const ageMs = call.ageMs ?? 0;
+      const content =
+        `Error executing client tool ${call.toolName}: the client never reported a result for ` +
+        `this call within ${timeoutMs} ms, so it timed out. The tool runs in the user's browser; ` +
+        `its result never reached the server. Treat this call as failed — do not assume it ` +
+        `produced any output, and do not retry it in this turn.`;
+
+      await this.persistClientToolResultRow({
+        conversationId,
+        toolCallId: call.toolCallId,
+        toolName: call.toolName,
+        content,
+        toolErrors: [{ code: "CLIENT_TOOL_TIMEOUT", message: content }],
+        status: "error",
+      });
+
+      // Tool name, call id and elapsed ms in one line: the three facts needed to tell
+      // "the browser was slow" from "the browser never heard about the call".
+      this.sessionLog(
+        "warn",
+        `[reconcileExpiredClientToolCalls] client tool "${call.toolName}" (callId: ${call.toolCallId}) timed out after ${ageMs} ms — recorded a failure result`,
+        {
+          conversationId,
+          toolName: call.toolName,
+          toolCallId: call.toolCallId,
+          ageMs,
+          timeoutMs,
+        },
+        conversationId,
+        personaId
+      );
+
+      closed.push({ toolCallId: call.toolCallId, toolName: call.toolName, ageMs });
+    }
+
+    return closed;
+  }
+
+  /**
+   * Write one client-tool result row and settle the call.
+   *
+   * Extracted from the `completeClientToolCalls` loop because the reconciler needs the
+   * identical sequence for a timed-out call, and two copies of "replace the
+   * placeholder, else append, then backfill the owning message, then set the status"
+   * would drift — the append-fallback and the mirror are both load-bearing (see the
+   * comments inside), and a drifted copy fails silently.
+   *
+   * Returns whether a placeholder row existed and was replaced. That flag is
+   * **good news**: it means the browser-facing path wrote its row and this result took
+   * its place. It is not evidence that a placeholder is still stored.
+   */
+  private async persistClientToolResultRow(args: {
+    conversationId: string;
+    toolCallId: string;
+    toolName: string;
+    content: string;
+    /** Entry mirrored into the owning assistant message's `tool_results`; omitted for a failure. */
+    toolResultsEntry?: any;
+    toolErrors?: Array<{ code: string; message: string }>;
+    status: "success" | "error";
+  }): Promise<boolean> {
+    const { conversationId, toolCallId, toolName, content, toolResultsEntry, status } = args;
+    const timestamp = new Date();
+
+    // 1. Replace the placeholder tool message in history, when one exists.
+    const placeholderStore = this.getMessageStore();
+    let hadPlaceholder = false;
+    if (placeholderStore) {
+      // The lookup is by `tool_call_id` inside the frozen array; the row is found instead. A
+      // non-zero result means a placeholder existed, preserving the append-fallback decision below.
+      const replaced = await placeholderStore.replaceToolMessageByToolCallId(
+        conversationId,
+        toolCallId,
+        {
+          content,
+          toolResults: toolResultsEntry ? [toolResultsEntry] : undefined,
+          timestamp,
+        }
+      );
+      hadPlaceholder = replaced > 0;
+    } else {
+      const updateResult: any = await ReactorConversationModel.findOneAndUpdate(
+        {
+          _id: conversationId,
+          "history.tool_call_id": toolCallId,
+          "history.role": "tool",
+        },
+        {
+          $set: {
+            "history.$.content": content,
+            ...(toolResultsEntry
+              ? { "history.$.tool_results": [toolResultsEntry] }
+              : {}),
+            "history.$.timestamp": timestamp,
+            updated: timestamp,
+          },
+        }
+      ).exec();
+      hadPlaceholder = !!updateResult;
+    }
+
+    // 2. If no placeholder was found (e.g. client tool executed via PROMPT mode
+    // where the server never created a placeholder), insert a new tool message.
+    if (!hadPlaceholder) {
+      // No placeholder row existed to replace, so the result is inserted fresh. The inserted
+      // item is hoisted and handed to the mirror: this is the *ordinary* path for a client tool
+      // reported for a batch the browser never received a placeholder for, and leaving the
+      // fallback undefined dropped the result — leaving the tool_call unanswered and the
+      // transcript permanently invalid.
+      const fallbackEntry = {
+        id: new ObjectId(),
+        role: "tool",
+        content,
+        tool_call_id: toolCallId,
+        tool_name: toolName,
+        timestamp,
+        tool_results: toolResultsEntry ? [toolResultsEntry] : ([] as any[]),
+        ...(args.toolErrors ? { tool_errors: args.toolErrors } : {}),
+      };
+
+      const fallbackUpdated = await ReactorConversationModel.findOneAndUpdate(
+        { _id: conversationId },
+        {
+          $push: { history: fallbackEntry },
+          $set: { updated: new Date() },
+        },
+        { new: true }
+      ).exec();
+
+      await this.mirrorPersistedAppend(conversationId, fallbackUpdated, fallbackEntry);
+    }
+
+    // 3. Backfill tool_results in the original assistant message that had tool_calls.
+    // Only when there is a result to backfill: a timeout has none, and pushing an empty
+    // entry would claim the tool produced something.
+    //
+    // The filter below is against the frozen array, so under the store source it matches nothing.
+    // The tool call id is not a row key, so the owning row is found by JSONB containment.
+    if (toolResultsEntry) {
+      if (placeholderStore) {
+        await placeholderStore.appendToolResultToOwningMessage(
+          conversationId,
+          toolCallId,
+          toolResultsEntry
+        );
+      } else {
+        await ReactorConversationModel.findOneAndUpdate(
+          {
+            _id: conversationId,
+            "history.tool_calls.id": toolCallId,
+          },
+          {
+            $push: {
+              "history.$.tool_results": toolResultsEntry,
+            },
+          }
+        ).exec();
+      }
+    }
+
+    // 4. Settle the call's own status. `error` for a timeout, so the transcript and any
+    // UI reading it agree with the result row.
+    await this.updateToolCallStatus(conversationId, toolCallId, status);
+
+    return hadPlaceholder;
   }
 
   /**
@@ -10007,7 +10449,9 @@ export default class ReactorConversationService
     const placeholderEntry = {
       id: new ObjectId(),
       role: 'tool',
-      content: `[Client-side tool "${toolName}" will be executed in the user's browser. The result is not available server-side.]`,
+      // Built from the shared marker so the reader (`isClientToolPlaceholderEntry`)
+      // cannot disagree with this writer about what a placeholder looks like.
+      content: `${CLIENT_TOOL_PLACEHOLDER_PREFIX}${toolName}" will be executed in the user's browser. The result is not available server-side.]`,
       tool_call_id: toolCall.id,
       tool_name: toolName,
       timestamp: new Date(),
