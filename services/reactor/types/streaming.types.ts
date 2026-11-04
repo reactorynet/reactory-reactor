@@ -116,7 +116,21 @@ export enum StreamingEventType {
   RETRY = 'retry',
   COMPACTION = 'compaction',
   INTERRUPTED = 'interrupted',
-  SHELL = 'shell'
+  SHELL = 'shell',
+  /**
+   * The turn is PAUSED, not finished: a client-routed tool call was forwarded and
+   * its result is still outstanding.
+   *
+   * Distinct from `COMPLETE` on purpose. The AUTO loop pauses when a client tool
+   * is pending and resumes when the browser reports the result, so emitting
+   * `COMPLETE` at that moment told every caller the turn had ended while a tool
+   * result was still owed — the UI showed a finished assistant message with no
+   * tool output, and a client that trusted it would never re-report the result.
+   * Treat `awaiting_client_tool` as "turn paused, result outstanding": no
+   * completion arrived, and one will when `ReactorCompleteClientToolCalls`
+   * resumes the turn.
+   */
+  AWAITING_CLIENT_TOOL = 'awaiting_client_tool'
 }
 
 /**
@@ -333,7 +347,28 @@ export interface ShellStreamingEvent extends StreamingEventBase {
   };
 }
 
-export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent | ToolIterationLimitStreamingEvent | RetryStreamingEvent | CompactionStreamingEvent | InterruptedStreamingEvent | ShellStreamingEvent;
+/**
+ * The turn paused on an outstanding client-tool result.
+ *
+ * Emitted where `COMPLETE` used to be emitted while a client-routed tool call was
+ * still unanswered. It carries the calls the browser owes a result for, so a
+ * client can resume exactly those calls instead of guessing from the transcript.
+ *
+ * CONTRACT CHANGE, stated for callers: this event means "turn paused, result
+ * outstanding". It is NOT a completion. Do not finalise the assistant message, do
+ * not clear a busy indicator, and do not treat the turn as done — the turn resumes
+ * server-side when the result arrives (`ReactorCompleteClientToolCalls`) and will
+ * then stream or return the actual completion.
+ */
+export interface AwaitingClientToolStreamingEvent extends StreamingEventBase {
+  type: StreamingEventType.AWAITING_CLIENT_TOOL;
+  data: {
+    /** The calls the turn is paused on — the browser must run these and report back. */
+    pendingToolCalls: Array<{ toolCallId: string; toolName: string }>;
+  };
+}
+
+export type StreamingEvent = TokenStreamingEvent | ToolCallStreamingEvent | ReasoningStreamingEvent | CompletionStreamingEvent | ErrorStreamingEvent | ToolIterationLimitStreamingEvent | RetryStreamingEvent | CompactionStreamingEvent | InterruptedStreamingEvent | ShellStreamingEvent | AwaitingClientToolStreamingEvent;
 
 /**
  * Per-persona token pacing configuration.

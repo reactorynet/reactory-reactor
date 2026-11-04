@@ -258,6 +258,11 @@ export class ReactorTui {
       case StreamingEventType.RETRY:
         this.onRetry(evt);
         break;
+      case StreamingEventType.AWAITING_CLIENT_TOOL:
+        // The turn is paused, not finished — a client tool result is outstanding.
+        // Deliberately not routed to `onComplete`.
+        this.onAwaitingClientTool(evt);
+        break;
       default:
         break;
     }
@@ -333,6 +338,28 @@ export class ReactorTui {
     // Collapse thinking panel
     adjustThinkingPanel(this.elements, false);
 
+    this.updateStatusBar();
+    this.render();
+  }
+
+  /**
+   * The turn paused on an outstanding client-tool result.
+   *
+   * Kept separate from `onComplete` on purpose: `onComplete` finalises the assistant
+   * message, clears `busy` and resets the streaming buffers, all of which report a
+   * paused turn as a finished one. Here the turn is still open — the browser owes a
+   * result and the server resumes the turn when it arrives.
+   */
+  private onAwaitingClientTool(evt: TransportEvent): void {
+    const pending = (evt.data as any)?.pendingToolCalls || [];
+    const names = pending.map((call: any) => call.toolName).filter(Boolean).join(", ");
+
+    this.appendChat(
+      "system",
+      `{yellow-fg}⏸ Paused — waiting for client tool result: ${names || "unknown"}{/yellow-fg}`
+    );
+
+    this.state.isStreaming = false;
     this.updateStatusBar();
     this.render();
   }

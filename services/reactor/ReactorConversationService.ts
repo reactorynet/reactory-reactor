@@ -45,7 +45,7 @@ import ReactoryFile, {
   ReactoryFileDocument,
 } from "@reactory/server-modules/reactory-core/models/CoreFile";
 import TaskModel from "@reactory/server-modules/reactory-core/models/Task";
-import { CompletionStreamingEvent, ToolCallStreamingEvent, ToolIterationLimitStreamingEvent, InterruptedStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
+import { AwaitingClientToolStreamingEvent, CompletionStreamingEvent, ToolCallStreamingEvent, ToolIterationLimitStreamingEvent, InterruptedStreamingEvent, PromptMergeStrategy, StreamingEventType, StreamingMode } from "./types/streaming.types";
 import Helpers from "@reactory/server-core/authentication/strategies/helpers";
 import { StreamingSessionManager } from "./StreamingSessionManager";
 import { StreamingTransportManager } from "./StreamingTransportManager";
@@ -6488,6 +6488,13 @@ export default class ReactorConversationService
             || parseInt(process.env.REACTOR_MAX_TOOL_ITERATIONS || '200', 10);
           let iteration = 0;
           let hasClientToolsPending = false;
+          // The calls the turn will pause on, in the order they were forwarded.
+          //
+          // Kept beside the boolean because the pause now reports *which* calls it is
+          // waiting for: a boolean cannot tell a client what to resume, and re-deriving
+          // the list from the transcript at emit time would race the very placeholder
+          // rows this loop just wrote.
+          let pendingClientToolCalls: Array<{ toolCallId: string; toolName: string }> = [];
 
           // Send periodic SSE heartbeats to keep the connection alive while
           // the server executes tools. Without this, proxies/browsers may
@@ -6618,6 +6625,7 @@ export default class ReactorConversationService
             }
 
             hasClientToolsPending = false;
+            pendingClientToolCalls = [];
 
             for (const toolCall of toolCalls) {
               const toolName = toolCall.function?.name;
@@ -6695,6 +6703,7 @@ export default class ReactorConversationService
                   }
 
                   hasClientToolsPending = true;
+                  pendingClientToolCalls.push({ toolCallId: String(toolCall.id), toolName });
                   batch.deferredClientTools.push(toolName);
 
                   // The plumbing — placeholder persistence, mirror, SSE forward —
@@ -6774,6 +6783,7 @@ export default class ReactorConversationService
                 }
 
                 hasClientToolsPending = true;
+                pendingClientToolCalls.push({ toolCallId: String(toolCall.id), toolName });
                 batch.deferredClientTools.push(toolName);
                 this.sessionLog("info", `[sendMessage] AUTO mode: skipping client-side tool "${toolName}" — will be forwarded to client`, {
                   toolName,
@@ -7149,7 +7159,53 @@ export default class ReactorConversationService
           const lastResponseToolCalls = response?.tool_calls || response?.choices?.[0]?.message?.tool_calls || [];
           const providerAlreadySentCompletion = lastResponseToolCalls.length === 0
             && (response?.content || response?.choices?.[0]?.message?.content);
-          if (streamingMode === StreamingMode.SSE && !providerAlreadySentCompletion) {
+          if (streamingMode === StreamingMode.SSE && hasClientToolsPending) {
+            // The turn is PAUSED, not finished.
+            //
+            // The gate below used to test only `!providerAlreadySentCompletion`, so a
+            // turn that paused on a client tool fell straight into the COMPLETE emitter:
+            // it announced a finished turn whose content was empty (nothing has been
+            // produced yet — the tool result has not arrived) and, worse, told the
+            // client there was nothing left to do. A client that believed it never
+            // reported the outstanding result, and the placeholder row was left to wait
+            // for the deadline reconciler.
+            //
+            // CONTRACT CHANGE, stated plainly for callers: `awaiting_client_tool` means
+            // "turn paused, result outstanding". It is not a completion. Callers must not
+            // finalise the assistant message or clear a busy state on it; the turn
+            // resumes server-side when the browser reports the result through
+            // `ReactorCompleteClientToolCalls`.
+            try {
+              const awaitingSessionId = this.streamingSessionManager.getSessionId(effectiveConversationId);
+              if (awaitingSessionId) {
+                const awaitingEvent: AwaitingClientToolStreamingEvent = {
+                  type: StreamingEventType.AWAITING_CLIENT_TOOL,
+                  sessionId: effectiveConversationId,
+                  conversationId: effectiveConversationId,
+                  messageId: new ObjectId().toString(),
+                  timestamp: new Date(),
+                  data: { pendingToolCalls: pendingClientToolCalls },
+                };
+                await this.streamingTransportManager.sendEventToSession(
+                  effectiveConversationId,
+                  awaitingEvent
+                );
+                this.sessionLog("info", `[sendMessage] AUTO mode: sent awaiting-client-tool event via SSE — turn paused, ${pendingClientToolCalls.length} result(s) outstanding`, {
+                  conversationId: effectiveConversationId,
+                  pendingToolCalls: pendingClientToolCalls,
+                }, effectiveConversationId, personaId);
+              } else {
+                this.sessionLog("warn", `[sendMessage] AUTO mode: no SSE session found for conversation ${effectiveConversationId} — the paused turn cannot be announced`, {
+                  conversationId: effectiveConversationId,
+                  pendingToolCalls: pendingClientToolCalls,
+                }, effectiveConversationId, personaId);
+              }
+            } catch (sseError: any) {
+              this.sessionLog("warn", `[sendMessage] AUTO mode: failed to send awaiting-client-tool event: ${sseError.message}`, {
+                conversationId: effectiveConversationId,
+              }, effectiveConversationId, personaId);
+            }
+          } else if (streamingMode === StreamingMode.SSE && !providerAlreadySentCompletion) {
             // processAIResponse normalizes the response to { __typename, content, ... }
             // so response.choices no longer exists. Read content from both formats.
             let finalContent = response?.choices?.[0]?.message?.content
