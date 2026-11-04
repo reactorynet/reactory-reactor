@@ -8582,6 +8582,46 @@ export default class ReactorConversationService
         }
       }
 
+      // A submission with no payload is not a result.
+      //
+      // `result === undefined` or `null` — with no `decision` and no `isError` — fell through
+      // to `JSON.stringify(toolResult.result ?? 'No result')`, so the literal string
+      // `"No result"` was persisted as a successful result. The model then read a successful
+      // tool call whose output was the words "No result", which is worse than a failure: it
+      // has no reason to retry and no evidence anything went wrong.
+      //
+      // Rejected here, naming the tool. The two paths that legitimately carry no `result` are
+      // preserved exactly as they were: a user decision (`declined`/`instructed`, which carries
+      // `userInstruction` or its own wording) and an explicit `isError` report (which carries
+      // `error`). An empty *string* result is still accepted: it is a deliberate "the tool
+      // produced nothing", which the model can see, unlike a missing payload it cannot.
+      const hasApprovalDecision =
+        toolResult.decision === "declined" || toolResult.decision === "instructed";
+      const hasUsablePayload = toolResult.result !== undefined && toolResult.result !== null;
+
+      if (!hasApprovalDecision && !toolResult.isError && !hasUsablePayload) {
+        this.sessionLog(
+          "warn",
+          `[completeClientToolCalls] rejecting result for tool "${toolResult.toolName}" (callId: ${submittedCallId}) — the submission carried no result payload`,
+          {
+            conversationId: chatSessionId,
+            toolName: toolResult.toolName,
+            toolCallId: submittedCallId,
+            reason: "empty-result",
+          },
+          chatSessionId,
+          personaId
+        );
+
+        rejectedResults.push({
+          toolCallId: submittedCallId,
+          toolName: toolResult.toolName,
+          reason: "empty-result",
+          message: `Tool "${toolResult.toolName}" was reported with no result payload. Submit the tool's output, an error, or a user decision.`,
+        });
+        continue;
+      }
+
       let content: string;
 
       // Handle user approval decisions (declined/instructed) differently from errors
@@ -8592,9 +8632,11 @@ export default class ReactorConversationService
       } else if (toolResult.isError) {
         content = `Error executing client tool ${toolResult.toolName}: ${toolResult.error}`;
       } else {
+        // No `?? 'No result'` fallback: the guard above guarantees a payload, and the
+        // fallback is what turned a contentless submission into a successful result.
         content = typeof toolResult.result === 'string'
           ? toolResult.result
-          : JSON.stringify(toolResult.result ?? 'No result');
+          : JSON.stringify(toolResult.result);
       }
 
       const clientToolResultEntry = {
