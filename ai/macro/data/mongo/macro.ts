@@ -8,6 +8,7 @@ import {
   generateCacheKey,
   createQueryResult
 } from '../utils';
+import { isDatabaseVariant } from '../variants';
 import logger from '@reactory/server-core/logging';
 
 // ─── Props interfaces ────────────────────────────────────────────────────────
@@ -95,7 +96,10 @@ async function connectMongo(
     };
   }
 
-  if (connection.variant !== 'mongo') {
+  // Accept every spelling that means MongoDB (`mongo`, `mongodb`, ...). The
+  // strict comparison against the canonical literal rejected the variant the
+  // `reactory` app actually declares. See ../variants.ts.
+  if (!isDatabaseVariant(connection.variant, 'mongo')) {
     return {
       error: {
         success: false,

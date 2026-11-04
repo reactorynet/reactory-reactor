@@ -24,6 +24,9 @@ export * from './types';
 // Export utilities
 export * from './utils';
 
+// Export the canonical variant set and alias resolution
+export * from './variants';
+
 // Export PostgreSQL macro
 export { PostgresMacro, PostgresMacroRegistry } from './pgsql/macro';
 

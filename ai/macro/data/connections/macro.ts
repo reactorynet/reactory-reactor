@@ -5,6 +5,7 @@ import {
 } from '@reactory/server-modules/reactory-reactor/ai/openai/types/chat';
 import { DatabaseVariant, ListedDatabaseConnection } from '../types';
 import { listDatabaseConnections } from '../utils';
+import { normaliseDatabaseVariant } from '../variants';
 
 export interface ListDataConnectionsProps {
   /** Optional single variant filter */
@@ -83,10 +84,19 @@ export const ListDataConnectionsMacro: Macro<
     };
   }
 
-  const allowedVariants = new Set<DatabaseVariant>([
+  // Filters come from an agent or an operator, so `mongodb` and `mongo` must both
+  // match. Unrecognised values are kept verbatim so an explicit filter on a
+  // non-database variant behaves exactly as it did before.
+  const requestedVariants = [
     ...(variant ? [variant] : []),
     ...((variants ?? []) as DatabaseVariant[]),
-  ]);
+  ] as string[];
+
+  const allowedVariants = new Set<DatabaseVariant>(
+    requestedVariants.map(
+      (value) => normaliseDatabaseVariant(value) ?? (value as DatabaseVariant),
+    ),
+  );
 
   const hasAnyRole = createRoleChecker(state);
   const allConnections = listDatabaseConnections(context.partner, hasAnyRole);

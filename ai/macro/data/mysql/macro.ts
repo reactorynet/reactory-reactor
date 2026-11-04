@@ -15,6 +15,7 @@ import {
   validateQuery, 
   createQueryResult 
 } from '../utils';
+import { isDatabaseVariant } from '../variants';
 import logger from '@reactory/server-core/logging';
 
 /**
@@ -118,7 +119,7 @@ export const MySqlMacro: Macro<DatabaseMacroResult, DatabaseMacroProps> = async 
     };
   }
 
-  if (connection.variant !== 'mysql') {
+  if (!isDatabaseVariant(connection.variant, 'mysql')) {
     return {
       success: false,
       error: `Connection '${connectionId}' is not a MySQL connection (variant: ${connection.variant})`,
