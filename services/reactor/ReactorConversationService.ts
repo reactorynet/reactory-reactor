@@ -5780,6 +5780,93 @@ export default class ReactorConversationService
   }
 
   /**
+   * How long a server-owned continuation will wait for the client to re-attach its
+   * SSE transport before giving up on a *live* stream.
+   *
+   * Only a live stream is at stake: `sendEventToSession` buffers for a reconnect, so
+   * the turn completes either way. The wait exists so the common case streams
+   * normally instead of being replayed from the buffer. Measured from the live
+   * session that opened this ticket, the client re-registers its transport about
+   * 1.1 s after submitting tool results, so the default is comfortably above that
+   * and still invisible to a user.
+   */
+  private continuationTransportWaitMs(): number {
+    const configured = Number(process.env.REACTOR_CONTINUATION_TRANSPORT_WAIT_MS);
+    if (Number.isFinite(configured) && configured >= 0) return configured;
+    return 5_000;
+  }
+
+  /**
+   * Decide whether this conversation currently has a usable SSE presentation channel,
+   * polling briefly if a wait is permitted.
+   *
+   * Reports *why* it is not ready rather than a bare boolean, because the previous
+   * silent version of this check is what made a discarded turn look like a stalled
+   * provider: three different failure modes (no session id, no session, no transport)
+   * all produced identical, unlogged silence.
+   *
+   * Re-resolves the session id on every pass: when the client reconnects it registers a
+   * brand-new id, so a value captured before the wait would be stale exactly in the case
+   * the wait is meant to cover.
+   */
+  private async awaitStreamingTransport(
+    chatSessionId: string,
+    waitMs: number,
+  ): Promise<{
+    ready: boolean;
+    reason: "ready" | "no-session-id" | "no-session" | "no-transport" | "probe-error";
+    sseSessionId: string | null;
+    waitedMs: number;
+    error?: string;
+  }> {
+    const startedAt = Date.now();
+    const deadline = startedAt + Math.max(0, waitMs);
+    const POLL_MS = 100;
+
+    for (;;) {
+      let reason: "ready" | "no-session-id" | "no-session" | "no-transport" | "probe-error" = "ready";
+      let sseSessionId: string | null = null;
+      let error: string | undefined;
+
+      try {
+        sseSessionId = this.streamingSessionManager.getSessionId(chatSessionId) || null;
+        if (!sseSessionId) {
+          reason = "no-session-id";
+        } else {
+          const sseSession = await this.streamingSessionManager.getSession(sseSessionId);
+          if (!sseSession) {
+            reason = "no-session";
+          } else if (!this.streamingTransportManager.hasTransport(sseSessionId)) {
+            reason = "no-transport";
+          }
+        }
+      } catch (probeError: any) {
+        // A probe failure is reported, not thrown: it must not turn a recoverable
+        // presentation problem into a failed turn. `waitedMs` still bounds the loop.
+        reason = "probe-error";
+        error = probeError?.message || String(probeError);
+      }
+
+      if (reason === "ready") {
+        return { ready: true, reason, sseSessionId, waitedMs: Date.now() - startedAt };
+      }
+
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        return {
+          ready: false,
+          reason,
+          sseSessionId,
+          waitedMs: Date.now() - startedAt,
+          ...(error ? { error } : {}),
+        };
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, Math.min(POLL_MS, remaining)));
+    }
+  }
+
+  /**
    * Serialise turns within one conversation.
    *
    * WHY THIS IS NOT THE `processing` FLAG
@@ -6084,15 +6171,61 @@ export default class ReactorConversationService
           // is missing we return a ReactorInitiateSSE response so the client can
           // establish the SSE connection first, then re-send the message.
           if (streamingMode === "SSE") {
-            const sseSessionId = this.streamingSessionManager.getSessionId(chatSessionId);
-            const sseSession = sseSessionId
-              ? await this.streamingSessionManager.getSession(sseSessionId)
-              : null;
-            const hasTransport = sseSession
-              ? await this.streamingTransportManager.hasTransport(sseSessionId!)
-              : false;
+            // Is there a live presentation channel for this turn?
+            //
+            // The answer used to be a silent gate: if any of session id, session or
+            // transport was missing, this returned an SSE-init response and the turn
+            // simply ended. Nothing was logged, so the last line before the silence
+            // was the provider-routing decision — which is why
+            // REACTORY-302016408/20261104/523706518 read for two days as "the provider
+            // went quiet" when in fact no provider request was ever made.
+            //
+            // For a USER send that contract is sound: the response asks the client to
+            // reconnect the stream and re-send, and the client does exactly that (the
+            // log shows the refusal and the re-send ~600 ms apart).
+            //
+            // For a SERVER-OWNED CONTINUATION it is fatal. The continuation is started
+            // by `completeClientToolCalls` in an un-awaited background task after the
+            // tool results have already been persisted, so nothing will ever re-send
+            // it: there is no user gesture to repeat. A gate that refuses therefore
+            // does not defer the turn, it discards it — leaving an assistant
+            // `tool_call` answered in the transcript with no reply to it, and a client
+            // waiting on a stream that will never emit. That is the whole defect.
+            //
+            // So a continuation waits briefly for the transport to come back (the
+            // client re-registers about a second after submitting results) and, if it
+            // still has not, PROCEEDS ANYWAY. Proceeding is safe because a missing
+            // subscriber is a presentation problem, not a computation one:
+            // `StreamingTransportManager.sendEventToSession` buffers events when no
+            // transport is reachable and replays them on reconnect, and the transcript
+            // is the source of truth regardless. Dropping the turn is never the lesser
+            // evil here.
+            const serverOwnedContinuation = continueAfterTools || role === "tool";
+            const readiness = await this.awaitStreamingTransport(
+              chatSessionId,
+              serverOwnedContinuation ? this.continuationTransportWaitMs() : 0,
+            );
 
-            if (!sseSessionId || !sseSession || !hasTransport) {
+            if (!readiness.ready) {
+              this.sessionLog(
+                serverOwnedContinuation ? "warn" : "debug",
+                serverOwnedContinuation
+                  ? "[sendMessage] no SSE transport for a server-owned continuation; continuing without one (events buffer and replay on reconnect) rather than discarding the turn — nothing would ever re-send it"
+                  : "[sendMessage] no SSE transport; returning an SSE-init response so the client can reconnect and re-send",
+                {
+                  conversationId: chatSessionId,
+                  reason: readiness.reason,
+                  waitedMs: readiness.waitedMs,
+                  sseSessionId: readiness.sseSessionId,
+                  continueAfterTools,
+                  role,
+                },
+                chatSessionId,
+                personaId,
+              );
+            }
+
+            if (!readiness.ready && !serverOwnedContinuation) {
               // Fetch the conversation without modifying it so we can build the SSE init response
               const existingConversation = await ReactorConversationModel.findOne(
                 { _id: chatSessionId, user: this.context.user },
