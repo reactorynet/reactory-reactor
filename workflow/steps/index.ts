@@ -14,6 +14,7 @@
 import Reactory from '@reactorynet/reactory-core';
 import { IWorkflowStepDesignerDefinition } from '@reactory/server-modules/reactory-core/workflow/YamlFlow/types/StepDesignerDefinition';
 import { AgentConversationStep } from './AgentConversationStep';
+import { DEFAULT_MAX_TOOL_ITERATIONS } from '../../services/reactor/toolIterations';
 import { GraphQueryStep } from './GraphQueryStep';
 import { ProcessConversationStep } from './ProcessConversationStep';
 import {
@@ -65,7 +66,17 @@ const agentConversationDesigner: IWorkflowStepDesignerDefinition = {
         enum: ['auto', 'safe_auto', 'prompt', 'plan'],
         default: 'auto',
       },
-      maxToolIterations: { type: 'number', title: 'Max Tool Iterations', default: 10, minimum: 1 },
+      // The advertised default IS the platform default, imported rather than
+      // restated. It used to read 10, a fourth value in a system whose budget is
+      // otherwise resolved in one place (`services/reactor/toolIterations.ts`), so
+      // a step authored without an explicit budget was pre-filled with 10 and ran
+      // at 10 — the same silent-cap class of defect the ticket exists to remove.
+      maxToolIterations: {
+        type: 'number',
+        title: 'Max Tool Iterations',
+        default: DEFAULT_MAX_TOOL_ITERATIONS,
+        minimum: 1,
+      },
       sessionId: { type: 'string', title: 'Resume Session Id', description: 'Optional — resume an existing conversation (idempotent retries)' },
     },
     required: ['name', 'personaId', 'message'],
@@ -86,7 +97,7 @@ const agentConversationDesigner: IWorkflowStepDesignerDefinition = {
       },
     },
   },
-  defaultProperties: { name: 'AI Agent', toolApprovalMode: 'auto', maxToolIterations: 10 },
+  defaultProperties: { name: 'AI Agent', toolApprovalMode: 'auto', maxToolIterations: DEFAULT_MAX_TOOL_ITERATIONS },
   tags: ['ai', 'agent', 'conversation', 'reactor'],
   rendering: {
     webgl: {

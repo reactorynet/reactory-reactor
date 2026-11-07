@@ -68,6 +68,11 @@ import {
 import { TurnInterruptLedger, IInterruptVerdict } from "../../ai/orchestration/turnInterrupt";
 import { applyChangedKeys, buildVarsUpdate, snapshotVars } from "./sessionVars";
 import { resolvePromptDirectives } from "../../ai/persona/loader/system-prompt";
+import {
+  readToolLoopTruncation,
+  resolveMaxToolIterations,
+  toolLoopTruncationFields,
+} from "./toolIterations";
 /**
  * Enhanced error response interface with correlation tracking
  */
@@ -6995,8 +7000,13 @@ export default class ReactorConversationService
           conversation.toolApprovalMode === ToolApprovalMode.AUTO &&
           responseToolCalls.length > 0
         ) {
-          const MAX_TOOL_ITERATIONS = (conversation as any).maxToolIterations
-            || parseInt(process.env.REACTOR_MAX_TOOL_ITERATIONS || '200', 10);
+          // Budget for the tool EXECUTION loop. Resolution order and the
+          // platform default live in `./toolIterations`, shared with the
+          // provider-internal loop so the two can never disagree about what the
+          // workflow asked for, and can never fall back to different defaults.
+          const MAX_TOOL_ITERATIONS = resolveMaxToolIterations(
+            (conversation as any).maxToolIterations,
+          );
           let iteration = 0;
           let hasClientToolsPending = false;
           // The calls the turn will pause on, in the order they were forwarded.
@@ -7019,7 +7029,12 @@ export default class ReactorConversationService
           try {
             while (
             (response?.tool_calls?.length > 0 || response?.choices?.[0]?.message?.tool_calls?.length > 0) &&
-            iteration < MAX_TOOL_ITERATIONS
+            iteration < MAX_TOOL_ITERATIONS &&
+            // A provider that exhausted its own tool loop returns the calls it has
+            // already executed. Re-entering here would execute that whole batch a
+            // second time and then ask the provider for yet another turn, so stop
+            // and let the post-loop check take the truncation/pause path.
+            readToolLoopTruncation(response) === null
           ) {
             // Check for user-initiated interruption before each iteration.
             //
@@ -7530,19 +7545,43 @@ export default class ReactorConversationService
             );
           }
 
-          if (iteration >= MAX_TOOL_ITERATIONS) {
-            this.sessionLog("warn", `[sendMessage] AUTO tool execution reached max iterations (${MAX_TOOL_ITERATIONS})`, {
+          // Two independent loops share this budget: the one below (tool batches
+          // executed by this service) and the provider-internal model round-trip
+          // loop. If EITHER stops at its limit the turn is truncated, and a
+          // truncated turn must take the pause path — reporting it as complete is
+          // how a reviewer approves a partial fix (ticket
+          // REACTORY-302016408/20261017/3478149265).
+          const providerTruncation = readToolLoopTruncation(response);
+          const truncatedByProvider = providerTruncation !== null && iteration < MAX_TOOL_ITERATIONS;
+
+          if (iteration >= MAX_TOOL_ITERATIONS || providerTruncation !== null) {
+            // Report the budget that was actually hit. When the provider's inner
+            // loop exhausted first, its own counters describe the turn; reusing the
+            // outer `iteration` would claim a 200-call run completed 1 of 200.
+            const iterationsCompleted = truncatedByProvider
+              ? (providerTruncation!.iterationsCompleted ?? iteration)
+              : iteration;
+            const iterationBudget = truncatedByProvider
+              ? (providerTruncation!.maxToolIterations ?? MAX_TOOL_ITERATIONS)
+              : MAX_TOOL_ITERATIONS;
+
+            this.sessionLog("warn", `[sendMessage] AUTO tool execution reached max iterations (${iterationBudget}${truncatedByProvider ? ', provider tool loop' : ''})`, {
               conversationId: effectiveConversationId,
+              iterationsCompleted,
+              iterationBudget,
+              truncatedByProvider,
             }, effectiveConversationId, personaId);
 
             const partialContent = response?.choices?.[0]?.message?.content || response?.content || '';
 
-            // Add assistant message so the user sees the pause
+            // Add assistant message so the user sees the pause. The wording states
+            // plainly that the turn was truncated: "completed" alone is what made a
+            // capped run look finished in the transcript.
             // Per-item so the mirror can receive the same object as the fallback.
             const iterationLimitItem = {
               id: new ObjectId(),
               role: 'assistant',
-              content: `I've completed ${iteration} tool call iterations and reached the configured limit of ${MAX_TOOL_ITERATIONS}. You can adjust the limit and continue, or accept the current results.`,
+              content: `I've completed ${iterationsCompleted} tool call iterations and reached the configured limit of ${iterationBudget}. The turn was truncated — the work is not finished. You can adjust the limit and continue, or accept the current results.`,
               timestamp: new Date(),
             };
 
@@ -7573,10 +7612,10 @@ export default class ReactorConversationService
                 name: effectivePersona?.name,
                 avatar: effectivePersona?.avatar,
               },
-              iterationsCompleted: iteration,
-              maxIterations: MAX_TOOL_ITERATIONS,
+              iterationsCompleted,
+              maxIterations: iterationBudget,
               title: 'Tool Execution Limit Reached',
-              description: `The agent completed ${iteration} of ${MAX_TOOL_ITERATIONS} allowed tool calls and paused. You can approve additional iterations to continue.`,
+              description: `The agent completed ${iterationsCompleted} of ${iterationBudget} allowed tool calls and paused. You can approve additional iterations to continue.`,
               pendingTools: (response?.tool_calls || response?.choices?.[0]?.message?.tool_calls || []).map((tc: any) => tc.function?.name || tc.name).filter(Boolean),
             };
 
@@ -7592,8 +7631,8 @@ export default class ReactorConversationService
                   messageId: new ObjectId().toString(),
                   timestamp: new Date(),
                   data: {
-                    iterationsCompleted: iteration,
-                    maxIterations: MAX_TOOL_ITERATIONS,
+                    iterationsCompleted,
+                    maxIterations: iterationBudget,
                     partialContent,
                     componentFqn,
                     componentProps,
@@ -7626,7 +7665,7 @@ export default class ReactorConversationService
               if (!pendingTask && this.context.user?._id) {
                 const taskDoc = new TaskModel({
                   title: `Tool Execution Approval: ${effectivePersona?.name || 'Reactor Agent'}`,
-                  description: `Agent reached tool execution limit (${iteration}/${MAX_TOOL_ITERATIONS}) in chat session. Approval required to resume.`,
+                  description: `Agent reached tool execution limit (${iterationsCompleted}/${iterationBudget}) in chat session. Approval required to resume.`,
                   category: 'workflow',
                   workflowStatus: 'awaiting_input',
                   status: 'pending',
@@ -7650,12 +7689,24 @@ export default class ReactorConversationService
             }
 
             // For non-streaming mode, flag the response so the client can detect it
-            if (response?.choices?.[0]?.message) {
-              (response.choices[0].message as any).toolIterationLimitReached = true;
-              (response.choices[0].message as any).iterationsCompleted = iteration;
-              (response.choices[0].message as any).maxToolIterations = MAX_TOOL_ITERATIONS;
-              (response.choices[0].message as any).componentFqn = componentFqn;
-              (response.choices[0].message as any).componentProps = componentProps;
+            // The response reaching this point has usually been flattened by
+            // `processAIResponse` ({ __typename, content, ... }), so the old
+            // `response.choices[0].message` guard matched nothing and no caller
+            // could tell a truncated turn from a finished one. Flag the object the
+            // caller actually receives, and the message when it still exists.
+            const limitFields = {
+              toolIterationLimitReached: true,
+              iterationsCompleted,
+              maxToolIterations: iterationBudget,
+              componentFqn,
+              componentProps,
+            };
+
+            if (response && typeof response === 'object') {
+              Object.assign(response, limitFields);
+              if (response?.choices?.[0]?.message) {
+                Object.assign(response.choices[0].message, limitFields);
+              }
             }
           }
 
@@ -8219,6 +8270,12 @@ export default class ReactorConversationService
     const sessionId = conversation._id.toString();
     if (response?.choices?.[0]?.message && !response.__typename) {
       const msg = response.choices[0].message;
+      // A provider that exhausted its own tool loop must not lose that fact in
+      // normalisation. The flat shape is what the AUTO loop and the workflow step
+      // receive, and a capped turn is otherwise indistinguishable from a finished
+      // one — same content, no pending tool calls. Ticket
+      // REACTORY-302016408/20261017/3478149265.
+      const toolLoopTruncation = readToolLoopTruncation(response);
       return {
         __typename: 'ReactorChatMessage',
         sessionId,
@@ -8234,6 +8291,7 @@ export default class ReactorConversationService
         })),
         tool_results: [],
         tool_errors: [],
+        ...(toolLoopTruncation ? toolLoopTruncationFields(toolLoopTruncation) : {}),
       };
     }
 

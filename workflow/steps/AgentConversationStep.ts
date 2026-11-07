@@ -23,7 +23,8 @@
  *   toolApprovalMode:   "auto"                    (optional — auto | safe_auto | prompt | plan; default auto)
  *   promptMergeStrategy:"append"                  (optional — append | prepend | replace; default append)
  *   sessionId:          "${convId}"               (optional — resume an existing conversation for idempotent retries; ${convId} is a bare workflow-variable reference)
- *   maxToolIterations:  25                        (optional — cap the auto tool loop)
+ *   maxToolIterations:  200                       (optional — cap the auto tool loop)
+ *                                                 (platform default 200; see services/reactor/toolIterations.ts)
  *   model / provider:   "claude-opus-4-8"         (optional — model/provider override)
  *   role:               "tool"                    (optional — user | tool | assistant | system; default user, or tool when toolCallId is set)
  *   toolCallId:         "call_abc123"             (optional — reply to a pending tool call: `message` becomes that call's result, sent back to the LLM)
@@ -303,6 +304,47 @@ export class AgentConversationStep extends BaseYamlStep {
           error: `Agent conversation turn failed: ${detail}`,
           outputs: { sessionId },
           metadata: { personaId, sessionId },
+        };
+      }
+
+      // A turn whose tool loop hit its budget is TRUNCATED, not finished: the agent
+      // stopped mid-task with work outstanding. Reporting success here would let
+      // the workflow — and a reviewer reading its outputs — treat a partial
+      // implementation as complete, which is exactly the silent-truncation failure
+      // this step used to exhibit (ticket REACTORY-302016408/20261017/3478149265).
+      // Fail loudly so the run is visibly incomplete.
+      if (response?.toolIterationLimitReached === true) {
+        const completed = typeof response.iterationsCompleted === 'number'
+          ? response.iterationsCompleted
+          : null;
+        const budget = typeof response.maxToolIterations === 'number'
+          ? response.maxToolIterations
+          : null;
+        const progress = completed !== null && budget !== null
+          ? `${completed}/${budget}`
+          : 'an unknown number of';
+        const error =
+          `Agent tool loop reached its iteration limit (${progress} iterations) — the turn was truncated ` +
+          `and the work is incomplete. Raise maxToolIterations for this step or continue the session ` +
+          `before treating the result as final.`;
+
+        context.logger.error(`Agent conversation truncated: ${error}`);
+
+        return {
+          success: false,
+          error,
+          outputs: {
+            sessionId,
+            truncated: true,
+            ...(completed !== null ? { iterationsCompleted: completed } : {}),
+            ...(budget !== null ? { maxToolIterations: budget } : {}),
+          },
+          metadata: {
+            personaId,
+            sessionId,
+            toolIterationLimitReached: true,
+            ...(completed !== null ? { iterationsCompleted: completed } : {}),
+          },
         };
       }
 

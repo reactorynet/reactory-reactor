@@ -46,8 +46,11 @@ import { CompletionStreamingEvent, ErrorStreamingEvent, ReasoningStreamingEvent,
 import { StreamingSessionManager } from "../StreamingSessionManager";
 import { StreamingTransportManager } from "../StreamingTransportManager";
 import { StreamingEventFactory } from "../streaming/StreamingEventFactory";
-
-const MAX_TOOL_ITERATIONS = 25;
+import {
+  resolveMaxToolIterations,
+  TOOL_LOOP_TRUNCATED_FINISH_REASON,
+  toolLoopTruncationFields,
+} from "../toolIterations";
 
 // Provider/model registry is loaded from providers.yaml once and cached for the
 // process. It's the source of truth for per-model capabilities such as which
@@ -1408,6 +1411,13 @@ class AnthropicService extends AIProviderBase {
   /**
    * Run the agentic tool loop: send message, execute any tool calls,
    * feed results back until the model produces a final response.
+   *
+   * The loop runs under the budget the CALLER requested, not a provider-side
+   * constant. A fixed cap here silently overrode `maxToolIterations` on the
+   * conversation document, so a workflow that asked for 60 (or 200) was
+   * truncated at 25 and the truncation was indistinguishable from a finished
+   * turn. Resolution order and the no-upward-clamp rule live in
+   * `../toolIterations`.
    */
   private async runToolLoop(
     messages: Anthropic.Messages.MessageParam[],
@@ -1420,6 +1430,10 @@ class AnthropicService extends AIProviderBase {
     finishReason: string;
     toolCalls: any[];
     toolResults: any[];
+    /** Model round-trips performed. Equals `maxToolIterations` when truncated. */
+    iterations: number;
+    /** Effective budget this loop ran under (never a hidden constant). */
+    maxToolIterations: number;
     usage: { promptTokens: number; completionTokens: number; cacheHitTokens?: number | null; cacheMissTokens?: number | null };
   }> {
     let totalPromptTokens = 0;
@@ -1432,7 +1446,21 @@ class AnthropicService extends AIProviderBase {
     // tool_use is the structured result — never an executable macro.
     const structuredToolName = toAnthropicParams(providerConfig).structuredToolName;
 
-    for (let iteration = 0; iteration < MAX_TOOL_ITERATIONS; iteration++) {
+    // The budget comes from the conversation the provider loaded — the only
+    // source there is. `chatState` is the snapshot `AIProviderBase.loadChatState`
+    // built (which now carries `maxToolIterations`), and `chatStateModel` is the
+    // live Mongoose document, consulted second so a budget changed mid-session is
+    // honoured even when the snapshot predates it. No per-call override is offered:
+    // the workflow and the chat UI both set the budget on the conversation, and an
+    // unused parameter advertising an override nobody supplies is a misleading API.
+    const maxToolIterations = resolveMaxToolIterations(
+      (this.chatState as any)?.maxToolIterations ??
+        (this.chatStateModel as any)?.maxToolIterations,
+    );
+    let iterations = 0;
+
+    for (let iteration = 0; iteration < maxToolIterations; iteration++) {
+      iterations = iteration + 1;
       const params = this.buildRequestParams(messages, persona, { providerConfig });
       const response = await this.anthropic.messages.create(params);
 
@@ -1472,6 +1500,8 @@ class AnthropicService extends AIProviderBase {
             finishReason: "end_turn",
             toolCalls: allToolCalls,
             toolResults: allToolResults,
+            iterations,
+            maxToolIterations,
             usage: {
               promptTokens: totalPromptTokens,
               completionTokens: totalCompletionTokens,
@@ -1489,6 +1519,8 @@ class AnthropicService extends AIProviderBase {
           finishReason: response.stop_reason || "end_turn",
           toolCalls: allToolCalls,
           toolResults: allToolResults,
+          iterations,
+          maxToolIterations,
           usage: {
             promptTokens: totalPromptTokens,
             completionTokens: totalCompletionTokens,
@@ -1550,17 +1582,21 @@ class AnthropicService extends AIProviderBase {
       messages.push({ role: "user", content: toolResults });
     }
 
-    // Exceeded max iterations
+    // Exceeded max iterations. The message and the log line both name the
+    // EFFECTIVE limit: a run that stops at a budget it cannot identify is the
+    // same non-diagnosis as a run that stops silently.
     this.context.warn(
-      `Tool loop exceeded ${MAX_TOOL_ITERATIONS} iterations`,
-      {},
+      `Tool loop exceeded ${maxToolIterations} iterations`,
+      { maxToolIterations, iterations, provider: "anthropic" },
       "AnthropicService.runToolLoop"
     );
     return {
-      content: "I've reached the maximum number of tool iterations. Here's what I have so far based on the tools I've used.",
-      finishReason: "max_tool_iterations",
+      content: `I've reached the maximum number of tool iterations (${maxToolIterations}). Here's what I have so far based on the tools I've used.`,
+      finishReason: TOOL_LOOP_TRUNCATED_FINISH_REASON,
       toolCalls: allToolCalls,
       toolResults: allToolResults,
+      iterations,
+      maxToolIterations,
       usage: {
         promptTokens: totalPromptTokens,
         completionTokens: totalCompletionTokens,
@@ -1598,7 +1634,7 @@ class AnthropicService extends AIProviderBase {
           cacheHitTokens: result.usage.cacheHitTokens,
           cacheMissTokens: result.usage.cacheMissTokens,
         } : undefined;
-        return this.buildCompletion(result.content, result.finishReason, result.toolCalls, toolLoopUsage);
+        return this.buildToolLoopCompletion(result, toolLoopUsage);
       }
 
       // Handle user messages
@@ -1656,7 +1692,7 @@ class AnthropicService extends AIProviderBase {
           cacheHitTokens: result.usage.cacheHitTokens,
           cacheMissTokens: result.usage.cacheMissTokens,
         } : undefined;
-        return this.buildCompletion(result.content, result.finishReason, result.toolCalls, loopUsage);
+        return this.buildToolLoopCompletion(result, loopUsage);
       }
 
       // Handle other roles - just add to history without getting response
@@ -1704,6 +1740,47 @@ class AnthropicService extends AIProviderBase {
     if (usage) {
       completion.usage = usage;
     }
+    return completion;
+  }
+
+  /**
+   * Build the completion for a finished tool loop, marking the turn as
+   * TRUNCATED when the loop ran out of budget.
+   *
+   * Without the marker a capped turn is indistinguishable from a finished one —
+   * both carry content and no pending tool calls — so the conversation service
+   * reports it as complete and a reviewer can approve a partial fix. The flags
+   * mirror the shape `ReactorConversationService` already uses for its own
+   * iteration limit, so both loops surface through the same pause path.
+   */
+  private buildToolLoopCompletion(
+    result: {
+      content: string;
+      finishReason: string;
+      toolCalls: any[];
+      iterations: number;
+      maxToolIterations: number;
+    },
+    usage?: AIChatCompletionUsage,
+  ): AIChatCompletion {
+    const completion = this.buildCompletion(
+      result.content,
+      result.finishReason,
+      result.toolCalls,
+      usage,
+    );
+
+    if (result.finishReason !== TOOL_LOOP_TRUNCATED_FINISH_REASON) return completion;
+
+    const fields = toolLoopTruncationFields({
+      iterationsCompleted: result.iterations,
+      maxToolIterations: result.maxToolIterations,
+    });
+
+    Object.assign(completion, fields);
+    const message = completion.choices?.[0]?.message;
+    if (message) Object.assign(message, fields);
+
     return completion;
   }
 
