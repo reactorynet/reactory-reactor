@@ -648,10 +648,100 @@ steps:
             failOnError: true
             output:
               captureStdout: true
+        # The test command depends on the repository under work. `scripts/ai/` ships with
+        # reactory-reactor only, so publishing one command for every workdir tells the other
+        # repositories to run something that does not exist - the same defect class this ticket
+        # removes. The recipe is resolved for THIS worktree here and passed to the engineer
+        # verbatim; when no harness exists the fallback is explicit rather than invented.
+        - id: resolveTestRecipe
+          name: Resolve the worktree test recipe
+          type: cli_command
+          dependsOn: readWorktreePath
+          config:
+            command: node
+            args:
+              - -e
+              - |
+                const fs = require('fs');
+                const path = require('path');
+
+                const wt = path.resolve(String(process.env.WT || '').trim());
+
+                const readPackage = (dir) => {
+                  try { return JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')); } catch (e) { return null; }
+                };
+
+                const findServerRoot = (start) => {
+                  let dir = path.resolve(start);
+                  for (;;) {
+                    const pkg = readPackage(dir);
+                    if (pkg && pkg.name === '@reactory/server-core') return dir;
+                    const parent = path.dirname(dir);
+                    if (parent === dir) return null;
+                    dir = parent;
+                  }
+                };
+
+                const serverRoot = findServerRoot(wt);
+                const localHarness = path.join(wt, 'scripts', 'ai', 'run-worktree-tests.js');
+
+                // One copy of the harness can serve any module, so look for it anywhere in the
+                // server tree rather than assuming a single module name.
+                const findCentralHarness = () => {
+                  if (!serverRoot) return '';
+                  const modulesDir = path.join(serverRoot, 'src', 'modules');
+                  let names = [];
+                  try { names = fs.readdirSync(modulesDir); } catch (e) { return ''; }
+                  for (let i = 0; i < names.length; i += 1) {
+                    const candidate = path.join(modulesDir, names[i], 'scripts', 'ai', 'run-worktree-tests.js');
+                    if (fs.existsSync(candidate)) return candidate;
+                  }
+                  return '';
+                };
+
+                const centralHarness = findCentralHarness();
+                const lines = [];
+
+                if (fs.existsSync(localHarness)) {
+                  lines.push('This repository ships the worktree test harness. Run it from the worktree root:');
+                  lines.push('');
+                  lines.push('    node scripts/ai/run-worktree-tests.js <test path or pattern> [more paths] [jest options]');
+                  lines.push('');
+                  lines.push('Examples (paths are relative to the worktree root):');
+                  lines.push('');
+                  lines.push('    node scripts/ai/run-worktree-tests.js services/reactor/__tests__/ReactorConversationService.contextLength.test.ts');
+                  lines.push('    node scripts/ai/run-worktree-tests.js services/reactor/__tests__ ai/macro/chats');
+                  lines.push('');
+                  lines.push('It runs THIS worktree code with the host server own Jest configuration plus a depth-aware resolver, and prints real suite/test counts and its own exit code.');
+                } else if (centralHarness) {
+                  lines.push('This repository does NOT ship the worktree test harness, but the host server tree carries a copy.');
+                  lines.push('Run that copy with --module-root pointing at THIS worktree (test paths are relative to it):');
+                  lines.push('');
+                  lines.push('    node ' + centralHarness + ' --module-root ' + wt + ' <test path or pattern>');
+                  lines.push('');
+                  lines.push('It resolves the module root from --module-root, so it exercises THIS worktree and not the primary checkout.');
+                } else {
+                  lines.push('No worktree test harness is available for this repository. Do not invent one and do not hand-roll a Jest config.');
+                  lines.push('');
+                  lines.push('Fallback:');
+                  lines.push('  1. Run the repository own documented test command (README, AGENT.md or package.json scripts) and record the exact command, its exit code and the counts.');
+                  lines.push('  2. If that command cannot run against this worktree at all, say exactly what failed in the report verification and risks, and report the run as blocked.');
+                  lines.push('  3. Do not claim a worktree test run you could not perform, and do not report counts without an exit code.');
+                }
+
+                lines.push('');
+                lines.push('Record the exact command AND its exit code AND the counts in testsRun.');
+                process.stdout.write(lines.join('\n'));
+            env:
+              WT: ${steps.readWorktreePath.outputs.stdout}
+            failOnError: false
+            output:
+              captureStdout: true
+              captureStderr: true
         - id: logPickup
           name: Log pickup
           type: log
-          dependsOn: readWorktreePath
+          dependsOn: resolveTestRecipe
           config:
             level: info
             message: AI agent '${input.agentId}' picking up
@@ -1832,7 +1922,9 @@ steps:
 
               4. After making a change you MUST run whatever verification exists (the project test
                  runner, a type check, or a targeted repro) and record the exact command and result.
-                 A claim without a recorded command is not verification.
+                 A claim without a recorded command is not verification. In this worktree that means
+                 the module test recipe below - a run that ends in "Test suite failed to run" or
+                 "Tests: 0 total" is a harness failure, not verification.
               5. You MUST finish by writing the completion report described below. This is how the
                  pipeline knows you are done. A run without a report is a failed run.
 
@@ -1840,6 +1932,41 @@ steps:
                  "NOTE PATH". Record the plan, decisions and their rationale, the exact commands you
                  ran, dead ends and open questions. The workflow creates the note and moves it to
                  complete/ on success - you only append to it.
+
+              VERIFICATION IN THIS WORKTREE - THE TEST RECIPE
+
+              Do not hand-roll a Jest config and do not rewrite the module's relative imports.
+
+              This worktree is a checkout of a server module (a package under src/modules) that is
+              mounted one directory level DEEPER than the module's natural home:
+              <express-server>/src/modules/reactory-worktrees/<id> instead of
+              <express-server>/src/modules/<module>. Module code reaches into the server with
+              relative imports written for the natural depth, so from here `../../../database/...`
+              resolves one level short and EVERY suite that imports the module fails at LOAD:
+
+                   Cannot find module '../../../database/tenant/ClientKeyColumn'
+                   Test Suites: 1 failed, 1 total
+                   Tests:       0 total
+
+              The exact command for THIS repository is given to you in the ticket message under
+              "## Test recipe" - it was resolved for this worktree before you started, because not
+              every repository in this pipeline ships a worktree test harness. Use that command
+              verbatim. Never run a bare `npx jest` against the worktree, and never run the module's
+              primary-checkout test script: those execute the wrong tree or fail at load.
+
+              EXIT-CODE CONTRACT for that recipe:
+                - exit 0 means every collected suite loaded and every test passed;
+                - exit 1 means a suite failed to load, a test failed, or the harness itself could
+                  not run. It does not distinguish those cases for you - read the output.
+              A green run must exit 0. If a baseline reports passing tests but exits non-zero, say
+              so in your report's risks and name the extra noise that caused it; never record it as
+              a clean pass. Never report a run as passed on the strength of the counts alone:
+              record the exact command, its exit code AND the counts in "testsRun".
+
+              If that section says no harness is available, follow its fallback exactly and do not
+              invent one. Where docs/ai-worktree-testing.md exists, it documents the rationale, the
+              inverse control (a green baseline must exit 0) and the failing control (break one
+              assertion, confirm exit 1).
 
               VERIFICATION SAFETY - SUBMODULES AND PRIMARY CHECKOUTS
 
@@ -1960,6 +2087,11 @@ steps:
 
               - NOTE PATH (persona workspace note - append your working log here):
                 ${steps.readNotePath.outputs.stdout}
+
+
+              ## Test recipe
+
+              ${steps.resolveTestRecipe.outputs.stdout}
 
 
               ## Additional context / instruction
