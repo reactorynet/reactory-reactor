@@ -2690,11 +2690,119 @@ steps:
                     Number(variables.reviewCycle) <
                     Number(variables.reviewCycleBound)
                   steps:
+                    # ── Open the review window ──────────────────────────────
+                    # REACTORY-302016408 (gate integrity). `.ai-agent/review.json`
+                    # lives in a directory the ENGINEER session can write to, so a
+                    # verdict file may already exist before the reviewer runs. This
+                    # step opens a dated review window and CLEARS any pre-existing
+                    # verdict artefact: the reviewer's output must be written during
+                    # its own run, and the stamp step below refuses anything older.
+                    # The old pipeline read whatever was on disk, so an engineer's
+                    # self-review (mtime 06:34:19Z, before its own step ended) would
+                    # have been published as the reviewer's approval.
+                    - id: prepareReview
+                      name: Open the review window
+                      type: cli_command
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          # Reused verbatim by prepareConfirmationReview: both passes open
+                          # their window the same way (a self-authored verdict must be
+                          # discarded for the confirmation pass too).
+                          - &prepareReviewScript |
+                            const fs = require('fs');
+                            const path = require('path');
+                            const crypto = require('crypto');
+
+                            const wt = String(process.env.WT || '').trim();
+                            const dir = path.join(wt, '.ai-agent');
+                            fs.mkdirSync(dir, { recursive: true });
+
+                            // Anything already here predates this reviewer run. The engineer
+                            // can write this directory, so it must not survive into the window:
+                            // clearing it makes "the reviewer wrote no verdict" observable
+                            // instead of inheriting a self-assessment.
+                            const cleared = [];
+                            ['review.json', 'review-normalised.json', 'review-accepted.json'].forEach((name) => {
+                              const target = path.join(dir, name);
+                              try {
+                                if (fs.existsSync(target)) {
+                                  fs.unlinkSync(target);
+                                  cleared.push(name);
+                                }
+                              } catch (e) { /* best effort: the stamp step re-checks the mtime */ }
+                            });
+
+                            const window = {
+                              startedAt: new Date().toISOString(),
+                              startedAtMs: Date.now(),
+                              reference: String(process.env.REF || '').trim(),
+                              reviewerId: String(process.env.REVIEWER || '').trim(),
+                              reviewCycle: String(process.env.CYCLE || '').trim(),
+                              nonce: crypto.randomBytes(16).toString('hex'),
+                            };
+                            try {
+                              fs.writeFileSync(path.join(dir, 'review-window.json'), JSON.stringify(window), 'utf8');
+                            } catch (e) {
+                              // Without a window there is no attributable verdict, so the
+                              // capture step will report review_unavailable. Loud is correct.
+                              process.stderr.write('could not write the review window: ' + String((e && e.message) || e));
+                            }
+
+                            process.stdout.write(JSON.stringify({
+                              startedAt: window.startedAt,
+                              reviewerId: window.reviewerId,
+                              reviewCycle: window.reviewCycle,
+                              cleared: cleared,
+                            }));
+                        env:
+                          WT: ${steps.readWorktreePath.outputs.stdout}
+                          REF: ${steps.loadTicket.result.reference}
+                          REVIEWER: ${input.reviewerId}
+                          CYCLE: ${variables.reviewCycle}
+                        # Soft: a window that could not be written must surface as
+                        # review_unavailable (capture fails closed), never terminate a run
+                        # that has real work in the worktree.
+                        failOnError: false
+                        output:
+                          captureStdout: true
+                          captureStderr: true
+
                     - id: review
                       name: Reviewer agent run
                       type: agent_conversation
+                      dependsOn: prepareReview
+                      # A reviewer that cannot run is a PIPELINE fault, not a quality
+                      # judgement (REACTORY-302016408). This step used to be fatal: four
+                      # provider-side faults exhausted the engine retries, the step went
+                      # Cancelled and the whole instance Terminated with `failedStepCount`
+                      # 0, no ticket comment, no human task, a non-terminal runStatus and
+                      # container steps still marked Running. continueOnError records the
+                      # failure in the instance log and lets the flow continue, so the
+                      # EXISTING review_unavailable handling (captureReview -> readVerdict
+                      # -> reviewUnavailableGate) sees "no verdict" and halts loudly for a
+                      # human instead of dying silently.
+                      #
+                      # RETRY SEMANTICS (revision 2 of this fix). `continueOnError` does
+                      # NOT retry: YamlStepBody converts a reported failure into
+                      # ExecutionResult.next(), so workflow-es never reaches the error
+                      # path where its Retry strategy is selected and a step-level
+                      # `retryPolicy` would never fire. Retries live INSIDE the step
+                      # instead (AgentConversationStep `maxAttempts`), which also catches
+                      # a thrown exception and reports it, so nothing escapes to defeat
+                      # continueOnError. Without this the first transient provider fault
+                      # would end the run after ONE attempt where the incident tolerated
+                      # four.
+                      continueOnError: true
                       config:
                         personaId: ${input.reviewerId}
+                        # The actual retry behaviour: up to four attempts per review,
+                        # retried inside the step. There is no step-level retryPolicy.
+                        maxAttempts: 4
+                        # The observed faults were transient (a provider 500 and
+                        # "Cannot read properties of null (reading 'choices')").
+                        attemptDelayMs: 2000
                         toolApprovalMode: auto
                         maxToolIterations: 150
                         promptMergeStrategy: append
@@ -2810,10 +2918,136 @@ steps:
                           Write your verdict JSON to REVIEW PATH:
 
                           ${steps.readWorktreePath.outputs.stdout}/.ai-agent/review.json
+                    # ── Accept the verdict (pipeline provenance) ────────────
+                    # REACTORY-302016408 (Part B). The pipeline, not the agent, decides
+                    # that a review.json IS this reviewer's verdict. The stamp records
+                    # who reviewed, which attempt, and when; it is only written when the
+                    # file was modified at or after the review window opened. A verdict
+                    # that predates the reviewer step - the engineer's self-review - is
+                    # never stamped, so the gate cannot accept it. captureReview requires
+                    # this stamp, so prompt instructions are not load-bearing.
+                    - id: stampReview
+                      name: Stamp the reviewer verdict
+                      type: cli_command
+                      dependsOn: review
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          # Reused verbatim by stampConfirmationReview: one stamping rule.
+                          - &stampReviewScript |
+                            const fs = require('fs');
+                            const path = require('path');
+                            const crypto = require('crypto');
+
+                            const wt = String(process.env.WT || '').trim();
+                            const dir = path.join(wt, '.ai-agent');
+                            const reviewPath = path.join(dir, 'review.json');
+                            const windowPath = path.join(dir, 'review-window.json');
+                            const acceptedPath = path.join(dir, 'review-accepted.json');
+
+                            const report = (payload) => {
+                              payload.accepted = payload.accepted === true;
+                              payload.recordedAt = new Date().toISOString();
+                              process.stdout.write(JSON.stringify(payload));
+                              process.exit(0);
+                            };
+                            const reject = (reason, extra) => report(Object.assign({ accepted: false, reason: reason }, extra || {}));
+
+                            const readJson = (file) => {
+                              try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return null; }
+                            };
+
+                            // No window means the reviewer step never got a start stamp:
+                            // nothing can be attributed to it.
+                            const window = readJson(windowPath);
+                            if (!window || typeof window.startedAt !== 'string') {
+                              reject('no review window was recorded for this reviewer run');
+                            }
+
+                            if (!fs.existsSync(reviewPath)) {
+                              reject('the reviewer produced no review.json');
+                            }
+
+                            let stat = null;
+                            try { stat = fs.statSync(reviewPath); } catch (e) {
+                              reject('review.json could not be stat-ed: ' + String((e && e.message) || e));
+                            }
+
+                            const startedAtMs = Number.isFinite(Number(window.startedAtMs))
+                              ? Number(window.startedAtMs)
+                              : Date.parse(window.startedAt);
+                            if (!Number.isFinite(startedAtMs)) {
+                              reject('the review window has no usable start time');
+                            }
+
+                            // THE check for defect 2. The engineer can write this path, and a
+                            // self-review written BEFORE the reviewer started must never be
+                            // accepted. mtime is the only evidence of when the file was written.
+                            if (!(stat.mtimeMs >= startedAtMs)) {
+                              reject(
+                                'review.json predates the reviewer step start, so it was not written by the reviewer',
+                                {
+                                  reviewMtime: new Date(stat.mtimeMs).toISOString(),
+                                  windowStartedAt: window.startedAt,
+                                }
+                              );
+                            }
+
+                            const content = fs.readFileSync(reviewPath);
+                            const reviewCycle = String(window.reviewCycle || process.env.CYCLE || '').trim();
+                            const numericCycle = Number(reviewCycle);
+                            const provenance = {
+                              source: 'pipeline',
+                              producer: 'core.ProcessAITicket',
+                              step: 'stampReview',
+                              reference: String(window.reference || process.env.REF || '').trim(),
+                              reviewerId: String(window.reviewerId || process.env.REVIEWER || '').trim(),
+                              reviewCycle: reviewCycle,
+                              // 1-based REVIEW ATTEMPT number within this cycle. The reviewer is
+                              // retried in-step (config.maxAttempts), so the cycle is no longer a
+                              // proxy for the attempt: ATTEMPT counts the attempts already
+                              // completed in this cycle (0 on the first). Falls back to the
+                              // cycle-derived value when a caller does not supply it.
+                              attempt: Number(process.env.ATTEMPT) >= 1
+                                ? Number(process.env.ATTEMPT)
+                                : (Number.isFinite(numericCycle) ? numericCycle + 1 : null),
+                              windowStartedAt: window.startedAt,
+                              windowNonce: String(window.nonce || ''),
+                              acceptedAt: new Date().toISOString(),
+                              reviewPath: reviewPath,
+                              reviewMtimeMs: stat.mtimeMs,
+                              reviewSize: stat.size,
+                              reviewSha256: crypto.createHash('sha256').update(content).digest('hex'),
+                            };
+
+                            try {
+                              fs.writeFileSync(acceptedPath, JSON.stringify({ provenance: provenance }, null, 2), 'utf8');
+                            } catch (e) {
+                              reject('the pipeline could not record the verdict provenance: ' + String((e && e.message) || e));
+                            }
+
+                            report({ accepted: true, provenance: provenance });
+                        env:
+                          WT: ${steps.readWorktreePath.outputs.stdout}
+                          REF: ${steps.loadTicket.result.reference}
+                          REVIEWER: ${input.reviewerId}
+                          CYCLE: ${variables.reviewCycle}
+                          # How many attempts the reviewer needed in this cycle. The step
+                          # retries internally (config.maxAttempts) and reports the count, so
+                          # provenance names the attempt that produced the accepted verdict.
+                          ATTEMPT: ${steps.review.outputs.attempts}
+                        # Soft: a REFUSED stamp is a normal outcome that must reach
+                        # captureReview as review_unavailable, not end the run.
+                        failOnError: false
+                        output:
+                          captureStdout: true
+                          captureStderr: true
+
                     - id: captureReview
                       name: Capture review verdict
                       type: cli_command
-                      dependsOn: review
+                      dependsOn: stampReview
                       config:
                         command: node
                         args:
@@ -2827,6 +3061,8 @@ steps:
                             const wt = String(process.env.WT || '').trim();
                             const reviewPath = path.join(wt, '.ai-agent', 'review.json');
                             const normalisedPath = path.join(wt, '.ai-agent', 'review-normalised.json');
+                            const windowPath = path.join(wt, '.ai-agent', 'review-window.json');
+                            const acceptedPath = path.join(wt, '.ai-agent', 'review-accepted.json');
 
                             // ---------------------------------------------------------------------------
                             // The reviewer writes its verdict in whichever key convention it prefers:
@@ -2923,6 +3159,9 @@ steps:
                                 verdict: verdict,
                                 verdictSource: 'capture_failed',
                                 reviewAvailable: false,
+                                // A capture failure has no pipeline stamp by definition; the
+                                // explicit null keeps the payload shape stable for callers.
+                                provenance: null,
                                 findingsResolved: false,
                                 requiredChanges: [],
                                 blockingFindings: [],
@@ -2937,8 +3176,77 @@ steps:
                               process.exit(0);
                             };
 
+                            // ---------------------------------------------------------------------------
+                            // PROVENANCE (REACTORY-302016408, Part B). review.json lives in
+                            // `.ai-agent/`, which the ENGINEER session can write. The gate used to
+                            // trust any file that happened to be there, so an engineer's own
+                            // self-review - written before the reviewer even started - read as an
+                            // approval. A verdict is only accepted when stampReview RECORDED it as
+                            // this reviewer's output: a `review-accepted.json` written by the
+                            // pipeline, carrying the review window it belongs to and a digest of
+                            // the exact bytes accepted. Anything else is `review_unavailable`, i.e.
+                            // "never judged", never `approved` and never `rejected`.
+                            // ---------------------------------------------------------------------------
+                            const readJsonFile = (file) => {
+                              try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { return null; }
+                            };
+
+                            const provenanceProblem = () => {
+                              const window = readJsonFile(windowPath);
+                              if (!window || typeof window.startedAt !== 'string' || !window.startedAt) {
+                                return 'no review window was recorded for this reviewer run, so a verdict cannot be attributed to the reviewer';
+                              }
+
+                              const startedAtMs = Number.isFinite(Number(window.startedAtMs))
+                                ? Number(window.startedAtMs)
+                                : Date.parse(window.startedAt);
+                              if (!Number.isFinite(startedAtMs) || !(startedAtMs > 0)) {
+                                return 'the review window has no usable start time';
+                              }
+
+                              // mtime FIRST. It needs no stamp and it is the exact symptom of the
+                              // incident: a self-review written before the reviewer started.
+                              let mtimeMs = null;
+                              try { mtimeMs = fs.statSync(reviewPath).mtimeMs; } catch (e) { mtimeMs = null; }
+                              if (mtimeMs === null) {
+                                return 'review.json could not be read';
+                              }
+                              if (!(mtimeMs >= startedAtMs)) {
+                                return 'review.json predates the reviewer step start, so it was not written by the reviewer';
+                              }
+
+                              const accepted = readJsonFile(acceptedPath);
+                              const provenance = accepted && accepted.provenance;
+                              if (!provenance || typeof provenance !== 'object') {
+                                return 'review.json carries no pipeline provenance marker, so it was not produced by the reviewer step';
+                              }
+                              if (provenance.source !== 'pipeline' || provenance.step !== 'stampReview') {
+                                return 'review.json was not accepted by the pipeline (provenance source/stage is not the reviewer step)';
+                              }
+                              if (String(provenance.windowNonce || '') !== String(window.nonce || '')
+                                || String(provenance.windowStartedAt || '') !== String(window.startedAt || '')) {
+                                return 'review.json provenance belongs to a different review window than the current reviewer run';
+                              }
+
+                              let content;
+                              try { content = fs.readFileSync(reviewPath); } catch (e) {
+                                return 'review.json could not be read: ' + String((e && e.message) || e);
+                              }
+                              const digest = require('crypto').createHash('sha256').update(content).digest('hex');
+                              if (String(provenance.reviewSha256 || '') !== digest) {
+                                return 'review.json changed after the pipeline accepted it, so the verdict is not attributable';
+                              }
+
+                              return '';
+                            };
+
                             if (!fs.existsSync(reviewPath)) {
                               fail('review_unavailable', 'review.json not found');
+                            }
+
+                            const provenanceIssue = provenanceProblem();
+                            if (provenanceIssue) {
+                              fail('review_unavailable', provenanceIssue, { provenanceProblem: provenanceIssue });
                             }
 
                             let raw;
@@ -3009,10 +3317,16 @@ steps:
                               ''
                             ).slice(0, 4000);
 
+                            const acceptedRecord = readJsonFile(acceptedPath) || {};
                             const payload = {
                               verdict: verdict,
                               verdictSource: norm,
                               reviewAvailable: true,
+                              // The pipeline stamp this verdict was accepted under. Downstream
+                              // gates (readPublishable) require it before publishing, so the
+                              // reviewer identity, attempt and timestamp travel with the verdict
+                              // instead of being inferred from a file any session can write.
+                              provenance: acceptedRecord.provenance || null,
                               findingsResolved: findingsResolved,
                               requiredChanges: resolvedRequired,
                               blockingFindings: resolvedBlocking,
@@ -3224,15 +3538,24 @@ steps:
                           - -e
                           # Reused verbatim by readConfirmationVerdict.
                           - &readVerdictScript |
-                            // Read the verdict that captureReview RESOLVED, not a re-derivation of
-                            // it. review-normalised.json is the only place a capture failure is
-                            // recorded, so it is read first: a missing or unparseable review.json
-                            // must surface as review_unavailable, never as "rejected".
+                            // REACTORY-302016408 (revision 2). The verdict is taken from the
+                            // STAMPED review.json - the exact bytes whose sha256 the pipeline
+                            // accepted - never from review-normalised.json, which is a side-car
+                            // in a directory the ENGINEER session can write. The side-car is
+                            // only allowed to contribute the "could not review" verdict, because
+                            // that can never open the gate; if it disagrees with the stamped
+                            // bytes, neither artefact is trusted and the verdict is
+                            // review_unavailable.
                             const fs = require('fs');
                             const path = require('path');
+                            const crypto = require('crypto');
                             const wt = String(process.env.WT || '').trim();
-                            const fallback = String(process.env.REVIEW || '').trim();
+                            const dir = path.join(wt, '.ai-agent');
+                            const reviewPath = path.join(dir, 'review.json');
 
+                            const readJson = (name) => {
+                              try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch (e) { return null; }
+                            };
                             const normalise = (raw) => {
                               const rv = (raw && typeof raw.review === 'object' && raw.review) ? raw.review : raw;
                               const norm = String((rv && (rv.verdict || rv.decision)) || (raw && raw.verdict) || '').trim().toLowerCase();
@@ -3241,27 +3564,59 @@ steps:
                               return 'rejected';
                             };
 
-                            try {
-                              const p = path.join(wt, '.ai-agent', 'review-normalised.json');
-                              if (fs.existsSync(p)) {
-                                process.stdout.write(normalise(JSON.parse(fs.readFileSync(p, 'utf8'))));
+                            // { ok: true, verdict } only when the pipeline accepted THESE bytes.
+                            const stampedVerdict = (() => {
+                              const window = readJson('review-window.json');
+                              const accepted = readJson('review-accepted.json');
+                              const provenance = accepted && accepted.provenance;
+                              if (!window || !provenance) return { ok: false, reason: 'no pipeline provenance for this run' };
+                              if (provenance.source !== 'pipeline' || provenance.step !== 'stampReview') return { ok: false, reason: 'provenance is not a reviewer stamp' };
+                              if (String(provenance.windowNonce || '') !== String(window.nonce || '')) return { ok: false, reason: 'provenance belongs to another review window' };
+
+                              let content;
+                              try { content = fs.readFileSync(reviewPath); } catch (e) { return { ok: false, reason: 'review.json is missing' }; }
+                              const digest = crypto.createHash('sha256').update(content).digest('hex');
+                              if (String(provenance.reviewSha256 || '') !== digest) return { ok: false, reason: 'review.json is not the artefact that was accepted' };
+
+                              const startedAtMs = Number.isFinite(Number(window.startedAtMs)) ? Number(window.startedAtMs) : Date.parse(window.startedAt);
+                              let mtimeMs = null;
+                              try { mtimeMs = fs.statSync(reviewPath).mtimeMs; } catch (e) { mtimeMs = null; }
+                              if (mtimeMs === null || !(mtimeMs >= startedAtMs)) return { ok: false, reason: 'review.json predates the reviewer step' };
+
+                              let raw;
+                              try { raw = JSON.parse(content.toString('utf8')); } catch (e) { return { ok: false, reason: 'review.json is not valid JSON' }; }
+                              return { ok: true, verdict: normalise(raw) };
+                            })();
+
+                            const sideCar = readJson('review-normalised.json');
+                            const claimed = sideCar && typeof sideCar.verdict === 'string'
+                              ? normalise({ verdict: sideCar.verdict })
+                              : '';
+
+                            if (stampedVerdict.ok) {
+                              // The side-car is only a rendering of the stamped bytes. A
+                              // disagreement means it was rewritten after capture (the engineer
+                              // session can reach it during a hand-back), so the review is no
+                              // longer describable by a single artefact: fail closed.
+                              if (claimed && claimed !== stampedVerdict.verdict) {
+                                process.stderr.write('review-normalised.json says "' + claimed + '" but the stamped review.json says "' + stampedVerdict.verdict + '" - refusing both');
+                                process.stdout.write('review_unavailable');
                                 process.exit(0);
                               }
-                            } catch (e) { /* fall through */ }
-
-                            try {
-                              const p = path.join(wt, '.ai-agent', 'review.json');
-                              if (fs.existsSync(p)) {
-                                process.stdout.write(normalise(JSON.parse(fs.readFileSync(p, 'utf8'))));
-                                process.exit(0);
-                              }
-                            } catch (e) { /* fall through */ }
-
-                            try {
-                              process.stdout.write(normalise(JSON.parse(fallback)));
-                            } catch (e) {
-                              process.stdout.write('review_unavailable');
+                              process.stdout.write(stampedVerdict.verdict);
+                              process.exit(0);
                             }
+
+                            // Not attributable. Only a capture-failure verdict may come from the
+                            // side-car: an "approved"/"rejected" claim there has no stamped
+                            // review behind it and is ignored.
+                            if (claimed === 'review_unavailable') {
+                              process.stdout.write('review_unavailable');
+                              process.exit(0);
+                            }
+
+                            process.stderr.write('no attributable verdict: ' + String(stampedVerdict.reason || 'unknown reason'));
+                            process.stdout.write('review_unavailable');
                         env:
                           WT: ${steps.readWorktreePath.outputs.stdout}
                           REVIEW: ${steps.captureReview.outputs.stdout}
@@ -3311,9 +3666,12 @@ steps:
                         sourcePath: bumpCycle.outputs.stdout
                     # ── Could not review at all ──────────────────────────────────
                     # REACTORY-302016408. A run with no review.json (or an unparseable one) is a
-                    # PIPELINE fault, not a quality judgement. It must not consume a cycle, must
-                    # not be reported as "rejected", and must be loud: halt for a human with a
-                    # ticket comment that says the work could not be reviewed.
+                    # PIPELINE fault, not a quality judgement. The same is true of a verdict that
+                    # cannot be ATTRIBUTED to the reviewer: one that predates the review window,
+                    # or that carries no pipeline provenance stamp (the engineer can write
+                    # .ai-agent/review.json during its own step). It must not consume a cycle,
+                    # must not be reported as "rejected", and must be loud: halt for a human with
+                    # a ticket comment that says the work could not be reviewed.
                     - id: reviewUnavailableGate
                       name: The reviewer produced no verdict
                       type: condition
@@ -3328,7 +3686,9 @@ steps:
                               level: error
                               message: REVIEW UNAVAILABLE for ${steps.loadTicket.result.reference} -
                                 no review verdict could be captured. This is a pipeline fault,
-                                not a rejection, and no review cycle was consumed.
+                                not a rejection, and no review cycle was consumed. The capture
+                                evidence below names the cause - no verdict file, an unreadable one,
+                                or one that could not be attributed to the reviewer.
                           - id: reviewUnavailableComment
                             name: Comment the capture failure on ticket
                             type: service_invoke
@@ -3341,7 +3701,9 @@ steps:
                                 comment: "COULD NOT BE REVIEWED - the reviewer produced no usable
                                   verdict file for
                                   ${steps.loadTicket.result.reference} (.ai-agent/review.json
-                                  was missing or unparseable), so the work was NEVER JUDGED.
+                                  was missing, unparseable, or not attributable to the reviewer:
+                                  it predates the reviewer step or carries no pipeline provenance
+                                  stamp), so the work was NEVER JUDGED.
                                   This is NOT a rejection and no review cycle was consumed: it
                                   is an operational fault in the AI pipeline. The run is halted
                                   for a human. Capture evidence:
@@ -3379,7 +3741,19 @@ steps:
                               action: set
                               key: runHalt
                               value: "true"
-
+                          # REACTORY-302016408 (revision 2). ONE un-reviewable run must raise
+                          # exactly ONE human task. This flag tells the outcome branch that
+                          # the loop already asked a human, so it must not ask again. It is
+                          # set only AFTER the task step, so a task that failed to raise
+                          # does not suppress the fallback escalation.
+                          - id: setReviewEscalated
+                            name: Record that this failure already has a human task
+                            type: set_variable
+                            dependsOn: setRunHaltUnavailable
+                            config:
+                              action: set
+                              key: reviewEscalated
+                              value: "true"
                     # A rejection with zero resolvable findings must block for a human,
                     # not hand the engineer a generic sentence and waste a full cycle.
                     - id: findingsHaltGate
@@ -3699,14 +4073,46 @@ steps:
                               message: The engineer revised after the last permitted review for
                                 ${steps.loadTicket.result.reference} - running ONE
                                 confirmation review whose verdict is authoritative.
+                          - id: prepareConfirmationReview
+                            name: Open the confirmation review window
+                            type: cli_command
+                            dependsOn: confirmationReviewLog
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - *prepareReviewScript
+                              env:
+                                WT: ${steps.readWorktreePath.outputs.stdout}
+                                REF: ${steps.loadTicket.result.reference}
+                                REVIEWER: ${input.reviewerId}
+                                CYCLE: ${variables.reviewCycle}
+                              failOnError: false
+                              output:
+                                captureStdout: true
+                                captureStderr: true
                           - id: confirmationReview
                             name: Confirmation reviewer agent run
                             type: agent_conversation
-                            dependsOn: confirmationReviewLog
+                            dependsOn: prepareConfirmationReview
+                            # Same tolerance as the in-loop reviewer (REACTORY-302016408):
+                            # a confirmation pass that cannot run is a pipeline fault, and
+                            # captureConfirmationReview must be reached so it reports
+                            # review_unavailable instead of the instance dying silently.
+                            # Retries are in-step, exactly as for the in-loop reviewer above:
+                            # a step-level retryPolicy cannot fire once continueOnError is set.
+                            continueOnError: true
                             config:
                               personaId: ${input.reviewerId}
-                              toolApprovalMode: auto
+                              # The confirmation verdict is authoritative, so this pass keeps
+                              # the SAME tool budget as the in-loop reviewer (HEAD had 150
+                              # here too). Dropping it silently fell back to the server
+                              # default, and a truncated loop reports retryable:false - which
+                              # would turn a legitimate revision into a false 'never judged'.
                               maxToolIterations: 150
+                              maxAttempts: 4
+                              attemptDelayMs: 2000
+                              toolApprovalMode: auto
                               promptMergeStrategy: append
                               instructions: *reviewerInstructions
                               message: >-
@@ -3775,10 +4181,29 @@ steps:
                                 A finding you record as blocking false must be one you are
                                 genuinely content to merge with; the pipeline publishes work whose
                                 only findings are explicitly non-blocking.
+                          - id: stampConfirmationReview
+                            name: Stamp the confirmation verdict
+                            type: cli_command
+                            dependsOn: confirmationReview
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - *stampReviewScript
+                              env:
+                                WT: ${steps.readWorktreePath.outputs.stdout}
+                                REF: ${steps.loadTicket.result.reference}
+                                REVIEWER: ${input.reviewerId}
+                                CYCLE: ${variables.reviewCycle}
+                                ATTEMPT: ${steps.confirmationReview.outputs.attempts}
+                              failOnError: false
+                              output:
+                                captureStdout: true
+                                captureStderr: true
                           - id: captureConfirmationReview
                             name: Capture the confirmation verdict
                             type: cli_command
-                            dependsOn: confirmationReview
+                            dependsOn: stampConfirmationReview
                             config:
                               command: node
                               args:
@@ -3865,8 +4290,88 @@ steps:
                         try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch (e) { return null; }
                       };
 
+                      // ── The decision comes from the STAMPED bytes ──────────────────
+                      // REACTORY-302016408 (revision 2). review-normalised.json is a
+                      // rendering written by captureReview, and it lives in `.ai-agent/`,
+                      // which the ENGINEER session can write during a hand-back. While this
+                      // step took its verdict from that file alone, rewriting ONLY the
+                      // side-car (leaving the stamped review.json - and therefore its
+                      // sha256 - untouched) turned a rejection into an approval. The verdict
+                      // and the findings are now derived from review.json, the exact bytes
+                      // whose sha256 the pipeline accepted, and the side-car must AGREE with
+                      // them. Any disagreement fails closed as review_unavailable.
+                      const crypto = require('crypto');
+                      const reviewPath = path.join(dir, 'review.json');
+                      // The side-car, read ONLY to cross-check the stamped bytes (and to
+                      // honour a capture-failure verdict, which can never open the gate).
                       const review = readJson('review-normalised.json') || {};
-                      const verdict = String(review.verdict || '').trim() || 'not_reviewed';
+                      const window = readJson('review-window.json');
+                      const accepted = readJson('review-accepted.json');
+                      const provenance = accepted && accepted.provenance;
+
+                      const resolveKey = (obj, names) => {
+                        if (!obj || typeof obj !== 'object') return undefined;
+                        const keys = Object.keys(obj);
+                        for (let i = 0; i < names.length; i += 1) {
+                          const wanted = String(names[i]).toLowerCase().replace(/[^a-z0-9]/g, '');
+                          for (let j = 0; j < keys.length; j += 1) {
+                            if (String(keys[j]).toLowerCase().replace(/[^a-z0-9]/g, '') === wanted) return obj[keys[j]];
+                          }
+                        }
+                        return undefined;
+                      };
+                      const vocabulary = (norm) => {
+                        if (['approved', 'approve', 'pass', 'passed', 'accept', 'accepted', 'ok'].indexOf(norm) !== -1) return 'approved';
+                        if (['review_unavailable', 'reviewunavailable', 'capture_failed', 'capturefailed'].indexOf(norm) !== -1) return 'review_unavailable';
+                        return norm ? 'rejected' : '';
+                      };
+
+                      let reviewBytes = null;
+                      try { reviewBytes = fs.readFileSync(reviewPath); } catch (e) { reviewBytes = null; }
+                      const reviewDigest = reviewBytes ? crypto.createHash('sha256').update(reviewBytes).digest('hex') : '';
+
+                      let stampedProblem = '';
+                      if (!window || !provenance) {
+                        stampedProblem = 'no pipeline provenance was recorded for this run';
+                      } else if (provenance.source !== 'pipeline' || provenance.step !== 'stampReview') {
+                        stampedProblem = 'the recorded provenance is not a reviewer stamp';
+                      } else if (String(provenance.windowNonce || '') !== String(window.nonce || '')) {
+                        stampedProblem = 'the provenance belongs to a different review window';
+                      } else if (!reviewDigest) {
+                        stampedProblem = 'review.json is missing, so the accepted bytes cannot be re-read';
+                      } else if (String(provenance.reviewSha256 || '') !== reviewDigest) {
+                        stampedProblem = 'review.json is not the artefact the pipeline accepted (its sha256 changed)';
+                      } else {
+                        const startedAtMs = Number.isFinite(Number(window.startedAtMs)) ? Number(window.startedAtMs) : Date.parse(window.startedAt);
+                        let mtimeMs = null;
+                        try { mtimeMs = fs.statSync(reviewPath).mtimeMs; } catch (e) { mtimeMs = null; }
+                        if (mtimeMs === null || !(mtimeMs >= startedAtMs)) {
+                          stampedProblem = 'review.json predates the reviewer step';
+                        }
+                      }
+
+                      let stampedReview = null;
+                      if (!stampedProblem) {
+                        try { stampedReview = JSON.parse(reviewBytes.toString('utf8')); } catch (e) { stampedProblem = 'review.json is not valid JSON'; }
+                      }
+
+                      const stampedInner = (stampedReview && typeof stampedReview.review === 'object' && stampedReview.review) ? stampedReview.review : stampedReview;
+                      const stampedRawVerdict = String(
+                        (stampedInner && (stampedInner.verdict || stampedInner.decision)) ||
+                        (stampedReview && stampedReview.verdict) || ''
+                      ).trim().toLowerCase();
+                      const stampedVerdict = stampedReview ? vocabulary(stampedRawVerdict) : '';
+                      const claimedVerdict = vocabulary(String(review.verdict || '').trim().toLowerCase());
+
+                      // The stamp is only meaningful when both artefacts describe the SAME
+                      // review. A side-car that says something else was rewritten after
+                      // capture (or captured against different bytes), so nothing publishes.
+                      if (!stampedProblem && claimedVerdict && stampedVerdict && claimedVerdict !== stampedVerdict) {
+                        stampedProblem = 'review-normalised.json says "' + claimedVerdict + '" but the stamped review.json says "' + stampedVerdict + '"';
+                      }
+
+                      const attributable = !stampedProblem;
+                      let verdict = attributable ? (stampedVerdict || 'rejected') : 'review_unavailable';
                       const asArray = (value) => (Array.isArray(value) ? value : []);
 
                       // This step runs BEFORE the engineer's work is committed (commitChanges
@@ -3879,10 +4384,26 @@ steps:
                       // as 'no commits', so nothing was ever published. The zero-commit check
                       // belongs after the commit, in publishReadinessGate.
 
+                      // Classified from the STAMPED bytes, not from the side-car: the same
+                      // reasoning as the verdict above. The non-blocking publish path reads
+                      // these counts, so an agent-writable side-car must not be able to
+                      // relabel a blocking finding as non-blocking either.
+                      const findingsSource = stampedInner || {};
+                      const isUsableFinding = (value) => value !== null && value !== undefined && (typeof value === 'object' || String(value).trim() !== '');
                       const entries = [];
-                      asArray(review.requiredChanges).forEach((finding) => entries.push({ finding: finding, list: 'requiredChanges' }));
-                      asArray(review.blockingFindings).forEach((finding) => entries.push({ finding: finding, list: 'blockingFindings' }));
-                      asArray(review.findings).forEach((finding) => entries.push({ finding: finding, list: 'findings' }));
+                      asArray(resolveKey(findingsSource, ['requiredChanges', 'required_changes', 'changes']))
+                        .filter(isUsableFinding)
+                        .forEach((finding) => entries.push({ finding: finding, list: 'requiredChanges' }));
+                      asArray(resolveKey(findingsSource, ['blockingFindings', 'blocking_findings']))
+                        .filter(isUsableFinding)
+                        .forEach((finding) => entries.push({ finding: finding, list: 'blockingFindings' }));
+                      asArray(resolveKey(findingsSource, ['findings', 'observations']))
+                        .filter(isUsableFinding)
+                        .forEach((finding) => entries.push({ finding: finding, list: 'findings' }));
+
+                      // captureReview's own rule: an approval needs no findings, a rejection
+                      // needs at least one actionable entry or a human decides.
+                      const findingsResolved = verdict === 'approved' ? true : entries.length > 0;
 
                       // true / false / undefined, where undefined means the reviewer did not say.
                       const blockingFlag = (entry) => {
@@ -3922,9 +4443,9 @@ steps:
                         basis = 'the reviewer approved the work';
                       } else if (verdict === 'review_unavailable') {
                         outcome = 'review_unavailable';
-                        basis = 'the work could not be reviewed: no verdict was captured';
+                        basis = 'the work could not be reviewed: ' + String(stampedProblem || 'no attributable verdict was captured');
                       } else if (verdict === 'rejected') {
-                        if (review.findingsResolved === false) {
+                        if (!findingsResolved) {
                           outcome = 'rejected';
                           basis = 'the reviewer rejected the work and no actionable finding could be resolved';
                         } else if (blocking === 0 && unstated === 0 && nonBlocking > 0) {
@@ -3937,6 +4458,10 @@ steps:
                         }
                       }
 
+                      // Attributability was established at the top of this script from the
+                      // stamped bytes and the side-car cross-check, so there is no second
+                      // provenance gate here - a decision recorded below is always one the
+                      // pipeline can attribute.
                       const decision = {
                         verdict: verdict,
                         outcome: outcome,
@@ -3945,6 +4470,10 @@ steps:
                         nonBlocking: nonBlocking,
                         unstated: unstated,
                         basis: basis,
+                        attributable: attributable,
+                        reviewer: provenance && provenance.reviewerId ? String(provenance.reviewerId) : null,
+                        reviewAttempt: provenance && provenance.attempt !== undefined ? provenance.attempt : null,
+                        reviewAcceptedAt: provenance && provenance.acceptedAt ? String(provenance.acceptedAt) : null,
                         decidedAt: new Date().toISOString(),
                       };
                       try { fs.writeFileSync(path.join(dir, 'publish-decision.json'), JSON.stringify(decision, null, 2), 'utf8'); } catch (e) { /* best effort */ }
@@ -6152,7 +6681,13 @@ steps:
                       type: condition
                       dependsOn: setRunStatusExhausted
                       config:
-                        condition: variables.reviewVerdict === 'review_unavailable'
+                        # Revision 2: the in-loop gate has ALREADY raised a human task for a
+                        # capture failure inside the review loop. Escalate here only when
+                        # nothing was raised - a confirmation-pass capture failure never
+                        # enters that gate - so one un-reviewable run produces exactly one
+                        # approval task instead of two for the same incident.
+                        condition: variables.reviewVerdict === 'review_unavailable' &&
+                          variables.reviewEscalated !== 'true'
                         thenSteps:
                           - id: reviewUnavailableOutcomeLog
                             name: Log the un-reviewable run

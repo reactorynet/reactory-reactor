@@ -26,6 +26,10 @@ interface IStep {
   id: string;
   type: string;
   config?: Record<string, any>;
+  /** Step-level tolerance: a failing step that must not end the instance. */
+  continueOnError?: boolean;
+  dependsOn?: string | string[];
+  retryPolicy?: Record<string, any>;
 }
 
 const parsed = new YamlFlowParser({ validateSchema: true }).parseFromFile(WORKFLOW_FILE) as any;
@@ -127,9 +131,43 @@ const writeReport = (dir: string, report: any): void => {
   fs.writeFileSync(path.join(dir, '.ai-agent', 'report.json'), JSON.stringify(report), 'utf8');
 };
 
-const writeReview = (dir: string, review: any): void => {
+/**
+ * Open a review window exactly the way the pipeline does (the `prepareReview`
+ * step). Every fixture that expects a verdict to be READ must go through this,
+ * because captureReview only accepts a verdict the pipeline stamped.
+ */
+const openReviewWindow = (dir: string, extra: Record<string, string> = {}): void => {
+  runScript(scriptOf('prepareReview'), Object.assign({ WT: dir, CYCLE: '0', REVIEWER: 'QualityQuinn' }, extra), dir);
+};
+
+/** Write a review.json without any pipeline involvement - the engineer's file. */
+const writeReviewUnstamped = (dir: string, review: any): void => {
   fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
   fs.writeFileSync(path.join(dir, '.ai-agent', 'review.json'), JSON.stringify(review), 'utf8');
+};
+
+/** Run the pipeline's stamp step (`stampReview`) and return its JSON report. */
+const stampVerdict = (dir: string, extra: Record<string, string> = {}): any =>
+  runJson(
+    scriptOf('stampReview'),
+    // ATTEMPT is the 1-based attempt the reviewer needed (the step reports it as
+    // outputs.attempts); the workflow passes it through as ATTEMPT.
+    Object.assign({ WT: dir, CYCLE: '0', REVIEWER: 'QualityQuinn', ATTEMPT: '1' }, extra),
+    dir,
+  );
+
+/**
+ * A verdict as the PIPELINE accepts it: open the window, write the reviewer's
+ * file, stamp it. Fixtures must use this rather than a bare write, so every
+ * existing assertion keeps exercising a realistic, attributable verdict.
+ */
+const writeReview = (dir: string, review: any, extra: Record<string, string> = {}): void => {
+  openReviewWindow(dir, extra);
+  writeReviewUnstamped(dir, review);
+  const stamp = stampVerdict(dir, extra);
+  if (stamp.accepted !== true) {
+    throw new Error('fixture review was not accepted by the pipeline: ' + String(stamp.reason));
+  }
 };
 
 describe('ProcessAITicket report status normalisation (all four paths)', () => {
@@ -1693,6 +1731,381 @@ describe('ProcessAITicket exit condition after the last permitted review (REACTO
  *  - the reviewer must see committed work (the evidence used to diff against HEAD);
  *  - a code change without a rewritten report must still trigger the confirmation pass.
  */
+/**
+ * REACTORY-302016408 - gate integrity on the review boundary.
+ *
+ * Two defects, both observed on instance 6aeebbe2e81c454073eec774:
+ *
+ *  1. a reviewer `agent_conversation` step that failed on every attempt
+ *     TERMINATED the instance - no comment, no human task, no terminal
+ *     runStatus, container steps still marked Running;
+ *  2. `.ai-agent/review.json` was trusted whoever wrote it, so the engineer's
+ *     own self-review (mtime 06:34:19Z, before its step ended at 06:34:50Z)
+ *     would have satisfied the publish gate.
+ *
+ * These tests drive the real step scripts: prepareReview opens a dated window
+ * and clears any pre-existing verdict, stampReview refuses anything written
+ * before that window, and captureReview/readVerdict/readPublishable accept only
+ * a stamped verdict.
+ */
+describe('ProcessAITicket review provenance and reviewer-failure tolerance (REACTORY-302016408)', () => {
+  const capture = scriptOf('captureReview');
+  const prepare = scriptOf('prepareReview');
+  const readVerdict = scriptOf('readVerdict');
+  const publishable = scriptOf('readPublishable');
+  const bumpCycle = scriptOf('bumpCycle');
+  const narrative = scriptOf('readReviewOutcomeNarrative');
+
+  const decisionOf = (dir: string): any =>
+    JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'publish-decision.json'), 'utf8'));
+
+  const completedReport = { status: 'completed', summary: 'work', changes: [{ file: 'a.ts', description: 'd' }] };
+
+  it('declares reviewer tolerance and a real retry budget, and proves the retry exists', () => {
+    // Wiring only: shape, not engine behaviour. A step that reports failure is
+    // tolerated, and the loop's existing review_unavailable handling (comment +
+    // user_activity + terminal runStatus) is reached instead of the engine
+    // terminating the run.
+    expect((byId('review') as any).continueOnError).toBe(true);
+    expect((byId('confirmationReview') as any).continueOnError).toBe(true);
+
+    // A step-level retryPolicy CANNOT fire once continueOnError is set, so it must
+    // not be presented as the retry mechanism. The retry budget lives in the step
+    // (config.maxAttempts), which AgentConversationStep implements and its own unit
+    // tests pin by running the failure.
+    expect((byId('review') as any).retryPolicy).toBeUndefined();
+    expect((byId('confirmationReview') as any).retryPolicy).toBeUndefined();
+
+    // ONE RULE, NOT TWO THAT CAN DRIFT (the same standard the prepare/stamp scripts
+    // are held to below). The confirmation pass reviews the revision whose verdict is
+    // authoritative, so it must run with the SAME reviewer settings; when its
+    // maxToolIterations was dropped, AgentConversationStep silently fell back to the
+    // server default and a truncated loop would have reported retryable:false - a
+    // legitimate revision becoming a false 'never judged'. Assert the values AND the
+    // equality, so a drift in either direction fails here.
+    const reviewerConfig = (id: string): Record<string, any> => byId(id).config as Record<string, any>;
+    const REVIEWER_SETTINGS = ['maxToolIterations', 'maxAttempts', 'attemptDelayMs', 'toolApprovalMode', 'personaId', 'promptMergeStrategy'];
+    REVIEWER_SETTINGS.forEach((key) => {
+      expect(reviewerConfig('review')[key]).toBeDefined();
+      expect(reviewerConfig('confirmationReview')[key]).toBe(reviewerConfig('review')[key]);
+    });
+    expect(reviewerConfig('review').maxToolIterations).toBe(150);
+    expect(reviewerConfig('confirmationReview').maxToolIterations).toBe(150);
+    expect(reviewerConfig('review').maxAttempts).toBe(4);
+    expect(reviewerConfig('confirmationReview').maxAttempts).toBe(4);
+    expect(reviewerConfig('review').attemptDelayMs).toBe(2000);
+    expect(reviewerConfig('confirmationReview').attemptDelayMs).toBe(2000);
+    expect(reviewerConfig('review').toolApprovalMode).toBe('auto');
+    expect(reviewerConfig('confirmationReview').toolApprovalMode).toBe('auto');
+
+    // A step-level retryPolicy CANNOT fire once continueOnError is set, so it must
+    // not be presented as the retry mechanism. The retry budget lives in the step
+    // (config.maxAttempts), which AgentConversationStep implements and its own unit
+    // tests pin by running the failure.
+    expect((byId('review') as any).retryPolicy).toBeUndefined();
+    expect((byId('confirmationReview') as any).retryPolicy).toBeUndefined();
+
+    // Provenance records which attempt produced the accepted verdict - and ONLY on
+    // the stamp step, which is the step that reads it: prepareConfirmationReview runs
+    // before the reviewer, so an ATTEMPT there would be a dead forward reference.
+    expect((byId('stampReview').config as any).env.ATTEMPT).toBe('${steps.review.outputs.attempts}');
+    expect((byId('stampConfirmationReview').config as any).env.ATTEMPT).toBe('${steps.confirmationReview.outputs.attempts}');
+    expect((byId('prepareReview').config as any).env.ATTEMPT).toBeUndefined();
+    expect((byId('prepareConfirmationReview').config as any).env.ATTEMPT).toBeUndefined();
+
+    // captureReview is only reachable after the window opened and the verdict was
+    // stamped, so the failure path always runs through the gate.
+    expect(byId('review').dependsOn).toBe('prepareReview');
+    expect(byId('stampReview').dependsOn).toBe('review');
+    expect(byId('captureReview').dependsOn).toBe('stampReview');
+
+    const loop = (byId('reviewLoop').config.steps as IStep[]).map((step) => step.id);
+    expect(loop.indexOf('prepareReview')).toBeLessThan(loop.indexOf('review'));
+    expect(loop.indexOf('review')).toBeLessThan(loop.indexOf('stampReview'));
+    expect(loop.indexOf('stampReview')).toBeLessThan(loop.indexOf('captureReview'));
+
+    // The one-shot confirmation pass has the same shape, including an identical
+    // window/stamp implementation (one rule, not two that can drift).
+    expect(byId('confirmationReview').dependsOn).toBe('prepareConfirmationReview');
+    expect(byId('stampConfirmationReview').dependsOn).toBe('confirmationReview');
+    expect(byId('captureConfirmationReview').dependsOn).toBe('stampConfirmationReview');
+    expect(String(byId('prepareConfirmationReview').config.args[1])).toBe(String(byId('prepareReview').config.args[1]));
+    expect(String(byId('stampConfirmationReview').config.args[1])).toBe(String(byId('stampReview').config.args[1]));
+  });
+
+  it('routes a reviewer that produced no verdict to review_unavailable, not to a rejection', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, completedReport);
+      // The reviewer step threw on all four attempts: the window opened and the
+      // reviewer wrote nothing. Continue-on-error means captureReview still runs.
+      openReviewWindow(dir);
+      const refused = stampVerdict(dir);
+      expect(refused.accepted).toBe(false);
+      expect(String(refused.reason)).toContain('produced no review.json');
+
+      const captured = runJson(capture, { WT: dir }, dir);
+      expect(captured.verdict).toBe('review_unavailable');
+      expect(captured.reviewAvailable).toBe(false);
+      expect(captured.provenance).toBeNull();
+
+      expect(runScript(readVerdict, { WT: dir }, dir)).toBe('review_unavailable');
+
+      // A reviewer that never judged the work must not consume the engineer's budget.
+      expect(runScript(bumpCycle, { CYCLE: '1', VERDICT: 'review_unavailable' }, dir)).toBe('1');
+
+      // Never publishable, and the recorded decision says why.
+      expect(runScript(publishable, { WT: dir }, dir)).toBe('false');
+      expect(decisionOf(dir).outcome).toBe('review_unavailable');
+      expect(decisionOf(dir).publishable).toBe(false);
+
+      // The ticket is told this is a PIPELINE fault, never a rejection.
+      const text = runScript(narrative, { WT: dir, HALT: 'true', CYCLES: '1' }, dir);
+      expect(text).toContain('COULD NOT BE REVIEWED');
+      expect(text).not.toContain('REJECTED');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  /**
+   * One un-reviewable run must raise exactly ONE human approval task. The loop gate
+   * raised reviewUnavailableTask and the outcome else-branch raised
+   * reviewUnavailableOutcomeTask for the same incident, so a human saw two tasks for
+   * one failure. The outcome gate now runs only when the loop did not already ask.
+   */
+  it('raises the human task once for a single un-reviewable run', () => {
+    const loopTasks = (byId('reviewUnavailableGate').config.thenSteps as IStep[])
+      .filter((step) => step.type === 'user_activity');
+    const outcomeTasks = (byId('reviewUnavailableOutcomeGate').config.thenSteps as IStep[])
+      .filter((step) => step.type === 'user_activity');
+
+    // Each branch owns exactly one escalation, and the loop's is the primary one.
+    expect(loopTasks.map((step) => step.id)).toEqual(['reviewUnavailableTask']);
+    expect(outcomeTasks.map((step) => step.id)).toEqual(['reviewUnavailableOutcomeTask']);
+
+    // The loop records that it escalated, AFTER raising the task, so the outcome
+    // branch knows not to ask again.
+    const escalated = (byId('reviewUnavailableGate').config.thenSteps as IStep[])
+      .find((step) => step.id === 'setReviewEscalated');
+    expect(escalated).toBeDefined();
+    expect((escalated as IStep).config.key).toBe('reviewEscalated');
+    expect(String((escalated as IStep).config.value)).toBe('true');
+    expect((escalated as IStep).dependsOn).toBe('setRunHaltUnavailable');
+
+    // The outcome gate therefore requires that nothing was escalated yet: one
+    // condition for both cases, so the two branches are mutually exclusive.
+    const condition = String(byId('reviewUnavailableOutcomeGate').config.condition);
+    expect(condition).toContain("variables.reviewVerdict === 'review_unavailable'");
+    expect(condition).toContain("variables.reviewEscalated !== 'true'");
+
+    // Every user_activity step on this path is accounted for: exactly two exist, and
+    // the guard above is what stops them both firing.
+    const allTasks = all.filter((step) => step.type === 'user_activity' && /reviewUnavailable/i.test(step.id));
+    expect(allTasks.map((step) => step.id).sort()).toEqual(['reviewUnavailableOutcomeTask', 'reviewUnavailableTask']);
+  });
+
+  it('discards a verdict that was already on disk when the review window opens', () => {
+    const dir = repoWithWork();
+    try {
+      // The engineer's self-review, written during its own step.
+      writeReviewUnstamped(dir, { verdict: 'approved', summary: 'Self-review of the fix for ...' });
+
+      const opened = runJson(prepare, { WT: dir }, dir);
+      expect(opened.cleared).toContain('review.json');
+      expect(fs.existsSync(path.join(dir, '.ai-agent', 'review.json'))).toBe(false);
+
+      // Nothing to accept, nothing to publish.
+      expect(runJson(capture, { WT: dir }, dir).verdict).toBe('review_unavailable');
+      expect(runScript(publishable, { WT: dir }, dir)).toBe('false');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('refuses a verdict whose mtime predates the reviewer step (the incident mtimes)', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, completedReport);
+      openReviewWindow(dir);
+
+      // Reproduce the run: `.ai-agent/review.json` said "approved" and was written
+      // by the ENGINEER ~38 minutes before the reviewer step started.
+      writeReviewUnstamped(dir, { verdict: 'approved', summary: 'Self-review of the fix for ...' });
+      const engineerWroteAt = (Date.now() - 38 * 60 * 1000) / 1000;
+      fs.utimesSync(path.join(dir, '.ai-agent', 'review.json'), engineerWroteAt, engineerWroteAt);
+
+      const refused = stampVerdict(dir);
+      expect(refused.accepted).toBe(false);
+      expect(String(refused.reason)).toContain('predates the reviewer step start');
+
+      const captured = runJson(capture, { WT: dir }, dir);
+      expect(captured.verdict).toBe('review_unavailable');
+      expect(String(captured.parseError)).toContain('predates the reviewer step start');
+      expect(captured.reviewAvailable).toBe(false);
+
+      expect(runScript(readVerdict, { WT: dir }, dir)).toBe('review_unavailable');
+      expect(runScript(publishable, { WT: dir }, dir)).toBe('false');
+      expect(decisionOf(dir).outcome).toBe('review_unavailable');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('treats a verdict without the pipeline provenance marker as review_unavailable', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, completedReport);
+      openReviewWindow(dir);
+      // Fresh mtime, valid JSON, approved verdict - and no stamp. The engineer can
+      // write this file at any time, so it is not evidence of a review.
+      writeReviewUnstamped(dir, { verdict: 'approved', summary: 'approved by nobody' });
+
+      const captured = runJson(capture, { WT: dir }, dir);
+      expect(captured.verdict).toBe('review_unavailable');
+      expect(String(captured.provenanceProblem)).toContain('no pipeline provenance marker');
+      expect(runScript(readVerdict, { WT: dir }, dir)).toBe('review_unavailable');
+      expect(runScript(publishable, { WT: dir }, dir)).toBe('false');
+      expect(decisionOf(dir).outcome).toBe('review_unavailable');
+
+      // The reader must not fall back to the raw file either: with the normalised
+      // side-car gone, an unstamped review.json is still not a verdict.
+      fs.unlinkSync(path.join(dir, '.ai-agent', 'review-normalised.json'));
+      expect(runScript(readVerdict, { WT: dir }, dir)).toBe('review_unavailable');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('refuses a verdict that changed after the pipeline accepted it', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, completedReport);
+      writeReview(dir, { verdict: 'rejected', summary: 'needs work', requiredChanges: ['do the thing'] });
+      // Rewrite after the stamp: the accepted digest no longer matches.
+      writeReviewUnstamped(dir, { verdict: 'approved', summary: 'rewritten to pass' });
+
+      const captured = runJson(capture, { WT: dir }, dir);
+      expect(captured.verdict).toBe('review_unavailable');
+      expect(String(captured.parseError)).toContain('changed after the pipeline accepted it');
+      expect(runScript(publishable, { WT: dir }, dir)).toBe('false');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('attributes an accepted approval to the reviewer, attempt and timestamp', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, completedReport);
+      writeReview(dir, { verdict: 'approved', summary: 'independently verified' }, { CYCLE: '2', REVIEWER: 'QualityQuinn', ATTEMPT: '3' });
+
+      const accepted = JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'review-accepted.json'), 'utf8')).provenance;
+      expect(accepted.reviewerId).toBe('QualityQuinn');
+      // Review cycle 2, and the THIRD attempt of that cycle produced the verdict.
+      expect(accepted.reviewCycle).toBe('2');
+      expect(accepted.attempt).toBe(3);
+      expect(String(accepted.acceptedAt)).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+      expect(String(accepted.reviewSha256)).toMatch(/^[a-f0-9]{64}$/);
+      expect(String(accepted.windowStartedAt)).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+      const captured = runJson(capture, { WT: dir }, dir);
+      expect(captured.verdict).toBe('approved');
+      expect(captured.provenance.reviewerId).toBe('QualityQuinn');
+      expect(captured.provenance.attempt).toBe(3);
+
+      expect(runScript(publishable, { WT: dir }, dir)).toBe('true');
+      const decision = decisionOf(dir);
+      expect(decision.attributable).toBe(true);
+      expect(decision.reviewer).toBe('QualityQuinn');
+      expect(decision.reviewAttempt).toBe(3);
+
+      // The stamp also keeps the raw verdict readable without the normalised side-car.
+      fs.unlinkSync(path.join(dir, '.ai-agent', 'review-normalised.json'));
+      expect(runScript(readVerdict, { WT: dir }, dir)).toBe('approved');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  /**
+   * The hole this revision closes. `readPublishable` used to take its VERDICT from
+   * review-normalised.json while only binding the stamp digest to review.json, so
+   * rewriting the side-car alone (the stamped bytes, and therefore the sha256, stay
+   * valid) flipped a rejection into an approval. It is reachable: after a rejection
+   * the engineer session runs and can write that file, and the confirmation pass is
+   * skipped when the revision did not complete.
+   */
+  it('refuses a side-car that rewrites a stamped REJECTION into an approval', () => {
+    const dir = repoWithWork();
+    try {
+      writeReport(dir, completedReport);
+      // The reviewer rejected the work and the pipeline stamped THOSE bytes.
+      writeReview(dir, {
+        verdict: 'rejected',
+        summary: 'blocking problem',
+        requiredChanges: ['Guard the null case'],
+      });
+      const captured = runJson(capture, { WT: dir }, dir);
+      expect(captured.verdict).toBe('rejected');
+      expect(runScript(publishable, { WT: dir }, dir)).toBe('false');
+      expect(decisionOf(dir).outcome).toBe('rejected');
+
+      // The attack: rewrite ONLY review-normalised.json, keeping the pipeline's
+      // provenance object verbatim. review.json - and so its sha256 - is untouched.
+      const normalisedPath = path.join(dir, '.ai-agent', 'review-normalised.json');
+      const normalised = JSON.parse(fs.readFileSync(normalisedPath, 'utf8'));
+      const provenanceBefore = JSON.stringify(normalised.provenance);
+      normalised.verdict = 'approved';
+      normalised.findingsResolved = true;
+      normalised.requiredChanges = [];
+      normalised.blockingFindings = [];
+      normalised.findings = [];
+      fs.writeFileSync(normalisedPath, JSON.stringify(normalised), 'utf8');
+      expect(JSON.stringify(JSON.parse(fs.readFileSync(normalisedPath, 'utf8')).provenance)).toBe(provenanceBefore);
+      // The stamped artefact still says the reviewer rejected it.
+      expect(JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'review.json'), 'utf8')).verdict).toBe('rejected');
+
+      expect(runScript(publishable, { WT: dir }, dir)).toBe('false');
+      const decision = decisionOf(dir);
+      expect(decision.publishable).toBe(false);
+      expect(decision.attributable).toBe(false);
+      expect(decision.outcome).toBe('review_unavailable');
+      expect(decision.verdict).toBe('review_unavailable');
+      expect(String(decision.basis)).toContain('review-normalised.json says "approved"');
+      expect(String(decision.basis)).toContain('rejected');
+
+      // The verdict reader must not be fooled either: the loop would otherwise
+      // believe an approval and skip the hand-back.
+      expect(runScript(readVerdict, { WT: dir }, dir)).toBe('review_unavailable');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('refuses to publish an approval whose normalised record carries no stamp', () => {
+    const dir = repoWithWork();
+    try {
+      // Defence in depth at the publish gate itself: a resumed instance can find a
+      // review-normalised.json written by an older pipeline, with no accepted stamp.
+      fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'review-normalised.json'),
+        JSON.stringify({ verdict: 'approved', findingsResolved: true, requiredChanges: [], blockingFindings: [], findings: [] }),
+        'utf8',
+      );
+
+      expect(runScript(publishable, { WT: dir }, dir)).toBe('false');
+      const decision = decisionOf(dir);
+      expect(decision.publishable).toBe(false);
+      expect(decision.attributable).toBe(false);
+      expect(decision.outcome).toBe('review_unavailable');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
+
 describe('ProcessAITicket review-time guards (RC-2, RC-3, RC-4)', () => {
   /** Age a run artefact so the mtime comparison is deterministic, not timing luck. */
   const age = (dir: string, file: string, secondsAgo: number): void => {

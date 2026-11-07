@@ -33,7 +33,9 @@ function makeContext(service: any) {
     workflow: { id: 't', instanceId: 't', nameSpace: 'test', name: 'agent', version: '1.0.0' },
     logger: { log: jest.fn(), error: jest.fn(), warn: jest.fn(), info: jest.fn(), debug: jest.fn() },
     reactoryContext: {
-      getService: (id: string) => (id === CONVERSATION_SERVICE_ID ? service : null),
+      // Return types are annotated: an unannotated arrow inside this object literal is
+      // the shape that trips TS7011 once the stub is type-checked.
+      getService: (id: string): any => (id === CONVERSATION_SERVICE_ID ? service : null),
     },
   } as any;
 }
@@ -322,7 +324,7 @@ describe('AgentConversationStep', () => {
   it('fails gracefully when the conversation service is unavailable', async () => {
     const step = new AgentConversationStep('chat', { personaId: 'reactor', message: 'hi' });
     const ctx = makeContext(null);
-    ctx.reactoryContext.getService = () => null;
+    ctx.reactoryContext.getService = (): any => null;
 
     const result = await step.execute(ctx);
     expect(result.success).toBe(false);
@@ -513,5 +515,131 @@ describe('reactor module workflow step registration (Phase 4 reference)', () => 
       config: { personaId: 'reactor', message: 'hi' },
     });
     expect(step.stepType).toBe('agent_conversation');
+  });
+});
+
+/**
+ * REACTORY-302016408 - in-step retries.
+ *
+ * A workflow that marks this step `continueOnError: true` makes a reported
+ * failure non-fatal, but it also bypasses the engine's Retry strategy
+ * (YamlStepBody converts the failure into ExecutionResult.next(), so workflow-es
+ * never reaches the error path where Retry is chosen). The reviewer therefore
+ * gets exactly ONE attempt unless the step retries itself. These tests pin the
+ * behaviour that makes `config.maxAttempts` real, including the promise that no
+ * throw escapes the step.
+ */
+describe('AgentConversationStep attempts (REACTORY-302016408)', () => {
+  const failingTurn = (service: any, times: number, failure: any) => {
+    let calls = 0;
+    service.sendMessage = jest.fn(async () => {
+      calls += 1;
+      if (calls <= times) throw failure;
+      return { content: 'recovered', sessionId: 'sess-1' };
+    });
+    return service;
+  };
+
+  it('retries a transient provider fault and reports one success', async () => {
+    // The incident's failure mode: the provider SDK threw inside the turn.
+    const service = failingTurn(makeService(), 2, new Error("Cannot read properties of null (reading 'choices')"));
+    const step = new AgentConversationStep('review', { personaId: 'QualityQuinn', message: 'review it', maxAttempts: 3 });
+
+    const result = await step.execute(makeContext(service));
+
+    expect(result.success).toBe(true);
+    expect(service.sendMessage).toHaveBeenCalledTimes(3);
+    expect(result.outputs.attempts).toBe(3);
+    expect((result.metadata as any).attempts).toBe(3);
+    expect(result.outputs.content).toBe('recovered');
+  });
+
+  it('gives up after maxAttempts and reports a failure instead of throwing', async () => {
+    const service = makeService({ sendMessage: jest.fn(async () => { throw new Error('500 Internal Server Error'); }) });
+    const step = new AgentConversationStep('review', { personaId: 'QualityQuinn', message: 'review it', maxAttempts: 4 });
+
+    const result = await step.execute(makeContext(service));
+
+    expect(result.success).toBe(false);
+    expect(service.sendMessage).toHaveBeenCalledTimes(4);
+    expect(result.error).toContain('500 Internal Server Error');
+    expect(result.outputs.attempts).toBe(4);
+  });
+
+  it('defaults to a single attempt, preserving the previous behaviour', async () => {
+    const service = makeService({ sendMessage: jest.fn(async () => { throw new Error('provider down'); }) });
+    const step = new AgentConversationStep('review', { personaId: 'QualityQuinn', message: 'review it' });
+
+    const result = await step.execute(makeContext(service));
+
+    expect(result.success).toBe(false);
+    expect(service.sendMessage).toHaveBeenCalledTimes(1);
+    expect(result.outputs.attempts).toBe(1);
+  });
+
+  it('resumes the session a failed attempt created instead of starting a second one', async () => {
+    let calls = 0;
+    const service = makeService({
+      sendMessage: jest.fn(async () => {
+        calls += 1;
+        if (calls === 1) throw new Error('read timeout');
+        return { content: 'ok', sessionId: 'sess-1' };
+      }),
+    });
+    const step = new AgentConversationStep('review', { personaId: 'QualityQuinn', message: 'review it', maxAttempts: 2 });
+
+    const result = await step.execute(makeContext(service));
+
+    expect(result.success).toBe(true);
+    // One conversation for both attempts: the retry continued it rather than
+    // paying for a second prompt and leaving an orphan session behind.
+    expect(service.startChatSession).toHaveBeenCalledTimes(1);
+    expect(service.sendMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not retry a deterministic failure (a truncated tool loop)', async () => {
+    // A budget verdict: the same budget would truncate at the same point again.
+    const service = makeService({
+      sendMessage: jest.fn(async () => ({
+        content: 'partial',
+        sessionId: 'sess-1',
+        toolIterationLimitReached: true,
+        iterationsCompleted: 150,
+        maxToolIterations: 150,
+      })),
+    });
+    const step = new AgentConversationStep('review', { personaId: 'QualityQuinn', message: 'review it', maxAttempts: 4 });
+
+    const result = await step.execute(makeContext(service));
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('iteration limit');
+    expect(service.sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('converts a throw that escapes the attempt into a reported failure (nothing escapes the step)', async () => {
+    // resolveTemplate runs before the turn's own try/catch; a bad template used to
+    // throw out of executeStep, where YamlStepBody rethrows BEFORE consulting
+    // continueOnError - so the declared tolerance could not apply at all.
+    const service = makeService();
+    const ctx = makeContext(service);
+    const step = new AgentConversationStep('review', { personaId: 'QualityQuinn', message: 'hi' });
+    const spy = jest.spyOn(step as any, 'runAttempt').mockImplementation(() => { throw new Error('template blew up'); });
+
+    const result = await step.execute(ctx);
+
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('template blew up');
+    expect(result.outputs.attempts).toBe(1);
+  });
+
+  it('validates maxAttempts and attemptDelayMs', () => {
+    const step = new AgentConversationStep('review', { personaId: 'p', message: 'hi', maxAttempts: 0 });
+    expect(step.validateConfig({ personaId: 'p', message: 'hi', maxAttempts: 0 }).valid).toBe(false);
+    expect(step.validateConfig({ personaId: 'p', message: 'hi', maxAttempts: 11 }).valid).toBe(false);
+    expect(step.validateConfig({ personaId: 'p', message: 'hi', maxAttempts: 2.5 }).valid).toBe(false);
+    expect(step.validateConfig({ personaId: 'p', message: 'hi', attemptDelayMs: -1 }).valid).toBe(false);
+    expect(step.validateConfig({ personaId: 'p', message: 'hi', maxAttempts: 4, attemptDelayMs: 2000 }).valid).toBe(true);
   });
 });

@@ -319,6 +319,20 @@ describe('core.ProcessAITicket review-loop resilience', () => {
     expect(script).toContain('review.json');
     expect(script).toContain('readFileSync');
     expect(step.config.failOnError).toBe(false);
+
+    // Revision 2: the STAMPED review.json is read first, and the side-car is only
+    // used afterwards (to cross-check, or to honour a capture-failure verdict). A
+    // side-car read first would let a rewritten review-normalised.json drive the
+    // review loop.
+    expect(script).toContain('const stampedVerdict');
+    expect(script).toContain('review-accepted.json');
+    expect(script).toContain('crypto');
+    const stampedAt = script.indexOf('const stampedVerdict');
+    // The side-car READ (the comment above also names the file, so match the call).
+    const sideCarAt = script.indexOf("readJson('review-normalised.json')");
+    expect(stampedAt).toBeGreaterThan(-1);
+    expect(sideCarAt).toBeGreaterThan(-1);
+    expect(stampedAt).toBeLessThan(sideCarAt);
   });
 
   it('treats changes_requested as a rejection', () => {
@@ -746,6 +760,20 @@ describe('core.ProcessAITicket exit condition contracts (REACTORY-302016408)', (
     expect(script).toContain('publish-decision.json');
     // Fail closed: unstated blocking flags are counted, never read as non-blocking.
     expect(script).toContain('blocking === 0 && unstated === 0 && nonBlocking > 0');
+
+    // REACTORY-302016408 (revision 2). The DECISION is taken from the stamped
+    // bytes, not from the side-car. Reading the verdict from an agent-writable
+    // file is what let a rewritten review-normalised.json flip a rejection into an
+    // approval while the stamped review.json still said rejected.
+    expect(script).toContain("review-accepted.json");
+    expect(script).toContain('const stampedVerdict');
+    expect(script).toContain('const claimedVerdict');
+    expect(script).toContain('review-normalised.json says');
+    expect(script).toContain('const attributable = !stampedProblem');
+    // Findings are classified from the stamped bytes too, so the non-blocking
+    // publish path cannot be re-labelled through the side-car.
+    expect(script).toContain('const findingsSource = stampedInner');
+    expect(script).toContain('resolveKey(findingsSource');
   });
 
   it('reports a capture failure as review_unavailable and never as rejected', () => {

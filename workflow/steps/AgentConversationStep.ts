@@ -64,6 +64,20 @@ const VALID_MERGE_STRATEGIES = ['append', 'prepend', 'replace'];
 const VALID_ROLES = ['user', 'tool', 'assistant', 'system'];
 
 /**
+ * Bound for `config.maxAttempts`. The upper bound is small on purpose: each
+ * attempt can run a 150-iteration tool loop, so a larger budget is a runaway,
+ * and 10 is well above the four attempts the incident tolerated.
+ */
+const MAX_ATTEMPT_BOUND = 10;
+
+/** Normalise `config.maxAttempts` to an integer in [1, MAX_ATTEMPT_BOUND]. */
+function clampAttempts(value: any): number {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return 1;
+  return Math.min(MAX_ATTEMPT_BOUND, Math.max(1, Math.floor(numeric)));
+}
+
+/**
  * The conversation service returns a `{ __typename: 'ReactorErrorResponse', ... }`
  * object on failure (it does not throw). Extract a readable message + nested
  * detail so the workflow surfaces the real cause (e.g. an unknown personaId).
@@ -106,6 +120,22 @@ export interface AgentConversationStepConfig {
   sessionId?: string;
   /** Cap on the auto tool-call loop before pausing. */
   maxToolIterations?: number;
+  /**
+   * Attempts for a turn that FAILS (a provider fault, an error response, a
+   * rejected session start, or an exception thrown out of the attempt).
+   *
+   * This is deliberately implemented INSIDE the step. A workflow can mark the
+   * step `continueOnError: true` so a failure does not end the run, but that
+   * also bypasses the engine's Retry strategy: YamlStepBody converts a reported
+   * failure into `ExecutionResult.next()`, so workflow-es never reaches the
+   * error path where Retry is selected and a step-level `retryPolicy` never
+   * fires. Without in-step retries the first transient provider hiccup ends the
+   * run (REACTORY-302016408: four attempts were tolerated before the fault was
+   * treated as fatal). Default 1 = no retry.
+   */
+  maxAttempts?: number;
+  /** Delay between attempts in milliseconds. Default 0 (immediate). */
+  attemptDelayMs?: number;
   /** Optional model / provider override for the session. */
   model?: string;
   provider?: string;
@@ -130,9 +160,82 @@ export interface AgentConversationStepConfig {
 export class AgentConversationStep extends BaseYamlStep {
   public readonly stepType = 'agent_conversation';
 
+  /**
+   * Run the turn, retrying a REPORTED failure up to `config.maxAttempts` times.
+   *
+   * Nothing escapes this method. An exception thrown by an attempt (template
+   * resolution, service lookup, a provider SDK blowing up) is converted into a
+   * failed result instead of propagating: YamlStepBody rethrows before it
+   * consults `continueOnError`, so an escaping throw would defeat the tolerance
+   * the caller declared. That makes `continueOnError` sufficient on its own - a
+   * failure here is always reported, never fatal.
+   */
   protected async executeStep(context: StepExecutionContext): Promise<StepExecutionResult> {
     const config = this.config as AgentConversationStepConfig;
+    const maxAttempts = clampAttempts(config.maxAttempts);
+    const delayMs = Number.isFinite(Number(config.attemptDelayMs)) && Number(config.attemptDelayMs) > 0
+      ? Number(config.attemptDelayMs)
+      : 0;
 
+    let result: StepExecutionResult | null = null;
+    let attempts = 0;
+    let resumeSessionId: string | undefined;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      attempts = attempt;
+      try {
+        result = await this.runAttempt(context, config, resumeSessionId);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        context.logger.error(`Agent conversation attempt ${attempt} threw: ${message}`);
+        result = {
+          success: false,
+          error: message,
+          outputs: {},
+          // A throw is never a configuration verdict, so it is retryable.
+          metadata: { personaId: config.personaId, retryable: true },
+        };
+      }
+
+      const failure = result as StepExecutionResult;
+      if (failure.success) break;
+
+      const metadata = (failure.metadata || {}) as Record<string, any>;
+      const retryable = metadata.retryable !== false;
+      const remaining = maxAttempts - attempt;
+      if (!retryable || remaining <= 0) break;
+
+      // Reuse the session the failed attempt managed to create: a retry must be a
+      // continuation, not a second conversation, or every provider hiccup leaves a
+      // stray session behind and re-pays the whole prompt.
+      const created = (failure.outputs || {}) as Record<string, any>;
+      if (typeof created.sessionId === 'string' && created.sessionId.trim() !== '') {
+        resumeSessionId = created.sessionId;
+      }
+
+      context.logger.warn(
+        `Agent conversation attempt ${attempt}/${maxAttempts} failed (${failure.error}); retrying` +
+          (resumeSessionId ? ` in session "${resumeSessionId}"` : '') +
+          '.',
+      );
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+
+    const final = result as StepExecutionResult;
+    // Attempts are recorded on BOTH metadata and outputs: metadata is for operators,
+    // outputs are what a workflow step can read back (e.g. to report how many
+    // attempts a reviewer needed before it produced a verdict).
+    final.metadata = { ...(final.metadata || {}), attempts };
+    final.outputs = { ...(final.outputs || {}), attempts };
+    return final;
+  }
+
+  /** One attempt at the turn. Reports failure; the caller decides whether to retry. */
+  private async runAttempt(
+    context: StepExecutionContext,
+    config: AgentConversationStepConfig,
+    resumeSessionId?: string,
+  ): Promise<StepExecutionResult> {
     if (!context.reactoryContext) {
       return {
         success: false,
@@ -165,6 +268,11 @@ export class AgentConversationStep extends BaseYamlStep {
     if (typeof sessionId === 'string' && (sessionId.trim() === '' || sessionId.includes('${'))) {
       sessionId = undefined;
     }
+    // An earlier attempt of THIS step may have created a conversation before it
+    // failed; resume it rather than starting a second one.
+    if (!sessionId && resumeSessionId) {
+      sessionId = resumeSessionId;
+    }
 
     const model = config.model ? this.resolveTemplate(config.model, context) : undefined;
     const provider = config.provider ? this.resolveTemplate(config.provider, context) : undefined;
@@ -194,7 +302,9 @@ export class AgentConversationStep extends BaseYamlStep {
         success: false,
         error: `Conversation service (${CONVERSATION_SERVICE_ID}) is not available`,
         outputs: {},
-        metadata: { personaId },
+        // A missing service is configuration, not a transient fault: retrying would
+        // only re-resolve the same absent dependency.
+        metadata: { personaId, retryable: false },
       };
     }
     if (promptKey && typeof conversationService.sendCannedPrompt !== 'function') {
@@ -202,7 +312,8 @@ export class AgentConversationStep extends BaseYamlStep {
         success: false,
         error: `Conversation service (${CONVERSATION_SERVICE_ID}) does not support canned prompts (sendCannedPrompt)`,
         outputs: {},
-        metadata: { personaId, promptKey },
+        // A missing capability is a wiring error, not a transient fault.
+        metadata: { personaId, promptKey, retryable: false },
       };
     }
 
@@ -257,14 +368,19 @@ export class AgentConversationStep extends BaseYamlStep {
       // appending to history), so without re-applying it here a resumed turn would
       // run under whatever mode the session was last left in — e.g. tools that
       // should auto-execute would instead pause for approval.
+      // Each rejection handler is EXPLICITLY annotated `(): void`. These are
+      // best-effort session settings - a failure here must not fail the turn - and an
+      // unannotated `() => undefined` is the shape that trips TS7011 ("implicitly has
+      // return type any ... referenced in one of its return expressions") once the
+      // service is typed. Naming the type keeps the file clean under any config.
       if (typeof conversationService.setChatToolApprovalMode === 'function') {
-        await conversationService.setChatToolApprovalMode(sessionId, toolApprovalMode).catch(() => undefined);
+        await conversationService.setChatToolApprovalMode(sessionId, toolApprovalMode).catch((): void => undefined);
       }
       if (typeof config.maxToolIterations === 'number' && typeof conversationService.setChatMaxToolIterations === 'function') {
-        await conversationService.setChatMaxToolIterations(sessionId, config.maxToolIterations).catch(() => undefined);
+        await conversationService.setChatMaxToolIterations(sessionId, config.maxToolIterations).catch((): void => undefined);
       }
       if ((model || provider) && typeof conversationService.setChatModelProvider === 'function') {
-        await conversationService.setChatModelProvider(sessionId, model, provider).catch(() => undefined);
+        await conversationService.setChatModelProvider(sessionId, model, provider).catch((): void => undefined);
       }
 
       // When a canned prompt key is supplied, render it from the persona's prompt
@@ -342,6 +458,9 @@ export class AgentConversationStep extends BaseYamlStep {
           metadata: {
             personaId,
             sessionId,
+            // A truncated turn is a BUDGET verdict, not a transient fault: retrying
+            // the same budget would truncate again at the same point.
+            retryable: false,
             toolIterationLimitReached: true,
             ...(completed !== null ? { iterationsCompleted: completed } : {}),
           },
@@ -418,6 +537,14 @@ export class AgentConversationStep extends BaseYamlStep {
       (typeof config.maxToolIterations !== 'number' || config.maxToolIterations < 1)
     ) {
       errors.push('maxToolIterations must be a positive number');
+    }
+    if (config.maxAttempts !== undefined
+      && (typeof config.maxAttempts !== 'number' || !Number.isInteger(config.maxAttempts) || config.maxAttempts < 1 || config.maxAttempts > MAX_ATTEMPT_BOUND)) {
+      errors.push(`maxAttempts must be an integer between 1 and ${MAX_ATTEMPT_BOUND}`);
+    }
+    if (config.attemptDelayMs !== undefined
+      && (typeof config.attemptDelayMs !== 'number' || config.attemptDelayMs < 0)) {
+      errors.push('attemptDelayMs must be a non-negative number');
     }
     if (config.role !== undefined && !VALID_ROLES.includes(config.role)) {
       errors.push(`role must be one of: ${VALID_ROLES.join(', ')}`);
