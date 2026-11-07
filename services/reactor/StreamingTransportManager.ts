@@ -4,6 +4,7 @@ import { service } from '@reactory/server-core/application/decorators/service';
 import RedisService from '@reactory/server-modules/reactory-core/services/RedisService';
 import { StreamingSessionManager } from './StreamingSessionManager';
 import { StreamingTransport } from './StreamingTransport';
+import { StreamingEventLog, streamingEventLogOptionsFromEnv } from './StreamingEventLog';
 import { StreamingEvent } from './types/streaming.types';
 import { ChatSessionResourceManager } from './ChatSessionResourceManager';
 
@@ -74,10 +75,17 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
    * every idle stream is cut roughly once a minute and reconnects — which,
    * across a stack of background streams, is a reconnect storm.
    *
-   * The per-turn heartbeat in ReactorConversationService only covers the tool
-   * loop; this one is a property of holding a transport open, so it lives with
-   * the transports. `lastWriteAt` keeps it to genuinely idle streams rather than
-   * interleaving comments into an active token stream.
+   * The heartbeat is written as a `: heartbeat` comment *and* a named
+   * `event: heartbeat` frame: the comment is what proxies count, the named frame
+   * is what the browser can observe, and a client whose liveness watchdog only
+   * sees named events used to force-close a healthy stream.
+   *
+   * This sweep is the mechanism that covers every idle stream — including a
+   * supervised tool-approval wait, where the turn has already returned the calls
+   * to the client and is not inside the AUTO loop. The per-turn heartbeat in
+   * ReactorConversationService is a redundant safety net for the tool loop, not
+   * the only cover. `lastWriteAt` keeps both to genuinely idle streams rather
+   * than interleaving keepalives into an active token stream.
    */
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private readonly lastWriteAt = new Map<string, number>();
@@ -91,10 +99,35 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
    * Events buffered for a chat session while no connected transport exists.
    * On reconnect (registerTransport), the buffer is flushed to the new transport
    * so the client receives the full response that was generated while it was away.
+   *
+   * Each entry keeps the id it was allocated when it was emitted, so a flushed
+   * event carries the same stream position it would have carried live — the
+   * client's Last-Event-ID then means the same thing either way.
    */
-  private readonly eventBuffer = new Map<string, { events: StreamingEvent[]; createdAt: number }>();
+  private readonly eventBuffer = new Map<string, {
+    entries: Array<{ event: StreamingEvent; sseId: number }>;
+    createdAt: number;
+  }>();
   private static readonly MAX_BUFFER_SIZE = 1000;
   private static readonly BUFFER_TTL_MS = 5 * 60 * 1000;
+
+  /**
+   * Session-scoped replay history for SSE reconnects.
+   *
+   * Ids are allocated here, once per emitted event per process, and handed to
+   * the transport — so every transport attached to a conversation emits the
+   * same numbers, and a reconnect that builds a *new* transport can be resumed
+   * from where the previous one stopped instead of silently dropping the gap.
+   */
+  private readonly eventLog = new StreamingEventLog(streamingEventLogOptionsFromEnv());
+
+  /**
+   * When this process last lost its last transport for a conversation. Used to
+   * say "the client reconnected" (and after how long) in the register log — the
+   * question that has to be answered from logs the next time a user reports a
+   * stream that went quiet.
+   */
+  private readonly lastTransportClosedAt = new Map<string, number>();
 
   private static instance: StreamingTransportManager;
 
@@ -137,22 +170,33 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
   }
 
   /**
+   * The replay log shared with the SSE transports this manager drives.
+   *
+   * Exposed so the endpoint that constructs the transport can hand it the same
+   * instance: ids allocated here and the history a reconnect is served from
+   * must be the same record.
+   */
+  getEventLog(): StreamingEventLog {
+    return this.eventLog;
+  }
+
+  /**
    * Buffer an event for a chat session so it can be flushed when a transport
    * is re-registered. Drops the oldest events if the buffer is full and
    * discards buffers older than BUFFER_TTL_MS.
    */
-  private bufferEvent(chatSessionId: string, event: StreamingEvent): void {
+  private bufferEvent(chatSessionId: string, event: StreamingEvent, sseId: number): void {
     this.cleanupExpiredBuffers();
 
     let entry = this.eventBuffer.get(chatSessionId);
     if (!entry) {
-      entry = { events: [], createdAt: Date.now() };
+      entry = { entries: [], createdAt: Date.now() };
       this.eventBuffer.set(chatSessionId, entry);
     }
 
-    entry.events.push(event);
-    if (entry.events.length > StreamingTransportManager.MAX_BUFFER_SIZE) {
-      entry.events.splice(0, entry.events.length - StreamingTransportManager.MAX_BUFFER_SIZE);
+    entry.entries.push({ event, sseId });
+    if (entry.entries.length > StreamingTransportManager.MAX_BUFFER_SIZE) {
+      entry.entries.splice(0, entry.entries.length - StreamingTransportManager.MAX_BUFFER_SIZE);
     }
   }
 
@@ -162,28 +206,28 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
    */
   private async flushEventBuffer(chatSessionId: string, transport: StreamingTransport): Promise<void> {
     const entry = this.eventBuffer.get(chatSessionId);
-    if (!entry || entry.events.length === 0) return;
+    if (!entry || entry.entries.length === 0) return;
 
     this.eventBuffer.delete(chatSessionId);
 
-    this.slog("info", `Flushing ${entry.events.length} buffered event(s) for chat session ${chatSessionId}`, {
-      eventCount: entry.events.length,
+    this.slog("info", `Flushing ${entry.entries.length} buffered event(s) for chat session ${chatSessionId}`, {
+      eventCount: entry.entries.length,
       bufferedAt: new Date(entry.createdAt).toISOString(),
     }, chatSessionId);
 
-    for (const event of entry.events) {
+    for (const { event, sseId } of entry.entries) {
       if (!transport.isConnected) {
-        this.bufferEvent(chatSessionId, event);
+        this.bufferEvent(chatSessionId, event, sseId);
         return;
       }
       try {
-        await transport.sendEvent(event);
+        await transport.sendEvent(event, sseId);
       } catch (error: any) {
         this.slog("warn", `Error flushing buffered event: ${error.message}`, {
           eventType: event.type,
           chatSessionId,
         }, chatSessionId);
-        this.bufferEvent(chatSessionId, event);
+        this.bufferEvent(chatSessionId, event, sseId);
         return;
       }
     }
@@ -197,7 +241,7 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
     for (const [chatSessionId, entry] of this.eventBuffer.entries()) {
       if (now - entry.createdAt > StreamingTransportManager.BUFFER_TTL_MS) {
         this.slog("debug", `Discarding expired event buffer for chat session ${chatSessionId}`, {
-          eventCount: entry.events.length,
+          eventCount: entry.entries.length,
         }, chatSessionId);
         this.eventBuffer.delete(chatSessionId);
       }
@@ -276,7 +320,14 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
     // consumers see the same shape as a locally produced event.
     if (event.timestamp) event.timestamp = new Date(event.timestamp);
 
-    this.deliverLocal(chatSessionId, event).catch((err: Error) => {
+    // Give the event a position in *this* process's stream before delivering
+    // it, so a client that reconnects here can be resumed from the log. Two
+    // workers number independently; a reconnect that lands on a worker which
+    // never issued the client's Last-Event-ID answers `resync` rather than
+    // guessing (see StreamingEventLog).
+    const sseId = this.eventLog.append(chatSessionId, event);
+
+    this.deliverLocal(chatSessionId, event, sseId).catch((err: Error) => {
       this.slog("warn", `Error delivering fanout event: ${err.message}`, {
         eventType: event.type,
         chatSessionId,
@@ -351,6 +402,11 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
     if (!set) return;
     set.delete(sseSessionId);
     if (set.size === 0) {
+      // Remember when the conversation lost its last local transport, so the
+      // next registration can report whether this was a reconnect and after how
+      // long. "It went quiet for a while then came back" is otherwise only
+      // visible by correlating two log lines by hand.
+      this.lastTransportClosedAt.set(chatId, Date.now());
       this.chatSessions.delete(chatId);
       this.unsubscribeFromChat(chatId).catch(() => {});
     }
@@ -382,6 +438,10 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
     transport: StreamingTransport }): Promise<void> {
     const { sessionId, chatSessionId, transport } = args;
 
+    // Captured before the eviction below, which is a close and would otherwise
+    // record "closed 0ms ago" for a same-id re-registration.
+    const previousCloseAt = this.lastTransportClosedAt.get(chatSessionId);
+
     this.slog("info", `registerTransport called`, {
       sessionId,
       chatSessionId,
@@ -392,18 +452,36 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
     await this.evictTransport(sessionId, 'same SSE session ID re-registration');
 
     try {
+      // initialize() also answers the request's Last-Event-ID, writing any
+      // replayed frames before this transport can receive live events.
       await transport.initialize();
       this.transports.set(sessionId, transport);
       this.lastWriteAt.set(sessionId, Date.now());
       this.attachSse(sessionId, chatSessionId);
       this.ensureHeartbeat();
 
+      this.lastTransportClosedAt.delete(chatSessionId);
+      const replay = transport.replayOutcome ?? null;
+
       this.slog("info", `Transport registered successfully`, {
         chatSessions: Array.from(this.chatSessions.entries()).map(([k, v]) => [k, Array.from(v)]),
         transports: Array.from(this.transports.keys()),
+        clientReconnected: previousCloseAt !== undefined,
+        previousTransportClosedMsAgo: previousCloseAt !== undefined ? Date.now() - previousCloseAt : null,
+        replayStatus: replay?.status ?? null,
+        replayedEvents: replay?.replayed ?? 0,
       }, chatSessionId);
 
-      await this.flushEventBuffer(chatSessionId, transport);
+      if (replay?.status === 'replayed') {
+        // The reconnect was served from the replay log, which holds exactly the
+        // events this gap missed — including the ones buffered for a transport
+        // that was gone. Flushing the buffer as well would emit them twice.
+        if (this.eventBuffer.delete(chatSessionId)) {
+          this.slog("debug", `Replay superseded the undelivered buffer for ${chatSessionId}`, undefined, chatSessionId);
+        }
+      } else {
+        await this.flushEventBuffer(chatSessionId, transport);
+      }
     } catch (error: any) {
       this.slog("error", `Error registering transport: ${error.message}`, {
         stack: error.stack,
@@ -439,6 +517,11 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
       event.conversationId = chatSessionId;
     }
 
+    // Allocate the stream position before anything is written, so the number
+    // is the event's place in the conversation rather than an artifact of which
+    // transport happened to be attached. A later reconnect resumes from it.
+    const sseId = this.eventLog.append(chatSessionId, event);
+
     // Snapshot our own subscription BEFORE delivering: delivering can prune the
     // last dead transport for this conversation and unsubscribe us, and Redis
     // will still be counting us as a subscriber when the publish below lands.
@@ -448,7 +531,7 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
 
     // Deliver to whatever this process holds, then hand the event to every
     // other process so the transports they hold get it too.
-    const sentCount = await this.deliverLocal(chatSessionId, event);
+    const sentCount = await this.deliverLocal(chatSessionId, event, sseId);
 
     if (sentCount > 0) {
       // Delivered here, so the publish result cannot change any decision below
@@ -481,7 +564,7 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
     this.slog("debug", `No transport anywhere for chat session ${chatSessionId} — buffering event`, {
       eventType: event.type,
     }, chatSessionId);
-    this.bufferEvent(chatSessionId, event);
+    this.bufferEvent(chatSessionId, event, sseId);
   }
 
   /**
@@ -491,7 +574,7 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
    * Does not publish or buffer — callers decide that, which is what lets the
    * fanout subscriber reuse this without echoing the event back out.
    */
-  private async deliverLocal(chatSessionId: string, event: StreamingEvent): Promise<number> {
+  private async deliverLocal(chatSessionId: string, event: StreamingEvent, sseId: number): Promise<number> {
     const sseSet = this.chatSessions.get(chatSessionId);
     if (!sseSet || sseSet.size === 0) return 0;
 
@@ -505,7 +588,7 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
         continue;
       }
       try {
-        await transport.sendEvent(event);
+        await transport.sendEvent(event, sseId);
         sentCount++;
         this.lastWriteAt.set(sessionId, Date.now());
         this.throttledUpdateSessionActivity(sessionId);
@@ -608,6 +691,7 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
     this.sseToChatMap.clear();
     this.chatSessions.clear();
     this.lastWriteAt.clear();
+    this.lastTransportClosedAt.clear();
 
     if (this.heartbeatTimer) {
       clearInterval(this.heartbeatTimer);
@@ -685,11 +769,6 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
   }
 
   /**
-   * Send a keepalive heartbeat to prevent proxy/browser timeouts during
-   * long-running server-side operations (e.g. AUTO tool execution loops).
-   * Best-effort — failures are silently ignored.
-   */
-  /**
    * Start the keepalive sweep once this process holds a transport. Idempotent.
    */
   private ensureHeartbeat(): void {
@@ -713,32 +792,59 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
     this.slog("debug", `Streaming keepalive stopped — no transports held`);
   }
 
-  /** Write a comment to every stream that has been silent for too long. */
+  /**
+   * Write a keepalive to every stream that has been silent for too long.
+   *
+   * This is the mechanism that covers *every* idle stream, whatever the turn is
+   * doing — including the waits the per-turn heartbeat does not reach: a
+   * supervised tool-approval prompt (the turn has already handed the calls back
+   * and is not in the AUTO loop), a long provider call, and a conversation that
+   * is simply sitting open between turns. It is a property of holding a
+   * transport open, not of running a turn.
+   */
   private sweepHeartbeats(): void {
     const now = Date.now();
-    const interval = StreamingTransportManager.HEARTBEAT_INTERVAL_MS;
-
-    for (const [sessionId, transport] of Array.from(this.transports.entries())) {
-      if (!transport.isConnected) continue;
-      const last = this.lastWriteAt.get(sessionId) ?? 0;
-      if (now - last < interval) continue;
-      if ('sendHeartbeat' in transport && typeof (transport as any).sendHeartbeat === 'function') {
-        (transport as any).sendHeartbeat();
-        this.lastWriteAt.set(sessionId, now);
-      }
+    for (const sessionId of Array.from(this.transports.keys())) {
+      this.maybeSendHeartbeat(sessionId, now);
     }
   }
 
+  /**
+   * Send one keepalive to one transport, but only if the stream has been silent
+   * for at least the heartbeat interval.
+   *
+   * The silence check is what keeps a keepalive from being interleaved into an
+   * active token stream: it is the single cadence both callers share, so a
+   * per-turn interval cannot add a second one.
+   */
+  private maybeSendHeartbeat(sessionId: string, now: number = Date.now()): boolean {
+    const transport = this.transports.get(sessionId);
+    if (!transport || !transport.isConnected) return false;
+
+    const interval = StreamingTransportManager.HEARTBEAT_INTERVAL_MS;
+    const last = this.lastWriteAt.get(sessionId) ?? 0;
+    if (now - last < interval) return false;
+
+    if (typeof transport.sendHeartbeat !== 'function') return false;
+    transport.sendHeartbeat();
+    this.lastWriteAt.set(sessionId, now);
+    return true;
+  }
+
+  /**
+   * Keepalive for every stream attached to one conversation.
+   *
+   * Called from the AUTO tool loop on its own interval. Throttled by
+   * {@link maybeSendHeartbeat}, so it is a redundant safety net for the sweep
+   * above rather than a second cadence — and, because it sends the same named
+   * frame, the client's liveness watchdog is reset either way.
+   */
   sendHeartbeatToSession(chatSessionId: string): void {
     const sseSet = this.chatSessions.get(chatSessionId);
     if (!sseSet || sseSet.size === 0) return;
+    const now = Date.now();
     for (const sessionId of Array.from(sseSet)) {
-      const transport = this.transports.get(sessionId);
-      if (!transport || !transport.isConnected) continue;
-      if ('sendHeartbeat' in transport && typeof (transport as any).sendHeartbeat === 'function') {
-        (transport as any).sendHeartbeat();
-        this.lastWriteAt.set(sessionId, Date.now());
-      }
+      this.maybeSendHeartbeat(sessionId, now);
     }
   }
 

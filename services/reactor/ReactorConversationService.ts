@@ -7017,11 +7017,29 @@ export default class ReactorConversationService
           // rows this loop just wrote.
           let pendingClientToolCalls: Array<{ toolCallId: string; toolName: string }> = [];
 
-          // Send periodic SSE heartbeats to keep the connection alive while
-          // the server executes tools. Without this, proxies/browsers may
-          // close idle connections before the tool loop finishes.
+          // Per-turn keepalive for the AUTO tool loop.
+          //
+          // This is NOT the only thing keeping an idle stream alive, and it is
+          // not what covers a supervised approval wait:
+          //
+          // - A supervised (non-AUTO) turn *returns* the tool calls to the
+          //   client and stops; the user may sit on the approval prompt for
+          //   minutes with no turn running, so this interval is not created at
+          //   all. That wait is covered by StreamingTransportManager's
+          //   heartbeat sweep, which sweeps every registered transport on its
+          //   own cadence regardless of turn state or approval mode.
+          // - While the AUTO loop is running, the sweep covers this turn too.
+          //   This interval is therefore a redundant safety net inside one
+          //   turn, kept because it fires from the loop's own timeline.
+          //
+          // Both paths call the same transport method and are throttled by the
+          // manager's lastWriteAt check, so they emit ONE cadence of named
+          // `heartbeat` frames (plus the proxy-facing comment) and never
+          // interleave keepalives into an active token stream.
           const heartbeatInterval = streamingMode === StreamingMode.SSE
             ? setInterval(() => {
+                // Throttled inside the manager: emits only if the stream has
+                // been silent for a full heartbeat interval.
                 this.streamingTransportManager.sendHeartbeatToSession(effectiveConversationId);
               }, 15_000)
             : null;

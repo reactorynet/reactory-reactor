@@ -148,9 +148,23 @@ describe('StreamingTransport', () => {
         await transport.sendEvent(mockEvent);
         
         const expectedData = JSON.stringify(mockEvent);
+        // Every event carries a resumable id (P2 of
+        // REACTORY-302016408/20261107/3216227283): the browser can only send
+        // Last-Event-ID on reconnect if the server put an id on the wire.
         expect(mockRes.write).toHaveBeenCalledWith(
-          `event: ${mockEvent.type}\ndata: ${expectedData}\n\n`
+          `id: 1\nevent: ${mockEvent.type}\ndata: ${expectedData}\n\n`
         );
+      });
+
+      it('should keep ids increasing for successive events', async () => {
+        await transport.initialize();
+        await transport.sendEvent(mockEvent);
+        await transport.sendEvent(mockEvent);
+
+        const writes = (mockRes.write as jest.Mock).mock.calls.map((call) => String(call[0]));
+        expect(writes.filter((frame) => frame.startsWith('id: '))).toHaveLength(2);
+        expect(writes.find((frame) => frame.startsWith('id: 1\n'))).toBeDefined();
+        expect(writes.find((frame) => frame.startsWith('id: 2\n'))).toBeDefined();
       });
       
       it('should throw error if not initialized', async () => {
