@@ -86,6 +86,32 @@ The module serves a `ReactorWebClient` plugin that provides the web-based chat i
 
 ## Testing
 
+From the host server checkout, against the module's natural mount (`src/modules/reactory-reactor`):
+
 ```bash
 $REACTORY_SERVER/bin/jest.sh reactory local --testPathPattern=reactor
 ```
+
+From an AI worktree (`src/modules/reactory-worktrees/ai-<ref>`) that command runs the PRIMARY
+checkout, not your work, and a bare `jest` run against the worktree fails at load with
+`Cannot find module '../../../database/...'` / `Tests: 0 total`. The worktree sits one directory
+level deeper than the natural mount, so the module's relative imports resolve one level short.
+
+Use the shipped harness instead - it is the only supported worktree recipe:
+
+```bash
+node scripts/ai/run-worktree-tests.js services/reactor/__tests__ ai/macro/chats
+node scripts/ai/run-worktree-tests.js services/reactor/__tests__/ReactorConversationService.contextLength.test.ts
+```
+
+Exit **0** means every collected suite loaded and every test passed; exit **1** means a suite
+failed to load, a test failed, or the wrapper could not run Jest. The wrapper adds `--forceExit`
+when the inherited server config enables `detectOpenHandles`, because this repository has async
+work that survives teardown and would otherwise turn a green run red. Record the command, its exit
+code and the counts.
+
+From a repository that does not ship `scripts/ai/`, invoke the copy in the server tree with
+`--module-root <this worktree>` (one copy serves any module).
+
+Do not hand-roll a Jest config and do not rewrite imports to work around the depth. Rationale,
+both controls and troubleshooting: [docs/ai-worktree-testing.md](docs/ai-worktree-testing.md).
