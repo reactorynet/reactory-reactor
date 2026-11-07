@@ -171,6 +171,61 @@ const resolveConversationHistory = async (conv: any, context: any): Promise<any[
   }
 };
 
+/**
+ * Resolve the token budget a delegated (sub-agent) conversation is created with.
+ *
+ * Delegation used to create the sub-agent document without `maxTokens`, so the schema
+ * default `null` survived. A null limit is not enforced anywhere — `checkTokenLimit`
+ * treats it as unlimited and four consumers substitute the platform constant — so the
+ * model's declared window was never applied and a delegated run grew to 203k–271k
+ * tokens before the provider's hard ceiling killed it mid-task
+ * (ticket REACTORY-302016408/20261104/1630018038).
+ *
+ * Inheritance is explicit rather than accidental: `modelId`/`providerId` here are the
+ * pair the sub-agent will actually run — the same pair inherited from the parent unless
+ * the persona or the caller overrides it. Resolving the limit for that pair therefore
+ * *is* inheriting the parent's limit, and an overridden model is re-resolved on its own
+ * terms instead of borrowing the parent's window.
+ *
+ * Returns `null` when no budget can be established. The caller must then refuse the
+ * delegation: starting a headless run without a limit is the defect itself.
+ */
+async function resolveDelegatedMaxTokens(
+  conversationService: any,
+  input: {
+    conversationId: string;
+    personaId: string;
+    modelId?: string;
+    providerId?: string;
+  },
+): Promise<{ maxTokens: number; source: string; authoritative: boolean } | null> {
+  const identify = `conversation=${input.conversationId} model=${input.modelId ?? "?"} provider=${input.providerId ?? "?"}`;
+  const resolver = conversationService?.resolveConversationBudget;
+
+  if (typeof resolver !== "function") {
+    logger.warn(`[chats.speakto] no context-budget resolver on the conversation service; refusing to delegate ${input.personaId} (${identify}) — a delegated session without a limit grows until the provider kills it`);
+    return null;
+  }
+
+  try {
+    const budget = await resolver.call(conversationService, {
+      conversationId: input.conversationId,
+      modelId: input.modelId,
+      providerId: input.providerId,
+    });
+
+    if (!budget || typeof budget.maxTokens !== "number" || !(budget.maxTokens > 0)) {
+      logger.warn(`[chats.speakto] context-budget resolution returned no usable limit; refusing to delegate ${input.personaId} (${identify})`);
+      return null;
+    }
+
+    return budget;
+  } catch (err: any) {
+    logger.warn(`[chats.speakto] context-budget resolution failed (${err?.message ?? String(err)}); refusing to delegate ${input.personaId} (${identify})`);
+    return null;
+  }
+}
+
 export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
   props: ChatsMacroProps,
   state: ChatState
@@ -406,6 +461,31 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
             // error records carry the same `startedAt` as the dispatch record.
             const dispatchedAt = new Date().toISOString();
 
+            // Resolve the budget BEFORE the session exists. A delegated run that starts
+            // without a limit is the defect this ticket is about, so an unresolvable
+            // model refuses the delegation here — loudly — instead of launching a run
+            // that will die at the provider's ceiling with the work half done.
+            const targetBudget = await resolveDelegatedMaxTokens(conversationService, {
+              conversationId: subagentSessionId,
+              personaId: persona.id,
+              modelId: targetModelId,
+              providerId: targetProviderId,
+            });
+
+            if (!targetBudget) {
+              return {
+                success: false,
+                error: `Cannot delegate to ${persona.name}: no context-window limit could be resolved for ${targetProviderId ?? "?"}/${targetModelId ?? "?"}.`,
+                data: {
+                  agentId: persona.id,
+                  agentName: persona.name,
+                  modelId: targetModelId ?? null,
+                  providerId: targetProviderId ?? null,
+                },
+                instructions: `## Delegation Refused — No Context Budget\n\n**Agent**: ${persona.name} (${persona.id})\n**Model**: ${targetProviderId ?? "?"}/${targetModelId ?? "?"}\n\nThe model's context-window limit could not be resolved from the provider registry, so the sub-agent would have run without a budget and grown until the provider killed it mid-task.\n\n### Suggested Next Steps:\n- Declare \`contextLength\` for this model in providers.yaml, or\n- Delegate to a model whose window is declared\n- Do NOT retry unchanged — the outcome is deterministic`
+              };
+            }
+
             // Pre-create the sub-agent conversation with a known _id so the
             // delegationId ↔ sessionId mapping is available at dispatch time and the
             // run is recoverable after a crash/disconnect.
@@ -418,6 +498,9 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
               clientKey: (state.context as any)?.partner?.key ?? undefined,
               modelId: targetModelId,
               providerId: targetProviderId,
+              // The resolved, non-null context budget. Without this the schema default
+              // `null` survives and the model's declared window is never applied.
+              maxTokens: targetBudget.maxTokens,
               history: [],
               // Stamp the delegationId onto the sub-agent session itself. This is the
               // durable delegationId -> session mapping: even if the parent's delegation

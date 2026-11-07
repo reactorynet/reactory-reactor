@@ -8,9 +8,17 @@ describe('ChatsMacro', () => {
   const mockSendMessage = jest.fn();
   const mockListPersonas = jest.fn();
   const mockGetProviders = jest.fn();
+  // Delegation resolves a creation-time context budget. Without a stub, the async
+  // dispatch path correctly refuses to run — which is a different test than these.
+  const mockResolveBudget = jest.fn();
 
   beforeEach(() => {
     jest.clearAllMocks();
+    mockResolveBudget.mockResolvedValue({
+      maxTokens: 128000,
+      source: 'model-declared',
+      authoritative: true,
+    });
 
     mockListPersonas.mockResolvedValue([
       { id: 'daan', name: 'Docent Daan', modelId: 'gpt-4o', providerId: 'openai' },
@@ -33,7 +41,7 @@ describe('ChatsMacro', () => {
           return { listPersonas: mockListPersonas };
         }
         if (id.startsWith('reactor.ReactorConversationService')) {
-          return { sendMessage: mockSendMessage };
+          return { sendMessage: mockSendMessage, resolveConversationBudget: mockResolveBudget };
         }
         if (id.startsWith('reactor.ReactorProviderService')) {
           return { getProviders: mockGetProviders };

@@ -32,6 +32,14 @@ describe('ChatsMacro - delegation lifecycle', () => {
   const mockSendMessage = jest.fn();
   const mockListPersonas = jest.fn();
   const mockGetProviders = jest.fn();
+  /**
+   * The context budget the conversation service resolves at creation time.
+   *
+   * A delegated session created without one used to reach 203k–271k tokens against
+   * a 1 000 000-token model, so this resolver is part of the delegation contract
+   * (ticket REACTORY-302016408/20261104/1630018038).
+   */
+  const mockResolveBudget = jest.fn();
 
   beforeEach(() => {
     jest.restoreAllMocks();
@@ -44,11 +52,19 @@ describe('ChatsMacro - delegation lifecycle', () => {
       { id: 'openai', name: 'OpenAI', models: [{ id: 'gpt-4o', name: 'GPT-4o' }] },
     ]);
 
+    mockResolveBudget.mockResolvedValue({
+      maxTokens: 128000,
+      source: 'model-declared',
+      authoritative: true,
+    });
+
     const mockContext: any = {
       user: { _id: new ObjectId(), firstName: 'Test', lastName: 'User', email: 'test@example.com' },
       getService: jest.fn((id: string) => {
         if (id.startsWith('reactor.AIPersonaProvider')) return { listPersonas: mockListPersonas };
-        if (id.startsWith('reactor.ReactorConversationService')) return { sendMessage: mockSendMessage };
+        if (id.startsWith('reactor.ReactorConversationService')) {
+          return { sendMessage: mockSendMessage, resolveConversationBudget: mockResolveBudget };
+        }
         if (id.startsWith('reactor.ReactorProviderService')) return { getProviders: mockGetProviders };
         return null;
       }),
@@ -132,6 +148,63 @@ describe('ChatsMacro - delegation lifecycle', () => {
       const created = createSpy.mock.calls[0][0] as any;
       expect(created.parentSessionId).toBe(chatState.id);
       expect(created.toolApprovalMode).toBe(ToolApprovalMode.AUTO);
+    });
+
+    it('creates the sub-agent session with the resolved context budget (never maxTokens: null)', async () => {
+      // The defect: delegation created the session without `maxTokens`, so the schema
+      // default `null` survived, the model's declared window was never applied and the
+      // run grew until the provider killed it.
+      const createSpy = jest.spyOn(ReactorConversationModel, 'create').mockResolvedValue({} as any);
+      jest.spyOn(ReactorConversationModel, 'findOneAndUpdate').mockImplementation(
+        () => ({ exec: async () => ({}) } as any),
+      );
+      mockSendMessage.mockImplementation(() => new Promise(() => {}));
+
+      const result: any = await ChatsMacro(
+        { action: 'speakto', id: 'daan', message: 'do work', async: true, wakeParent: false },
+        chatState,
+      );
+
+      expect(result.success).toBe(true);
+      const created = createSpy.mock.calls[0][0] as any;
+      expect(created.maxTokens).toBe(128000);
+      // Resolved for the session that was actually created, against the model/provider
+      // the sub-agent will run — which is what makes the limit part of the inheritance.
+      expect(mockResolveBudget).toHaveBeenCalledTimes(1);
+      expect(mockResolveBudget).toHaveBeenCalledWith({
+        conversationId: result.data.subagentSessionId,
+        modelId: 'gpt-4o',
+        providerId: 'openai',
+      });
+    });
+
+    it('refuses to delegate when no context budget resolves, instead of running unbounded', async () => {
+      const createSpy = jest.spyOn(ReactorConversationModel, 'create').mockResolvedValue({} as any);
+      mockResolveBudget.mockResolvedValue(null);
+
+      const result: any = await ChatsMacro(
+        { action: 'speakto', id: 'daan', message: 'do work', async: true, wakeParent: false },
+        chatState,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('no context-window limit could be resolved');
+      // No session, no dispatch record, no sub-agent run.
+      expect(createSpy).not.toHaveBeenCalled();
+      expect(mockSendMessage).not.toHaveBeenCalled();
+    });
+
+    it('refuses to delegate when budget resolution fails, instead of guessing', async () => {
+      const createSpy = jest.spyOn(ReactorConversationModel, 'create').mockResolvedValue({} as any);
+      mockResolveBudget.mockRejectedValue(new Error('provider registry unavailable'));
+
+      const result: any = await ChatsMacro(
+        { action: 'speakto', id: 'daan', message: 'do work', async: true, wakeParent: false },
+        chatState,
+      );
+
+      expect(result.success).toBe(false);
+      expect(createSpy).not.toHaveBeenCalled();
     });
   });
 
