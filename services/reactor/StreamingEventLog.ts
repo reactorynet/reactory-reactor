@@ -18,9 +18,14 @@ import { StreamingEvent } from './types/streaming.types';
  * - **Bounded.** Two independent bounds — a maximum number of retained events
  *   and a maximum age — so a long streamed answer cannot grow process memory
  *   without limit. Both are asserted by tests.
- * - **Monotonic per stream.** Ids are allocated per session key, not per
- *   transport, so a reconnect that creates a *new* `SSETransport` continues the
- *   same numbering and its `Last-Event-ID` is comparable with ids already sent.
+ * - **Monotonic per stream, and monotonic across a reset.** Ids are allocated
+ *   per session key, not per transport, so a reconnect that creates a *new*
+ *   `SSETransport` continues the same numbering and its `Last-Event-ID` is
+ *   comparable with ids already sent. A stream whose state is reclaimed for
+ *   idleness also continues the numbering instead of restarting at 1 — see
+ *   `highWaterMark`. Restarting would let a stale `Last-Event-ID` name a
+ *   *different* event that happened to reuse the number, which is a silent
+ *   mis-resume: exactly the failure this log exists to prevent.
  * - **Honest about gaps.** When the requested id has been evicted (or was never
  *   seen by this process — e.g. the reconnect landed on a different worker),
  *   {@link StreamingEventLog.prototype.since} reports `resync` rather than
@@ -78,7 +83,7 @@ export interface ReplaySlice {
 
 interface StreamState {
   entries: SSEEventLogEntry[];
-  /** Highest id ever allocated — survives pruning, so gaps stay detectable. */
+  /** Highest id ever allocated for this stream — survives pruning. */
   lastId: number;
   updatedAt: number;
 }
@@ -114,6 +119,18 @@ export class StreamingEventLog {
   private readonly maxAgeMs: number;
   /** When the map of streams was last swept for idle keys. */
   private lastSweepAt = 0;
+  /**
+   * Highest id this log has ever issued, across every stream.
+   *
+   * A stream that is created after another one has already issued ids starts its
+   * own numbering here rather than at 1. That matters in one specific case: a
+   * stream reclaimed for idleness and then rebuilt by a later turn. Seeding from
+   * the high-water mark means its ids continue upward, so a client that reconnects
+   * holding a pre-sweep `Last-Event-ID` can only ever be served a *later* event
+   * (a contiguous replay) or an explicit `resync` — never an older, unrelated
+   * event that reuses the number it is holding.
+   */
+  private highWaterMark = 0;
 
   constructor(options: StreamingEventLogOptions = {}) {
     this.maxEventsPerStream = options.maxEventsPerStream && options.maxEventsPerStream > 0
@@ -149,12 +166,15 @@ export class StreamingEventLog {
 
     let state = this.streams.get(streamKey);
     if (!state) {
-      state = { entries: [], lastId: 0, updatedAt: now };
+      // Seed from the high-water mark, not from 0: a rebuilt stream continues the
+      // numbering instead of restarting it. See the field doc above.
+      state = { entries: [], lastId: this.highWaterMark, updatedAt: now };
       this.streams.set(streamKey, state);
     }
     this.prune(state, now);
 
     const id = ++state.lastId;
+    this.highWaterMark = id;
     state.entries.push({
       id,
       type: String(event.type),
@@ -265,9 +285,11 @@ export class StreamingEventLog {
     this.streams.delete(streamKey);
   }
 
-  /** Drop every stream. Test helper; not used in production paths. */
+  /** Drop every stream and the id watermark. Test helper; not used in production paths. */
   clear(): void {
     this.streams.clear();
+    this.highWaterMark = 0;
+    this.lastSweepAt = 0;
   }
 
   /**
@@ -277,6 +299,17 @@ export class StreamingEventLog {
    * conversation that is never resumed would keep that key forever — one per
    * session, for the life of the process. Swept at most once per window so the
    * cost amortizes to nothing across a token stream.
+   *
+   * Reclaiming the state does NOT reclaim the id numbering: `highWaterMark`
+   * carries it, so a later event for the same session gets a higher id than
+   * anything already sent. The consequence for a client is one of two explicit
+   * answers on reconnect, never a silent rewind:
+   *
+   * - nothing else happened in between, so the next event is contiguous with the
+   *   id the client holds and it is replayed (`replayed`);
+   * - other conversations consumed ids meanwhile, so the gap is reported as
+   *   `resync`/`evicted` rather than replayed from an id that means something
+   *   else.
    */
   private sweepIdleStreams(now: number): void {
     if (now - this.lastSweepAt < this.maxAgeMs) return;

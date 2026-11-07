@@ -1,6 +1,7 @@
 import request from 'supertest';
 import express from 'express';
 import { StreamingEndpoints } from '../StreamingEndpoints';
+import { StreamingEventLog } from '../StreamingEventLog';
 import { StreamingSession, StreamingEvent } from '../types/streaming.types';
 
 const mockTransportManager = {
@@ -11,6 +12,10 @@ const mockTransportManager = {
   getTransportCount: jest.fn(),
   closeAllTransports: jest.fn(),
   cleanupDisconnectedTransports: jest.fn(),
+  // The endpoint requires this (not optional-chained: see the comment at the
+  // construction site). A plain function, so `jest.clearAllMocks()` in
+  // beforeEach cannot strip the implementation.
+  getEventLog: jest.fn(() => new StreamingEventLog()),
 } as any;
 
 const mockSessionManager = {

@@ -2,7 +2,33 @@ import { Response } from 'express';
 import { SSETransport } from '../StreamingTransport';
 import { StreamingEventLog } from '../StreamingEventLog';
 import { StreamingTransportManager } from '../StreamingTransportManager';
+import { ChatSessionResourceManager } from '../ChatSessionResourceManager';
 import { StreamingEvent } from '../types/streaming.types';
+
+/**
+ * The transports reach the session file logger through the static registry, so
+ * stub the registry rather than writing log files. Nothing else in this file
+ * depends on the real implementation.
+ */
+jest.mock('../ChatSessionResourceManager', () => ({
+  ChatSessionResourceManager: { forSession: jest.fn() },
+}));
+
+const forSession = ChatSessionResourceManager.forSession as unknown as jest.Mock;
+
+/** A logger that records what the transport wrote at each level. */
+const createLogger = () => ({
+  debug: jest.fn(),
+  info: jest.fn(),
+  warn: jest.fn(),
+  error: jest.fn(),
+});
+
+/** Locate a logged message whose text contains `needle`, with its metadata. */
+const logged = (logger: ReturnType<typeof createLogger>, level: 'debug' | 'info' | 'warn' | 'error', needle: string) => {
+  const call = (logger[level] as jest.Mock).mock.calls.find((c) => String(c[0]).includes(needle));
+  return call ? (call[1] as Record<string, unknown>) : undefined;
+};
 
 /**
  * Regression tests for the server half of REACTORY-302016408/20261107/3216227283.
@@ -328,6 +354,56 @@ describe('StreamingEventLog bounds (P2)', () => {
     expect(log.since('chat-old', 1, start + 5_000).outcome.reason).toBe('unknown');
   });
 
+  /**
+   * Q3 — the id sequence must not restart when an idle stream is reclaimed.
+   *
+   * Reclaiming the map entry is what keeps memory bounded, but if the rebuilt
+   * stream restarted at 1 a stale `Last-Event-ID` would name a *different*
+   * event that happened to reuse the number, and the client would be resumed
+   * onto the wrong position with nothing to indicate it. Seeding from the
+   * log-wide high-water mark makes that impossible: ids only ever move forward.
+   */
+  it('continues the numbering when an idle stream is swept and rebuilt', () => {
+    const log = new StreamingEventLog({ maxEventsPerStream: 10, maxAgeMs: 1_000 });
+    const start = 1_000_000;
+
+    const first = log.append('chat-1', makeEvent('a'), start);
+    const afterSweep = log.append('chat-1', makeEvent('b'), start + 2_000);
+
+    expect(first).toBe(1);
+    expect(afterSweep).toBeGreaterThan(first);
+
+    // Nothing else consumed ids in between, so the rebuild is contiguous and the
+    // client holding the pre-sweep id is served the new event directly.
+    const slice = log.since('chat-1', first, start + 2_000);
+    expect(slice.outcome.status).toBe('replayed');
+    expect(slice.entries.map((entry) => entry.id)).toEqual([afterSweep]);
+  });
+
+  it('never reuses an id across a sweep, and resyncs a stale cursor when others consumed ids', () => {
+    const log = new StreamingEventLog({ maxEventsPerStream: 10, maxAgeMs: 1_000 });
+    const start = 1_000_000;
+
+    const first = log.append('chat-1', makeEvent('a'), start);
+
+    // Another conversation issues ids while chat-1 is idle, which is what makes
+    // the sweep reclaim chat-1's state; then chat-1 is rebuilt.
+    for (let i = 0; i < 3; i++) {
+      log.append('chat-other', makeEvent(`x${i}`), start + 2_000 + i);
+    }
+    const afterSweep = log.append('chat-1', makeEvent('b'), start + 3_000);
+
+    // The rebuilt stream continued past the ids the other stream used: no reuse.
+    expect(afterSweep).toBe(5);
+
+    // A client holding the pre-sweep id is told the gap exists. It is never
+    // silently handed an event whose number merely happens to line up.
+    const slice = log.since('chat-1', first, start + 3_000);
+    expect(slice.outcome.status).toBe('resync');
+    expect(slice.outcome.reason).toBe('evicted');
+    expect(slice.entries).toEqual([]);
+  });
+
   it('ignores an unusable Last-Event-ID instead of inventing a position', () => {
     const log = new StreamingEventLog();
     log.append('chat-1', makeEvent('a'));
@@ -392,6 +468,50 @@ describe('StreamingTransportManager reconnect handling (P2)', () => {
     await manager.closeAllTransports();
   });
 
+  /**
+   * O1 — the replay happens inside `initialize()`, which runs before the
+   * transport is attached. An event emitted in that window has nowhere to go and
+   * is buffered under the same session key. Dropping the *whole* buffer once a
+   * replay has been written would discard it: it is in the log, so the next
+   * reconnect would recover it, but this connection would silently miss it.
+   * Only entries the replay actually covered may be dropped.
+   */
+  it('flushes an event appended during the replay window instead of dropping it (O1)', async () => {
+    const manager = new StreamingTransportManager({}, mockContext as any);
+    (manager as any).sessionManager = mockSessionManager;
+
+    const first = createTransport({ sessionKey: 'chat-1', eventLog: manager.getEventLog() });
+    await manager.registerTransport({ sessionId: 'sse-1', chatSessionId: 'chat-1', transport: first.transport });
+    await manager.sendEventToSession('chat-1', makeEvent('a')); // id 1, delivered
+    await first.transport.close();
+    await manager.sendEventToSession('chat-1', makeEvent('b')); // id 2, buffered
+
+    const second = createTransport({
+      sessionKey: 'chat-1',
+      eventLog: manager.getEventLog(),
+      lastEventId: 1,
+    });
+
+    // Race the window: emit a third event after the replay has been written but
+    // before this transport is registered, so the manager can only buffer it.
+    const realInitialize = second.transport.initialize.bind(second.transport);
+    jest.spyOn(second.transport, 'initialize').mockImplementation(async () => {
+      await realInitialize();
+      await manager.sendEventToSession('chat-1', makeEvent('c')); // id 3, buffered
+    });
+
+    await manager.registerTransport({ sessionId: 'sse-2', chatSessionId: 'chat-1', transport: second.transport });
+
+    const ids = eventFrames(second.frames()).map((frame) => frame.split('\n')[0]);
+    expect(second.transport.replayOutcome?.status).toBe('replayed');
+    // id 2 arrived by replay; id 3 raced the window and must still be delivered,
+    // exactly once each.
+    expect(ids).toEqual(['id: 2', 'id: 3']);
+    expect((manager as any).eventBuffer.has('chat-1')).toBe(false);
+
+    await manager.closeAllTransports();
+  });
+
   it('still flushes the buffer for a client that reconnects without Last-Event-ID', async () => {
     const manager = new StreamingTransportManager({}, mockContext as any);
     (manager as any).sessionManager = mockSessionManager;
@@ -431,6 +551,107 @@ describe('StreamingTransportManager reconnect handling (P2)', () => {
     expect(framesOf(res).some((frame) => frame.includes('event: heartbeat'))).toBe(false);
 
     await manager.closeAllTransports();
+  });
+});
+
+/**
+ * P4 and O3 — what the connection log says.
+ *
+ * The whole point of the ticket is that this class of bug should be diagnosable
+ * from logs. A close line that omits the session, the idle duration or the replay
+ * outcome leaves an operator exactly where the user report left them, so the
+ * metadata is asserted rather than assumed.
+ */
+describe('SSETransport connection logging', () => {
+  let logger: ReturnType<typeof createLogger>;
+  let now: jest.SpyInstance;
+  const baseNow = 1_700_000_000_000;
+  let clock: number;
+
+  beforeEach(() => {
+    logger = createLogger();
+    forSession.mockReturnValue(logger);
+    clock = baseNow;
+    now = jest.spyOn(Date, 'now').mockImplementation(() => clock);
+  });
+
+  afterEach(() => {
+    now.mockRestore();
+    forSession.mockReset();
+  });
+
+  const closeHandlerOf = (res: Response) =>
+    (res.on as jest.Mock).mock.calls.find((call) => call[0] === 'close')?.[1] as (() => void) | undefined;
+
+  it('logs the session id and elapsed idle time when the connection closes', async () => {
+    const { res, transport } = createTransport({ sessionKey: 'chat-1', sseSessionId: 'sse-1' });
+    await transport.initialize();
+    await transport.sendEvent(makeEvent('a'));
+
+    // 42 idle seconds, then the client goes away.
+    clock += 42_000;
+    closeHandlerOf(res)!();
+
+    const meta = logged(logger, 'info', 'SSE connection closed');
+    expect(meta).toMatchObject({
+      sseSessionId: 'sse-1',
+      chatSessionId: 'chat-1',
+      idleMs: 42_000,
+      idleSeconds: 42,
+      eventsSent: 1,
+      lastEventId: 1,
+      replayStatus: 'none',
+    });
+    // The initiator is named, so "the client dropped it" is distinguishable from
+    // "we closed it" without guessing from timestamps.
+    expect(String((logger.info as jest.Mock).mock.calls.find((c) => String(c[0]).includes('SSE connection closed'))[0]))
+      .toContain('client-disconnect');
+  });
+
+  it('names a server-initiated close as such, and reports the resume it served', async () => {
+    const log = new StreamingEventLog();
+    log.append('chat-1', makeEvent('a'));
+    log.append('chat-1', makeEvent('b'));
+
+    const { res, transport } = createTransport({
+      sessionKey: 'chat-1', sseSessionId: 'sse-1', eventLog: log, lastEventId: 1,
+    });
+    await transport.initialize();
+    await transport.close();
+    closeHandlerOf(res)!();
+
+    const meta = logged(logger, 'info', 'SSE connection closed');
+    expect(meta).toMatchObject({ requestedLastEventId: 1, replayStatus: 'replayed', eventsSent: 1 });
+    expect(String((logger.info as jest.Mock).mock.calls.find((c) => String(c[0]).includes('SSE connection closed'))[0]))
+      .toContain('server-close');
+  });
+
+  it('reports a supplied stream position that is not increasing (O3)', async () => {
+    const { transport, frames } = createTransport({ sessionKey: 'chat-1', sseSessionId: 'sse-1' });
+    await transport.initialize();
+
+    // The manager normally supplies increasing ids. If one transport is driven
+    // both directly and through the manager, the supplied id can be behind what
+    // this connection already wrote. The manager's id still wins — it is the
+    // position in the replay log, so it is what Last-Event-ID is matched
+    // against — but the wiring bug is now reported instead of being silent.
+    await transport.sendEvent(makeEvent('a'), 5);
+    await transport.sendEvent(makeEvent('b'), 1);
+
+    const meta = logged(logger, 'warn', 'Stream position is not increasing');
+    expect(meta).toMatchObject({ lastEventId: 5, eventId: 1, eventType: 'token' });
+    // Emitting the authoritative id is deliberate: clamping it to keep the wire
+    // monotonic would hand the client an id that no log entry backs.
+    expect(eventFrames(frames()).map((frame) => frame.split('\n')[0])).toEqual(['id: 5', 'id: 1']);
+  });
+
+  it('does not warn when ids increase, as every production path does', async () => {
+    const { transport } = createTransport({ sessionKey: 'chat-1', sseSessionId: 'sse-1' });
+    await transport.initialize();
+    await transport.sendEvent(makeEvent('a'), 1);
+    await transport.sendEvent(makeEvent('b'), 2);
+
+    expect(logged(logger, 'warn', 'Stream position is not increasing')).toBeUndefined();
   });
 });
 

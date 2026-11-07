@@ -372,15 +372,31 @@ export class SSETransport implements StreamingTransport {
   /**
    * Resolve the id for an outgoing event.
    *
-   * Uses the sender's id when given one (the manager allocates per session so
-   * the number means the same thing across reconnects and across every
-   * transport attached to that session). Falls back to allocating here, which
-   * covers a transport driven directly rather than through the manager.
+   * Uses the sender's id when given one: the manager allocates it per session, so
+   * that number is the event's position in the replay log and is what a client's
+   * `Last-Event-ID` will be matched against. It is therefore authoritative, even
+   * if it is lower than something this transport already wrote.
+   *
+   * That last case is a wiring bug, not a normal state: it needs one transport
+   * driven both directly (self-allocating) and through the manager. Nothing in
+   * production does that — the endpoint always supplies a session key and the
+   * manager always supplies the id. Since the alternative is silently writing a
+   * non-monotonic `id:` on the wire and leaving no trace of why, it is reported
+   * loudly instead; `localEventId` is raised past it either way so the transport's
+   * own numbering can never go backwards after this point.
+   *
+   * Falls back to allocating here, which covers a transport driven directly rather
+   * than through the manager (tests, and any future non-endpoint caller).
    */
   private resolveEventId(event: StreamingEvent, eventId?: number): number {
     if (typeof eventId === 'number' && Number.isFinite(eventId)) {
-      // Keep any self-allocated numbering ahead of ids seen from the manager,
-      // so a mixed call sequence still produces increasing ids on this stream.
+      if (this._lastSentEventId !== null && eventId <= this._lastSentEventId) {
+        this.slog("warn", `Stream position is not increasing on this connection (last ${this._lastSentEventId}, now ${eventId}) — emitting the manager's id because it is the position in the replay log`, {
+          lastEventId: this._lastSentEventId,
+          eventId,
+          eventType: event.type,
+        });
+      }
       if (eventId > this._localEventId) this._localEventId = eventId;
       return eventId;
     }

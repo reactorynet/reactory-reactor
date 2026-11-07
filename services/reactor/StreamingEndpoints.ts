@@ -263,7 +263,12 @@ export class StreamingEndpoints {
         sessionKey: chatId,
         sseSessionId: session.sessionId,
         lastEventId: readLastEventId(req),
-        eventLog: transportManager.getEventLog?.(),
+        // Not optional-chained on purpose. A missing method here would make the
+        // transport build a *private* log, so ids would stop being session-wide
+        // and a reconnect could no longer be resumed — the exact regression this
+        // change exists to prevent — with nothing in the logs to say why. Fail
+        // loudly instead of degrading silently.
+        eventLog: transportManager.getEventLog(),
       });
 
       // Disable Nagle's algorithm so small SSE chunks are sent immediately

@@ -234,6 +234,39 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
   }
 
   /**
+   * Discard buffered events that a replay has already delivered.
+   *
+   * Drops entries *through* `throughId` only, rather than the whole buffer. The
+   * replay happens inside `initialize()`; anything appended after that point —
+   * and before this transport is attached, i.e. while the conversation still had
+   * no local transport — lands in the same buffer and is NOT in the replay slice.
+   * Deleting the buffer outright would drop it: it is in the log, so the next
+   * reconnect recovers it, but this connection would silently miss the event.
+   *
+   * Entries at or below the replay's watermark have definitely been written to
+   * this connection; the rest still have to be flushed.
+   */
+  private dropBufferedThrough(chatSessionId: string, throughId: number): void {
+    const entry = this.eventBuffer.get(chatSessionId);
+    if (!entry) return;
+
+    const remaining = entry.entries.filter(({ sseId }) => sseId > throughId);
+    const dropped = entry.entries.length - remaining.length;
+
+    if (remaining.length === 0) {
+      this.eventBuffer.delete(chatSessionId);
+    } else {
+      entry.entries = remaining;
+    }
+
+    this.slog("debug", `Replay covered ${dropped} buffered event(s); ${remaining.length} left to flush`, {
+      throughEventId: throughId,
+      dropped,
+      remaining: remaining.length,
+    }, chatSessionId);
+  }
+
+  /**
    * Remove buffers that have exceeded their TTL.
    */
   private cleanupExpiredBuffers(): void {
@@ -475,10 +508,12 @@ export class StreamingTransportManager implements Reactory.Service.IReactoryServ
       if (replay?.status === 'replayed') {
         // The reconnect was served from the replay log, which holds exactly the
         // events this gap missed — including the ones buffered for a transport
-        // that was gone. Flushing the buffer as well would emit them twice.
-        if (this.eventBuffer.delete(chatSessionId)) {
-          this.slog("debug", `Replay superseded the undelivered buffer for ${chatSessionId}`, undefined, chatSessionId);
-        }
+        // that was gone. Flushing those as well would emit them twice, so drop
+        // them — but only through the id the replay reached. An event appended
+        // between the replay write (inside initialize) and this point is not in
+        // the replay slice and still has to be delivered.
+        this.dropBufferedThrough(chatSessionId, replay.latestId);
+        await this.flushEventBuffer(chatSessionId, transport);
       } else {
         await this.flushEventBuffer(chatSessionId, transport);
       }
