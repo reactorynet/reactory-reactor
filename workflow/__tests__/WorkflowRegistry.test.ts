@@ -27,6 +27,13 @@ import yaml from 'js-yaml';
 const WORKFLOW_DIR = path.resolve(__dirname, '..');
 const REGISTRY_FILE = path.join(WORKFLOW_DIR, 'index.ts');
 
+/**
+ * The version this module ships, and the one the dispatcher must be pinned to.
+ * One literal, so the id assertion and the catalog-path assertion below cannot
+ * disagree about what "current" means.
+ */
+const PROCESS_AI_TICKET_VERSION = '1.4.7';
+
 interface IRegistryEntry {
   nameSpace: string;
   name: string;
@@ -126,6 +133,38 @@ describe('reactor module workflow registry', () => {
     // supportWorkflowIds.ts) is what dispatchAiTickets starts and what
     // checkWorkflowRegistered gates on. Its guard test compares the constant to this
     // YAML body, so the two only stay in step while this id is stable.
-    expect(ids).toContain('core.ProcessAITicket@1.4.6');
+    expect(ids).toContain('core.ProcessAITicket@' + PROCESS_AI_TICKET_VERSION);
+  });
+
+  it('provisions exactly one catalog path for ProcessAITicket, at its declared version', () => {
+    // `loadYamlWorkflow(nameSpace, name, filename, version, dir)` copies the body to
+    //   <REACTORY_DATA>/workflows/catalog/<nameSpace>/<name>/<version>/<filename>
+    // so the TS arguments — not the body — decide WHERE the file lands. A second
+    // entry for the same namespace/name would provision a second directory, and an
+    // argument version that disagrees with the body (the 1.5.0-at-a-1.4.6-path
+    // defect) would leave the declared version with no catalog path at all.
+    const entries = registry.filter((entry) => entry.nameSpace === 'core' && entry.name === 'ProcessAITicket');
+    expect(entries).toHaveLength(1);
+
+    const entry = entries[0];
+    const body = bodyOf(entry.filename);
+    expect(body).not.toBeNull();
+
+    const destination = `${entry.nameSpace}/${entry.name}/${entry.version}`;
+    expect(destination).toBe('core/ProcessAITicket/' + PROCESS_AI_TICKET_VERSION);
+    // The file that lands in that directory declares that same identity, so the
+    // catalog holds exactly one ProcessAITicket path per shipped version and its
+    // `location` matches the definition it contains.
+    expect(`${String(body!.nameSpace)}/${String(body!.name)}/${String(body!.version)}`).toBe(destination);
+  });
+
+  it('never points two registry entries at the same catalog path', () => {
+    const destinations = registry.map((entry) => `${entry.nameSpace}/${entry.name}/${entry.version}`);
+    expect(new Set(destinations).size).toBe(destinations.length);
+
+    // Two entries for one namespace/name would provision two directories for a
+    // single workflow, whichever versions they name.
+    const identities = registry.map((entry) => `${entry.nameSpace}/${entry.name}`);
+    expect(new Set(identities).size).toBe(identities.length);
   });
 });
