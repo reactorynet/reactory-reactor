@@ -62,6 +62,16 @@ const ReactorModule: Reactory.Server.IReactoryModule = {
     skills: ReactorSkills,
   },
   description: 'Reactory Reactor Module',
+  roles: [
+    'FORM_DEVELOPER',
+    'SUPERADMIN',
+    'SUPPORT',
+    'SUPPORT_ADMIN',
+    'SYSADMIN',
+    'TESTER',
+    'WORKFLOW_ADMIN',
+    'WORKFLOW_OPERATOR',
+  ],
 };
 
 export default ReactorModule;
