@@ -730,6 +730,29 @@ export interface IReactorConversationsService extends Reactory.Service.IReactory
   setChatModelProvider(chatSessionId: string, modelId?: string, providerId?: string): Promise<any>;
 
   /**
+   * Resolves the token budget a conversation must be CREATED with.
+   *
+   * Delegated (sub-agent) conversations must be created with a real limit: a
+   * conversation created with `maxTokens: null` never applies its model's declared
+   * context window, so its run grows until the provider's hard ceiling kills it
+   * mid-task (ticket REACTORY-302016408/20261104/1630018038).
+   *
+   * `maxTokens` is always a positive number. `authoritative` reports whether it came
+   * from the model's declared `contextLength`; a non-authoritative or unresolved
+   * answer is logged at WARN naming the conversation, model and provider before the
+   * documented conservative fallback is applied.
+   */
+  resolveConversationBudget(input: {
+    conversationId?: string;
+    modelId?: string;
+    providerId?: string;
+  }): Promise<{
+    maxTokens: number;
+    source: IModelContextLengthResolution["source"];
+    authoritative: boolean;
+  }>;
+
+  /**
    * Sets the maximum number of tokens for the chat session.
    * This allows you to control the token limit for the conversation.
    * @param chatSessionId 

@@ -288,6 +288,68 @@ const TOKEN_LIMITS = {
 } as const;
 
 /**
+ * Growth guard for delegated (headless) conversations.
+ *
+ * A delegated run has no human watching it, so an unbounded transcript reads as
+ * "the agent stopped" rather than "the budget was wrong". The limit itself now comes
+ * from the provider registry (see `resolveConversationBudget`); this guard is the
+ * independent signal that the limit is not being *applied* — i.e. the transcript kept
+ * growing past a multiple of the resolved limit even though the turn boundary had the
+ * opportunity to compact it.
+ *
+ * Expressed as a multiple of the resolved limit because the absolute overrun is a
+ * property of the model's window, not of the platform.
+ */
+const DELEGATION_GROWTH_GUARD = {
+  ENV: "REACTORY_DELEGATION_GROWTH_GUARD_MULTIPLIER",
+  DEFAULT_MULTIPLIER: 1.5,
+} as const;
+
+/**
+ * Resolve the delegated growth-guard multiplier.
+ *
+ * Pure and exported so the parsing rules (default, garbage, non-positive) are
+ * testable without standing up the service. A garbage value falls back to the
+ * default rather than disabling the guard: silently turning an alarm off is the
+ * failure mode the alarm exists to catch.
+ */
+export function resolveDelegationGrowthGuardMultiplier(
+  raw: string | undefined = process.env[DELEGATION_GROWTH_GUARD.ENV],
+): number {
+  if (raw === undefined || raw === null || String(raw).trim() === "") {
+    return DELEGATION_GROWTH_GUARD.DEFAULT_MULTIPLIER;
+  }
+  const parsed = Number(String(raw).trim());
+  // A multiplier of `1` or below is not a guard at all — it would fire on every turn.
+  if (!Number.isFinite(parsed) || parsed <= 1) {
+    return DELEGATION_GROWTH_GUARD.DEFAULT_MULTIPLIER;
+  }
+  return parsed;
+}
+
+/**
+ * Did a compaction actually shrink the transcript?
+ *
+ * `compactConversationHistory` reports `success: true` for two outcomes that change
+ * nothing: "no messages to archive" and "system messages exceed the target". The turn
+ * boundary used to treat `success` as "reduced" and skip the truncation fallback, so a
+ * conversation could sit above its compaction threshold indefinitely while every log
+ * line said compaction completed. Reduction is `tokensAfter < tokensBefore` — nothing
+ * else. Pure and exported so it is directly testable.
+ */
+export function didCompactionReduceTokens(result: {
+  success: boolean;
+  tokensBefore: number;
+  tokensAfter: number;
+} | null | undefined): boolean {
+  if (!result || result.success !== true) return false;
+  if (!Number.isFinite(result.tokensBefore) || !Number.isFinite(result.tokensAfter)) {
+    return false;
+  }
+  return result.tokensAfter < result.tokensBefore;
+}
+
+/**
  * Bounds on the conversation history returned to a client.
  *
  * Token-based truncation (TOKEN_LIMITS) governs what the model sees; these
@@ -1515,7 +1577,105 @@ export default class ReactorConversationService
   }
 
   /**
+   * The budget a conversation is actually judged against.
+   *
+   * A conversation with no stored limit is backfilled through
+   * `resolveConversationBudget` and the backfill is persisted, so every later reader
+   * sees the same number. Persisting matters: leaving the document at `null` meant
+   * each consumer invented its own answer, and the conversation could never reach a
+   * compaction threshold because `percentageUsed` was computed against nothing.
+   */
+  private async resolveEnforcedMaxTokens(
+    conversation: {
+      maxTokens?: number | null;
+      modelId?: string;
+      providerId?: string;
+    },
+    conversationId: string,
+  ): Promise<number> {
+    const stored = conversation?.maxTokens;
+    if (typeof stored === "number" && Number.isFinite(stored) && stored > 0) {
+      return stored;
+    }
+
+    const { maxTokens } = await this.resolveConversationBudget({
+      conversationId,
+      modelId: conversation?.modelId,
+      providerId: conversation?.providerId,
+    });
+
+    try {
+      await ReactorConversationModel.findOneAndUpdate(
+        { _id: conversationId },
+        { $set: { maxTokens, updated: new Date() } },
+      ).exec();
+      this.sessionLog(
+        "warn",
+        "[conversation-budget] backfilled a missing maxTokens from the provider registry",
+        {
+          conversationId,
+          modelId: conversation?.modelId ?? null,
+          providerId: conversation?.providerId ?? null,
+          maxTokens,
+          previousMaxTokens: stored ?? null,
+        },
+        conversationId,
+      );
+    } catch (err: any) {
+      // The value is still returned and enforced for this turn; failing to persist it
+      // must not fail the turn.
+      this.sessionLog(
+        "error",
+        "[conversation-budget] failed to persist the backfilled maxTokens",
+        {
+          conversationId,
+          maxTokens,
+          error: err?.message ?? String(err),
+        },
+        conversationId,
+      );
+    }
+
+    return maxTokens;
+  }
+
+  /**
+   * Substitute the platform constant for a missing budget — and say so.
+   *
+   * `TOKEN_LIMITS.DEFAULT_MAX_TOKENS` is an arithmetic target, not a source of
+   * context limits. Every place that reaches for it must record that it did, naming
+   * the conversation/model/provider, otherwise the resulting behaviour is
+   * indistinguishable from a model that really declares 200 000 tokens.
+   */
+  private logDefaultMaxTokensSubstitution(
+    conversationId?: string,
+    modelId?: string,
+    providerId?: string,
+  ): number {
+    this.sessionLog(
+      "warn",
+      "[conversation-budget] no enforced maxTokens available — substituting DEFAULT_MAX_TOKENS",
+      {
+        conversationId: conversationId ?? null,
+        modelId: modelId ?? null,
+        providerId: providerId ?? null,
+        maxTokens: TOKEN_LIMITS.DEFAULT_MAX_TOKENS,
+      },
+      conversationId,
+    );
+    return TOKEN_LIMITS.DEFAULT_MAX_TOKENS;
+  }
+
+  /**
    * Check if conversation exceeds max tokens and handle accordingly
+   *
+   * The returned `maxTokens` is always the budget that will actually be enforced.
+   * It used to return `maxTokens: 0` / `shouldTruncate: false` for a conversation
+   * with no limit, while four other call sites substituted
+   * `TOKEN_LIMITS.DEFAULT_MAX_TOKENS` — so "unlimited" and "200 000" described the
+   * same conversation depending on who you asked. A null limit is now backfilled
+   * from the provider registry (and persisted), which is what makes this method
+   * consistent with its consumers instead of the one place that disagreed.
    */
   private async checkTokenLimit(conversationId: string): Promise<{
     exceedsLimit: boolean;
@@ -1552,16 +1712,7 @@ export default class ReactorConversationService
     );
 
     const currentTokens = conversation.tokenCount || 0;
-    const maxTokens = conversation.maxTokens;
-
-    if (!maxTokens) {
-      return {
-        exceedsLimit: false,
-        currentTokens,
-        maxTokens: 0,
-        shouldTruncate: false,
-      };
-    }
+    const maxTokens = await this.resolveEnforcedMaxTokens(conversation as any, conversationId);
 
     const exceedsLimit = currentTokens > maxTokens;
     const shouldTruncate =
@@ -1625,16 +1776,20 @@ export default class ReactorConversationService
       );
       // Preserve existing higher token count (e.g. from provider) so heuristic does not underestimate
       const calculatedTokens = Math.max(existingTokenCount, heuristicTokens);
-      const maxTokens = conversationData.maxTokens;
-      const percentageUsed = maxTokens
-        ? (calculatedTokens / maxTokens) * 100
-        : 0;
+      const maxTokens = await this.resolveEnforcedMaxTokens(
+        {
+          maxTokens: conversationData.maxTokens,
+          modelId: conversationData.modelId,
+          providerId: conversationData.providerId,
+        },
+        conversationId,
+      );
+      const percentageUsed = (calculatedTokens / maxTokens) * 100;
 
-      const exceedsLimit = maxTokens ? calculatedTokens >= maxTokens : false;
-      const shouldTruncate = maxTokens
-        ? calculatedTokens >=
-          maxTokens * TOKEN_LIMITS.TRUNCATION_THRESHOLD_MULTIPLIER
-        : false;
+      const exceedsLimit = calculatedTokens >= maxTokens;
+      const shouldTruncate =
+        calculatedTokens >=
+        maxTokens * TOKEN_LIMITS.TRUNCATION_THRESHOLD_MULTIPLIER;
 
       // Atomically update the conversation with the new token count
       await ReactorConversationModel.findOneAndUpdate(
@@ -2349,7 +2504,13 @@ export default class ReactorConversationService
       }
 
       const currentTokens = conversation.tokenCount || 0;
-      const maxTokens = conversation.maxTokens || TOKEN_LIMITS.DEFAULT_MAX_TOKENS;
+      // Backfill through the shared helper rather than substituting 200 000 here:
+      // a manual compaction on an unbudgeted conversation must use (and record) the
+      // model's real window.
+      const maxTokens = await this.resolveEnforcedMaxTokens(
+        conversation as any,
+        chatSessionId,
+      );
 
       // Determine streaming mode — send SSE events if a transport is connected
       let streamingMode = StreamingMode.NONE;
@@ -3417,6 +3578,93 @@ export default class ReactorConversationService
       authoritative: false,
       providerId: providerId ?? null,
       modelId: modelId ?? null,
+    };
+  }
+
+  /**
+   * Resolve the token budget a conversation must be CREATED with.
+   *
+   * Creation is the one moment a conversation has no budget of its own, so the
+   * provider registry is consulted directly and the answer is always a concrete
+   * number. This is the shared creation helper: `sendMessage` (new conversation),
+   * `getNewConversation`/`startChatSession`, the per-turn backfill in
+   * `updateTokenCountAndCheckLimits`, and the delegation pre-create in the `chats`
+   * macro all resolve through it. Before this existed, `maxTokens` was only ever
+   * written by `setChatModelProvider`, so a conversation created on any other path
+   * stayed at the schema default `null` and the model's declared window was never
+   * applied — a delegated run could grow to 271 810 tokens against a 1 000 000-token
+   * model (ticket REACTORY-302016408/20261104/1630018038).
+   *
+   * Never silent: an unresolved or non-authoritative resolution is logged at WARN
+   * with the conversation, model and provider, because a fabricated budget that
+   * nobody logged is indistinguishable from a measured one at the point of failure.
+   *
+   * @returns `maxTokens` is always a positive number. `authoritative` says whether it
+   *          came from `providers.yaml` (`model-declared`) or was invented.
+   */
+  public async resolveConversationBudget(input: {
+    conversationId?: string;
+    modelId?: string;
+    providerId?: string;
+  }): Promise<{
+    maxTokens: number;
+    source: IModelContextLengthResolution["source"];
+    authoritative: boolean;
+  }> {
+    const { conversationId, modelId, providerId } = input ?? ({} as any);
+
+    const resolution = await this.resolveModelContextLength(modelId, providerId);
+    const resolvedValue = resolution?.value;
+
+    if (
+      typeof resolvedValue === "number" &&
+      Number.isFinite(resolvedValue) &&
+      resolvedValue > 0
+    ) {
+      if (!resolution.authoritative) {
+        // A configured/builtin default is usable, but it is a guess — say so once, at
+        // creation, naming the conversation it was applied to.
+        this.sessionLog(
+          "warn",
+          "[conversation-budget] using a non-authoritative context window — the model declares no contextLength",
+          {
+            conversationId: conversationId ?? null,
+            modelId: modelId ?? null,
+            providerId: providerId ?? null,
+            maxTokens: resolvedValue,
+            source: resolution.source ?? "unknown",
+          },
+          conversationId,
+        );
+      }
+      return {
+        maxTokens: resolvedValue,
+        source: resolution.source,
+        authoritative: !!resolution.authoritative,
+      };
+    }
+
+    // Nothing was resolved at all. Refusing on every creation path would make an
+    // incomplete registry a hard outage, so the documented conservative limit is
+    // applied instead — loudly, and with the exact identity of the model that could
+    // not be measured.
+    const fallbackMaxTokens = TOKEN_LIMITS.DEFAULT_MAX_TOKENS;
+    this.sessionLog(
+      "warn",
+      "[conversation-budget] model context length could not be resolved — applying the documented conservative limit",
+      {
+        conversationId: conversationId ?? null,
+        modelId: modelId ?? null,
+        providerId: providerId ?? null,
+        maxTokens: fallbackMaxTokens,
+        source: resolution?.source ?? "unresolved",
+      },
+      conversationId,
+    );
+    return {
+      maxTokens: fallbackMaxTokens,
+      source: "unresolved",
+      authoritative: false,
     };
   }
 
@@ -5250,10 +5498,13 @@ export default class ReactorConversationService
       return lastConversation;
     }
 
-    const maxTokens = (await this.resolveModelContextLength(
-      persona.modelId,
-      persona.providerId
-    )).value;
+    // The limit comes from the provider registry, never from the persona. Resolved
+    // through the shared creation helper so it is never `null`: a conversation
+    // created without a budget cannot reach a compaction threshold at all.
+    const maxTokens = (await this.resolveConversationBudget({
+      modelId: persona.modelId,
+      providerId: persona.providerId,
+    })).maxTokens;
 
     const conversationData: any = {
       personaId: persona.id,
@@ -6391,45 +6642,102 @@ export default class ReactorConversationService
           );
 
           // Check if truncation or compaction is needed based on updated token count
+          //
+          // `tokenStatus.maxTokens` is a concrete number: `updateTokenCountAndCheckLimits`
+          // backfills a null limit from the provider registry. The reduction target is
+          // therefore the model's real window rather than a per-consumer guess — and if
+          // it is ever missing anyway, the substitution is logged instead of silently
+          // becoming 200 000.
           if (
             tokenStatus.shouldTruncate ||
             tokenStatus.exceedsLimit ||
             tokenStatus.percentageUsed >= TOKEN_LIMITS.COMPACTION_THRESHOLD * 100
           ) {
+            const thresholdConversationId = conversation._id.toString();
+            const storedBudget = tokenStatus.maxTokens;
+            const reductionBudget =
+              typeof storedBudget === "number" && storedBudget > 0
+                ? storedBudget
+                : this.logDefaultMaxTokensSubstitution(
+                    thresholdConversationId,
+                    (conversation as any).modelId,
+                    (conversation as any).providerId,
+                  );
+            const truncationTarget =
+              reductionBudget * TOKEN_LIMITS.TRUNCATION_TARGET_MULTIPLIER;
+
             this.sessionLog("warn",
               `Token threshold reached (${Math.round(tokenStatus.percentageUsed)}%), initiating history reduction before dispatch`,
               {
-                conversationId: conversation._id.toString(),
+                conversationId: thresholdConversationId,
                 currentTokens: tokenStatus.currentTokens,
-                maxTokens: tokenStatus.maxTokens,
+                maxTokens: reductionBudget,
                 percentageUsed: tokenStatus.percentageUsed,
                 shouldTruncate: tokenStatus.shouldTruncate,
                 exceedsLimit: tokenStatus.exceedsLimit,
-              }, conversation._id.toString(), personaId
+              }, thresholdConversationId, personaId
             );
+
+            // `success: true` from compaction covers two no-op outcomes ("nothing to
+            // archive" and "system messages exceed the target"). Recorded so the
+            // growth guard can say whether a compaction actually ran.
+            let compactionResult: {
+              success: boolean;
+              tokensBefore: number;
+              tokensAfter: number;
+              messagesArchived: number;
+            } | null = null;
 
             if (tokenStatus.shouldTruncate) {
               await this.truncateConversationHistory(
-                conversation._id.toString(),
-                (tokenStatus.maxTokens || TOKEN_LIMITS.DEFAULT_MAX_TOKENS) *
-                  TOKEN_LIMITS.TRUNCATION_TARGET_MULTIPLIER
+                thresholdConversationId,
+                truncationTarget
               );
             } else {
               try {
-                await this.compactConversationHistory(
-                  conversation._id.toString(),
+                compactionResult = await this.compactConversationHistory(
+                  thresholdConversationId,
                   tokenStatus.currentTokens,
-                  tokenStatus.maxTokens || TOKEN_LIMITS.DEFAULT_MAX_TOKENS,
+                  reductionBudget,
                   streamingMode,
                 );
+
+                if (didCompactionReduceTokens(compactionResult)) {
+                  this.sessionLog("info", "Auto-compaction reduced the transcript", {
+                    conversationId: thresholdConversationId,
+                    tokensBefore: compactionResult.tokensBefore,
+                    tokensAfter: compactionResult.tokensAfter,
+                    messagesArchived: compactionResult.messagesArchived,
+                    maxTokens: reductionBudget,
+                  }, thresholdConversationId, personaId);
+                } else {
+                  // The compaction reported success but the transcript did not shrink.
+                  // This is the measured gap behind "a delegated session reached 271 810
+                  // tokens against a 200 000 fallback": the caller only fell back to
+                  // truncation when compaction THREW, so a no-op compaction left the
+                  // conversation over budget forever.
+                  this.sessionLog("warn",
+                    "Auto-compaction did not reduce the transcript — falling back to truncation",
+                    {
+                      conversationId: thresholdConversationId,
+                      tokensBefore: compactionResult?.tokensBefore ?? tokenStatus.currentTokens,
+                      tokensAfter: compactionResult?.tokensAfter ?? tokenStatus.currentTokens,
+                      messagesArchived: compactionResult?.messagesArchived ?? 0,
+                      maxTokens: reductionBudget,
+                    }, thresholdConversationId, personaId
+                  );
+                  await this.truncateConversationHistory(
+                    thresholdConversationId,
+                    truncationTarget
+                  );
+                }
               } catch (compactionErr: any) {
                 this.sessionLog("warn", `Auto-compaction failed, falling back to truncation: ${compactionErr.message}`, {
-                  conversationId: conversation._id.toString(),
-                }, conversation._id.toString(), personaId);
+                  conversationId: thresholdConversationId,
+                }, thresholdConversationId, personaId);
                 await this.truncateConversationHistory(
-                  conversation._id.toString(),
-                  (tokenStatus.maxTokens || TOKEN_LIMITS.DEFAULT_MAX_TOKENS) *
-                    TOKEN_LIMITS.TRUNCATION_TARGET_MULTIPLIER
+                  thresholdConversationId,
+                  truncationTarget
                 );
               }
             }
@@ -6437,6 +6745,51 @@ export default class ReactorConversationService
             const freshConv = await ReactorConversationModel.findById(conversation._id).exec();
             if (freshConv) {
               conversation = freshConv;
+            }
+
+            // Delegated-growth guard. A sub-agent has nobody watching it, so an
+            // unbounded transcript reads as "the agent stopped" rather than "the
+            // budget was not applied". If a delegated conversation is still above a
+            // configured multiple of its resolved limit AFTER the turn-boundary
+            // reduction, the reduction did not work — say so, with whether a
+            // compaction actually ran.
+            // Derived from the document as well as the turn args: continuations (AUTO
+            // loop, client-tool completions) send only `chatSessionId`, so trusting the
+            // argument alone would skip the guard for most of a delegated run.
+            const delegatedParentSessionId =
+              parentSessionId || (conversation as any)?.parentSessionId || null;
+
+            if (delegatedParentSessionId) {
+              const guardMultiplier = resolveDelegationGrowthGuardMultiplier();
+              const guardLimit = reductionBudget * guardMultiplier;
+              const tokensAfterReduction =
+                (conversation as any)?.tokenCount ?? tokenStatus.currentTokens;
+              const compactionReduced = didCompactionReduceTokens(compactionResult);
+              // Judge the worst point of this turn: a compaction that DID reduce the
+              // transcript has already handled the growth.
+              const observedTokens = Math.max(
+                tokenStatus.currentTokens,
+                tokensAfterReduction,
+              );
+
+              if (observedTokens > guardLimit && !compactionReduced) {
+                this.sessionLog("warn",
+                  "[delegation-guard] delegated conversation remains above its growth guard after history reduction — compaction is not holding the budget",
+                  {
+                    conversationId: thresholdConversationId,
+                    parentSessionId: delegatedParentSessionId,
+                    modelId: (conversation as any)?.modelId ?? null,
+                    providerId: (conversation as any)?.providerId ?? null,
+                    maxTokens: reductionBudget,
+                    guardMultiplier,
+                    guardLimit,
+                    tokensBeforeReduction: tokenStatus.currentTokens,
+                    tokensAfterReduction,
+                    compactionRan: !!compactionResult,
+                    compactionReduced,
+                  }, thresholdConversationId, personaId
+                );
+              }
             }
           }
         } else {
@@ -6454,14 +6807,29 @@ export default class ReactorConversationService
             tool_args,
             tool_call_id,
           };
+          // Creation-time budget. This is the path every newly created conversation
+          // takes — including a delegated (blocking) sub-agent — and it used to omit
+          // `maxTokens` entirely. The schema default `null` then survived, the model's
+          // declared window was never applied, `percentageUsed` was computed against
+          // nothing, and no compaction threshold could ever be reached. That is how a
+          // delegated run reached 271 810 tokens against a 1 000 000-token model.
+          const creationBudget = await this.resolveConversationBudget({
+            conversationId: sessionId.toString(),
+            modelId: effectiveModelId,
+            providerId: provider,
+          });
+
           conversation = new ReactorConversationModel({
             personaId,
             user,
             // Owning client (WP-B2): keep the session document and its message
             // rows on the same tenant key.
             clientKey: this.context?.partner?.key ?? undefined,
-            modelId: modelIdOverride || persona.modelId,
+            modelId: effectiveModelId,
             providerId: provider,
+            // The model's declared context window, resolved from the provider
+            // registry — never `null`, so the budget is enforced from the first turn.
+            maxTokens: creationBudget.maxTokens,
             history: [initialHistoryItem],
             vars: {},
             meta: {
