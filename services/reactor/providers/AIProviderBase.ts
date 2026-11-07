@@ -242,6 +242,14 @@ abstract class AIProviderBase implements IAIProviderService {
         tools: chatSession.tools,
         files: chatSession.files || [],
         toolApprovalMode: chatSession.toolApprovalMode || (process.env.TOOL_APPROVAL_MODE as ToolApprovalMode) || ToolApprovalMode.PROMPT,
+        // The per-conversation tool budget, set by `setChatMaxToolIterations`
+        // (workflow `agent_conversation` steps) or by the chat UI. Providers MUST
+        // see it: a provider-internal loop that cannot read the requested budget
+        // silently caps the turn at its own constant (AnthropicService used to
+        // stop at 25 regardless of what the workflow asked for). `undefined` here
+        // means "not requested"; the provider resolves that to the platform
+        // default via `resolveMaxToolIterations`.
+        maxToolIterations: chatSession.maxToolIterations ?? undefined,
         apiKey: undefined,
         apiOrg: undefined,
         ai: undefined,

@@ -336,7 +336,14 @@ const ReactorConversationSchema = new Schema({
     enum: Object.values(ToolApprovalMode),
     default: ToolApprovalMode.PROMPT,
   },
-  // The maximum number of auto tool call iterations before pausing for user confirmation
+  // The maximum number of auto tool call iterations before pausing for user confirmation.
+  //
+  // `null` means "not requested", NOT "zero" and NOT "25": every loop that
+  // enforces this budget resolves null through `services/reactor/toolIterations`
+  // (explicit value -> REACTOR_MAX_TOOL_ITERATIONS -> 200). Keeping the intended
+  // default in that one module is what stops the chat default and the workflow
+  // default drifting apart — they did, at 25 vs 60 (ticket
+  // REACTORY-302016408/20261017/3478149265).
   maxToolIterations: {
     type: Number,
     default: null,

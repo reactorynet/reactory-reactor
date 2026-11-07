@@ -7,6 +7,7 @@
 import { AgentConversationStep } from '../AgentConversationStep';
 import { workflowSteps } from '../index';
 import { YamlStepRegistry } from '@reactory/server-modules/reactory-core/workflow/YamlFlow/steps/registry/YamlStepRegistry';
+import { DEFAULT_MAX_TOOL_ITERATIONS } from '../../../services/reactor/toolIterations';
 
 const CONVERSATION_SERVICE_ID = 'reactor.ReactorConversationService@1.0.0';
 
@@ -73,6 +74,50 @@ describe('AgentConversationStep', () => {
     expect(result.error).toContain('Tool execution limit exceeded');
     // sessionId from the created session is preserved for diagnostics.
     expect(result.outputs.sessionId).toBe('sess-1');
+  });
+
+  it('fails the step when the tool loop was truncated, instead of reporting a finished run', async () => {
+    // A turn that hit its tool budget stopped mid-task. Reporting success would
+    // let the workflow — and a reviewer reading its outputs — treat a partial
+    // implementation as complete (ticket REACTORY-302016408/20261017/3478149265).
+    const service = makeService({
+      sendMessage: jest.fn(async () => ({
+        content: "I've reached the maximum number of tool iterations (200).",
+        sessionId: 'sess-1',
+        toolIterationLimitReached: true,
+        iterationsCompleted: 200,
+        maxToolIterations: 200,
+      })),
+    });
+    const step = new AgentConversationStep('chat', {
+      personaId: 'ReactorAIPersona',
+      message: 'do the work',
+    });
+
+    const result = await step.execute(makeContext(service));
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('truncated');
+    expect(result.error).toContain('200/200');
+    expect(result.outputs.truncated).toBe(true);
+    expect(result.outputs.iterationsCompleted).toBe(200);
+    expect(result.outputs.maxToolIterations).toBe(200);
+    // The session id stays available so the caller can continue the conversation.
+    expect(result.outputs.sessionId).toBe('sess-1');
+    expect(result.metadata.toolIterationLimitReached).toBe(true);
+  });
+
+  it('does not treat a normal completion as truncated', async () => {
+    const service = makeService();
+    const step = new AgentConversationStep('chat', {
+      personaId: 'ReactorAIPersona',
+      message: 'do the work',
+    });
+
+    const result = await step.execute(makeContext(service));
+
+    expect(result.success).toBe(true);
+    expect(result.outputs.truncated).toBeUndefined();
   });
 
   it('creates a conversation with instructions + auto tool approval, then sends the message', async () => {
@@ -433,6 +478,27 @@ describe('reactor module workflow step registration (Phase 4 reference)', () => 
     const provider = workflowSteps.find((s) => s.stepType === 'agent_conversation');
     expect(provider).toBeDefined();
     expect(typeof provider!.constructor).toBe('function');
+  });
+
+  it('advertises a maxToolIterations default that cannot drift below the platform default', () => {
+    // The designer's advertised default used to be 10 — a fourth value beside the
+    // routing file, the workflow YAML and the resolver, and low enough that a step
+    // authored without a budget silently ran at 10. The advertised number must be
+    // the platform one (imported, not restated), so a reviewer or a human author
+    // reading the designer sees the budget the runtime actually applies.
+    const provider: any = workflowSteps.find((s) => s.stepType === 'agent_conversation');
+    expect(provider).toBeDefined();
+
+    const schemaDefault = provider.definition.propertySchema.properties.maxToolIterations.default;
+    const defaultProperties = provider.definition.defaultProperties.maxToolIterations;
+
+    expect(schemaDefault).toBe(DEFAULT_MAX_TOOL_ITERATIONS);
+    expect(defaultProperties).toBe(DEFAULT_MAX_TOOL_ITERATIONS);
+    // The guard the finding asks for, stated positively: never BELOW the platform
+    // default. Equality is asserted above; this keeps the intent legible if the
+    // wording ever changes.
+    expect(schemaDefault).toBeGreaterThanOrEqual(DEFAULT_MAX_TOOL_ITERATIONS);
+    expect(DEFAULT_MAX_TOOL_ITERATIONS).toBe(200);
   });
 
   it('registers module providers into a YamlStepRegistry (as discoverModuleSteps does)', () => {
