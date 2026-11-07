@@ -274,6 +274,15 @@ export type ChatState = {
   toolApprovalMode?: ToolApprovalMode; // Added field for tool approval mode
 
   /**
+   * The maximum number of auto tool-call iterations the agent may run before the
+   * turn pauses. Set per conversation by `setChatMaxToolIterations` (workflow
+   * `agent_conversation` steps set it explicitly). Absent means "not requested":
+   * providers resolve it to the platform default through
+   * `services/reactor/toolIterations` rather than inventing their own constant.
+   */
+  maxToolIterations?: number
+
+  /**
    * A list of MCP Clients
    */
   mcpClients?: MCPClient[]
