@@ -5057,6 +5057,19 @@ export default class ReactorConversationService
       historyWindow?: IReactorHistoryWindow;
     }
   > {
+    // The argument is the documented object shape `{ id, loadOptions? }`, and every
+    // caller in this module passes it that way. A positional string would destructure
+    // to `id === undefined` and only be caught further down as
+    // "Invalid conversation ID format: undefined" — which is how a valid session id
+    // was lost on the task-approval resume path. Reject a non-object argument here,
+    // naming what was received, so a future positional call fails immediately and
+    // legibly instead of after a confusing guard message.
+    if ((args as any) === null || typeof (args as any) !== "object") {
+      throw new Error(
+        `Invalid conversation ID format: getChatSession expects { id: string }, received ${typeof args}`
+      );
+    }
+
     const { id, loadOptions } = args;
 
     this.sessionLog("debug", "Retrieving chat session", {
@@ -6327,17 +6340,32 @@ export default class ReactorConversationService
       if (budgetRefusal) return budgetRefusal;
     }
 
+    // Validate chatSessionId BEFORE anything reads it.
+    //
+    // The persona fallback below re-reads the session by id, so an id that is
+    // missing or malformed has to be rejected here — as the standard
+    // ReactorErrorCode failure every other method raises — instead of surfacing
+    // from `getChatSession` later as a raw "Invalid conversation ID format"
+    // (and, on the continuation path, as an unhandled rejection). Validating
+    // first also guarantees the fallback only ever runs on an id that passed.
+    if (chatSessionId) {
+      this.validateChatSessionId(chatSessionId, "sendMessage");
+    }
+
     // Fallback: If personaId is missing, attempt to resolve it from existing session
     if (!personaId && chatSessionId) {
-      const existingSession = await this.getChatSession(chatSessionId);
+      // `getChatSession` takes an object — passing the id positionally
+      // destructured `{ id }` to `undefined` and threw
+      // "Invalid conversation ID format: undefined" after a valid id had been
+      // handed to `continueToolExecution` by the task-approval path
+      // (REACTORY-302016408/20261108/1108891525).
+      const existingSession = await this.getChatSession({ id: chatSessionId });
       if (existingSession) {
         personaId = (existingSession as any).personaId || (existingSession as any).botId || (existingSession as any).persona?.id;
       }
     }
 
-    // Validate chatSessionId if provided
     if (chatSessionId) {
-      this.validateChatSessionId(chatSessionId, "sendMessage");
       this.cancelGraphingSchedule(chatSessionId);
     }
 
