@@ -50,7 +50,7 @@ export class InMemoryProgrammeStore implements IProgrammeStore {
       ownerUserId: String(doc.ownerUserId) as any,
       ownerEmail: doc.ownerEmail || 'owner@example.com',
       partnerKey: doc.partnerKey,
-      childWorkflowId: doc.childWorkflowId || 'core.ProcessAITicket@1.4.7',
+      childWorkflowId: doc.childWorkflowId || 'core.ProcessAITicket@1.4.8',
       childInputDefaults: doc.childInputDefaults,
       slaMinutes: doc.slaMinutes ?? 45,
       maxAttempts: doc.maxAttempts ?? 3,

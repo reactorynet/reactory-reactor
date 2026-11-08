@@ -66,7 +66,7 @@ const REACTOR_YAML_WORKFLOWS: IReactorYamlWorkflow[] = [
   // Ships with the reactor module because the pipeline is an AI capability, even
   // though it uses the `core` workflow namespace alongside the Support triage /
   // escalation workflows it plugs into.
-  { nameSpace: 'core', name: 'ProcessAITicket', filename: 'ProcessAITicket.yaml', version: '1.4.7' },
+  { nameSpace: 'core', name: 'ProcessAITicket', filename: 'ProcessAITicket.yaml', version: '1.4.8' },
   { nameSpace: 'core', name: 'DispatchAITickets', filename: 'DispatchAITickets.yaml', version: '1.0.0' },
   { nameSpace: 'core', name: 'RequestAIRouting', filename: 'RequestAIRouting.yaml', version: '1.0.0' },
 ];

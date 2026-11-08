@@ -32,7 +32,7 @@ const REGISTRY_FILE = path.join(WORKFLOW_DIR, 'index.ts');
  * One literal, so the id assertion and the catalog-path assertion below cannot
  * disagree about what "current" means.
  */
-const PROCESS_AI_TICKET_VERSION = '1.4.7';
+const PROCESS_AI_TICKET_VERSION = '1.4.8';
 
 interface IRegistryEntry {
   nameSpace: string;

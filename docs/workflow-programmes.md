@@ -200,37 +200,49 @@ defect — a package failure used to consume the programme's terminal notificati
 So a programme with three failing packages sends three distinct package messages and
 exactly one terminal message, in that order.
 
-## Known limitation: child reporting is not wired up
+## Child reporting is wired up (1.4.8)
 
-`reportPackageOutcome` has **no production caller yet**. `core.ProcessAITicket`
-(the default child, 1.4.7) does not call it, and no macro or GraphQL surface exposes
-the method. Consequences, in order of importance:
+`core.ProcessAITicket` 1.4.8 is the first production caller of
+`reportPackageOutcome`. Reporting is **path-specific**, because a step placed after a
+step that terminates the instance never runs:
 
-1. **A package cannot reach `succeeded` on its own.** Nothing sets `prUrl`, so the
-   tick's `gh` verification never runs.
-2. **A healthy child is no longer failed for it.** Because the tick consults the child
-   instance's own status (see *Before escalating, the child itself is consulted*), a
-   long-running child keeps its package `running`. When that child **completes**, the
-   package is failed with `child_completed_unreported` and an accurate reason — the
-   child finished and said nothing, which is a contract failure rather than a
-   judgement on the work. It is loud and actionable, and it no longer arrives as
-   "gone silent" while the child is still working.
-3. **Wave-2 packages therefore never become `ready`,** because their dependency
-   never succeeds. The programme does not complete.
-4. The reconciler is still the right answer structurally: it cannot duplicate a
-   dispatch, it recovers by `dispatchId`, and it reports honestly. What is missing is
-   the last mile on the child side.
+| how the run ends | what reports | reported status |
+|---|---|---|
+| success, pull request opened | `programmeOutcomeGate` → `reportProgrammeOutcome` at the end of the run | `completed` + `prUrl` (the tick then verifies the merge with `gh`) |
+| success, nothing to publish | same end gate, no `prUrl` | `completed` with **no** `prUrl` — the legitimate "no merge to wait for" branch |
+| review rejection / exhaustion | same end gate | `failed` + `error` (runStatus, verdict, cycle count, PR state) |
+| run produced no work / non-completion | same end gate | `failed` + `error` |
+| no ticket found | same end gate | `failed` + `error` |
+| **publish-readiness blocked** | `publishBlockReportGate` → `reportPublishBlockOutcome`, authored immediately **before** `publishBlockHalt` | `failed` + the `describePublishBlock` detail; the instance then terminates |
+| **contaminated primary checkout** | `submoduleBaselineReportGate` → `reportSubmoduleBaselineOutcome`, authored immediately **before** `submoduleBaselineHalt` | `failed` + the formatted guard violations; the instance then terminates |
+| engine-level termination (throw, step timeout, programmatic cancel) | **nothing — no step can run after it** | the package is failed by the reconciler's `child_terminated` branch, from the child instance status |
 
-Only **push-reporting** needs the coordinated `core.ProcessAITicket` bump: a guarded
-`service_invoke → WorkflowProgrammeService.reportPackageOutcome` step at the end of
-the child (its workflow id is pinned in four places, including
-`PROCESS_AI_TICKET_WORKFLOW_ID` in `reactory-core`), or a macro for manual reporting.
+The last row is the one honest gap: a run that dies at the engine level cannot report
+itself, so its package fails with `child_terminated` rather than a child-authored
+reason. It is still a failure, never a success.
 
-Closing this needs a **coordinated version bump**: a guarded
-`service_invoke → reactor.WorkflowProgrammeService@1.0.0.reportPackageOutcome`
-step at the end of `core.ProcessAITicket` (its workflow id is pinned in four places,
-including `PROCESS_AI_TICKET_WORKFLOW_ID` in `reactory-core`), or a macro for manual
-reporting. Until then, do not create a programme and expect it to finish.
+Mechanics common to every reporting path:
+
+- The child declares `dispatchId`, `programmeId` and `packageId` as **optional** inputs.
+  A Support-path dispatch supplies none of them, so it behaves exactly as before and
+  calls nothing.
+- `readProgrammeDispatch` is hoisted above `ticketGuard` and every report is gated on
+  `steps.readProgrammeDispatch.stdout !== ''`, so a `${input.dispatchId}` placeholder
+  can never masquerade as an id — and the two halting branches, which live inside the
+  ticket-guarded pipeline, can still reach it.
+- The end gate derives its status from `variables.runStatus`: `completed` only when the
+  run reached the publish path. A halted run never sends a `prUrl`, and no `mergedSha`
+  is ever invented.
+- Each report step is `continueOnError: true` (never `retryPolicy` — the two are
+  mutually exclusive): a failed report must not retroactively fail an engineering run
+  that already succeeded. `programmeOutcomeLanded` logs at WARN when the programme did
+  not accept the end-gate push, because a swallowed report is precisely the
+  `child_completed_unreported` failure the bridge exists to remove.
+
+The reconciler's refusal is unchanged: a child that completes without reporting is
+still failed `child_completed_unreported`. Only an actual report can settle a
+package, and `succeeded` still requires a merge SHA, a verified merge, or a completed
+report with no PR to wait for.
 
 ## Provisioning the schedule
 
@@ -258,7 +270,7 @@ Create a programme from any signed-in user's context:
 const service = context.getService('reactor.WorkflowProgrammeService@1.0.0');
 await service.createProgramme({
   name: 'Reactor hardening',
-  childWorkflowId: 'core.ProcessAITicket@1.4.7',
+  childWorkflowId: 'core.ProcessAITicket@1.4.8',
   childInputDefaults: { agentId: 'ReactorAIPersona' },
   packages: [
     { id: 'schema', title: 'Schema migration', input: { ticketReference: 'ACME-1' } },

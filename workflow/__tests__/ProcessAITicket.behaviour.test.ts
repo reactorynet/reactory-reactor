@@ -3231,3 +3231,153 @@ describe('ProcessAITicket workspace note describes its own change (D2 follow-up)
     }
   });
 });
+
+/**
+ * Programme outcome reporting (1.4.8) — the shipped scripts, executed.
+ *
+ * The contract test pins the wiring; these run the gate probe, the three derived
+ * readers and the baseline-block summariser exactly as the workflow ships them,
+ * with the same environment (and the same unresolved `${…}` tokens) the engine
+ * would hand them. The reconcile half lives in
+ * `services/reactor/__tests__/WorkflowProgrammeService.processAITicket.test.ts`,
+ * which feeds these exact params into the real service.
+ */
+describe('core.ProcessAITicket programme outcome reporting', () => {
+  const cwd = process.cwd();
+
+  const probe = (dispatchId?: string): string =>
+    runScript(
+      scriptOf('readProgrammeDispatch'),
+      // An unset optional input reaches a cli step as its own token.
+      { DISPATCH_ID: dispatchId === undefined ? '${input.dispatchId}' : dispatchId },
+      cwd,
+    );
+
+  const outcome = (env: Record<string, string>) => ({
+    status: runScript(scriptOf('readProgrammeReportStatus'), env, cwd),
+    prUrl: runScript(scriptOf('readProgrammeReportPrUrl'), env, cwd),
+    error: runScript(scriptOf('readProgrammeReportError'), env, cwd),
+  });
+
+  const base: Record<string, string> = {
+    RUN_STATUS: 'completed',
+    PR_URL: '',
+    REF: 'REF-1',
+    VERDICT: 'approved',
+    CYCLES: '1',
+    PR_STATE: 'MERGED',
+  };
+
+  const PR_URL = 'https://github.com/reactorynet/reactory-reactor/pull/3';
+
+  it('treats an absent dispatchId as "not programme-dispatched"', () => {
+    // The token is what the engine leaves behind for an unset optional input — and
+    // it is truthy, which is the whole reason this is a probe step.
+    expect(probe()).toBe('');
+    expect(probe('')).toBe('');
+    expect(probe('undefined')).toBe('');
+    expect(probe('null')).toBe('');
+  });
+
+  it('recovers the exact dispatch id a programme threaded in', () => {
+    const dispatchId = 'prog-1:pkg-1:0f9a8b7c';
+    expect(probe(dispatchId)).toBe(dispatchId);
+    expect(probe('  ' + dispatchId + '  ')).toBe(dispatchId);
+  });
+
+  it('reports completed with the real pull request url', () => {
+    const reported = outcome({ ...base, PR_URL: PR_URL });
+    expect(reported.status).toBe('completed');
+    expect(reported.prUrl).toBe(PR_URL);
+    expect(reported.error).toBe('');
+  });
+
+  it('reports completed WITHOUT a prUrl when the run finished and no pull request exists', () => {
+    const reported = outcome({ ...base, PR_URL: '${steps.readPrUrl.outputs.stdout}' });
+    expect(reported.status).toBe('completed');
+    expect(reported.prUrl).toBe('');
+    expect(reported.error).toBe('');
+  });
+
+  it('reports failure with an error for a halted run, and never a prUrl', () => {
+    const reported = outcome({
+      ...base,
+      RUN_STATUS: 'blocked',
+      PR_URL: PR_URL,
+      VERDICT: 'rejected',
+      CYCLES: '3',
+      PR_STATE: 'NOT_OPENED',
+    });
+
+    expect(reported.status).toBe('failed');
+    expect(reported.prUrl).toBe('');
+    expect(reported.error).toContain("runStatus 'blocked'");
+    expect(reported.error).toContain('rejected');
+    expect(reported.error).toContain('3 cycle(s)');
+  });
+
+  it('reports failure for a run that never reached a verdict', () => {
+    const reported = outcome({
+      RUN_STATUS: 'pending',
+      PR_URL: '',
+      REF: '',
+      VERDICT: 'pending',
+      CYCLES: '0',
+      PR_STATE: 'unknown',
+    });
+    expect(reported.status).toBe('failed');
+    expect(reported.prUrl).toBe('');
+    expect(reported.error).toContain("runStatus 'pending'");
+  });
+
+  // ── the two paths that ABORT the instance ────────────────────────────────
+  // These paths report from inside their own branch, so the value that becomes the
+  // package's `lastError` is produced by a shipped script, not by a step after the
+  // halt (which would never run).
+
+  it('names the publish blocker from the worktree publish-readiness record', () => {
+    const dir = tempDir('pa-publish-block-');
+    fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, '.ai-agent', 'publish-readiness.json'),
+      JSON.stringify({ ready: false, detail: 'nothing to commit on feature/test' }),
+      'utf8',
+    );
+
+    expect(runScript(scriptOf('describePublishBlock'), { WT: dir }, cwd)).toBe(
+      'nothing to commit on feature/test',
+    );
+
+    // A worktree with no record at all must still produce a usable reason.
+    const empty = tempDir('pa-publish-block-empty-');
+    expect(runScript(scriptOf('describePublishBlock'), { WT: empty }, cwd)).toContain(
+      'no commit that could be published',
+    );
+  });
+
+  it('summarises a refused baseline from the guard violations, never raw JSON', () => {
+    const summary = runScript(
+      scriptOf('readProgrammeBaselineBlock'),
+      {
+        GUARD: JSON.stringify({
+          baselineReady: false,
+          violations: ['submodule x is on feature/y', 'held by run ai-1'],
+        }),
+      },
+      cwd,
+    );
+
+    expect(summary).toContain('primary-checkout baseline is not usable');
+    expect(summary).toContain('submodule x is on feature/y');
+    expect(summary).toContain('held by run ai-1');
+    expect(summary).not.toContain('{');
+
+    // A guard that blocked without a reason still yields something actionable.
+    expect(runScript(scriptOf('readProgrammeBaselineBlock'), { GUARD: '{}' }, cwd)).toContain(
+      'without a reason',
+    );
+    expect(runScript(scriptOf('readProgrammeBaselineBlock'), { GUARD: 'not json' }, cwd)).toContain(
+      'without a reason',
+    );
+  });
+});

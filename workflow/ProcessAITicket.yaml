@@ -11,10 +11,10 @@ name: ProcessAITicket
 #      whose guard test compares that constant to this body and whose
 #      checkWorkflowRegistered gate refuses to dispatch a run whose id it cannot
 #      resolve — the runner matches the id VERBATIM, it does not resolve "latest".
-# 1.4.7 is the coordinated bump: (1)-(3) land here and (4) is the companion pin in
+# 1.4.8 is the coordinated bump: (1)-(3) land here and (4) is the companion pin in
 # reactory-core that must ship in the same release window. Bumping this body alone
 # stops every delegated AI ticket run from dispatching.
-version: 1.4.7
+version: 1.4.8
 description: Autonomous AI engineering run for a SINGLE support ticket. Loads the ticket,
   moves it to in_progress, prepares an isolated git worktree on a ticket-keyed
   branch, has the nominated AI engineer agent perform the work, captures a
@@ -104,6 +104,37 @@ inputs:
     description: Raise a human approval task for the pull request (carrying the PR
       link) and poll for the merge. When false the run polls for the merge
       immediately after opening the pull request.
+
+  # ── Programme reconciler plumbing ──────────────────────────────────────────
+  # These three are threaded into every child by
+  # `reactor.WorkflowProgrammeService.startChild`. They are OPTIONAL and INERT when
+  # absent: a Support-path dispatch supplies none of them, so the run behaves
+  # exactly as it did before 1.4.8 and reports nothing.
+  #
+  # `dispatchId` is the only one with behaviour attached. When it is present this
+  # workflow pushes the run's outcome back to the programme via
+  # `reactor.WorkflowProgrammeService@1.0.0.reportPackageOutcome` — at the end of a
+  # run that falls through, and immediately before each step that ABORTS the
+  # instance (see `readProgrammeDispatch`). That push is the difference between a
+  # package that can succeed and one the reconciler correctly fails as
+  # `child_completed_unreported`.
+  dispatchId:
+    type: string
+    required: false
+    description: The dispatch id the programme reconciler minted for THIS run. It
+      is also the exact key the reconciler uses to recover a child after a crash,
+      so it must be declared here (an undeclared input is ignored). Absent on the
+      Support dispatch path.
+  programmeId:
+    type: string
+    required: false
+    description: The programme that dispatched this run. Optional and unused except
+      for logging; present only on the programme path.
+  packageId:
+    type: string
+    required: false
+    description: The package within that programme that this run fulfils. Optional
+      and unused except for logging; present only on the programme path.
 
 steps:
   # ── 0. Guard the inputs ─────────────────────────────────────────────────
@@ -383,6 +414,38 @@ steps:
       action: set
       key: publishable
       value: "false"
+
+
+  # ── 3b. Resolve programme dispatch identity ─────────────────────────────
+  # HOISTED above `ticketGuard`, deliberately. Two guards further down ABORT the
+  # instance (`submoduleBaselineGate` -> `submoduleBaselineHalt` and
+  # `publishReadinessGate` -> `publishBlockHalt`), and each of them reports from
+  # inside its own branch, because a step placed after a terminating step never
+  # runs. Every reporting step needs this value, and the probe depends on nothing
+  # but the seeded variables, so it is resolved once, before any halting branch.
+  #
+  # An ABSENT optional input reaches a cli step as the unresolved token
+  # `${input.dispatchId}`, which is TRUTHY. This probe is what makes "not
+  # programme-dispatched" a real, testable state: it emits '' for the token, for an
+  # empty value and for the literals 'undefined'/'null'.
+  - id: readProgrammeDispatch
+    name: Read programme dispatch identity
+    type: cli_command
+    dependsOn: seedPublishable
+    config:
+      command: node
+      args:
+        - -e
+        - |
+          const TOK = '$' + '{';
+          const raw = String(process.env.DISPATCH_ID || '').trim();
+          const absent = !raw || raw === 'undefined' || raw === 'null' || raw.indexOf(TOK) !== -1;
+          process.stdout.write(absent ? '' : raw);
+      env:
+        DISPATCH_ID: ${input.dispatchId}
+      failOnError: false
+      output:
+        captureStdout: true
 
   # ── 4. Guard the ticket ─────────────────────────────────────────────────
   - id: ticketGuard
@@ -1862,6 +1925,51 @@ steps:
                     worktree: ${steps.readWorktreePath.outputs.stdout}
                     baselinePath: ${steps.readWorktreePath.outputs.stdout}/.ai-agent/submodule-baseline.json
                     evidence: ${steps.submoduleGuardSnapshot.outputs.stdout}
+              # A programme-dispatched run refused here must REPORT before it stops:
+              # `submoduleBaselineHalt` exits 1 with failOnError and terminates the
+              # instance, so the end-of-run gate cannot cover this path. The summary is a
+              # human-readable form of the guard's violations, not raw JSON, because it
+              # becomes the package's `lastError`. Gated on the same dispatch probe, so a
+              # Support-path run reports nothing.
+              - id: readProgrammeBaselineBlock
+                name: Summarise the refused baseline for the programme
+                type: cli_command
+                dependsOn: submoduleBaselineBlockedTask
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - |
+                      let state = {};
+                      try { state = JSON.parse(process.env.GUARD || '{}'); } catch (e) { state = {}; }
+                      const violations = Array.isArray(state.violations) ? state.violations : [];
+                      const reasons = violations.length
+                        ? violations.map((item) => String(item)).join('; ')
+                        : 'the guard reported the baseline as not ready without a reason';
+                      process.stdout.write('primary-checkout baseline is not usable: ' + reasons);
+                  env:
+                    GUARD: ${steps.submoduleGuardSnapshot.outputs.stdout}
+                  failOnError: false
+                  output:
+                    captureStdout: true
+              - id: submoduleBaselineReportGate
+                name: Report the refused baseline to the programme
+                type: condition
+                dependsOn: readProgrammeBaselineBlock
+                config:
+                  condition: steps.readProgrammeDispatch.stdout !== ''
+                  thenSteps:
+                    - id: reportSubmoduleBaselineOutcome
+                      name: Report the refused baseline as a package failure
+                      type: service_invoke
+                      continueOnError: true
+                      config:
+                        service: reactor.WorkflowProgrammeService@1.0.0
+                        method: reportPackageOutcome
+                        params:
+                          dispatchId: ${steps.readProgrammeDispatch.outputs.stdout}
+                          status: 'failed'
+                          error: ${steps.readProgrammeBaselineBlock.outputs.stdout}
               # Fail loudly and immediately: the engineer must not start against a checkout
               # whose pre-run state cannot be trusted. Nothing has been mutated at this point.
               - id: submoduleBaselineHalt
@@ -5033,6 +5141,29 @@ steps:
                                 publishReadiness: ${steps.readPublishReadiness.outputs.stdout}
                                 detail: ${steps.describePublishBlock.outputs.stdout}
                                 commitResult: ${steps.commitChanges.outputs.stdout}
+                          # A programme-dispatched run that stops here must REPORT before it
+                          # stops. `publishBlockHalt` exits 1 with failOnError, which terminates
+                          # the instance, so the end-of-run reporting gate never executes on this
+                          # path. Gated on the same dispatch probe as that gate, so a Support-path
+                          # run still reports nothing and its behaviour is unchanged.
+                          - id: publishBlockReportGate
+                            name: Report the publish block to the programme
+                            type: condition
+                            dependsOn: publishBlockTask
+                            config:
+                              condition: steps.readProgrammeDispatch.stdout !== ''
+                              thenSteps:
+                                - id: reportPublishBlockOutcome
+                                  name: Report the publish block as a package failure
+                                  type: service_invoke
+                                  continueOnError: true
+                                  config:
+                                    service: reactor.WorkflowProgrammeService@1.0.0
+                                    method: reportPackageOutcome
+                                    params:
+                                      dispatchId: ${steps.readProgrammeDispatch.outputs.stdout}
+                                      status: 'failed'
+                                      error: ${steps.describePublishBlock.outputs.stdout}
                           # Hard stop: pushBranch and createPullRequest must never run for a
                           # branch that carries no commit of its own. The comment, the task
                           # and the terminal runStatus are already in place, so this abort
@@ -5916,7 +6047,7 @@ steps:
                             // renderFailures names the fields that genuinely rendered to nothing.
                             renderFailures.forEach((field) => warnings.push('report field "' + field + '" could not be rendered; a visible marker was written instead'));
 
-                            body = body.replace(/\s+$/, '') + '\n\n---\nGenerated by core.ProcessAITicket@1.4.7\n';
+                            body = body.replace(/\s+$/, '') + '\n\n---\nGenerated by core.ProcessAITicket@1.4.8\n';
 
                             // A publication on non-blocking-only findings must SAY so: a human
                             // reading this pull request must not mistake it for an approval.
@@ -6932,3 +7063,178 @@ steps:
             action: set
             key: prState
             value: NOT_OPENED
+
+  # ── Programme outcome reporting (fall-through paths) ───────────────────────
+  # A programme child must PUSH its outcome. The reconciler's success rule is
+  # "push-reported merge SHA, verified merge, or nothing to merge", and a child that
+  # merely completes is failed `child_completed_unreported` — correctly, it claims
+  # nothing. This gate is the bridge for every path that FALLS THROUGH to the end of
+  # the run: success with a pull request, success with nothing to merge, a review
+  # rejection or exhaustion, a run that never produced work, and a missing ticket.
+  #
+  # The two paths that ABORT the instance are covered where they abort, because a
+  # step placed after a terminating step never runs: `publishBlockReportGate` before
+  # `publishBlockHalt`, and `submoduleBaselineReportGate` before
+  # `submoduleBaselineHalt`.
+  #
+  # It is INERT unless `dispatchId` is set — the probe above emits '' for an absent
+  # optional input — so a Support-path dispatch makes no service call and behaves
+  # exactly as it did before 1.4.8.
+  #
+  # The report step is `continueOnError: true` on purpose: a programme that is
+  # unreachable (stopped, archived, wrong dispatch id) must not retroactively fail an
+  # engineering run that already succeeded. The trade-off is that a swallowed report
+  # is exactly the `child_completed_unreported` failure this exists to remove, so the
+  # outcome of the push is logged at WARN when it is not accepted. `retryPolicy` is
+  # deliberately NOT used: with `continueOnError: true` the step returns `next()` on
+  # failure and never throws, so `.onError(Retry)` would be unreachable (see
+  # YamlStepBody.ts, where the two are mutually exclusive).
+  - id: programmeOutcomeGate
+    name: Report the outcome to the programme
+    type: condition
+    dependsOn: ticketGuard
+    config:
+      # No dispatch id = a Support-path run. Nothing to report, nothing to change.
+      condition: steps.readProgrammeDispatch.stdout !== ''
+      thenSteps:
+        # ── Derive what to report from the run's own terminal state ─────────
+        # `runStatus` is the run's verdict: `completed` is set only after a pull
+        # request exists (inside prPublishedGate); `blocked`/`failed` are the
+        # halt, rejection, publish-failed and non-completion paths that reach here.
+        - id: readProgrammeReportStatus
+          name: Decide the status to report
+          type: cli_command
+          dependsOn: readProgrammeDispatch
+          config:
+            command: node
+            args:
+              - -e
+              - |
+                const TOK = '$' + '{';
+                const read = (value) => {
+                  const text = String(value == null ? '' : value).trim();
+                  if (!text || text === 'undefined' || text === 'null' || text.indexOf(TOK) !== -1) return '';
+                  return text;
+                };
+                // Only a run that reached the publish path is reported complete.
+                // Anything else is a failure: never tell the reconciler that work
+                // landed when the run halted, was rejected, or never published.
+                process.stdout.write(read(process.env.RUN_STATUS).toLowerCase() === 'completed' ? 'completed' : 'failed');
+            env:
+              RUN_STATUS: ${variables.runStatus}
+            failOnError: false
+            output:
+              captureStdout: true
+
+        - id: readProgrammeReportPrUrl
+          name: Read the pull request url to report
+          type: cli_command
+          dependsOn: readProgrammeReportStatus
+          config:
+            command: node
+            args:
+              - -e
+              - |
+                const TOK = '$' + '{';
+                const raw = String(process.env.PR_URL || '').trim();
+                const status = String(process.env.RUN_STATUS || '').trim().toLowerCase();
+                const usable = !!raw && raw !== 'undefined' && raw !== 'null' && raw.indexOf(TOK) === -1;
+                // A completed run with no PR reports `completed` WITHOUT a prUrl:
+                // there is genuinely nothing to merge, which is the reconciler's
+                // "no merge to wait for" branch. Never invent a prUrl, and never
+                // attach one to a run that did not complete.
+                process.stdout.write(status === 'completed' && usable && /\/pull\/\d+/.test(raw) ? raw : '');
+            env:
+              PR_URL: ${steps.readPrUrl.outputs.stdout}
+              RUN_STATUS: ${variables.runStatus}
+            failOnError: false
+            output:
+              captureStdout: true
+
+        - id: readProgrammeReportError
+          name: Read the failure to report
+          type: cli_command
+          dependsOn: readProgrammeReportPrUrl
+          config:
+            command: node
+            args:
+              - -e
+              - |
+                const TOK = '$' + '{';
+                const read = (value, fallback) => {
+                  const text = String(value == null ? '' : value).trim();
+                  if (!text || text === 'undefined' || text === 'null' || text.indexOf(TOK) !== -1) return fallback;
+                  return text;
+                };
+                const status = read(process.env.RUN_STATUS, 'unknown').toLowerCase();
+                if (status === 'completed') {
+                  process.stdout.write('');
+                } else {
+                  const ref = read(process.env.REF, '');
+                  const verdict = read(process.env.VERDICT, 'unknown');
+                  const cycles = read(process.env.CYCLES, '0');
+                  const prState = read(process.env.PR_STATE, 'unknown');
+                  const where = ref ? ' for ' + ref : '';
+                  process.stdout.write(
+                    'ProcessAITicket run' + where + " ended with runStatus '" + status + "'" +
+                    ' (review verdict ' + verdict + ' after ' + cycles + ' cycle(s),' +
+                    ' pull request state ' + prState + '). No merged pull request was' +
+                    ' reported, so the package did not succeed.',
+                  );
+                }
+            env:
+              RUN_STATUS: ${variables.runStatus}
+              REF: ${steps.loadTicket.result.reference}
+              VERDICT: ${variables.reviewVerdict}
+              CYCLES: ${variables.reviewCycle}
+              PR_STATE: ${variables.prState}
+            failOnError: false
+            output:
+              captureStdout: true
+
+        # ── Push the outcome ────────────────────────────────────────────────
+        - id: reportProgrammeOutcome
+          name: Report package outcome to the programme reconciler
+          type: service_invoke
+          dependsOn: readProgrammeReportError
+          continueOnError: true
+          config:
+            service: reactor.WorkflowProgrammeService@1.0.0
+            method: reportPackageOutcome
+            params:
+              dispatchId: ${steps.readProgrammeDispatch.outputs.stdout}
+              status: ${steps.readProgrammeReportStatus.outputs.stdout}
+              prUrl: ${steps.readProgrammeReportPrUrl.outputs.stdout}
+              error: ${steps.readProgrammeReportError.outputs.stdout}
+
+        # A returned `reported: false` is NOT a thrown error, so `continueOnError`
+        # alone would let it disappear. Say so at WARN: the package will be failed
+        # as `child_completed_unreported` once this child completes.
+        - id: programmeOutcomeLanded
+          name: Did the programme accept the reported outcome
+          type: condition
+          dependsOn: reportProgrammeOutcome
+          config:
+            condition: steps.reportProgrammeOutcome.result && steps.reportProgrammeOutcome.result.reported === true
+            thenSteps:
+              - id: programmeOutcomeAcceptedLog
+                name: Log the accepted programme outcome
+                type: log
+                config:
+                  level: info
+                  message: Programme accepted the reported outcome for dispatch
+                    ${steps.readProgrammeDispatch.outputs.stdout} - status
+                    ${steps.readProgrammeReportStatus.outputs.stdout}, package state
+                    ${steps.reportProgrammeOutcome.outputs.result.state}.
+            elseSteps:
+              - id: programmeOutcomeRejectedLog
+                name: Log a report the programme did not accept
+                type: log
+                config:
+                  level: warn
+                  message: "PROGRAMME OUTCOME REPORT NOT ACCEPTED for dispatch
+                    ${steps.readProgrammeDispatch.outputs.stdout} (reported status
+                    ${steps.readProgrammeReportStatus.outputs.stdout}). This run's own
+                    outcome is unchanged, but the programme package will be failed as
+                    child_completed_unreported when the child instance completes unless
+                    the outcome is re-reported."
