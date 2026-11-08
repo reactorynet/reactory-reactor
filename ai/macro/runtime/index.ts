@@ -8,6 +8,7 @@ import { TodoMacroRegistry } from './todoMacro.macro';
 import { AddToolsToSessionMacroRegistry, RemoveToolsFromSessionMacroRegistry, ToolkitMacroRegistry } from './sessionTools.macro';
 import { ReloadPersonasMacroRegistry } from './reloadPersonas.macro';
 import { ContinuationMacroRegistry } from './continuationMacro.macro';
+import { ProgrammeMacroRegistry } from './programmeMacro.macro';
 import ToolResultProcessor from './ToolResultProcessor';
 
 export { ToolResultProcessor, ToolkitMacroRegistry };
@@ -18,6 +19,14 @@ export {
   CancelContinuationMacro,
   ListContinuationsMacro,
 } from './continuationMacro.macro';
+
+export {
+  ProgrammeMacroRegistry,
+  ProgrammeMacro,
+  PROGRAMME_SERVICE_ID,
+  PROGRAMME_ACTIONS,
+} from './programmeMacro.macro';
+export type { ProgrammeAction, IProgrammeMacroProps } from './programmeMacro.macro';
 
 export default [
   VariableMacroRegistry,
@@ -34,5 +43,9 @@ export default [
   ReloadPersonasMacroRegistry,
   // Durable agent continuation (REACTORY-302016408):
   // scheduleContinuation / cancelContinuation / listContinuations.
-  ...ContinuationMacroRegistry
+  ...ContinuationMacroRegistry,
+  // Programme reconciler front door (REACTORY-302016408): the `programme`
+  // macro (create/get/list/pause/resume/abort/report/tick). Without it a
+  // programme could only be created by writing TypeScript against the service.
+  ProgrammeMacroRegistry,
 ];

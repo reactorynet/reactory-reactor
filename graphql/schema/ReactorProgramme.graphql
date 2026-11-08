@@ -1,0 +1,256 @@
+"""
+One work package inside a programme.
+
+A package is a node in the dependency graph the reconciler walks. Its `state` is
+the reconciler's own vocabulary (`pending`, `ready`, `dispatching`, `running`,
+`succeeded`, `failed`, `cancelled`, `blocked`) and is never derived here — a
+client that wants "is this package done?" reads `state`, not `attempt`.
+
+`dispatchId` is the identity the tick minted for this attempt and threaded into the
+child workflow's input. `childInstanceId` is the engine instance that was adopted
+for it. Together they are the two facts that make a dispatch checkable.
+"""
+type ReactorWorkflowProgrammePackage {
+  """Stable id within the programme."""
+  id: String!
+
+  """Human-readable package title."""
+  title: String
+
+  """Package ids that must reach `succeeded` before this package is dispatched."""
+  dependsOn: [String!]!
+
+  """
+  pending | ready | dispatching | running | succeeded | failed | cancelled | blocked
+  """
+  state: String!
+
+  """Dispatch attempts consumed (incremented only when a child is claimed)."""
+  attempt: Int
+
+  """The id minted for this attempt and threaded into the child's input."""
+  dispatchId: String
+
+  """The adopted child workflow instance, once known."""
+  childInstanceId: String
+
+  """ISO-8601 dispatch time."""
+  dispatchedAt: String
+
+  """ISO-8601 last evidence of life (dispatch, child report, verified merge)."""
+  lastProgressAt: String
+
+  """ISO-8601 completion time (terminal states only)."""
+  completedAt: String
+
+  """Pull request URL, when the child pushed one."""
+  prUrl: String
+
+  """Merge commit SHA, when the child pushed one or `gh` verified the merge."""
+  mergedSha: String
+
+  """
+  The last status recorded on the package: a child-reported
+  `completed`/`failed`, `awaiting_merge`, `child_running`,
+  `child_completed_unreported`, `child_terminated`, `merged`, `closed`.
+  """
+  status: String
+
+  """Who decided the current state: `push`, `gh` or `reconciler`."""
+  outcomeSource: String
+
+  """Why the package is not progressing, when it is not."""
+  lastError: String
+}
+
+"""A package count for one state. `counts` is a map on the service; a list here."""
+type ReactorProgrammeStateCount {
+  state: String!
+  count: Int!
+}
+
+"""
+A programme: a dependency graph of work packages plus the reconciler's state.
+
+The reconciler dispatches a `ready` package exactly once, adopts the child
+instance, observes it, verifies a claimed merge, and settles the programme. This
+type is the observable result of those decisions — it deliberately exposes no
+`childInputDefaults` and no per-package `input`, because those may carry workflow
+inputs and are not part of the read contract.
+"""
+type ReactorWorkflowProgramme {
+  """Stable programme id (minted from `name` when the caller omitted one)."""
+  programmeId: String!
+
+  """Programme name."""
+  name: String!
+
+  """Free-text description."""
+  description: String
+
+  """active | paused | aborted | completed | failed"""
+  state: String!
+
+  """Email of the person who owns the programme (pause/abort must name them)."""
+  ownerEmail: String
+
+  """The default child workflow id for packages that do not override it."""
+  childWorkflowId: String
+
+  """Minutes a running package may be silent before it is a stall."""
+  slaMinutes: Int
+
+  """Dispatch attempts + stall windows before a package is failed."""
+  maxAttempts: Int
+
+  """Package counts by state, derived from `packages`."""
+  counts: [ReactorProgrammeStateCount!]!
+
+  """The packages, in programme order."""
+  packages: [ReactorWorkflowProgrammePackage!]!
+
+  """ISO-8601 creation time."""
+  createdAt: String
+
+  """ISO-8601 last mutation time."""
+  updatedAt: String
+
+  """ISO-8601 settle time (terminal states only)."""
+  completedAt: String
+
+  """ISO-8601 pause time."""
+  pausedAt: String
+
+  """ISO-8601 abort time."""
+  abortedAt: String
+
+  """How the owner was notified of the terminal state, when they were."""
+  notificationChannel: String
+
+  """The terminal event already notified (`completed`, `failed`, `aborted`)."""
+  notifiedEvent: String
+}
+
+"""One package to create. `input` is merged into the child workflow's input."""
+input ReactorProgrammePackageInput {
+  """Stable id within the programme. Required, unique, and what `dependsOn` names."""
+  id: String!
+  title: String
+  dependsOn: [String!]
+  """Extra child workflow input for this package."""
+  input: JSON
+  notes: String
+}
+
+"""
+A programme to create.
+
+`childInputDefaults` is merged into EVERY child's input (the package `input` wins
+on a key collision), and is never echoed back by a refusal or an error.
+"""
+input ReactorCreateProgrammeInput {
+  """Optional. Minted from `name` when omitted."""
+  programmeId: String
+  """Required; the service validates and mints an id from it."""
+  name: String!
+  description: String
+  """Defaults to the module's ProcessAITicket child when omitted."""
+  childWorkflowId: String
+  """Defaults merged into every child workflow input."""
+  childInputDefaults: JSON
+  """1–1440. The service clamps; it does not guess."""
+  slaMinutes: Int
+  """1–20. The service clamps; it does not guess."""
+  maxAttempts: Int
+  """Required; must be a valid dependency graph."""
+  packages: [ReactorProgrammePackageInput!]!
+}
+
+"""
+The outcome of pause/resume/abort.
+
+A refusal is DATA, not an exception: `ok` is false and `code` says why
+(`not_found`, `invalid_state`, `raced`, `not_authorised`). The system account and
+an unauthenticated caller are refused at the resolver boundary and therefore never
+produce this shape.
+"""
+type ReactorProgrammeControlResult {
+  """True only when the requested transition was applied."""
+  ok: Boolean!
+
+  """The programme state after the call."""
+  state: String
+
+  """Why the call was refused, when it was."""
+  reason: String
+
+  """Machine-readable refusal code, when the call was refused."""
+  code: String
+
+  """Present for pause: true when the programme is now paused."""
+  paused: Boolean
+
+  """Present for resume: true when the programme is now active."""
+  resumed: Boolean
+
+  """Present for abort: true when the programme is now aborted."""
+  aborted: Boolean
+
+  """Pause: packages whose child may still be running (left untouched)."""
+  runningPackages: Int
+
+  """Abort: packages moved to `cancelled`."""
+  cancelled: Int
+
+  """Abort: children that could not be cancelled (each is recorded on the package)."""
+  cancelFailures: Int
+
+  """Abort: packages mid-dispatch whose child could not be seen yet."""
+  pendingDispatch: Int
+
+  """Abort: how the owner was notified, when they were."""
+  notificationChannel: String
+}
+
+extend type Query {
+  """
+  One programme by id.
+
+  Returns null when no programme has that id. A programme owned by another user is
+  refused (an error), not returned as null: "you may not see this" and "this does
+  not exist" must not look the same to an operator.
+  """
+  programme(programmeId: String!): ReactorWorkflowProgramme
+
+  """
+  Programmes visible to the caller: their own, or every programme for an
+  administrative role. `state` filters; `limit` is 1–200 (default 25).
+  """
+  programmes(state: String, limit: Int): [ReactorWorkflowProgramme!]!
+}
+
+extend type Mutation {
+  """
+  Create a programme. The calling user becomes the owner, and the system account is
+  refused (pause/abort must always name a person).
+  """
+  createProgramme(input: ReactorCreateProgrammeInput!): ReactorWorkflowProgramme!
+
+  """
+  Stop new dispatch. Running children are left completely untouched, so a pause is
+  not a kill switch. Owner or administrator only; the system account is refused.
+  """
+  pauseProgramme(programmeId: String!, reason: String): ReactorProgrammeControlResult!
+
+  """
+  Resume from actual state. Nothing is re-dispatched; the next tick reads the graph.
+  Owner or administrator only; the system account is refused.
+  """
+  resumeProgramme(programmeId: String!, reason: String): ReactorProgrammeControlResult!
+
+  """
+  Cancel every non-terminal package and settle the programme. Terminal packages are
+  left alone. Owner or administrator only; the system account is refused.
+  """
+  abortProgramme(programmeId: String!, reason: String): ReactorProgrammeControlResult!
+}
