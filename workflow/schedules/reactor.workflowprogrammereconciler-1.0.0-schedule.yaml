@@ -1,0 +1,60 @@
+# Schedule: workflow programme reconciler
+#
+# ⚠ RUNTIME LOCATION: the scheduler reads <APP_DATA_ROOT>/workflows/schedules (or
+#   ./data/workflows/schedules when APP_DATA_ROOT is unset). NOTHING copies files there.
+#
+#   This module copy is the ONLY version-controlled file. It is NOT committed to
+#   `reactory-data`: that repository ignores workflows/*, so every schedule on a host is
+#   a deployment-installed artefact. A deployment must copy this file into
+#   <APP_DATA_ROOT>/workflows/schedules/ (or bake it into the data image).
+#
+#   WorkflowProgrammeService.onStartup warns at boot when the runtime copy is missing,
+#   resolving the data root exactly as the Scheduler does.
+#
+# Every 60 seconds. That cadence is part of the design, not a preference:
+#
+#   * it bounds the latency between "a dependency succeeded" and "the next package
+#     was dispatched", which is the whole point of removing the agent from the loop;
+#   * it bounds how long a crash between "start child" and "adopt instance id" can
+#     leave a package in `dispatching` (recovery is by dispatch id, never by a second
+#     start);
+#   * it is the same loop the continuation primitive is expected to share later.
+#
+# Single-flight: `maxConcurrent: 1` prevents the scheduler from overlapping this
+# workflow with itself, and the service additionally holds a per-programme lease
+# (`DEFAULT_LEASE_MS = 55s`) so a second process cannot double-tick either. Neither
+# guard is the correctness boundary — the atomic package predicate is. Two ticks
+# running would still start exactly one child per package.
+#
+# Execution identity: no `runAs`. The tick dispatches each child under the programme
+# owner's rebuilt context, so the child run belongs to the person who owns the
+# programme.
+#
+# Failure semantics: a missed tick delays work by up to a minute. A repeated tick
+# cannot duplicate a dispatch, cannot re-notify a settled programme (the terminal
+# state transition is the dedupe), and records `gh` failures instead of failing a
+# package on a transient error.
+id: reactor.workflowprogrammereconciler-1.0.0
+name: Workflow programme reconciler (every minute)
+description: >-
+  Advances dependency-graph programmes: dispatches ready packages exactly once,
+  adopts crashed dispatches by dispatch id, verifies pushed outcomes, escalates
+  stalls once per SLA window, and notifies the owner on completion or failure.
+workflow:
+  id: reactor.WorkflowProgrammeReconciler@1.0.0
+  version: 1.0.0
+  nameSpace: reactor
+schedule:
+  cron: '* * * * *'
+  enabled: true
+  timezone: null
+retry:
+  attempts: 1
+  delay: 5
+timeout: 300
+maxConcurrent: 1
+properties:
+  limit: 25
+  staleMs: 120000
+  maxDispatchesPerTick: 4
+  maxVerificationsPerTick: 3

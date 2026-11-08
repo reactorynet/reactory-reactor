@@ -27,6 +27,7 @@ import ReactoryAiModelPricing from './ReactoryAiModelPricing';
 import ReactorConversationMessage from './ReactorConversationMessage';
 import ReactorAiFailure from './ReactorAiFailure';
 import AgentContinuationModel, { generateCorrelationKey } from './AgentContinuation';
+import WorkflowProgrammeModel from './WorkflowProgramme';
 // Type-only re-export: `export type` is erased, so no runtime binding is emitted
 // for these under babel/isolatedModules.
 export type {
@@ -37,6 +38,15 @@ export type {
   ContinuationOutcome,
   ContinuationFiredBy,
 } from './AgentContinuation';
+// Type-only re-export for the programme reconciler (REACTORY-302016408). `export
+// type` is erased, so no runtime binding is emitted under babel/isolatedModules.
+export type {
+  IWorkflowProgramme,
+  IWorkflowProgrammeDocument,
+  IProgrammePackage,
+  PackageState,
+  ProgrammeState,
+} from './WorkflowProgramme';
 import seedAiProviders from './seedAiProviders';
 
 const {
@@ -138,6 +148,9 @@ export {
   // ReactorConversationMessage above, and must not be exposed as a component.
   AgentContinuationModel,
   generateCorrelationKey,
+  // Programme reconciler state (models/WorkflowProgramme.ts) — internal to
+  // `reactor.WorkflowProgrammeService@1.0.0`, like the continuation record above.
+  WorkflowProgrammeModel,
 };
 
 export default [
