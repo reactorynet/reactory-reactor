@@ -1262,7 +1262,10 @@ class ReactorChatResolver {
 
       let personaId = args.personaId;
       if (!personaId && args.chatSessionId) {
-        const session = await conversationService.getChatSession(args.chatSessionId);
+        // `getChatSession` takes `{ id }`, not a bare id: a positional string
+        // destructured to `id === undefined` and threw "Invalid conversation ID
+        // format: undefined" (REACTORY-302016408/20261108/1108891525).
+        const session = await conversationService.getChatSession({ id: args.chatSessionId });
         if (session) {
           personaId = (session as any).personaId || (session as any).botId || (session as any).persona?.id;
         }
