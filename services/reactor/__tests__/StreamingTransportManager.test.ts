@@ -79,8 +79,13 @@ describe('StreamingTransportManager', () => {
       const event = makeEvent();
       await manager.sendEventToSession(CHAT_ID, event);
 
-      expect(mockTransport.sendEvent).toHaveBeenCalledWith(event);
-      expect(newTransport.sendEvent).toHaveBeenCalledWith(event);
+      // Every transport attached to a conversation receives the same stream
+      // position (the manager allocates it per session, not per transport), so
+      // a client reconnecting to either one resumes coherently.
+      expect(mockTransport.sendEvent).toHaveBeenCalledWith(event, expect.any(Number));
+      expect(newTransport.sendEvent).toHaveBeenCalledWith(event, expect.any(Number));
+      expect((mockTransport.sendEvent as jest.Mock).mock.calls[0][1])
+        .toBe((newTransport.sendEvent as jest.Mock).mock.calls[0][1]);
     });
 
     it('should handle transport initialization failure', async () => {
@@ -110,7 +115,7 @@ describe('StreamingTransportManager', () => {
       const event = makeEvent();
       await manager.sendEventToSession(CHAT_ID, event);
 
-      expect(mockTransport.sendEvent).toHaveBeenCalledWith(event);
+      expect(mockTransport.sendEvent).toHaveBeenCalledWith(event, 1);
     });
 
     it('should buffer (not throw) when no session mapping exists', async () => {
@@ -204,9 +209,11 @@ describe('StreamingTransportManager', () => {
       });
 
       expect(newTransport.sendEvent).toHaveBeenCalledTimes(3);
-      expect(newTransport.sendEvent).toHaveBeenNthCalledWith(1, event1);
-      expect(newTransport.sendEvent).toHaveBeenNthCalledWith(2, event2);
-      expect(newTransport.sendEvent).toHaveBeenNthCalledWith(3, completeEvent);
+      // Buffered events keep the position they were allocated when emitted, so
+      // a flushed event and a live event mean the same thing to the client.
+      expect(newTransport.sendEvent).toHaveBeenNthCalledWith(1, event1, 1);
+      expect(newTransport.sendEvent).toHaveBeenNthCalledWith(2, event2, 2);
+      expect(newTransport.sendEvent).toHaveBeenNthCalledWith(3, completeEvent, 3);
     });
 
     it('should buffer events when no transport is registered and flush on register', async () => {
@@ -223,8 +230,8 @@ describe('StreamingTransportManager', () => {
       });
 
       expect(mockTransport.sendEvent).toHaveBeenCalledTimes(2);
-      expect(mockTransport.sendEvent).toHaveBeenNthCalledWith(1, event1);
-      expect(mockTransport.sendEvent).toHaveBeenNthCalledWith(2, event2);
+      expect(mockTransport.sendEvent).toHaveBeenNthCalledWith(1, event1, 1);
+      expect(mockTransport.sendEvent).toHaveBeenNthCalledWith(2, event2, 2);
     });
   });
 

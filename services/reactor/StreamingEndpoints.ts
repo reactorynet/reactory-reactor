@@ -35,6 +35,28 @@ function slog(
 }
 
 /**
+ * Parse the resume cursor from an SSE reconnect.
+ *
+ * `Last-Event-ID` is sent by the browser itself on reconnect, so it is present
+ * on `req.headers` — no custom header support is required (and the note about
+ * query-param JWT auth does not apply to it). The query-string form exists for
+ * non-EventSource clients that replay by hand.
+ *
+ * Returns `undefined` when there is no usable cursor, which makes the
+ * connection behave exactly like a first connection.
+ */
+export function readLastEventId(req: Request): number | undefined {
+  const header = req.headers?.['last-event-id'];
+  const raw = Array.isArray(header) ? header[0] : header;
+  const candidate = raw ?? (req.query?.['last-event-id'] as string | undefined);
+  if (candidate === undefined || candidate === null || candidate === '') return undefined;
+
+  const parsed = parseInt(String(candidate), 10);
+  if (!Number.isFinite(parsed) || parsed < 1) return undefined;
+  return parsed;
+}
+
+/**
  * HTTP endpoints for streaming functionality
  * Provides SSE endpoints and session management APIs
  */
@@ -230,8 +252,24 @@ export class StreamingEndpoints {
         return;
       }
 
-      // Create SSE transport and register it
-      const transport = new SSETransport(res);
+      // Create SSE transport and register it.
+      //
+      // `Last-Event-ID` is set by the *browser* on an automatic reconnect (SSE
+      // spec), so unlike a custom header it does arrive here. The query-param
+      // JWT auth below is unaffected: auth still travels in the query string,
+      // this header is only a resume cursor. `last-event-id` is also accepted as
+      // a query param for hand-rolled clients that cannot set headers.
+      const transport = new SSETransport(res, {
+        sessionKey: chatId,
+        sseSessionId: session.sessionId,
+        lastEventId: readLastEventId(req),
+        // Not optional-chained on purpose. A missing method here would make the
+        // transport build a *private* log, so ids would stop being session-wide
+        // and a reconnect could no longer be resumed — the exact regression this
+        // change exists to prevent — with nothing in the logs to say why. Fail
+        // loudly instead of degrading silently.
+        eventLog: transportManager.getEventLog(),
+      });
 
       // Disable Nagle's algorithm so small SSE chunks are sent immediately
       req.socket.setNoDelay(true);
