@@ -34,6 +34,7 @@ import PersonaLoaderService from "@reactory/server-modules/reactory-reactor/ai/p
 // reactor service; `lifeCycle` stays at the decorator default (`instance`) so the
 // wake path holds the workflow instance's own identity.
 import AgentContinuationService from "./reactor/AgentContinuationService";
+import WorkflowProgrammeService from "./reactor/WorkflowProgrammeService";
 
 export default [
   ReactorMacroService,
@@ -68,5 +69,7 @@ export default [
   ShellSessionManager,
   ReactorPlaywrightService,
   MarkdownProjectProcessor,
+  // Dependency-graph programme reconciler (REACTORY-302016408).
+  WorkflowProgrammeService,
   AgentContinuationService
 ];

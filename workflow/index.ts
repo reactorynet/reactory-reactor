@@ -55,6 +55,13 @@ const REACTOR_YAML_WORKFLOWS: IReactorYamlWorkflow[] = [
   // reactory-data: workflows/schedules/reactor.agentcontinuationsweeper-1.0.0-schedule.yaml.
   { nameSpace: 'reactor', name: 'AgentContinuationSweeper', filename: 'AgentContinuationSweeper.yaml', version: '1.0.0' },
 
+  // ── Workflow programme reconciler (REACTORY-302016408) ─────────────────────
+  // The permanent orchestration loop: 60s, single-flight lease, dependency-graph
+  // dispatch. Schedule lives in reactory-data:
+  // workflows/schedules/reactor.workflowprogrammereconciler-1.0.0-schedule.yaml
+  // (a byte-identical reviewable copy ships at workflow/schedules/).
+  { nameSpace: 'reactor', name: 'WorkflowProgrammeReconciler', filename: 'WorkflowProgrammeReconciler.yaml', version: '1.0.0' },
+
   // ── AI engineering ticket pipeline (core namespace) ────────────────────────
   // Ships with the reactor module because the pipeline is an AI capability, even
   // though it uses the `core` workflow namespace alongside the Support triage /

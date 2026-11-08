@@ -1,0 +1,157 @@
+# reactor.WorkflowProgrammeReconciler@1.0.0
+#
+# The permanent answer for programme orchestration.
+#
+# A programme is a dependency graph of work packages. `WorkflowProgrammeService`
+# owns every DECISION (claim a package, start its child, adopt the child by dispatch
+# id, verify a pushed outcome, settle the programme); this workflow's whole job is
+# to be the durable, observable 60-second tick that calls it.
+#
+# ── Why not a parent workflow ────────────────────────────────────────────────
+#
+# `invoke_workflow(..., waitForCompletion: true)` is rejected PERMANENTLY, not
+# temporarily. `InvokeWorkflowStep` keeps `childInstanceId` in a LOCAL VARIABLE and
+# calls `startWorkflow` unconditionally inside an in-step poll loop, so a crash,
+# deploy or step retry mid-wait starts a SECOND child against the same ticket. It is
+# duplicative, not merely fragile.
+#
+# ── Why the decisions are not in YAML ────────────────────────────────────────
+#
+# YAML has no vocabulary for "update this subdocument only if it still says `ready`
+# and has never carried a dispatch id". That predicate is the idempotency boundary,
+# and it belongs in typed, unit-tested code. YAML would either lose it or fake it
+# with a lock that breaks the moment two ticks run.
+#
+# ── Cadence ─────────────────────────────────────────────────────────────────
+#
+# 60 seconds, single-flight lease per programme (`maxConcurrent: 1` is a second,
+# coarser guard). A missed tick delays a dispatch by up to a minute; a repeated tick
+# cannot dispatch twice because the package state is the gate. The same tick loop is
+# intended to serve the continuation primitive later.
+#
+# ── Identity ────────────────────────────────────────────────────────────────
+#
+# No `runAs`. The tick holds no user identity: it dispatches each child under the
+# PROGRAMME OWNER's rebuilt context, so the child run and every session/task it
+# creates belong to the person who created the programme. Pause/abort is refused for
+# the system account, so the audit trail always names a person.
+#
+# ── Schedule ────────────────────────────────────────────────────────────────
+#
+# `reactor.workflowprogrammereconciler-1.0.0-schedule.yaml` (cron `* * * * *`).
+# The scheduler reads <APP_DATA_ROOT>/workflows/schedules, so the runtime copy lives
+# in reactory-data; the copy beside this file is the reviewable source of truth.
+
+nameSpace: reactor
+name: WorkflowProgrammeReconciler
+version: 1.0.0
+description: >-
+  Every 60s: reconcile every active programme — adopt or re-arm in-flight dispatches
+  by dispatch id, promote ready packages, verify pushed outcomes with gh only when a
+  claim cannot be trusted, escalate stalls once per SLA window, settle finished
+  programmes, and dispatch at most one child per ready package.
+author: Reactor
+tags:
+  - reactor
+  - workflow
+  - programme
+  - reconciler
+  - orchestration
+  - scheduler
+
+metadata:
+  # Comfortably below the minute cadence: a tick that hangs past its lease is
+  # recovered by the next tick, not by a second concurrent run.
+  timeout: 300000
+  retryPolicy:
+    maxAttempts: 1
+    backoffStrategy: linear
+    initialDelay: 5000
+
+inputs:
+  programmeId:
+    type: string
+    required: false
+    description: >-
+      Reconcile exactly one programme (ops/debugging). Omit to reconcile every
+      active or paused programme.
+  limit:
+    type: number
+    required: false
+    default: 25
+    description: Maximum number of programmes to reconcile in one tick.
+  staleMs:
+    type: number
+    required: false
+    default: 120000
+    description: >-
+      Age at which a `dispatching` package with no child found by dispatch id is
+      re-armed. Two ticks. Must exceed the child's start latency.
+  maxDispatchesPerTick:
+    type: number
+    required: false
+    default: 4
+    description: Children started per programme per tick.
+  maxVerificationsPerTick:
+    type: number
+    required: false
+    default: 3
+    description: >-
+      External `gh` calls per programme per tick. A transient gh failure is recorded
+      and never blocks a wave.
+
+outputs:
+  programmes:
+    type: number
+    source: step.reconcile.result.programmes
+    description: Programmes reconciled this tick.
+  dispatched:
+    type: number
+    source: step.reconcile.result.dispatched
+    description: Children started this tick.
+  settled:
+    type: number
+    source: step.reconcile.result.settled
+    description: Programmes that reached a terminal state this tick.
+
+steps:
+  # The whole tick. `reconcile` is idempotent and single-flight; it returns a summary
+  # rather than throwing for a programme another tick holds (`outcome: leased`).
+  - id: reconcile
+    name: Reconcile programmes
+    type: service_invoke
+    config:
+      service: reactor.WorkflowProgrammeService@1.0.0
+      method: reconcile
+      params:
+        programmeId: "${input.programmeId}"
+        limit: "${input.limit}"
+        staleMs: "${input.staleMs}"
+        maxDispatchesPerTick: "${input.maxDispatchesPerTick}"
+        maxVerificationsPerTick: "${input.maxVerificationsPerTick}"
+
+  - id: logTick
+    name: Tick summary
+    type: log
+    dependsOn:
+      - reconcile
+    config:
+      level: info
+      message: >-
+        programme reconcile — programmes=${steps.reconcile.result.programmes}
+        dispatched=${steps.reconcile.result.dispatched}
+        adopted=${steps.reconcile.result.adopted}
+        verified=${steps.reconcile.result.verified}
+        stalled=${steps.reconcile.result.stalled}
+        settled=${steps.reconcile.result.settled}
+      data:
+        programmes: "${steps.reconcile.result.programmes}"
+        dispatched: "${steps.reconcile.result.dispatched}"
+        adopted: "${steps.reconcile.result.adopted}"
+        verified: "${steps.reconcile.result.verified}"
+        stalled: "${steps.reconcile.result.stalled}"
+        settled: "${steps.reconcile.result.settled}"
+
+  - id: done
+    name: Done
+    type: end

@@ -13,6 +13,12 @@ import AgentContinuationModel, {
 } from '../../models/AgentContinuation';
 import ReactorConversationModel from '../../models/ReactorChatState';
 import { StreamingMode } from './types/streaming.types';
+import { ADMIN_ROLES, hasAdministrativeRole, isSystemIdentity } from './identity';
+
+// Shared identity predicates live in `./identity` so the programme reconciler uses
+// the SAME definition of "administrative" and "the system account". Re-exported to
+// keep this module's public surface unchanged.
+export { ADMIN_ROLES, hasAdministrativeRole, isSystemIdentity };
 
 /**
  * reactor.AgentContinuationService@1.0.0
@@ -203,31 +209,6 @@ export function validateConditionParams(params: any): string | undefined {
   return undefined;
 }
 
-/**
- * Roles allowed to read another user's continuations.
- *
- * Mirrors `graphql/resolvers/ReactorAIUsage.ts` deliberately: the platform has one
- * spelling of "administrative" and a second one here would drift.
- */
-export const ADMIN_ROLES = ['ADMIN', 'SUPERADMIN', 'DEVELOPER'];
-
-/** Whether the given Reactory context carries an administrative role. */
-export function hasAdministrativeRole(context: any): boolean {
-  if (!context) return false;
-  if (typeof context.hasRole === 'function') {
-    try {
-      if (ADMIN_ROLES.some((role) => context.hasRole(role) === true)) return true;
-    } catch {
-      /* fall through to the role list */
-    }
-  }
-  const roles: string[] = ((context.user as any)?.roles ?? []) as string[];
-  return (
-    Array.isArray(roles) &&
-    roles.some((role) => ADMIN_ROLES.includes(String(role).toUpperCase()))
-  );
-}
-
 /** States that still have a waiter (or are about to). */
 export const ACTIVE_STATES: ContinuationState[] = ['pending', 'armed', 'firing'];
 
@@ -372,17 +353,8 @@ export function refusal(code: ContinuationRefusalCode, detail?: string): IRegist
   };
 }
 
-/** True when the given user document is the platform's system account. */
-export function isSystemIdentity(user: any): boolean {
-  if (!user) return false;
-  const systemEmail = String(process.env.SYSTEM_USER_EMAIL || '').trim().toLowerCase();
-  const systemId = String(process.env.SYSTEM_USER_ID || '').trim();
-  const email = String(user.email || '').trim().toLowerCase();
-  const id = String(user._id || user.id || '').trim();
-  if (systemEmail && email && email === systemEmail) return true;
-  if (systemId && id && id === systemId) return true;
-  return false;
-}
+// `isSystemIdentity` is defined in `./identity` (shared with the programme
+// reconciler, so the platform keeps one spelling of "the system account").
 
 /**
  * Strict outcome parsing.
