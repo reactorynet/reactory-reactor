@@ -67,7 +67,7 @@ export const COMMUNICATOR_SERVICE_ID = 'communicator.CommunicatorService@1.0.0';
 export const WORKFLOW_SERVICE_ID = 'core.ReactoryWorkflowService@1.0.0';
 
 /** The child workflow an AI engineering package is dispatched to by default. */
-export const DEFAULT_CHILD_WORKFLOW_ID = 'core.ProcessAITicket@1.4.7';
+export const DEFAULT_CHILD_WORKFLOW_ID = 'core.ProcessAITicket@1.4.8';
 
 /** A running package silent for this long is a stall. */
 export const DEFAULT_SLA_MINUTES = 45;

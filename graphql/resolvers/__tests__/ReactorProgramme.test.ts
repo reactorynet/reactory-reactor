@@ -41,7 +41,7 @@ const programmeView = (overrides: Record<string, any> = {}): Record<string, any>
   description: 'two packages',
   state: 'active',
   ownerEmail: 'owner@example.com',
-  childWorkflowId: 'core.ProcessAITicket@1.4.7',
+  childWorkflowId: 'core.ProcessAITicket@1.4.8',
   slaMinutes: 45,
   maxAttempts: 3,
   counts: { ready: 1, pending: 1 },
