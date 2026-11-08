@@ -70,6 +70,8 @@ const EXPECTED_SERVER_TOOL_NAMES: string[] = [
   'getWorkflowStats',
   'getRecentExecutions',
   'controlWorkflowInstance',
+  // Programme reconciler front door
+  'programme',
   // Chat sessions and delegation
   'chats',
   'updateChatData',
