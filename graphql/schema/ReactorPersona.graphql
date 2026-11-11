@@ -194,6 +194,24 @@ type ReactorPersonaResource {
 }
 
 """
+Where the effective content of a persona was resolved from for the current request.
+
+- `module`   — the module's own `ai/persona` defaults
+- `operator` — the server operator's `~/.reactor/ai/persona` overrides
+- `user`     — the calling user's `profiles/<userId>/reactor/ai/persona` overrides
+"""
+type ReactorPersonaSource {
+  """
+  The layer kind: module, operator or user.
+  """
+  source: String
+  """
+  Absolute directory the layer was read from.
+  """
+  path: String
+}
+
+"""
 A pre-defined collection of tools (toolbelt) for a persona.
 """
 type ReactorToolProfile {
@@ -286,6 +304,17 @@ type ReactorPersona {
   Pre-defined collections of tools (toolbelts) for this persona.
   """
   toolProfiles: [ReactorToolProfile]
+
+  """
+  Where this persona's effective content came from for the current request. Only present
+  when a layer above the module default (operator and/or user profile) was applied.
+  """
+  personaSources: [ReactorPersonaSource]
+
+  """
+  True when the persona exists only in the calling user's profile.
+  """
+  userScoped: Boolean
 }
 
 input ReactorMacroInput {

@@ -19,7 +19,7 @@ export const ReloadPersonasMacro: Macro<unknown, unknown> = async (
     return {
       success: true,
       totalLoaded: result.totalLoaded,
-      instructions: `## Personas Reloaded Successfully\n\nSuccessfully reloaded **${result.totalLoaded}** AI personas from the modules and user directories.`
+      instructions: `## Personas Reloaded Successfully\n\nSuccessfully reloaded **${result.totalLoaded}** AI personas from the modules and user directories.\n\n> Per-user profile personas (\`<REACTORY_DATA>/profiles/<USERID>/reactor/ai/persona/<agent>/\`) resolve at request time and are not part of this count — no reload is required after adding or editing one.`
     };
   } catch (err) {
     const errMsg = err instanceof Error ? err.message : 'Unknown error';
@@ -39,7 +39,13 @@ export const ReloadPersonasMacroRegistry: MacroComponentDefinition<typeof Reload
   component: ReloadPersonasMacro,
   category: 'Runtime',
   description: `# reloadPersonas macro
-  Use this macro to dynamically reload all AI personas from disk (module directories and ~/.reactor/ai/persona) into the application memory.
+  Use this macro to dynamically reload the module and operator AI personas from disk
+  (\`<module>/ai/persona\` and \`~/.reactor/ai/persona\`) into the application memory.
+
+  ## Personal personas
+  Per-user profile personas (\`<REACTORY_DATA>/profiles/<USERID>/reactor/ai/persona/<agent>/\`)
+  are resolved at request time for the calling user. They are request-scoped, are never
+  registered in the process-wide model registry, and therefore never need a reload.
 
   ## Usage
   @reloadPersonas()
@@ -61,7 +67,7 @@ export const ReloadPersonasMacroRegistry: MacroComponentDefinition<typeof Reload
     safeForAutoExecution: true,
     function: {
       name: "reloadPersonas",
-      description: "Dynamically reload all AI personas from disk (module directories and ~/.reactor user directory) into memory.",
+      description: "Dynamically reload the module personas and the ~/.reactor operator personas from disk into memory. Per-user profile personas resolve at request time and do not need a reload.",
       parameters: {
         type: "object",
         properties: {},
