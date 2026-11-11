@@ -424,10 +424,18 @@ class AIPersonaProvider
       return null;
     }
 
+    // Read once and classify the failure instead of stat-then-read: the check/use pair is a
+    // TOCTOU race (CodeQL js/file-system-race) and buys nothing — readFileSync already fails
+    // cleanly when the path is absent or is a directory.
     try {
-      if (!fs.existsSync(candidate) || !fs.statSync(candidate).isFile()) return null;
       return fs.readFileSync(candidate, 'utf8');
     } catch (err: any) {
+      const code = err?.code;
+
+      // ENOENT: the layer simply does not override this file.
+      // EISDIR: a directory where a markdown file was expected — also "no override".
+      if (code === 'ENOENT' || code === 'EISDIR') return null;
+
       this.context.error?.(
         `AIPersonaProvider: could not read ${layer.source} layer file ${candidate}: ${err?.message || err}`,
       );
@@ -441,10 +449,12 @@ class AIPersonaProvider
       const candidate = path.join(layer.dir, fileName);
       if (!isPathInside(layer.dir, candidate) || !isPathInsideReal(layer.dir, candidate)) continue;
 
+      // stat only — a preceding existsSync would be a check-then-use race, and statSync
+      // already throws when the candidate is absent.
       try {
-        if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) return candidate;
+        if (fs.statSync(candidate).isFile()) return candidate;
       } catch {
-        // Unreadable candidate — try the next name.
+        // Absent or unreadable candidate — try the next name.
       }
     }
 
