@@ -399,10 +399,36 @@ export interface IToolProfile {
 }
 
 /**
+ * Where the effective content of a persona was resolved from.
+ *
+ * - `module`   — the module's own `ai/persona` defaults (registry).
+ * - `operator` — the process operator's `~/.reactor/ai/persona` overrides.
+ * - `user`     — the calling user's `profiles/<userId>/reactor/ai/persona` overrides.
+ */
+export interface IAIPersonaSource {
+  source: 'module' | 'operator' | 'user';
+  /** Absolute directory the layer was read from. */
+  path: string;
+}
+
+/**
  * Defines the shape fo the AI Persona object
  */
 export interface IAIPersona {
   id: string;
+  /**
+   * Where the effective persona content was resolved from for the current request.
+   *
+   * Only present when a layer above the module default was applied (the operator
+   * `~/.reactor` layer and/or the calling user's profile layer). Clients can use the
+   * `user` entry to badge a persona as personal to the signed-in user.
+   */
+  personaSources?: IAIPersonaSource[];
+  /**
+   * Free-form metadata. `userScoped: true` marks a persona that exists only in the
+   * calling user's profile (a profile-only persona).
+   */
+  metadata?: Record<string, any>;
   modelId?: string;
   /**
    * Tool profiles allow the agent to have different sets of tools enabled dynamically.

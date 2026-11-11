@@ -23,6 +23,224 @@ The system consists of:
 - ✅ Resource management
 - ✅ TypeScript support with full type safety
 
+## Three-layer persona resolution (module → operator → user)
+
+Persona content is resolved from up to **three** layers, lowest precedence first. Layers
+are applied **at request time** by `AIPersonaProvider.listPersonas()` / `getPersona()` —
+adding, editing or deleting a layer file never requires a server restart or `@reloadPersonas()`.
+
+| # | Layer | Root | Trust |
+| - | ----- | ---- | ----- |
+| 1 | **module default** | `<module>/ai/persona/<agent>/` | trusted (code) |
+| 2 | **operator override** | `~/.reactor/ai/persona/<agent>/` | trusted (process operator) |
+| 3 | **calling user** | `<REACTORY_DATA>/profiles/<USERID>/reactor/ai/persona/<agent>/` | **untrusted** |
+
+`<REACTORY_DATA>` is `process.env.REACTORY_DATA`, falling back to `process.env.APP_DATA_ROOT`.
+If neither is set, layer 3 is skipped (debug log) and layers 1-2 behave exactly as before.
+
+### Directory contract
+
+Every layer folder is optional and may contain any subset of:
+
+```
+<agent>/
+  agent.yaml      # or agent.yml — merged into the persona
+  persona.md      # replaces the `persona` markdown
+  features.md     # replaces the `features` markdown
+  prompts/        # files referenced by prompts.<key>.files
+    *.md
+  avatar.png      # per-user avatar (layer 3 only; never copied elsewhere)
+```
+
+Within a single layer the files compose in this order, each one winning over what came
+before for the fields it sets:
+
+1. `agent.yaml` / `agent.yml` — `mergeWithExisting()` (scalars, config, tools, macros,
+   resources, prompts)
+2. `persona.md` — replaces `persona` when non-empty
+3. `features.md` — replaces `features` when non-empty
+
+`prompts.system` is rebuilt **once**, after every layer has been applied — never per layer,
+which would discard the earlier text. The trigger matches the pre-change `~/.reactor`
+behaviour: any layer that contributed an `agent.yaml` (even one that only sets `name`), a
+`persona.md` or a `features.md` marks the persona for one rebuild from the merged
+`persona` + `features`. **Trade-off:** a layer that ships its own `prompts.system` has that
+content replaced by the generated prompt whenever the persona also has `persona`/`features`
+— this is long-standing operator behaviour, pinned by test AC20, not a new restriction.
+
+### Which folder is used for a persona id?
+
+Both the operator and the user layer use the same candidate list (one helper, so they
+cannot drift):
+
+1. exact id — `ReactorAIPersona`
+2. lower-case id — `reactoraipersona`
+3. id with `aipersona` stripped, lower-cased — `reactor`
+
+The first candidate that exists as a directory wins.
+
+### Overrides vs. profile-only personas
+
+- If the profile directory matches an **existing** persona id, its contents override the
+  module/operator layers for that user only. Other users keep the lower-layer result.
+- If a profile directory's `agent.yaml` declares an id the registry does not know (for
+  example `PersonalAgent` in `profiles/<user>/reactor/ai/persona/personal-agent/`), that
+  persona is **profile-only**: it appears in `listPersonas()` and resolves through
+  `getPersona(id)` for its owner, and nowhere else.
+- Profile-only personas are **never** registered with `modelRegistry.register()`. They are
+  request-scoped values: another user cannot see them, they do not survive into the global
+  registry, and they disappear when the profile folder does.
+- If a profile folder and a module define the same id, `listPersonas()` returns exactly one
+  entry, with the profile content.
+
+A profile persona carries `personaSources: [{ source: 'user', path }]` (and
+`metadata.userScoped: true` for profile-only personas) so clients can badge it as personal.
+
+### Omitting a field leaves the lower layer alone
+
+An override is *additive*: a field the layer does not mention keeps the value the lower
+layer produced. This applies to `tools` (including `tools.custom`/`macros.custom`, which are
+ignored outright for user layers), `macros`, `toolProfiles`, `resources`, `config`, `prompts`
+and the markdown files. So an `agent.yaml` containing only
+
+```yaml
+id: "ReactorAIPersona"
+name: "Reactor (my setup)"
+```
+
+renames the persona and keeps its tools, resources and prompts untouched. Declaring a field
+**replaces** it with the declared value (and for tools/toolProfiles, with the intersected
+subset the persona already grants).
+
+### One folder is one layer
+
+`listProfilePersonaDirs()` consumes every directory under `persona/` exactly once. A folder
+whose name is a candidate for an existing persona id (for example `persona/reactor/`) but
+whose `agent.yaml` declares a different id is used as that persona's **override**; it is not
+additionally emitted as a profile-only persona under the declared id. Keep folder names and
+declared ids aligned to avoid confusing results.
+
+### Profile-only personas and model selection
+
+A profile layer may not choose `modelId`/`providerId` (SEC-5 hardening). An **override** keeps
+the underlying persona's model/provider. A **profile-only** persona has no lower layer to
+inherit from, so it falls back to the loader defaults (`gemini-2.5-pro` / `google`). On a
+deployment configured for a different provider, give the user an operator-level persona to
+override instead of declaring one from scratch.
+
+### Security restrictions for the user layer
+
+The profile layer is user-authored input, so the loader runs it with restrictions the
+trusted layers do not use:
+
+| Requirement | Behaviour |
+| ----------- | --------- |
+| **User id** | Taken from `context.user` only (`_id` then `id`, first candidate that validates wins), validated with `^[A-Za-z0-9][A-Za-z0-9._@-]{0,127}$`. `.`, `..`, `/`, `\` and null bytes are rejected before any read. A user id is never read from request arguments. |
+| **Containment** | `<dataRoot>/profiles/<userId>` and its `reactor/ai` subtree are **canonicalised with `realpath`** and must resolve inside `realpath(<dataRoot>/profiles)`, keeping the `<userId>` basename. The canonical root is then used as `restrictTo` for every later `path.relative`/`realpath` check, so a symlinked `profiles/<userId>` or `profiles/<userId>/reactor/ai` cannot borrow another user's tree. If the tree does not exist, the layer is skipped. |
+| **Environment expansion** | `${ENV}` / `${ENV:-default}` substitution is **disabled** for user layers (`processEnvironmentVars: false`). Otherwise a user could read any server variable (DB URIs, provider keys, JWT secrets) through `description` or `prompts.system.content`, both of which the `ReactorPersonas` query returns. The trusted module and `~/.reactor` layers keep substitution. |
+| **Prompt includes** | `prompts.<key>.files` may only name **relative** paths inside the user's `reactor/ai` tree. Absolute paths and `..` are skipped with a warning and never read. |
+| **Tools** | The layer's resolved tools are intersected with the tools the underlying persona already grants. `tools.custom` and `macros.custom` are ignored, and so are macros that are not already granted. `toolProfiles[].tools` is intersected the same way (a tool profile is a second door to the same registry), and profiles left with nothing permitted are dropped. A profile-only persona starts with **no tools** — an untrusted layer can narrow capabilities, never add them. |
+| **Provider config** | Only `config.defaultSearchIndexes` and `config.streamingPace` are copied from the layer. `apiKey`, `apiBaseURL`, `apiEndpoint`, `apiOrg`, `apiVersion` and `project` are ignored, so a user cannot redirect provider traffic or inject credentials. |
+| **Model selection** | `modelId` and `providerId` are also ignored for user layers. They cannot leak credentials, but they would let a user bill an arbitrary (possibly expensive) configured model to the service. Provider/model choice stays with the module or operator persona. |
+| **Merge mode** | `merge.mode` is forced to `merge`; a user layer cannot replace or re-identify a persona it only overrides. |
+| **Avatars** | Resolved from the user's own folder (`.../persona/<agent>/avatar.png`). Nothing is written into the shared `profiles/reactor/personas/**` namespace, so two users with the same persona id cannot collide. |
+| **Failure isolation** | Invalid YAML, unreadable files and rejected includes are logged and skipped; `listPersonas()` and chat turns still return the lower-layer persona. |
+| **Logging** | Only source paths and dropped tool/macro names are logged — never secret values from the layer. |
+
+### Sample profile tree
+
+```
+<REACTORY_DATA>/profiles/65f0c1d2e3a4b5c6d7e8f901/reactor/ai/persona/reactor/
+  agent.yaml
+  persona.md
+  features.md
+  prompts/
+    00-identity.md
+    10-house-rules.md
+  avatar.png
+```
+
+`agent.yaml` — only the fields the user wants to change:
+
+```yaml
+id: "ReactorAIPersona"          # must match the persona being personalised
+name: "Reactor (my setup)"
+description: "My personal Reactor assistant"
+tools:
+  includes:                     # may only repeat tools the persona already grants
+    - readFile
+config:
+  defaultSearchIndexes:         # non-sensitive keys only
+    - "my-project-docs"
+  streamingPace:
+    minChunkSize: 40
+prompts:
+  system:
+    files:
+      - "prompts/00-identity.md"
+      - "prompts/10-house-rules.md"
+    role: "system"
+```
+
+`persona.md` — wins over the `persona` field above:
+
+```markdown
+# Reactor — personal
+
+You are my Reactor assistant. Keep answers short and cite file paths.
+```
+
+`features.md` — wins over `features`:
+
+```markdown
+## How I want you to work
+
+- Prefer TypeScript.
+- Show the exact command you ran.
+```
+
+`prompts/00-identity.md` and `prompts/10-house-rules.md` are concatenated in order (a
+missing file is logged and skipped). Includes are only read from inside
+`profiles/<userId>/reactor/ai/`.
+
+### Declaring a persona that exists only for one user
+
+`profiles/<userId>/reactor/ai/persona/personal-agent/agent.yaml`:
+
+```yaml
+id: "PersonalAgent"
+name: "Personal Agent"
+description: "A persona that exists only for me"
+persona: |
+  # Personal Agent
+  You help me with my own notes and tasks.
+features: |
+  ## Scope
+  Personal projects only.
+prompts:
+  system:
+    content: "${buildSystemPrompt()}"
+    role: "system"
+```
+
+It appears in that user's `listPersonas()` (marked `metadata.userScoped: true`) and is
+absent for every other user and from `modelRegistry.getModels({ name: '*aipersona' })`.
+
+### Limitations
+
+- **No user identity in system/workflow contexts.** `ProcessAITicket`, scheduled agents
+  and other non-user runs have no `context.user`, so they resolve layers 1-2 only. A
+  personal persona is therefore not available to background automation.
+- **No caching.** Nothing is cached between calls, so edits are visible immediately. The
+  cost per `listPersonas()` / `getPersona()` is a `realpath` + `stat` per layer directory
+  for every registry persona, plus a full read, YAML parse and validation of **every**
+  profile `agent.yaml` (needed to learn its declared id). On a busy chat path with many
+  personas this is real work; if latency shows up, a `(path, mtimeMs, size)`-keyed cache
+  cleared by `reloadPersonas()` is the intended remedy.
+- **No UI, persistence or cross-device sync.** Profile personas are files on the server.
+- **Profile persona tools.** Because a profile-only persona has no underlying grant, it
+  has no tools. Tool access must be granted by a module or operator persona.
+
 ## Quick Start
 
 ### 1. Install Dependencies
@@ -330,6 +548,15 @@ interface PersonaLoaderOptions {
   baseDir?: string;                // Directory relative prompt `files` resolve against.
                                    // Set automatically by loadFromFile/loadFromDirectory.
   userRoles?: string[];            // Roles used for ${roleCapabilities()}. Default: ['USER']
+  processEnvironmentVars?: boolean;// Default: true. Pass false for untrusted layers.
+
+  // ── Restrictions for UNTRUSTED (user profile) layers ────────────────────
+  // All optional; omitting them preserves the historical trusted-layer behaviour.
+  allowedTools?: string[];         // Tool names the layer may resolve (never widens).
+  disallowCustomTools?: boolean;   // Ignore `tools.custom` and `macros.custom`.
+  sanitizeConfig?: boolean;        // Copy only defaultSearchIndexes / streamingPace.
+  restrictPromptFilesTo?: string;  // Root every prompts.<key>.files entry must stay inside.
+  restrictMergeMode?: boolean;     // Force merge semantics (ignore merge.mode).
 }
 ```
 
