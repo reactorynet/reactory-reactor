@@ -2978,7 +2978,12 @@ describe('ProcessAITicket commits the work before it publishes (D1)', () => {
     expect(commitScript).toContain('git rm -r --cached --quiet --ignore-unmatch -- .ai-agent');
     // Staging and committing must be separate invocations, so a failed add cannot
     // suppress the commit, and a failed commit cannot be mistaken for a failed push.
-    expect(commitScript).toContain("execSync('git commit' + identity");
+    // PROCESS-001: the commit no longer interpolates an identity STRING - the identity
+    // travels as env (author/committer resolved from the signing configuration), so the
+    // two invocations stay separate and a headless server still cannot fail on identity.
+    expect(commitScript).toContain('git commit -m');
+    expect(commitScript).toContain('env: commitEnv');
+    expect(commitScript).not.toContain('-c user.email');
   });
 });
 
@@ -3379,5 +3384,358 @@ describe('core.ProcessAITicket programme outcome reporting', () => {
     expect(runScript(scriptOf('readProgrammeBaselineBlock'), { GUARD: 'not json' }, cwd)).toContain(
       'without a reason',
     );
+  });
+});
+
+/**
+ * The signed-commit pipeline (PROCESS-001 / REACTORY-302016408/20261111/432598720).
+ *
+ * The incident: two engineer-authored commits reached origin with a mathematically valid
+ * signature (%G? = G) that GitHub reported as verified:false (reason "no_user"), because
+ * the committer was an identity no account owns. Every branch with required_signatures
+ * therefore refused the merge, and the only repair was to re-create the commits by hand.
+ *
+ * These tests execute the real `cli_command` scripts against throwaway git repositories.
+ * They deliberately do NOT require a working GPG key: the signing-disabled path and the
+ * refusal path are both fully exercisable, and the verification gate is driven with a
+ * commit whose %G? is not G, which is exactly the condition that must block publication.
+ */
+describe('ProcessAITicket signed-commit pipeline (PROCESS-001)', () => {
+  const commitScript = scriptOf('commitChanges');
+  const guardScript = scriptOf('guardEngineerCommits');
+  const verifyScript = scriptOf('verifyCommitSignatures');
+
+  /** No ambient user identity may leak into these fixtures. */
+  const ISOLATED_CONFIG = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+
+  interface IScriptResult {
+    status: number;
+    stdout: string;
+    stderr: string;
+  }
+
+  /** Like runScript, but returns the exit instead of throwing: commitChanges ends in 1. */
+  const runScriptResult = (
+    script: string,
+    env: Record<string, string>,
+    cwd: string,
+  ): IScriptResult => {
+    try {
+      const stdout = execFileSync(process.execPath, ['-e', script], {
+        cwd,
+        env: Object.assign({}, process.env, env),
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      return { status: 0, stdout: String(stdout), stderr: '' };
+    } catch (error: any) {
+      return {
+        status: typeof error.status === 'number' ? error.status : 1,
+        stdout: String(error.stdout || ''),
+        stderr: String(error.stderr || ''),
+      };
+    }
+  };
+
+  const onBranchWithWork = (dir: string, branch: string = 'feature/test'): void => {
+    sh('git checkout -q -b ' + branch, dir);
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'src', 'work.ts'), 'export const v = 1;\n', 'utf8');
+  };
+
+  const readEvidence = (dir: string, name: string): any =>
+    JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', name), 'utf8'));
+
+  // ── D1: the committer identity ────────────────────────────────────────────
+  describe('committer identity (D1)', () => {
+    it('refuses to commit when signing is enabled and user.email is missing', () => {
+      const dir = tempDir('pa-identity-');
+      try {
+        initRepo(dir);
+        sh('git config commit.gpgsign true', dir);
+        sh('git config user.signingkey ABCDEF0123456789', dir);
+        sh('git config --unset user.email', dir);
+        fs.appendFileSync(path.join(dir, 'README.md'), 'change\n', 'utf8');
+
+        const result = runScriptResult(commitScript, Object.assign({ WT: dir, REF: 'REF-1' }, ISOLATED_CONFIG), dir);
+
+        expect(result.status).toBe(1);
+        const payload = JSON.parse(result.stdout);
+        expect(payload.committed).toBe(false);
+        // Reported as a commit failure so publishReadinessGate blocks instead of pushing.
+        expect(payload.reason).toBe('git commit failed');
+        // The message must name BOTH pieces of missing configuration.
+        expect(payload.error).toContain('user.email is not configured');
+        expect(payload.error).toContain('user.signingkey');
+        // Never the invented address from the incident.
+        expect(payload.error).not.toContain('ai@reactory.net');
+        expect(payload.error).toContain('refuses to invent');
+
+        // No commit was created and the work is still in the working tree.
+        expect(sh('git log --oneline', dir).trim().split('\n').length).toBe(1);
+        expect(sh('git status --porcelain', dir)).toContain('README.md');
+      } finally {
+        removeDir(dir);
+      }
+    });
+
+    it('keeps the key owner as committer (never the bot) when signing is enabled', () => {
+      const dir = tempDir('pa-identity-');
+      try {
+        initRepo(dir);
+        sh('git config user.email owner@example.com', dir);
+        sh('git config user.name "Key Owner"', dir);
+        sh('git config commit.gpgsign true', dir);
+        sh('git config user.signingkey ABCDEF0123456789', dir);
+        fs.appendFileSync(path.join(dir, 'README.md'), 'change\n', 'utf8');
+
+        const result = runScriptResult(commitScript, Object.assign({ WT: dir, REF: 'REF-1' }, ISOLATED_CONFIG), dir);
+
+        if (result.status === 0) {
+          // A working key exists on this machine: the committer must be its owner and the
+          // author may remain the bot identity.
+          const payload = JSON.parse(result.stdout);
+          expect(payload.identity.signing).toBe(true);
+          expect(payload.identity.committerIsKeyOwner).toBe(true);
+          expect(payload.committer.email).toBe('owner@example.com');
+          expect(payload.author.email).toBe('reactor@reactory.net');
+        } else {
+          // No usable key in CI: the failure must be the SIGNING failure, never the
+          // identity refusal - the step resolved an identity and handed it to git.
+          const payload = JSON.parse(result.stdout);
+          expect(String(payload.error)).not.toContain('user.email is not configured');
+          expect(String(payload.error)).toMatch(/sign|gpg|commit/i);
+        }
+
+        // Statically: the signing branch may set the AUTHOR identity only. A committer
+        // override there is precisely the defect that made the commits unverifiable.
+        const signingBranch = commitScript.slice(
+          commitScript.indexOf('if (signingEnabled) {'),
+          commitScript.indexOf('} else if (configuredEmail)'),
+        );
+        expect(signingBranch).toContain('GIT_AUTHOR_EMAIL');
+        expect(signingBranch).not.toContain('GIT_COMMITTER_EMAIL');
+      } finally {
+        removeDir(dir);
+      }
+    });
+
+    it('commits with the configured identity when signing is disabled', () => {
+      const dir = tempDir('pa-identity-');
+      try {
+        initRepo(dir);
+        sh('git config user.email owner@example.com', dir);
+        sh('git config user.name "Key Owner"', dir);
+        onBranchWithWork(dir);
+
+        const payload = runJson(commitScript, Object.assign({ WT: dir, REF: 'REF-2' }, ISOLATED_CONFIG), dir);
+
+        expect(payload.committed).toBe(true);
+        expect(payload.identity.signing).toBe(false);
+        expect(payload.committer.email).toBe('owner@example.com');
+        expect(payload.author.email).toBe('owner@example.com');
+        expect(sh('git rev-list --count master..HEAD', dir)).toBe('1');
+      } finally {
+        removeDir(dir);
+      }
+    });
+
+    it('falls back to the bot identity only when signing is off and nothing is configured', () => {
+      const dir = tempDir('pa-identity-');
+      try {
+        initRepo(dir);
+        sh('git config --unset user.email', dir);
+        sh('git config --unset user.name', dir);
+        onBranchWithWork(dir);
+
+        const payload = runJson(commitScript, Object.assign({ WT: dir, REF: 'REF-3' }, ISOLATED_CONFIG), dir);
+
+        expect(payload.committed).toBe(true);
+        expect(payload.committer.email).toBe('reactor@reactory.net');
+        expect(payload.committer.email).not.toBe('ai@reactory.net');
+        expect(sh('git rev-list --count master..HEAD', dir)).toBe('1');
+      } finally {
+        removeDir(dir);
+      }
+    });
+  });
+
+  // ── D2: engineer-created commits are neutralised ──────────────────────────
+  describe('engineer-commit guard (D2)', () => {
+    it('detects, records and soft-resets an engineer commit, keeping the work', () => {
+      const dir = tempDir('pa-guard-');
+      try {
+        initRepo(dir);
+        sh('git checkout -q -b feature/test', dir);
+        fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+        fs.writeFileSync(path.join(dir, 'src', 'work.ts'), 'export const v = 1;\n', 'utf8');
+        // Exactly the incident: the engineer committed with an invented committer.
+        sh(
+          'git add -A && git -c user.name="Reactor AI" -c user.email="reactor@reactory.net" commit -qm "engineer commit"',
+          dir,
+        );
+        // Work the reset must not disturb: one staged/unstaged edit and one new file.
+        fs.writeFileSync(path.join(dir, 'src', 'work.ts'), 'export const v = 2;\n', 'utf8');
+        fs.writeFileSync(path.join(dir, 'src', 'extra.ts'), 'export const extra = true;\n', 'utf8');
+
+        const result = runJson(guardScript, { WT: dir }, dir);
+
+        // (a) the guard resets it
+        expect(result.recovered).toBe(true);
+        expect(result.state).toBe('recovered');
+        expect(result.commits).toBe(1);
+        expect(result.base).toBe('master');
+        expect(String(result.offendingLog)).toContain('engineer commit');
+        expect(sh('git rev-parse HEAD', dir)).toBe(sh('git rev-parse master', dir));
+
+        // (b) the working tree is preserved
+        expect(fs.readFileSync(path.join(dir, 'src', 'work.ts'), 'utf8')).toContain('v = 2');
+        expect(fs.existsSync(path.join(dir, 'src', 'extra.ts'))).toBe(true);
+        expect(sh('git status --porcelain', dir)).toContain('extra.ts');
+
+        // The evidence the ticket comment and the reviewer read.
+        const evidence = readEvidence(dir, 'engineer-commits.json');
+        expect(evidence.recovered).toBe(true);
+        expect(evidence.commits).toBe(1);
+        expect(String(evidence.offendingLog)).toContain('engineer commit');
+
+        // (c) exactly one pipeline commit remains ahead of base, and it is the pipeline's.
+        const commit = runJson(commitScript, { WT: dir, REF: 'REF-1' }, dir);
+        expect(commit.committed).toBe(true);
+        expect(sh('git rev-list --count master..HEAD', dir)).toBe('1');
+        expect(sh('git log --format=%s -1', dir)).toContain('AI engineering run:');
+        expect(sh('git log --oneline master..HEAD', dir)).not.toContain('engineer commit');
+      } finally {
+        removeDir(dir);
+      }
+    });
+
+    it('leaves a run with no engineer commit completely alone', () => {
+      const dir = tempDir('pa-guard-');
+      try {
+        initRepo(dir);
+        // Uncommitted work only: no engineer commit, so there is nothing to recover.
+        fs.writeFileSync(path.join(dir, 'work.ts'), 'export const x = 1;\n', 'utf8');
+        const head = sh('git rev-parse HEAD', dir);
+
+        const result = runJson(guardScript, { WT: dir }, dir);
+
+        expect(result.recovered).toBe(false);
+        expect(result.state).toBe('clean');
+        expect(result.commits).toBe(0);
+        expect(sh('git rev-parse HEAD', dir)).toBe(head);
+      } finally {
+        removeDir(dir);
+      }
+    });
+
+    it('fails closed when the base cannot be resolved', () => {
+      const dir = tempDir('pa-guard-');
+      try {
+        // A default branch that is neither main nor master, and no origin to ask.
+        initRepo(dir, 'trunk');
+
+        const result = runJson(guardScript, { WT: dir }, dir);
+
+        expect(result.state).toBe('blocked');
+        expect(result.recovered).toBe(false);
+        expect(String(result.error)).toContain('Refusing to publish');
+        expect(readEvidence(dir, 'engineer-commits.json').state).toBe('blocked');
+        // The reader turns an unreadable/missing artefact into a block as well.
+        expect(runScript(scriptOf('readEngineerCommitState'), { WT: dir }, dir)).toBe('blocked');
+        expect(runScript(scriptOf('readEngineerCommitState'), { WT: path.join(dir, 'nope') }, dir)).toBe(
+          'blocked',
+        );
+      } finally {
+        removeDir(dir);
+      }
+    });
+  });
+
+  // ── D3: nothing unverifiable is published ─────────────────────────────────
+  describe('pre-push signature verification (D3)', () => {
+    it('is a no-op when commit.gpgsign is not enabled', () => {
+      const dir = repoWithWork();
+      try {
+        // repoWithWork sets commit.gpgsign false locally.
+        expect(runScript(verifyScript, { WT: dir }, dir)).toBe('ok');
+
+        const evidence = readEvidence(dir, 'commit-verification.json');
+        expect(evidence.signed).toBe(false);
+        expect(evidence.state).toBe('ok');
+        expect(evidence.checked).toBe(0);
+      } finally {
+        removeDir(dir);
+      }
+    });
+
+    it('rejects a non-G %G? value and blocks publication', () => {
+      const dir = tempDir('pa-verify-');
+      try {
+        initRepo(dir);
+        onBranchWithWork(dir);
+        sh('git add -A && git commit -qm "unsigned work"', dir); // %G? = N
+
+        // Signing is enabled for the repository, but the commit ahead of base is not
+        // verifiably signed. This is the exact shape of the incident.
+        sh('git config commit.gpgsign true', dir);
+        sh('git config user.signingkey ABCDEF0123456789', dir);
+
+        expect(runScript(verifyScript, { WT: dir }, dir)).toBe('blocked');
+
+        const evidence = readEvidence(dir, 'commit-verification.json');
+        expect(evidence.signed).toBe(true);
+        expect(evidence.state).toBe('blocked');
+        expect(evidence.checked).toBe(1);
+        expect(evidence.unverifiable.length).toBe(1);
+        expect(evidence.unverifiable[0].signature).not.toBe('G');
+        expect(evidence.unverifiable[0].committerEmail).toBe('test@example.com');
+        expect(evidence.signingKey).toBe('ABCDEF0123456789');
+        expect(String(evidence.error)).toContain('signing key');
+
+        // The readiness gate consumes that verdict and owns the block, the ticket
+        // comment, the human task and the hard halt, so nothing is pushed. The detail
+        // names the SHA, the committer and the signing key - what a human needs.
+        const readiness = runScript(
+          scriptOf('readPublishReadiness'),
+          { WT: dir, BRANCH: 'feature/test', COMMIT: JSON.stringify({ committed: true, sha: evidence.unverifiable[0].sha }) },
+          dir,
+        );
+        expect(readiness).toBe('blocked');
+
+        const readinessEvidence = readEvidence(dir, 'publish-readiness.json');
+        expect(readinessEvidence.state).toBe('blocked');
+        expect(readinessEvidence.commitVerification).toBe('blocked');
+        expect(String(readinessEvidence.detail)).toContain(String(evidence.unverifiable[0].sha).slice(0, 12));
+        expect(String(readinessEvidence.detail)).toContain('test@example.com');
+        expect(String(readinessEvidence.detail)).toContain('ABCDEF0123456789');
+        expect(String(readinessEvidence.detail)).toContain('Nothing was pushed');
+      } finally {
+        removeDir(dir);
+      }
+    });
+
+    it('does not block a run whose verification artefact is absent', () => {
+      const dir = repoWithWork();
+      try {
+        // Fail open on an ABSENT artefact is deliberate: the step order guarantees it
+        // exists in production, and a fixture or an older provision must not be stranded.
+        // An unverifiable COMMIT still blocks - that is the condition that matters (the
+        // previous test drives it).
+        expect(String(fs.existsSync(path.join(dir, '.ai-agent', 'commit-verification.json')))).toBe(
+          'false',
+        );
+        expect(
+          runScript(
+            scriptOf('readPublishReadiness'),
+            { WT: dir, BRANCH: 'feature/test', COMMIT: JSON.stringify({ committed: true, sha: 'x' }) },
+            dir,
+          ),
+        ).toBe('ok');
+        expect(readEvidence(dir, 'publish-readiness.json').commitVerification).toBe('not_checked');
+      } finally {
+        removeDir(dir);
+      }
+    });
   });
 });

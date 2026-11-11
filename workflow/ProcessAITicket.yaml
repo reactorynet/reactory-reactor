@@ -2241,10 +2241,273 @@ steps:
               captureStdout: true
               captureStderr: true
 
+        # ── Engineer-commit guard (PROCESS-001, defect D2) ──────────────────────
+        # The engineer is told never to commit, and it sometimes does. The only
+        # concession until now was untracking .ai-agent inside commitChanges: the
+        # commits themselves were published verbatim - including the ones made with an
+        # identity no GitHub account owns, which GitHub reports as verified:false and
+        # which block a merge into any branch that requires signed commits.
+        #
+        # detectPrematurePublish does NOT cover this: it looks for a PUSHED branch on
+        # origin, not for local commits ahead of the base.
+        #
+        # This guard runs immediately after the engineer session and BEFORE the
+        # reviewer, so the reviewer reviews exactly what will be published and the
+        # pipeline owns the single published commit. `git reset --soft <base>` moves
+        # HEAD only: the index and the working tree survive, so no work is lost - only
+        # the agent-authored commit objects (and the identity they carried) are
+        # discarded.
+        #
+        # FAIL CLOSED. If the reset cannot be proven, the run stops. An
+        # agent-authored commit is never published.
+        - id: guardEngineerCommits
+          name: Neutralise commits the engineer created
+          type: cli_command
+          dependsOn: verifyWorkspaceNote
+          config:
+            command: node
+            args:
+              - -e
+              - |
+                const fs = require('fs');
+                const path = require('path');
+                const { execSync } = require('child_process');
+
+                const wt = String(process.env.WT || '').trim();
+                const dir = path.join(wt, '.ai-agent');
+                const evidencePath = path.join(dir, 'engineer-commits.json');
+
+                const git = (cmd) => execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString().trim();
+                const tryGit = (cmd) => { try { return git(cmd); } catch (e) { return ''; } };
+
+                const write = (payload) => {
+                  try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* best effort */ }
+                  try { fs.writeFileSync(evidencePath, JSON.stringify(payload, null, 2), 'utf8'); } catch (e) { /* best effort */ }
+                };
+                const emit = (payload) => {
+                  write(payload);
+                  process.stdout.write(JSON.stringify(payload));
+                  process.exit(0);
+                };
+
+                // The base is resolved the way prepareWorktree resolves it: origin/<remote
+                // default> first. The local refs are a documented fallback for a checkout
+                // whose origin/HEAD is unset (a fixture repository, or a clone with no
+                // remote); the source is recorded so a stale base can never be silent.
+                const resolveBase = () => {
+                  const symbolic = tryGit('git symbolic-ref --quiet refs/remotes/origin/HEAD');
+                  if (symbolic) {
+                    const name = symbolic.split('refs/remotes/origin/').pop();
+                    if (name && tryGit('git rev-parse --verify --quiet origin/' + name)) {
+                      return { ref: 'origin/' + name, source: 'origin-HEAD' };
+                    }
+                  }
+                  const remoteCandidates = ['main', 'master'];
+                  for (let i = 0; i < remoteCandidates.length; i += 1) {
+                    if (tryGit('git rev-parse --verify --quiet origin/' + remoteCandidates[i])) {
+                      return { ref: 'origin/' + remoteCandidates[i], source: 'origin-fallback-' + remoteCandidates[i] };
+                    }
+                  }
+                  const localCandidates = ['main', 'master'];
+                  for (let i = 0; i < localCandidates.length; i += 1) {
+                    if (tryGit('git rev-parse --verify --quiet refs/heads/' + localCandidates[i])) {
+                      return { ref: localCandidates[i], source: 'local-fallback-' + localCandidates[i] };
+                    }
+                  }
+                  return null;
+                };
+
+                if (!wt) {
+                  process.stdout.write(JSON.stringify({ recovered: false, state: 'blocked', commits: 0, error: 'no worktree was resolved' }));
+                  process.exit(0);
+                }
+
+                const base = resolveBase();
+                if (!base) {
+                  emit({
+                    recovered: false,
+                    state: 'blocked',
+                    commits: 0,
+                    base: null,
+                    error: 'no base ref could be resolved (origin/HEAD, origin/main, origin/master, main or master), so commits created by the engineer cannot be separated from commits this run may publish. Refusing to publish an agent-authored commit.',
+                    checkedAt: new Date().toISOString(),
+                  });
+                }
+
+                const baseSha = tryGit('git rev-parse ' + base.ref);
+                const headBefore = tryGit('git rev-parse HEAD');
+                const rawCount = tryGit('git rev-list --count ' + base.ref + '..HEAD');
+
+                if (!/^[0-9]+$/.test(rawCount)) {
+                  emit({
+                    recovered: false,
+                    state: 'blocked',
+                    commits: 0,
+                    base: base.ref,
+                    baseSource: base.source,
+                    headBefore: headBefore,
+                    error: 'git rev-list --count ' + base.ref + '..HEAD did not produce a number, so the number of engineer-created commits is unknown. Refusing to publish.',
+                    checkedAt: new Date().toISOString(),
+                  });
+                }
+
+                const count = Number(rawCount);
+
+                if (count === 0) {
+                  emit({
+                    recovered: false,
+                    state: 'clean',
+                    commits: 0,
+                    base: base.ref,
+                    baseSource: base.source,
+                    headBefore: headBefore,
+                    headAfter: headBefore,
+                    checkedAt: new Date().toISOString(),
+                  });
+                }
+
+                // The engineer committed. Record the offending log BEFORE the reset, then take
+                // the work back into the index/working tree.
+                const offendingLog = tryGit('git log --oneline ' + base.ref + '..HEAD');
+
+                let resetError = '';
+                try {
+                  git('git reset --soft ' + base.ref);
+                } catch (e) {
+                  resetError = [e && e.stderr ? String(e.stderr).trim() : '', e && e.message ? String(e.message) : String(e)].filter(Boolean).join(' | ');
+                }
+
+                const headAfter = tryGit('git rev-parse HEAD');
+                const recovered = !resetError && !!headAfter && headAfter === baseSha;
+                if (!recovered && !resetError) {
+                  resetError = 'the soft reset did not move HEAD to ' + base.ref + ' (' + String(baseSha).slice(0, 12) + '); HEAD is ' + String(headAfter).slice(0, 12);
+                }
+
+                emit({
+                  recovered: recovered,
+                  state: recovered ? 'recovered' : 'blocked',
+                  commits: count,
+                  base: base.ref,
+                  baseSource: base.source,
+                  baseSha: baseSha,
+                  headBefore: headBefore,
+                  headAfter: headAfter,
+                  offendingLog: offendingLog,
+                  resetError: resetError,
+                  checkedAt: new Date().toISOString(),
+                });
+            env:
+              WT: ${steps.readWorktreePath.outputs.stdout}
+            failOnError: false
+            output:
+              captureStdout: true
+              captureStderr: true
+
+        - id: readEngineerCommitState
+          name: Read the engineer-commit verdict
+          type: cli_command
+          dependsOn: guardEngineerCommits
+          config:
+            command: node
+            args:
+              - -e
+              - |
+                const fs = require('fs');
+                const path = require('path');
+                const wt = String(process.env.WT || '').trim();
+                let record = {};
+                try { record = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'engineer-commits.json'), 'utf8')); } catch (e) { record = {}; }
+                const state = String(record.state || '').trim();
+                // An unreadable artefact is NOT a clean verdict: fail closed.
+                process.stdout.write(state === 'clean' || state === 'recovered' ? state : 'blocked');
+            env:
+              WT: ${steps.readWorktreePath.outputs.stdout}
+            failOnError: false
+            output:
+              captureStdout: true
+
+        - id: describeEngineerCommitState
+          name: Describe the engineer-commit finding
+          type: cli_command
+          dependsOn: readEngineerCommitState
+          config:
+            command: node
+            args:
+              - -e
+              - |
+                const fs = require('fs');
+                const path = require('path');
+                const wt = String(process.env.WT || '').trim();
+                const NL = String.fromCharCode(10);
+                let record = {};
+                try { record = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'engineer-commits.json'), 'utf8')); } catch (e) { record = {}; }
+                const lines = [];
+                const base = String(record.base || 'the base branch');
+                const offending = record.offendingLog ? String(record.offendingLog).split(NL).slice(0, 8) : [];
+
+                if (record.state === 'recovered') {
+                  lines.push('PROCESS VIOLATION - the engineering session created ' + String(record.commits || 0) + ' commit(s) ahead of ' + base + ', which its instructions forbid (the pipeline owns committing, pushing and opening the pull request).');
+                  lines.push('The pipeline recovered them with `git reset --soft ' + base + '`: the index and working tree are intact, so no work was lost, and the pipeline will create the single published commit. The agent-authored commit objects - and the identity they carried - are discarded and will never be published.');
+                  if (offending.length) {
+                    lines.push('Offending log:');
+                    lines.push(offending.join(NL));
+                  }
+                } else {
+                  lines.push('BLOCKED - the engineering session created commits ahead of ' + base + ' and the pipeline could NOT recover them with a soft reset, so the run is stopped rather than publish an agent-authored commit. Nothing was pushed.');
+                  if (record.resetError) lines.push('Reason: ' + String(record.resetError));
+                  if (record.error) lines.push('Reason: ' + String(record.error));
+                  if (offending.length) lines.push('Offending log: ' + offending.join(' | '));
+                }
+
+                process.stdout.write(lines.join(NL));
+            env:
+              WT: ${steps.readWorktreePath.outputs.stdout}
+            failOnError: false
+            output:
+              captureStdout: true
+
+        - id: engineerCommitGate
+          name: Did the engineer commit in violation of its instructions
+          type: condition
+          dependsOn: describeEngineerCommitState
+          config:
+            condition: steps.readEngineerCommitState.stdout !== 'clean'
+            thenSteps:
+              - id: engineerCommitComment
+                name: Comment the engineer-commit recovery on the ticket
+                type: service_invoke
+                config:
+                  service: core.ReactorySupportWorkflowService@1.0.0
+                  method: addComment
+                  params:
+                    ticketId: ${steps.loadTicket.result.id}
+                    comment: ${steps.describeEngineerCommitState.outputs.stdout}
+              - id: engineerCommitHaltGate
+                name: Stop the run when the engineer commits cannot be recovered
+                type: condition
+                dependsOn: engineerCommitComment
+                config:
+                  condition: steps.readEngineerCommitState.stdout === 'blocked'
+                  thenSteps:
+                    - id: engineerCommitHalt
+                      name: Fail closed instead of publishing an agent-authored commit
+                      type: cli_command
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const why = String(process.env.DETAIL || 'the engineer created commits the pipeline could not recover');
+                            process.stderr.write('Publish path stopped: ' + why + String.fromCharCode(10));
+                            process.exit(1);
+                        env:
+                          DETAIL: ${steps.describeEngineerCommitState.outputs.stdout}
+                        failOnError: true
+
         - id: submoduleGuardVerify
           name: Verify submodule state after engineer
           type: cli_command
-          dependsOn: verifyWorkspaceNote
+          dependsOn: engineerCommitGate
           config:
             command: node
             args:
@@ -4855,11 +5118,101 @@ steps:
                               process.exit(0);
                             }
 
-                            // A headless server may have no git identity configured; a commit
-                            // must not fail for that reason alone.
-                            let email = '';
-                            try { email = run('git config user.email').trim(); } catch (e) { email = ''; }
-                            const identity = email ? '' : ' -c user.name="Reactory AI" -c user.email="ai@reactory.net"';
+                            // ---------------------------------------------------------------------------
+                            // COMMITTER IDENTITY (PROCESS-001, defect D1).
+                            //
+                            // INVARIANT: a signed commit is only VERIFIABLE when the COMMITTER is
+                            // the owner of the signing key. GitHub attributes a signature through
+                            // the committer's e-mail, so a mathematically valid signature made by
+                            // an identity no account owns reports verified:false, reason:"no_user",
+                            // and the pull request can never merge into a branch that requires
+                            // signed commits.
+                            //
+                            // The old code invented a 'Reactory AI' bot address whenever no
+                            // identity was configured. That address owns no signing key either, so
+                            // the documented fallback carried exactly the defect it existed to
+                            // avoid - it only looked harmless because it was normally unreachable.
+                            // It is now GONE; this step refuses to invent an identity.
+                            //
+                            //   signing ENABLED  -> the COMMITTER is left to git (user.name /
+                            //                       user.email: the key owner) and is NEVER
+                            //                       overridden. user.email is required; when it is
+                            //                       missing the step fails with an actionable
+                            //                       message naming the missing config and
+                            //                       user.signingkey.
+                            //   signing DISABLED -> the bot identity is acceptable, but only as a
+                            //                       fallback when nothing at all is configured.
+                            //
+                            // The AUTHOR may stay the bot identity: GitHub verifies the
+                            // signature and attributes it via the COMMITTER, so attribution is
+                            // preserved without breaking verification.
+                            //
+                            // GIT_AUTHOR_* / GIT_COMMITTER_* are used rather than `-c user.*`,
+                            // because `-c` sets BOTH identities and cannot express "bot author,
+                            // human committer".
+                            // ---------------------------------------------------------------------------
+                            const BOT_AUTHOR_NAME = 'Reactor AI';
+                            const BOT_AUTHOR_EMAIL = 'reactor@reactory.net';
+
+                            const configValue = (key) => {
+                              try { return run('git config --get ' + key).trim(); } catch (e) { return ''; }
+                            };
+
+                            const signingEnabled = configValue('commit.gpgsign') === 'true';
+                            const signingKey = configValue('user.signingkey');
+                            const gpgFormat = configValue('gpg.format') || 'openpgp';
+                            const configuredName = configValue('user.name');
+                            const configuredEmail = configValue('user.email');
+
+                            const commitEnv = Object.assign({}, process.env);
+                            const identity = { signing: signingEnabled };
+
+                            if (signingEnabled) {
+                              if (!configuredEmail) {
+                                // Fail with the missing configuration named, and never invent one.
+                                const identityError = [
+                                  'commit.gpgsign is true but user.email is not configured in ' + wt + ',',
+                                  'so the committer cannot be the owner of the signing key',
+                                  '(user.signingkey ' + (signingKey || 'is not configured') + ').',
+                                  'A signed commit is only verifiable when the committer is the owner of the signing key:',
+                                  'an invented identity produces a structurally valid signature that GitHub reports as',
+                                  'verified:false (reason "no_user"), and the pull request cannot merge into a branch that',
+                                  'requires signed commits.',
+                                  'Configure the key owner (git config user.email <owner-email> and',
+                                  'git config user.name "<owner-name>") or disable commit.gpgsign for this repository,',
+                                  'then retry. This step refuses to invent a commit identity.',
+                                ].join(' ');
+                                process.stderr.write(identityError + '\n');
+                                process.stdout.write(JSON.stringify({
+                                  committed: false,
+                                  reason: 'git commit failed',
+                                  error: identityError,
+                                  identity: { signing: true, committer: null, signingKey: signingKey || null },
+                                }));
+                                process.exit(1);
+                              }
+
+                              // Committer = key owner (git config, untouched). Author = bot, for attribution.
+                              commitEnv.GIT_AUTHOR_NAME = BOT_AUTHOR_NAME;
+                              commitEnv.GIT_AUTHOR_EMAIL = BOT_AUTHOR_EMAIL;
+                              identity.author = { name: BOT_AUTHOR_NAME, email: BOT_AUTHOR_EMAIL };
+                              identity.committer = { name: configuredName || null, email: configuredEmail };
+                            } else if (configuredEmail) {
+                              identity.author = { name: configuredName || null, email: configuredEmail };
+                              identity.committer = { name: configuredName || null, email: configuredEmail };
+                            } else {
+                              // Signing is off and nothing is configured: the bot identity is acceptable.
+                              commitEnv.GIT_AUTHOR_NAME = BOT_AUTHOR_NAME;
+                              commitEnv.GIT_AUTHOR_EMAIL = BOT_AUTHOR_EMAIL;
+                              commitEnv.GIT_COMMITTER_NAME = BOT_AUTHOR_NAME;
+                              commitEnv.GIT_COMMITTER_EMAIL = BOT_AUTHOR_EMAIL;
+                              identity.author = { name: BOT_AUTHOR_NAME, email: BOT_AUTHOR_EMAIL };
+                              identity.committer = { name: BOT_AUTHOR_NAME, email: BOT_AUTHOR_EMAIL };
+                            }
+
+                            identity.signingKey = signingKey || null;
+                            identity.gpgFormat = gpgFormat;
+                            identity.committerIsKeyOwner = signingEnabled ? true : null;
                             const safe = ('AI engineering run: ' + ref).replace(/["'`$\\]/g, ' ');
 
                             // Stage everything, then take the run artefacts back out of the
@@ -4896,7 +5249,9 @@ steps:
                             try { run('git rm -r --cached --quiet --ignore-unmatch -- .ai-agent'); } catch (e) { /* nothing staged under .ai-agent */ }
 
                             try {
-                              execSync('git commit' + identity + " -m '" + safe + "'", { cwd: wt, stdio: 'pipe' });
+                              // env carries the author/committer identities: `git commit -c user.*`
+                              // cannot set the author without also setting the committer.
+                              execSync("git commit -m '" + safe + "'", { cwd: wt, stdio: 'pipe', env: commitEnv });
                             } catch (e) {
                               const detail = describe(e);
                               console.error('git commit failed: ' + detail);
@@ -4907,6 +5262,15 @@ steps:
                             process.stdout.write(JSON.stringify({
                               committed: true,
                               sha: run('git rev-parse HEAD').trim(),
+                              identity: identity,
+                              committer: {
+                                name: run('git log -1 --format=%cn').trim(),
+                                email: run('git log -1 --format=%ce').trim(),
+                              },
+                              author: {
+                                name: run('git log -1 --format=%an').trim(),
+                                email: run('git log -1 --format=%ae').trim(),
+                              },
                             }));
                         env:
                           WT: ${steps.readWorktreePath.outputs.stdout}
@@ -4925,6 +5289,136 @@ steps:
                           captureStdout: true
                           captureStderr: true
 
+                    - id: verifyCommitSignatures
+                      name: Verify every commit is verifiable before publishing
+                      type: cli_command
+                      dependsOn: commitChanges
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const fs = require('fs');
+                            const path = require('path');
+                            const { execSync } = require('child_process');
+
+                            const wt = String(process.env.WT || '').trim();
+                            const dir = path.join(wt, '.ai-agent');
+                            const evidencePath = path.join(dir, 'commit-verification.json');
+                            const NL = String.fromCharCode(10);
+
+                            const git = (cmd) => execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString().trim();
+                            const tryGit = (cmd) => { try { return git(cmd); } catch (e) { return ''; } };
+
+                            const write = (payload) => {
+                              try { fs.mkdirSync(dir, { recursive: true }); } catch (e) { /* best effort */ }
+                              try { fs.writeFileSync(evidencePath, JSON.stringify(payload, null, 2), 'utf8'); } catch (e) { /* best effort */ }
+                            };
+
+                            const signingEnabled = tryGit('git config --bool --get commit.gpgsign') === 'true';
+                            const signingKey = tryGit('git config --get user.signingkey');
+                            const gpgFormat = tryGit('git config --get gpg.format') || 'openpgp';
+
+                            if (!signingEnabled) {
+                              // Signing is off for this repository: there is no signature to verify
+                              // and the run must publish exactly as it did before this gate existed.
+                              write({
+                                signed: false,
+                                state: 'ok',
+                                checked: 0,
+                                reason: 'commit.gpgsign is not enabled, so there is no signature to verify',
+                                checkedAt: new Date().toISOString(),
+                              });
+                              process.stdout.write('ok');
+                              process.exit(0);
+                            }
+
+                            const resolveBase = () => {
+                              const symbolic = tryGit('git symbolic-ref --quiet refs/remotes/origin/HEAD');
+                              if (symbolic) {
+                                const name = symbolic.split('refs/remotes/origin/').pop();
+                                if (name && tryGit('git rev-parse --verify --quiet origin/' + name)) {
+                                  return { ref: 'origin/' + name, source: 'origin-HEAD' };
+                                }
+                              }
+                              const remoteCandidates = ['main', 'master'];
+                              for (let i = 0; i < remoteCandidates.length; i += 1) {
+                                if (tryGit('git rev-parse --verify --quiet origin/' + remoteCandidates[i])) {
+                                  return { ref: 'origin/' + remoteCandidates[i], source: 'origin-fallback-' + remoteCandidates[i] };
+                                }
+                              }
+                              const localCandidates = ['main', 'master'];
+                              for (let i = 0; i < localCandidates.length; i += 1) {
+                                if (tryGit('git rev-parse --verify --quiet refs/heads/' + localCandidates[i])) {
+                                  return { ref: localCandidates[i], source: 'local-fallback-' + localCandidates[i] };
+                                }
+                              }
+                              return null;
+                            };
+
+                            const base = resolveBase();
+                            if (!base) {
+                              write({
+                                signed: true,
+                                state: 'blocked',
+                                checked: 0,
+                                signingKey: signingKey || null,
+                                gpgFormat: gpgFormat,
+                                error: 'signing is enabled but no base ref could be resolved, so the commits that would be pushed cannot be enumerated or verified',
+                                checkedAt: new Date().toISOString(),
+                              });
+                              process.stdout.write('blocked');
+                              process.exit(0);
+                            }
+
+                            // sha, %G?, committer e-mail. %G? is G for a good signature and
+                            // N/B/U/X/Y/R/E for everything else.
+                            // The format is QUOTED: unquoted, the shell splits `%G?` and `%ce` into
+                            // separate arguments and git reads them as revisions, so the range
+                            // silently enumerates nothing (checked: 0).
+                            const raw = tryGit('git log --format="%H %G? %ce" ' + base.ref + '..HEAD');
+                            const commits = String(raw || '')
+                              .split(NL)
+                              .map((line) => line.trim())
+                              .filter(Boolean)
+                              .map((line) => {
+                                const parts = line.split(' ');
+                                return {
+                                  sha: parts[0] || '',
+                                  signature: parts[1] || '',
+                                  committerEmail: parts.slice(2).join(' ') || '',
+                                };
+                              });
+
+                            const unverifiable = commits.filter((commit) => commit.signature !== 'G');
+                            const state = unverifiable.length === 0 ? 'ok' : 'blocked';
+
+                            const payload = {
+                              signed: true,
+                              state: state,
+                              base: base.ref,
+                              baseSource: base.source,
+                              signingKey: signingKey || null,
+                              gpgFormat: gpgFormat,
+                              checked: commits.length,
+                              unverifiable: unverifiable,
+                              commits: commits,
+                              checkedAt: new Date().toISOString(),
+                            };
+
+                            if (state === 'blocked') {
+                              payload.error = 'a signed commit is only verifiable when the committer is the owner of the signing key: ' + String(unverifiable.length) + ' of ' + String(commits.length) + ' commit(s) ahead of ' + base.ref + ' do not report %G? = G (signing key ' + (signingKey || 'user.signingkey is not configured') + ', format ' + gpgFormat + ')';
+                            }
+
+                            write(payload);
+                            process.stdout.write(state);
+                      env:
+                        WT: ${steps.readWorktreePath.outputs.stdout}
+                      failOnError: false
+                      output:
+                        captureStdout: true
+                        captureStderr: true
+
                     # ── Publish readiness ────────────────────────
                     # This gate runs AFTER commitChanges, which is the only point at which
                     # git can answer "is there a commit to publish?". Evaluated earlier (in
@@ -4939,7 +5433,7 @@ steps:
                     - id: readPublishReadiness
                       name: Check the branch really carries the committed work
                       type: cli_command
-                      dependsOn: commitChanges
+                      dependsOn: verifyCommitSignatures
                       config:
                         command: node
                         args:
@@ -4988,15 +5482,38 @@ steps:
                             const committed = commit.committed === true;
                             const reason = String(commit.reason || '').trim();
                             const commitFailed = !committed && /fail/i.test(reason);
+                            const commitError = String(commit.error || '').trim();
+
+                            // ── Pre-push signature verification (PROCESS-001, defect D3) ────
+                            // The step before this one (verifyCommitSignatures) writes
+                            // .ai-agent/commit-verification.json. A 'blocked' verdict means at
+                            // least one commit ahead of base does not report %G? = G, so GitHub
+                            // would report it verified:false (reason "no_user") and the merge
+                            // would be BLOCKED on any branch that requires signed commits.
+                            // Nothing may be pushed in that state.
+                            //
+                            // A MISSING file is read as "the check did not run" and fails OPEN:
+                            // the production order guarantees the file exists, and a fixture or
+                            // an older provision must not be stranded by an absent artefact.
+                            let verification = {};
+                            try { verification = JSON.parse(fs.readFileSync(path.join(dir, 'commit-verification.json'), 'utf8')); } catch (e) { verification = {}; }
+                            const verificationBlocked = String(verification.state || '') === 'blocked';
 
                             let state = 'ok';
                             let detail = '';
-                            if (commitFailed) {
+                            if (verificationBlocked) {
+                              // The blocking narrative names the SHA, the committer e-mail and the
+                              // signing key, because that is what a human needs to repair it.
+                              const offenders = Array.isArray(verification.unverifiable) ? verification.unverifiable : [];
+                              const described = offenders.map((commit) => String(commit.sha || '').slice(0, 40) + ' reports %G? = ' + String(commit.signature || '?') + ' (committer ' + (commit.committerEmail || 'unknown') + ', user.signingkey ' + String(verification.signingKey || 'not configured') + ')');
+                              state = 'blocked';
+                              detail = 'a signed commit is only verifiable when the committer is the owner of the signing key, and ' + (described.length ? described.join('; ') : String(verification.error || 'a commit ahead of base is not verifiably signed')) + '. Nothing was pushed and no pull request was opened: GitHub would report the commit as verified:false and the merge would be blocked on any signature-protected branch.';
+                            } else if (commitFailed) {
                               // A genuine failed commit. Only this case may tell a human the
                               // work needs recovering: nothing was committed and nothing was
                               // pushed, so the worktree holds the only copy.
                               state = 'blocked';
-                              detail = 'the commit step FAILED (' + reason + '), so no commit exists for this work. The change is still in the worktree at ' + wt + ' and it was NOT pushed. Recover it before the worktree is cleaned up.';
+                              detail = 'the commit step FAILED (' + reason + '), so no commit exists for this work. The change is still in the worktree at ' + wt + ' and it was NOT pushed. Recover it before the worktree is cleaned up.' + (commitError ? ' Reason: ' + commitError : '');
                             } else if (commitsAhead === 0) {
                               state = 'blocked';
                               if (committed) {
@@ -5021,6 +5538,8 @@ steps:
                                 commitsAhead: commitsAhead,
                                 committed: committed,
                                 commitReason: reason,
+                                commitError: commitError || null,
+                                commitVerification: String(verification.state || 'not_checked'),
                                 worktreeDirty: !!dirty,
                                 checkedAt: new Date().toISOString(),
                               }, null, 2), 'utf8');
@@ -5050,6 +5569,24 @@ steps:
                               level: info
                               message: Branch ${steps.readBranch.outputs.stdout} carries a commit
                                 to publish for ${steps.loadTicket.result.reference}.
+                          # ── Pre-push signature verification (PROCESS-001, defect D3) ─────
+                          # publishReadinessGate only asserts that a commit EXISTS. An
+                          # unverifiable commit satisfied every gate and failed later, inside
+                          # GitHub, as a BLOCKED merge that reads like a CI problem - while the
+                          # work was already on origin and the branch could only be repaired by
+                          # re-creating the commits by hand with a different committer.
+                          #
+                          # INVARIANT: a signed commit is only verifiable when the committer is
+                          # the owner of the signing key. The signature can be mathematically
+                          # valid and still report verified:false (reason "no_user") because no
+                          # GitHub account owns the committer address.
+                          #
+                          # So when commit.gpgsign is true, every commit in <base>..HEAD must
+                          # report %G? = G. Any other value (N, B, U, X, Y, R, E) blocks
+                          # publication: an error naming the SHA, the committer e-mail and
+                          # user.signingkey is recorded in .ai-agent/commit-verification.json and
+                          # NOTHING is pushed. When signing is disabled the gate is a no-op, so a
+                          # run over an unsigned repository publishes exactly as before.
                         elseSteps:
                           - id: describePublishBlock
                             name: Describe why there is nothing to publish
