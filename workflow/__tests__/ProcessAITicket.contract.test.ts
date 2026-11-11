@@ -1075,3 +1075,114 @@ describe('core.ProcessAITicket programme reporting', () => {
     expect(JSON.stringify(sites().map((entry) => entry.step.config!.params))).not.toContain('mergedSha');
   });
 });
+
+describe('core.ProcessAITicket signed-commit contracts (PROCESS-001)', () => {
+  /**
+   * REACTORY-302016408/20261111/432598720. The pipeline produced commits that GitHub
+   * could not verify, so they could not merge into any branch with required_signatures.
+   * The signature was structurally valid (%G? = G) but unattributable: the committer was
+   * an identity no account owns, and GitHub reported verified:false (reason "no_user").
+   *
+   * INVARIANT: a signed commit is only verifiable when the committer is the owner of the
+   * signing key.
+   */
+  const workflowSource = (): string => fs.readFileSync(WORKFLOW_FILE, 'utf8');
+
+  it('never invents a commit identity', () => {
+    // D1: the fallback identity was 'Reactory AI <ai@reactory.net>'. That address owns no
+    // signing key, so the fallback carried exactly the defect it was written to avoid.
+    expect(workflowSource()).not.toContain('ai@reactory.net');
+
+    const script = String(byId('commitChanges').config!.args[1]);
+
+    // Identity is resolved from the repository configuration...
+    expect(script).toContain('commit.gpgsign');
+    expect(script).toContain('user.signingkey');
+    expect(script).toContain('gpg.format');
+    expect(script).toContain('user.name');
+    expect(script).toContain('user.email');
+
+    // ...and the bot identity may only ever be the AUTHOR. GitHub attributes a verified
+    // signature through the COMMITTER, so overriding the committer would break the very
+    // verification this change exists to guarantee.
+    expect(script).toContain('GIT_AUTHOR_EMAIL');
+    expect(script).toContain('GIT_AUTHOR_NAME');
+    expect(script).not.toContain('-c user.email');
+  });
+
+  it('fails with the missing configuration named instead of inventing an identity', () => {
+    const script = String(byId('commitChanges').config!.args[1]);
+
+    // Signing enabled + no user.email is a hard stop, not a fallback.
+    expect(script).toContain('if (!configuredEmail)');
+    expect(script).toContain('user.email is not configured');
+    expect(script).toContain('user.signingkey');
+    // It must be reported as a COMMIT failure, so publishReadinessGate blocks the run
+    // with the reason rather than pushing whatever is on the branch.
+    expect(script).toContain("reason: 'git commit failed'");
+    expect(script).toContain('process.exit(1)');
+  });
+
+  it('resets engineer-created commits before the reviewer runs', () => {
+    // D2: nothing stopped the engineer's own commits from being published verbatim.
+    const guard = byId('guardEngineerCommits');
+    expect(guard.type).toBe('cli_command');
+
+    const script = String(guard.config!.args[1]);
+    expect(script).toContain('git rev-list --count');
+    expect(script).toContain('git reset --soft');
+    // The base is resolved the way prepareWorktree resolves it.
+    expect(script).toContain('origin/HEAD');
+    expect(script).toContain('origin/main');
+    expect(script).toContain("recovered ? 'recovered' : 'blocked'");
+
+    // After the engineer session, and before the reviewer sees the branch.
+    expect(indexOf('verifyWorkspaceNote')).toBeLessThan(indexOf('guardEngineerCommits'));
+    expect(indexOf('guardEngineerCommits')).toBeLessThan(indexOf('reviewLoop'));
+
+    // The recovery is reported on the ticket, and a reset that cannot be proven stops
+    // the run instead of publishing an agent-authored commit.
+    expect(byId('engineerCommitComment').type).toBe('service_invoke');
+    expect(byId('engineerCommitHalt').config!.failOnError).toBe(true);
+    expect(String(byId('engineerCommitHalt').config!.args[1])).toContain('process.exit(1)');
+  });
+
+  it('blocks publication when a commit is not verifiable', () => {
+    // D3: publishReadinessGate only asserted that a commit EXISTS.
+    const verify = String(byId('verifyCommitSignatures').config!.args[1]);
+
+    expect(byId('verifyCommitSignatures').type).toBe('cli_command');
+    expect(verify).toContain('commit.gpgsign');
+    expect(verify).toContain('%G?');
+    expect(verify).toContain("commit.signature !== 'G'");
+    expect(verify).toContain('commit-verification.json');
+    expect(verify).toContain('user.signingkey');
+    // Signing disabled must remain a no-op so unsigned repositories publish as before.
+    expect(verify).toContain('commit.gpgsign is not enabled');
+
+    // The verdict is consumed by the readiness gate, which already owns the block,
+    // ticket comment, human task and hard halt - so an unverifiable commit can never
+    // reach pushBranch, and nothing new needs to report to the programme.
+    const readiness = String(byId('readPublishReadiness').config!.args[1]);
+    expect(readiness).toContain('commit-verification.json');
+    expect(readiness).toContain('a signed commit is only verifiable');
+    expect(readiness).toContain('Nothing was pushed');
+
+    expect(indexOf('commitChanges')).toBeLessThan(indexOf('verifyCommitSignatures'));
+    expect(indexOf('verifyCommitSignatures')).toBeLessThan(indexOf('readPublishReadiness'));
+    expect(indexOf('readPublishReadiness')).toBeLessThan(indexOf('publishReadinessGate'));
+    // pushBranch's own contract is unchanged, and the halt stays hard.
+    expect((byId('pushBranch') as any).dependsOn).toBe('publishReadinessGate');
+    expect(byId('publishReadinessGate').type).toBe('condition');
+    expect(byId('publishBlockHalt').config!.failOnError).toBe(true);
+  });
+
+  it('keeps the workflow version pinned for the in-place hotfix', () => {
+    // The pin lives in reactory-core (a separate nested repository) and the runner matches
+    // the id VERBATIM. Bumping the body alone removes @1.4.8 from the catalog and stops
+    // every delegated run, so this fix ships in place and the coordinated bump is
+    // documented in workflow/README.md instead.
+    expect(String(def.version)).toBe('1.4.8');
+    expect(String(def.version)).not.toBe('');
+  });
+});
