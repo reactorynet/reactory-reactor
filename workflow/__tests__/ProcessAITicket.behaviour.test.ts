@@ -2889,7 +2889,7 @@ describe('ProcessAITicket commits the work before it publishes (D1)', () => {
       // Run internals must still never reach the branch.
       expect(files.join(' ')).not.toContain('.ai-agent');
       // Nothing is left staged-but-uncommitted for worktree hygiene to destroy.
-      expect(sh('git status --porcelain', dir)).toBe('');
+      expect(sh('git status --porcelain -- . ":!:.ai-agent"', dir)).toBe('');
     } finally {
       removeDir(dir);
     }
@@ -3737,5 +3737,1984 @@ describe('ProcessAITicket signed-commit pipeline (PROCESS-001)', () => {
         removeDir(dir);
       }
     });
+  });
+});
+
+/**
+ * PROCESS-002 behaviour tests: revision commit integrity and the
+ * post-publication observation loop.
+ *
+ * These execute the real `cli_command` scripts. Every one of them references a
+ * step that does not exist in the pre-change workflow (`guardRevisionCommits`,
+ * `observePullRequest`, `capturePostPublishReview`, ...), so `byId` throws and
+ * the suite fails against the old YAML: the tests cannot pass vacuously.
+ *
+ * Reproduced facts this suite is built from (SPEECH-010, PR #18):
+ *  - `.ai-agent/engineer-commits.json` recorded ONE recovery (10343ed); the
+ *    engineer then committed twice during revisions (b46bcd6, 67ffdc) with
+ *    committer 'Reactor AI <reactor@reactory.net>'. GitHub reported
+ *    verified:false (reason no_user) and the PR could not merge.
+ *  - The pull request carried CodeQL review threads (3 on #18, 16 on #13) that
+ *    no step ever read.
+ */
+describe('ProcessAITicket revision commit integrity (PROCESS-002 A)', () => {
+  /** A repo on feature/test with the configured identity, signing disabled. */
+  const revisionRepo = (): string => {
+    const dir = tempDir('pa-rev-');
+    initRepo(dir);
+    sh('git config user.email owner@example.com', dir);
+    sh('git config user.name "Key Owner"', dir);
+    sh('git checkout -q -b feature/test', dir);
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'src', 'work.ts'), 'export const v = 1;\n', 'utf8');
+    return dir;
+  };
+
+  /** The one thing the engineer must never do, done exactly as it did on PR #18. */
+  const engineerCommit = (dir: string, message: string, content: string): void => {
+    fs.writeFileSync(path.join(dir, 'src', 'work.ts'), content, 'utf8');
+    sh(
+      'git add -A && git -c user.name="Reactor AI" -c user.email="reactor@reactory.net" commit -qm "'
+        + message.replace(/"/g, ' ')
+        + '"',
+      dir,
+    );
+  };
+
+  it('recovers an engineer commit on EVERY revision, so none is ever published', () => {
+    const dir = revisionRepo();
+    try {
+      // Two review cycles, each ending in a rejection and a revising engineer -
+      // the SPEECH-010 shape that PROCESS-001 only guarded once.
+      [0, 1].forEach((cycle) => {
+        openReviewWindow(dir, { CYCLE: String(cycle) });
+        writeReviewUnstamped(dir, {
+          verdict: 'rejected',
+          findings: ['the parser is not parameterised'],
+          requiredChanges: ['parameterise the parser'],
+        });
+        const stamp = stampVerdict(dir, { CYCLE: String(cycle) });
+        expect(stamp.accepted).toBe(true);
+
+        engineerCommit(dir, 'engineer revision ' + cycle, 'export const v = ' + (cycle + 2) + ';\n');
+        expect(sh('git rev-list --count master..HEAD', dir)).toBe('1');
+
+        // The revision guard runs after handBack + reCaptureReport.
+        const evidence = 'engineer-commits-revision-' + cycle + '.json';
+        const guard = runJson(
+          scriptOf('guardRevisionCommits'),
+          { WT: dir, EVIDENCE: evidence, STAGE: 'revision', CYCLE: String(cycle) },
+          dir,
+        );
+
+        expect(guard.state).toBe('recovered');
+        expect(guard.recovered).toBe(true);
+        expect(guard.commits).toBe(1);
+        expect(guard.stage).toBe('revision');
+        expect(String(guard.cycle)).toBe(String(cycle));
+        expect(String(guard.offendingLog)).toContain('engineer revision ' + cycle);
+        // Reset to base: the branch carries no agent-authored commit.
+        expect(sh('git rev-list --count master..HEAD', dir)).toBe('0');
+        expect(sh('git rev-parse HEAD', dir)).toBe(sh('git rev-parse master', dir));
+
+        // Evidence is per cycle, so the audit trail keeps both violations.
+        const record = JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', evidence), 'utf8'));
+        expect(record.state).toBe('recovered');
+        expect(record.evidenceFile).toBe(evidence);
+        // The reader the gate consumes agrees.
+        expect(
+          runScript(scriptOf('readRevisionCommitState'), { WT: dir, EVIDENCE: evidence }, dir),
+        ).toBe('recovered');
+      });
+
+      // The revision work survived the resets (soft reset keeps the index), and
+      // the pipeline creates the SINGLE published commit with the key owner as
+      // committer - the only commit a signature-protected branch can merge.
+      const commit = runJson(scriptOf('commitChanges'), { WT: dir, REF: 'REF-1' }, dir);
+      expect(commit.committed).toBe(true);
+      expect(commit.repaired).toBeNull();
+      expect(commit.committer.email).toBe('owner@example.com');
+
+      expect(sh('git rev-list --count master..HEAD', dir)).toBe('1');
+      const committers = sh('git log --format=%ce master..HEAD', dir).split('\n');
+      expect(committers).toEqual(['owner@example.com']);
+      expect(sh('git log --format=%s master..HEAD', dir)).not.toContain('engineer revision');
+      // Every commit ahead of base is verifiable by the pipeline's own gate.
+      expect(runScript(scriptOf('verifyCommitSignatures'), { WT: dir }, dir)).toBe('ok');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('fails closed when the revision reset cannot be proven, and vetoes publication', () => {
+    const dir = revisionRepo();
+    try {
+      engineerCommit(dir, 'engineer revision', 'export const v = 9;\n');
+      // An unresolvable base is the documented fail-closed condition: the guard
+      // cannot separate the engineer's commit from the pipeline's, so it blocks.
+      sh('git branch -m master trunk', dir);
+      const guard = runJson(
+        scriptOf('guardRevisionCommits'),
+        { WT: dir, EVIDENCE: 'engineer-commits-revision-0.json', STAGE: 'revision', CYCLE: '0' },
+        dir,
+      );
+      expect(guard.state).toBe('blocked');
+      expect(guard.recovered).toBe(false);
+      expect(
+        runScript(
+          scriptOf('readRevisionCommitState'),
+          { WT: dir, EVIDENCE: 'engineer-commits-revision-0.json' },
+          dir,
+        ),
+      ).toBe('blocked');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('marks a commit whose committer is not the key owner as unverifiable', () => {
+    // The SPEECH-010 signature was locally fine (%G? = G) and remotely
+    // unattributable (verified:false, no_user). The gate now requires BOTH.
+    const dir = tempDir('pa-verify-owner-');
+    try {
+      initRepo(dir);
+      sh('git config user.email owner@example.com', dir);
+      sh('git config user.name "Key Owner"', dir);
+      sh('git checkout -q -b feature/test', dir);
+      fs.writeFileSync(path.join(dir, 'work.ts'), 'export const v = 1;\n', 'utf8');
+      sh(
+        'git add -A && git -c user.name="Reactor AI" -c user.email="reactor@reactory.net" commit -qm "bot committer"',
+        dir,
+      );
+      sh('git config commit.gpgsign true', dir);
+      sh('git config user.signingkey ABCDEF0123456789', dir);
+
+      expect(runScript(scriptOf('verifyCommitSignatures'), { WT: dir }, dir)).toBe('blocked');
+      const evidence = JSON.parse(
+        fs.readFileSync(path.join(dir, '.ai-agent', 'commit-verification.json'), 'utf8'),
+      );
+      expect(evidence.keyOwner).toBe('owner@example.com');
+      expect(evidence.unverifiable.length).toBe(1);
+      expect(evidence.unverifiable[0].reasons).toContain('committer_not_key_owner');
+      expect(evidence.unverifiable[0].reasons).toContain('not_verifiably_signed');
+      expect(String(evidence.error)).toContain('is not the key owner');
+      expect(String(evidence.error)).toContain('reactor@reactory.net');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('does not invent a committer mismatch when the committer IS the key owner', () => {
+    const dir = tempDir('pa-verify-owner-');
+    try {
+      initRepo(dir);
+      sh('git config user.email owner@example.com', dir);
+      sh('git config user.name "Key Owner"', dir);
+      sh('git checkout -q -b feature/test', dir);
+      fs.writeFileSync(path.join(dir, 'work.ts'), 'export const v = 1;\n', 'utf8');
+      sh('git add -A && git commit -qm "owner committer"', dir);
+      sh('git config commit.gpgsign true', dir);
+      sh('git config user.signingkey ABCDEF0123456789', dir);
+
+      expect(runScript(scriptOf('verifyCommitSignatures'), { WT: dir }, dir)).toBe('blocked');
+      const evidence = JSON.parse(
+        fs.readFileSync(path.join(dir, '.ai-agent', 'commit-verification.json'), 'utf8'),
+      );
+      // Unsigned (no usable key here) but attributable: only the signature reason.
+      expect(evidence.unverifiable[0].reasons).toEqual(['not_verifiably_signed']);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('repairs published commits that GitHub cannot verify, keeping the tree', () => {
+    // The repair a human performed by hand on PR #18: re-create the commits with
+    // the key owner as committer. The tree must be byte-identical.
+    const dir = revisionRepo();
+    try {
+      fs.writeFileSync(path.join(dir, 'src', 'work.ts'), 'export const v = 7;\n', 'utf8');
+      sh('git add -A && git commit -qm "published but unverifiable"', dir);
+      const treeBefore = sh('git rev-parse HEAD^{tree}', dir);
+
+      const commit = runJson(
+        scriptOf('republishCommit'),
+        { WT: dir, REF: 'REF-1', REPAIR_BASE_REF: 'master' },
+        dir,
+      );
+      expect(commit.committed).toBe(true);
+      expect(commit.repaired).not.toBeNull();
+      expect(commit.repaired.base).toBe('master');
+      expect(commit.repaired.headAfter).toBe(sh('git rev-parse master', dir));
+      // Same content, new commit, key-owner committer.
+      expect(sh('git rev-parse HEAD^{tree}', dir)).toBe(treeBefore);
+      expect(sh('git rev-list --count master..HEAD', dir)).toBe('1');
+      expect(sh('git log --format=%ce -1', dir)).toBe('owner@example.com');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
+
+describe('ProcessAITicket post-publication observation loop (PROCESS-002 B/C)', () => {
+  const THREAD_BODY = 'CodeQL: the SQL statement is built by string concatenation (CWE-89).';
+
+  /** A published branch: origin/feature/test is the published tip. */
+  const publishedRepo = (): string => {
+    const dir = tempDir('pa-pp-');
+    initRepo(dir);
+    sh('git config user.email owner@example.com', dir);
+    sh('git config user.name "Key Owner"', dir);
+    sh('git checkout -q -b feature/test', dir);
+    fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+    fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'src', 'work.ts'), 'export const v = 1;\n', 'utf8');
+    sh('git add -A && git commit -qm "AI engineering run: REF-1"', dir);
+    sh('git remote add origin .', dir);
+    sh('git push -q origin feature/test', dir);
+    return dir;
+  };
+
+  const writeObservationFixture = (dir: string, payload: Record<string, any>): string => {
+    const file = path.join(dir, '.ai-agent', 'observation-fixture.json');
+    fs.writeFileSync(file, JSON.stringify(payload), 'utf8');
+    return file;
+  };
+
+  // No ambient signing identity may leak into these fixtures: the classifier
+  // asks git whether a signing identity is configured, and a developer machine
+  // with a global user.signingkey would otherwise change the verdict.
+  const ISOLATED_CONFIG = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+
+  const observe = (dir: string, fixture: string, cycle: string = '0'): any =>
+    runJson(
+      scriptOf('observePullRequest'),
+      Object.assign(
+        { WT: dir, PR_NUMBER: '18', PR_STATE: 'OPEN', CYCLE: cycle, OBSERVATION_FIXTURE: fixture },
+        ISOLATED_CONFIG,
+      ),
+      dir,
+    );
+
+  const blockedByThread = (): Record<string, any> => ({
+    pr: { number: 18, state: 'OPEN', mergeStateStatus: 'BLOCKED', reviewDecision: 'CHANGES_REQUESTED', url: 'https://x/pull/18' },
+    reviews: [],
+    reviewThreads: {
+      data: {
+        repository: {
+          pullRequest: {
+            reviewThreads: {
+              nodes: [
+                {
+                  id: 'THREAD_1',
+                  isResolved: false,
+                  path: 'src/work.ts',
+                  line: 12,
+                  comments: {
+                    nodes: [
+                      { author: { login: 'github-advanced-security' }, body: THREAD_BODY, url: 'https://x/thread/1' },
+                    ],
+                  },
+                },
+                {
+                  // Already resolved: must never be reported as actionable.
+                  id: 'THREAD_OLD',
+                  isResolved: true,
+                  path: 'src/work.ts',
+                  line: 3,
+                  comments: { nodes: [{ author: { login: 'github-advanced-security' }, body: 'old finding' }] },
+                },
+              ],
+            },
+          },
+        },
+      },
+    },
+    checkRuns: { check_runs: [] },
+    commits: [{ sha: 'abc123def4567890', verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+    protection: { required_signatures: { enabled: false } },
+  });
+
+  it('hands an unresolved review thread back to the engineer VERBATIM and re-publishes', () => {
+    const dir = publishedRepo();
+    try {
+      const publishedTip = sh('git rev-parse origin/feature/test', dir);
+      const fixture = writeObservationFixture(dir, blockedByThread());
+
+      // 1. Observe: the thread is read, classified agent-fixable.
+      const observation = observe(dir, fixture);
+      expect(observation.ok).toBe(true);
+      expect(observation.state).toBe('fixable');
+      expect(observation.findings.length).toBe(1);
+      expect(observation.findings[0].kind).toBe('review_thread');
+      expect(observation.findings[0].author).toBe('github-advanced-security');
+      expect(observation.findings[0].body).toBe(THREAD_BODY);
+      // The resolved thread is not actionable.
+      expect(observation.findings.map((f: any) => f.id)).not.toContain('thread:THREAD_OLD');
+      expect(String(observation.reason)).toContain('agent-fixable');
+
+      // 2. The briefing the engineer receives carries the thread body verbatim.
+      const briefing = runScript(scriptOf('preparePostPublishReview'), { WT: dir, BOUND: '2', CYCLE: '0' }, dir);
+      expect(briefing).toContain(THREAD_BODY);
+      expect(briefing).toContain('src/work.ts:12');
+      expect(briefing).toContain('src/work.ts');
+      expect(briefing).toContain('requiredChanges');
+      const findingsFile = JSON.parse(
+        fs.readFileSync(path.join(dir, '.ai-agent', 'post-publish-findings.json'), 'utf8'),
+      );
+      expect(findingsFile.findings[0].body).toBe(THREAD_BODY);
+
+      // 3. The quality agent judges it a real defect; the workflow records the fix set.
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review.json'),
+        JSON.stringify({
+          verdict: 'changes_required',
+          requiredChanges: ['Build the statement with a parameterised query.'],
+          dismissals: [],
+          resolvedFindingIds: ['thread:THREAD_1'],
+          evidence: 'read src/work.ts:12',
+        }),
+        'utf8',
+      );
+      const captured = runJson(
+        scriptOf('capturePostPublishReview'),
+        { WT: dir, CYCLE: '0' },
+        dir,
+      );
+      expect(captured.state).toBe('changes_required');
+      expect(captured.requiredChanges).toEqual(['Build the statement with a parameterised query.']);
+      expect(captured.resolvedFindingIds).toEqual(['thread:THREAD_1']);
+      expect(runScript(scriptOf('readPostPublishDecision'), { WT: dir }, dir)).toBe('changes_required');
+
+      // 4. The engineer revises (and, like SPEECH-010, commits anyway).
+      fs.writeFileSync(path.join(dir, 'src', 'work.ts'), 'export const v = 2;\n', 'utf8');
+      sh(
+        'git add -A && git -c user.name="Reactor AI" -c user.email="reactor@reactory.net" commit -qm "engineer fix commit"',
+        dir,
+      );
+
+      // 5. The guard runs on THIS revision too, measured against the PUBLISHED tip.
+      const guard = runJson(
+        scriptOf('guardPostPublishCommits'),
+        { WT: dir, BASE_REF: publishedTip, EVIDENCE: 'post-publish-commits-0.json', STAGE: 'post-publish', CYCLE: '0' },
+        dir,
+      );
+      expect(guard.state).toBe('recovered');
+      expect(guard.baseSource).toBe('explicit-base');
+      expect(sh('git rev-parse HEAD', dir)).toBe(publishedTip);
+
+      // 6. Re-verify and re-publish: one pipeline commit on top of the published tip.
+      const commit = runJson(scriptOf('republishCommit'), { WT: dir, REF: 'REF-1' }, dir);
+      expect(commit.committed).toBe(true);
+      expect(commit.repaired).toBeNull();
+      expect(sh('git rev-list --count master..HEAD', dir)).toBe('2');
+      const committers = sh('git log --format=%ce master..HEAD', dir).split('\n');
+      expect(committers).toEqual(['owner@example.com', 'owner@example.com']);
+      expect(runScript(scriptOf('verifyPostPublishSignatures'), { WT: dir }, dir)).toBe('ok');
+      const readiness = runScript(
+        scriptOf('readRepublishReadiness'),
+        { WT: dir, BRANCH: 'feature/test', COMMIT: JSON.stringify(commit) },
+        dir,
+      );
+      expect(readiness).toBe('ok');
+      // The published tip is an ancestor, so the re-publish is a fast-forward.
+      expect(() => sh('git merge-base --is-ancestor ' + publishedTip + ' HEAD', dir)).not.toThrow();
+
+      // 7. The structured log records observed / judged / fixed per cycle.
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review-normalised.json'),
+        JSON.stringify(captured),
+        'utf8',
+      );
+      const logEntry = JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'post-publish-log.json'), 'utf8'))[0];
+      expect(logEntry.cycle).toBe(0);
+      expect(logEntry.observed.map((f: any) => f.kind)).toEqual(['review_thread']);
+      expect(logEntry.judged.requiredChanges).toEqual(['Build the statement with a parameterised query.']);
+      expect(runScript(
+        scriptOf('readRepublishResult'),
+        { WT: dir, PUSH: JSON.stringify({ ok: true, head: commit.sha }), COMMIT: JSON.stringify(commit), CYCLE: '0' },
+        dir,
+      )).toBe('pushed');
+      const afterPush = JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'post-publish-log.json'), 'utf8'))[0];
+      expect(afterPush.fixed.length).toBe(1);
+      expect(afterPush.fixed[0].pushed).toBe(true);
+
+      // 8. (review round 4) The fix has been published, so the thread the
+      // reviewer judged ADDRESSED is resolved - and a SECOND observation of the
+      // PR therefore converges instead of re-reporting the same thread.
+      const fakeBin = path.join(tempDir('pa-thread-gh-'), 'fakebin');
+      fs.mkdirSync(fakeBin, { recursive: true });
+      const ghLog = path.join(path.dirname(fakeBin), 'gh.log');
+      fs.writeFileSync(
+        path.join(fakeBin, 'gh'),
+        [
+          '#!/bin/sh',
+          'for a in "$@"; do printf "[%s]" "$a" >> "' + ghLog + '"; done',
+          'echo >> "' + ghLog + '"',
+          'case "$*" in *graphql*) echo \'{"data":{"resolveReviewThread":{"thread":{"id":"THREAD_1","isResolved":true}}}}\' ;; *) echo \'{"ok":1}\' ;; esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      // The normalised record is what resolveAddressedThreads reads.
+      const normalisedPath = path.join(dir, '.ai-agent', 'post-publish-review-normalised.json');
+      const normalised = JSON.parse(fs.readFileSync(normalisedPath, 'utf8'));
+      normalised.resolvedFindingIds = ['thread:THREAD_1'];
+      normalised.dismissals = [];
+      fs.writeFileSync(normalisedPath, JSON.stringify(normalised), 'utf8');
+
+      const resolved = runJson(
+        scriptOf('resolveAddressedThreads'),
+        Object.assign({ WT: dir, CYCLE: '0', PATH: fakeBin + ':' + process.env.PATH }, ISOLATED_CONFIG),
+        dir,
+      );
+      expect(resolved.resolved).toBe(1);
+      expect(resolved.results[0].findingId).toBe('thread:THREAD_1');
+      expect(fs.readFileSync(ghLog, 'utf8')).toContain('[graphql]');
+
+      // The second observation sees the thread resolved: the loop converges.
+      const resolvedFixture = path.join(dir, '.ai-agent', 'observation-after.json');
+      fs.writeFileSync(
+        resolvedFixture,
+        JSON.stringify({
+          pr: { number: 18, state: 'OPEN', mergeStateStatus: 'CLEAN', reviewDecision: '', headRefOid: commit.sha },
+          reviews: [],
+          reviewThreads: {
+            data: { repository: { pullRequest: { reviewThreads: { nodes: [{ id: 'THREAD_1', isResolved: true, path: 'src/work.ts', line: 12, comments: { nodes: [] } }] } } } },
+          },
+          checkRuns: { check_runs: [] },
+          commits: [{ sha: commit.sha, verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+          protection: null,
+        }),
+        'utf8',
+      );
+      const second = runJson(
+        scriptOf('observePullRequest'),
+        Object.assign({ WT: dir, PR_NUMBER: '18', PR_STATE: 'OPEN', CYCLE: '1', TIP: commit.sha, OBSERVATION_FIXTURE: resolvedFixture }, ISOLATED_CONFIG),
+        dir,
+      );
+      expect(second.findings.length).toBe(0);
+      expect(second.state).toBe('clean');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('does not loop on an unfixable block: required signatures with no configured key', () => {
+    const dir = publishedRepo();
+    try {
+      const payload = blockedByThread();
+      payload.pr = { number: 18, state: 'OPEN', mergeStateStatus: 'BLOCKED', reviewDecision: '', url: 'https://x/pull/18' };
+      payload.reviewThreads = { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } };
+      payload.protection = { required_signatures: { enabled: true } };
+      payload.commits = [
+        {
+          sha: 'b46bcd6f00d',
+          verification: { verified: false, reason: 'no_user' },
+          commit: { committer: { email: 'reactor@reactory.net' } },
+        },
+      ];
+      // No signing identity in this worktree (initRepo sets commit.gpgsign false).
+      sh('git config --unset user.signingkey 2>/dev/null || true', dir);
+
+      const observation = observe(dir, writeObservationFixture(dir, payload));
+      expect(observation.state).toBe('human_only');
+      expect(observation.signingKeyConfigured).toBe(false);
+      expect(observation.requiredSignatures).toBe(true);
+      expect(String(observation.reason)).toContain('requires signed commits');
+      expect(String(observation.reason)).toContain('signing key');
+      // NOT fixable: the fix arm must not be entered, so no cycle is burned.
+      expect(observation.state).not.toBe('fixable');
+      expect(observation.findings.every((finding: any) => finding.fixable === false)).toBe(true);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('treats an unverifiable commit as fixable when a signing identity IS configured', () => {
+    const dir = publishedRepo();
+    try {
+      sh('git config commit.gpgsign true', dir);
+      sh('git config user.signingkey ABCDEF0123456789', dir);
+      const payload = blockedByThread();
+      payload.reviewThreads = { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } };
+      payload.commits = [
+        {
+          sha: 'b46bcd6f00d',
+          verification: { verified: false, reason: 'no_user' },
+          commit: { committer: { email: 'reactor@reactory.net' } },
+        },
+      ];
+      const observation = observe(dir, writeObservationFixture(dir, payload));
+      expect(observation.state).toBe('fixable');
+      expect(observation.findings[0].kind).toBe('unverifiable_commit');
+      expect(observation.findings[0].fixable).toBe(true);
+      // The repair base the pipeline would reset to is the base it published from.
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'publish-readiness.json'),
+        JSON.stringify({ base: 'master', state: 'ok' }),
+        'utf8',
+      );
+      expect(runScript(scriptOf('resolveRepairBase'), { WT: dir, BASE: 'deadbeef' }, dir)).toBe('master');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('refuses a dismissal that carries no justification, and applies a justified one with its comment', () => {
+    const dir = publishedRepo();
+    try {
+      const fixture = writeObservationFixture(dir, {
+        pr: { number: 18, state: 'OPEN', mergeStateStatus: 'UNSTABLE', reviewDecision: '', url: 'https://x/pull/18' },
+        reviews: [],
+        reviewThreads: {
+          data: {
+            repository: {
+              pullRequest: {
+                reviewThreads: {
+                  nodes: [
+                    {
+                      id: 'THREAD_1',
+                      isResolved: false,
+                      path: 'src/work.ts',
+                      line: 4,
+                      comments: {
+                        nodes: [{ author: { login: 'github-advanced-security' }, body: 'CodeQL: unused variable', url: 'u' }],
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        },
+        checkRuns: { check_runs: [{ name: 'codeql', conclusion: 'failure', output: { summary: 'analysis failed' } }] },
+        commits: [{ sha: 'abc123def4567890', verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+        protection: null,
+      });
+      observe(dir, fixture);
+
+      // (a) A silent dismissal is refused: the judgement is unusable.
+      runScript(scriptOf('preparePostPublishReview'), { WT: dir, BOUND: '2', CYCLE: '0' }, dir);
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review.json'),
+        JSON.stringify({ verdict: 'no_action', requiredChanges: [], dismissals: [{ findingId: 'check:codeql' }] }),
+        'utf8',
+      );
+      const invalid = runJson(scriptOf('capturePostPublishReview'), { WT: dir, CYCLE: '0' }, dir);
+      expect(invalid.state).toBe('invalid');
+      expect(invalid.invalidDismissals.length).toBe(1);
+      expect(invalid.dismissals.length).toBe(0);
+      expect(String(invalid.reason)).toContain('refusing to dismiss silently');
+      expect(runScript(scriptOf('readPostPublishDecision'), { WT: dir }, dir)).toBe('invalid');
+
+      // (b) A justified dismissal is accepted, with the justification carried into
+      // the artefact that is sent to GitHub. The window is re-opened: capture
+      // accepts only bytes written during the CURRENT window.
+      runScript(scriptOf('preparePostPublishReview'), { WT: dir, BOUND: '2', CYCLE: '0' }, dir);
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review.json'),
+        JSON.stringify({
+          verdict: 'no_action',
+          requiredChanges: [],
+          dismissals: [
+            {
+              findingId: 'thread:THREAD_1',
+              justification: 'The variable is read by the test harness; CodeQL cannot see it.',
+              dismissedReason: 'false positive',
+              dismissedComment: 'Read by the test harness; see src/work.ts:40.',
+            },
+          ],
+          resolvedFindingIds: ['thread:THREAD_1'],
+        }),
+        'utf8',
+      );
+      const captured = runJson(scriptOf('capturePostPublishReview'), { WT: dir, CYCLE: '0' }, dir);
+      expect(captured.state).toBe('no_action');
+      expect(captured.dismissals[0].justification).toContain('test harness');
+      expect(captured.dismissals[0].dismissedComment).toContain('src/work.ts:40');
+
+      // (c) The dismissal reaches GitHub with the justification as one argument,
+      // and the addressed review thread is resolved through the agent's judgement.
+      const bin = path.join(dir, 'fakebin');
+      fs.mkdirSync(bin, { recursive: true });
+      const ghLog = path.join(dir, 'gh-args.log');
+      fs.writeFileSync(
+        path.join(bin, 'gh'),
+        [
+          '#!/bin/sh',
+          'for a in "$@"; do printf "[%s]" "$a" >> "' + ghLog + '"; done',
+          'echo >> "' + ghLog + '"',
+          'case "$*" in',
+          '  *graphql*) echo \'{"data":{"resolveReviewThread":{"thread":{"id":"THREAD_1","isResolved":true}}}}\' ;;',
+          '  *) echo \'{"state":"dismissed"}\' ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      // Give the dismissal a code-scanning alert number so the PATCH path runs too.
+      const normalisedPath = path.join(dir, '.ai-agent', 'post-publish-review-normalised.json');
+      const normalised = JSON.parse(fs.readFileSync(normalisedPath, 'utf8'));
+      normalised.dismissals[0].kind = 'code_scanning';
+      normalised.dismissals[0].alertNumber = 42;
+      normalised.resolvedFindingIds = ['thread:THREAD_1'];
+      fs.writeFileSync(normalisedPath, JSON.stringify(normalised), 'utf8');
+
+      const applied = runJson(
+        scriptOf('applyPostPublishDecisions'),
+        { WT: dir, PR_NUMBER: '18', PR_REPO: 'reactorynet/x', PATH: bin + ':' + process.env.PATH },
+        dir,
+      );
+      expect(applied.applied).toBe(1);
+      expect(applied.resolvedThreads).toBe(1);
+
+      const calls = fs.readFileSync(ghLog, 'utf8');
+      expect(calls).toContain('[api][-X][PATCH]');
+      expect(calls).toContain('repos/reactorynet/x/code-scanning/alerts/42');
+      expect(calls).toContain('[state=dismissed]');
+      expect(calls).toContain('[dismissed_reason=false positive]');
+      expect(calls).toContain('[dismissed_comment=Read by the test harness; see src/work.ts:40.]');
+      expect(calls).toContain('[graphql]');
+      // The dismissal is also visible on the pull request, with its justification.
+      expect(calls).toContain('[pr][comment][18]');
+      expect(calls).toContain('Read by the test harness; see src/work.ts:40.');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('reports an exhausted budget explicitly and never as success', () => {
+    const dir = publishedRepo();
+    try {
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-observation.json'),
+        JSON.stringify({
+          state: 'fixable',
+          mergeStateStatus: 'BLOCKED',
+          reviewDecision: 'CHANGES_REQUESTED',
+          findings: [{ id: 'thread:THREAD_1', kind: 'review_thread', path: 'src/work.ts', line: 12, body: THREAD_BODY }],
+        }),
+        'utf8',
+      );
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-log.json'),
+        JSON.stringify([{ cycle: 0 }, { cycle: 1 }]),
+        'utf8',
+      );
+      const text = runScript(
+        scriptOf('describePostPublishBlock'),
+        { WT: dir, OUTCOME: 'exhausted', REASON: '', PR_URL: 'https://x/pull/18', BOUND: '2' },
+        dir,
+      );
+      expect(text).toContain('NOT complete');
+      expect(text).toContain('budget was exhausted');
+      expect(text).toContain('still blocked');
+      expect(text).toContain('https://x/pull/18');
+
+      // A recorded human-only reason is reported verbatim, not replaced by prose.
+      const human = runScript(
+        scriptOf('describePostPublishBlock'),
+        {
+          WT: dir,
+          OUTCOME: 'blocked_human',
+          REASON: 'the base branch requires signed commits and no signing key is configured',
+          PR_URL: 'https://x/pull/18',
+          BOUND: '2',
+        },
+        dir,
+      );
+      expect(human).toContain('requires signed commits');
+      expect(human).toContain('does not loop');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
+
+
+/**
+ * PROCESS-002 review round 2: the defects that survived the first pass.
+ *
+ * Every test here fails against the previous body:
+ *  - resolvePublishedTip was resolved ONCE outside the loop, so cycle 1 measured
+ *    against a tip cycle 0 had already replaced;
+ *  - republishPush refused every non-fast-forward, which made the
+ *    unverifiable-commit repair unreachable;
+ *  - 'unavailable' fell through to awaiting_human, reporting success for a pull
+ *    request nobody had read;
+ *  - a CHANGES_REQUESTED review re-appeared every cycle;
+ *  - the post-publication judgement had no provenance;
+ *  - no code-scanning alert number ever reached the dismissal call.
+ */
+describe('ProcessAITicket post-publication loop convergence (PROCESS-002 round 2)', () => {
+  const ISOLATED_CONFIG = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+
+  const commitAs = (dir: string, who: 'bot' | 'owner', message: string, content: string): void => {
+    fs.writeFileSync(path.join(dir, 'work.ts'), content, 'utf8');
+    if (who === 'bot') {
+      sh(
+        'git add -A && git -c user.name="Reactor AI" -c user.email="reactor@reactory.net" commit -qm "'
+          + message + '"',
+        dir,
+      );
+      return;
+    }
+    sh('git add -A && git commit -qm "' + message + '"', dir);
+  };
+
+  /** A clone whose origin is a real bare repository, so pushes are observable. */
+  const publishedClone = (): { dir: string; origin: string } => {
+    const origin = tempDir('pa-origin-');
+    sh('git init -q --bare -b master .', origin);
+
+    const dir = tempDir('pa-clone-');
+    sh('git init -q -b master .', dir);
+    sh('git config user.email owner@example.com', dir);
+    sh('git config user.name "Key Owner"', dir);
+    sh('git config commit.gpgsign false', dir);
+    fs.writeFileSync(path.join(dir, 'README.md'), '# fixture\n', 'utf8');
+    sh('git add -A && git commit -qm base', dir);
+    sh('git remote add origin ' + origin, dir);
+    sh('git checkout -q -b feature/test', dir);
+    fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'work.ts'), 'export const v = 1;\n', 'utf8');
+    sh('git add -A && git commit -qm "AI engineering run: REF-1"', dir);
+    sh('git push -q --set-upstream origin feature/test', dir);
+    return { dir, origin };
+  };
+
+  const remoteTip = (origin: string, dir: string): string =>
+    sh('git --git-dir=' + origin + ' rev-parse feature/test', dir);
+
+  const originLog = (origin: string, dir: string): string =>
+    sh("git --git-dir=" + origin + " log --format='%h %ce %s' feature/test", dir);
+
+  it('converges across TWO fix cycles: the tip is re-resolved and the second push is a fast-forward', () => {
+    const { dir, origin } = publishedClone();
+    try {
+      const tips: string[] = [];
+
+      [0, 1].forEach((cycle) => {
+        // The pipeline re-resolves the tip at the TOP of every cycle.
+        const tip = runScript(
+          scriptOf('resolvePublishedTip'),
+          { WT: dir, BRANCH: 'feature/test', CYCLE: String(cycle) },
+          dir,
+        ).trim();
+        tips.push(tip);
+        // It must be what origin actually has - not the tip of two cycles ago.
+        expect(tip).toBe(remoteTip(origin, dir));
+        // The per-cycle evidence records which tip this cycle measured against.
+        const evidence = JSON.parse(
+          fs.readFileSync(path.join(dir, '.ai-agent', 'post-publish-tip-' + cycle + '.json'), 'utf8'),
+        );
+        expect(evidence.tip).toBe(tip);
+        expect(evidence.source).toBe('origin-tip');
+
+        // The engineer commits during the fix (the SPEECH-010 behaviour).
+        commitAs(dir, 'bot', 'engineer fix ' + cycle, 'export const v = ' + (cycle + 2) + ';\n');
+
+        const guard = runJson(
+          scriptOf('guardPostPublishCommits'),
+          { WT: dir, BASE_REF: tip, EVIDENCE: 'post-publish-commits-' + cycle + '.json', STAGE: 'post-publish', CYCLE: String(cycle) },
+          dir,
+        );
+        expect(guard.state).toBe('recovered');
+        expect(guard.commits).toBe(1);
+        expect(guard.baseSource).toBe('explicit-base');
+        // The reset lands ON the tip origin has, so nothing published is lost.
+        expect(sh('git rev-parse HEAD', dir)).toBe(tip);
+
+        const commit = runJson(scriptOf('republishCommit'), { WT: dir, REF: 'REF-1' }, dir);
+        expect(commit.committed).toBe(true);
+        expect(runScript(scriptOf('verifyPostPublishSignatures'), { WT: dir }, dir)).toBe('ok');
+
+        const push = runJson(
+          scriptOf('republishPush'),
+          { WT: dir, BRANCH: 'feature/test', OBSERVED_TIP: tip, REPAIR_BASE: '' },
+          dir,
+        );
+        expect(push.ok).toBe(true);
+        expect(push.mode).toBe('fast-forward');
+        expect(push.remoteTip).toBe(tip);
+        expect(remoteTip(origin, dir)).toBe(commit.sha);
+      });
+
+      // Two distinct tips were observed: the second cycle did NOT measure against
+      // the first cycle's starting point.
+      expect(tips[0]).not.toBe(tips[1]);
+      // Every commit on origin carries the key owner, and the branch grew.
+      const log = originLog(origin, dir);
+      expect(log.split('\n').filter((line) => line.indexOf('AI engineering run: REF-1') !== -1).length).toBe(3);
+      expect(log).not.toContain('reactor@reactory.net');
+      expect(log).not.toContain('engineer fix');
+    } finally {
+      removeDir(dir);
+      removeDir(origin);
+    }
+  });
+
+  it('reports a cycle where the engineer committed nothing as clean, not as a violation', () => {
+    const { dir, origin } = publishedClone();
+    try {
+      // One full fix cycle, so the tip moves.
+      const first = runScript(scriptOf('resolvePublishedTip'), { WT: dir, BRANCH: 'feature/test', CYCLE: '0' }, dir).trim();
+      commitAs(dir, 'bot', 'engineer fix', 'export const v = 2;\n');
+      runJson(scriptOf('guardPostPublishCommits'), { WT: dir, BASE_REF: first, EVIDENCE: 'pp-0.json', STAGE: 'post-publish', CYCLE: '0' }, dir);
+      const commit = runJson(scriptOf('republishCommit'), { WT: dir, REF: 'REF-1' }, dir);
+      expect(runJson(scriptOf('republishPush'), { WT: dir, BRANCH: 'feature/test', OBSERVED_TIP: first, REPAIR_BASE: '' }, dir).ok).toBe(true);
+
+      // Cycle 1: the engineer does NOT commit. Against the stale base this was a
+      // phantom "1 commit ahead" and a false PROCESS VIOLATION.
+      const second = runScript(scriptOf('resolvePublishedTip'), { WT: dir, BRANCH: 'feature/test', CYCLE: '1' }, dir).trim();
+      expect(second).toBe(commit.sha);
+      const guard = runJson(
+        scriptOf('guardPostPublishCommits'),
+        { WT: dir, BASE_REF: second, EVIDENCE: 'pp-1.json', STAGE: 'post-publish', CYCLE: '1' },
+        dir,
+      );
+      expect(guard.state).toBe('clean');
+      expect(guard.commits).toBe(0);
+      expect(guard.recovered).toBe(false);
+      // Nothing was reset, and the published commit is still there.
+      expect(sh('git rev-parse HEAD', dir)).toBe(commit.sha);
+      expect(remoteTip(origin, dir)).toBe(commit.sha);
+    } finally {
+      removeDir(dir);
+      removeDir(origin);
+    }
+  });
+
+  it('REPAIRS published unverifiable commits by force-pushing onto the observed tip', () => {
+    // The remediation SPEECH-010 needed: b46bcd6/67ffdc -> a key-owner commit.
+    // The repair re-creates the commits on the publication base, so the old tip
+    // is EXPECTED not to be an ancestor; the previous body refused that push.
+    const { dir, origin } = publishedClone();
+    try {
+      commitAs(dir, 'bot', 'bot commit', 'export const v = 2;\n');
+      sh('git push -q origin feature/test', dir);
+      commitAs(dir, 'owner', 'owner commit', 'export const v = 3;\n');
+      sh('git push -q origin feature/test', dir);
+      expect(originLog(origin, dir)).toContain('reactor@reactory.net');
+
+      const observed = runScript(scriptOf('resolvePublishedTip'), { WT: dir, BRANCH: 'feature/test', CYCLE: '0' }, dir).trim();
+      expect(observed).toBe(remoteTip(origin, dir));
+
+      // The observation reports one unverifiable commit; a signing identity exists.
+      sh('git config user.signingkey ABCDEF0123456789', dir);
+      const fixture = path.join(dir, '.ai-agent', 'observation.json');
+      fs.writeFileSync(
+        fixture,
+        JSON.stringify({
+          pr: { number: 18, state: 'OPEN', mergeStateStatus: 'BLOCKED', headRefOid: observed },
+          reviews: [],
+          reviewThreads: { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } },
+          checkRuns: { check_runs: [] },
+          commits: [
+            { sha: sh('git rev-parse HEAD~1', dir), verification: { verified: false, reason: 'no_user' }, commit: { committer: { email: 'reactor@reactory.net' } } },
+            { sha: observed, verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } },
+          ],
+          protection: { required_signatures: { enabled: true } },
+        }),
+        'utf8',
+      );
+      const observation = runJson(
+        scriptOf('observePullRequest'),
+        Object.assign({ WT: dir, PR_NUMBER: '18', PR_STATE: 'OPEN', CYCLE: '0', TIP: observed, OBSERVATION_FIXTURE: fixture }, ISOLATED_CONFIG),
+        dir,
+      );
+      expect(observation.state).toBe('fixable');
+      expect(observation.findings[0].kind).toBe('unverifiable_commit');
+      expect(observation.findings[0].fixable).toBe(true);
+
+      // The repair base is the PUBLICATION base, never the published tip.
+      const repairBase = runScript(scriptOf('resolveRepairBase'), { WT: dir }, dir).trim();
+      expect(repairBase).toBe('master');
+
+      const commit = runJson(
+        scriptOf('republishCommit'),
+        { WT: dir, REF: 'REF-1', REPAIR_BASE_REF: repairBase },
+        dir,
+      );
+      expect(commit.committed).toBe(true);
+      expect(commit.repaired).not.toBeNull();
+      // The repaired commit sits on the base, and the tree is byte-identical.
+      expect(sh('git rev-parse HEAD~1', dir)).toBe(sh('git rev-parse master', dir));
+
+      const push = runJson(
+        scriptOf('republishPush'),
+        { WT: dir, BRANCH: 'feature/test', OBSERVED_TIP: observed, REPAIR_BASE: repairBase },
+        dir,
+      );
+      expect(push.ok).toBe(true);
+      expect(push.mode).toBe('repair-rewrite');
+      expect(push.rewritten).toBe(true);
+
+      // The remote tip IS the new owner-committer commit, and the bot commit is gone.
+      expect(remoteTip(origin, dir)).toBe(commit.sha);
+      const log = originLog(origin, dir);
+      expect(log).not.toContain('reactor@reactory.net');
+      expect(log.split('\n').length).toBe(2);
+    } finally {
+      removeDir(dir);
+      removeDir(origin);
+    }
+  });
+
+  it('still refuses a rewrite that is NOT a repair, and a repair whose lease is stale', () => {
+    const { dir, origin } = publishedClone();
+    try {
+      const observed = runScript(scriptOf('resolvePublishedTip'), { WT: dir, BRANCH: 'feature/test', CYCLE: '0' }, dir).trim();
+      // The branch moves on origin AFTER the observation, without this clone
+      // seeing it: a synthetic commit on top of the observed tip, published
+      // straight into the bare repository.
+      const tree = sh('git rev-parse ' + observed + '^{tree}', dir);
+      const other = sh(
+        'git -c user.name="Someone Else" -c user.email=else@example.com commit-tree ' + tree + ' -p ' + observed + ' -m "someone else"',
+        dir,
+      );
+      // Pushed, so the bare repository actually HAS the object.
+      sh('git push -q origin ' + other + ':refs/heads/feature/test', dir);
+      const moved = remoteTip(origin, dir);
+      expect(moved).toBe(other);
+      expect(moved).not.toBe(observed);
+      expect(sh('git rev-parse HEAD', dir)).toBe(observed);
+
+      // A plain fix must never rewrite it...
+      const refused = runJson(
+        scriptOf('republishPush'),
+        { WT: dir, BRANCH: 'feature/test', OBSERVED_TIP: observed, REPAIR_BASE: '' },
+        dir,
+      );
+      expect(refused.ok).toBe(false);
+      expect(refused.mode).toBe('rewrite-refused');
+      expect(String(refused.error)).toContain('not an ancestor');
+      expect(remoteTip(origin, dir)).toBe(moved);
+
+      // ...and a repair whose lease no longer matches origin is refused too, so an
+      // unseen push is never overwritten.
+      const staleLease = runJson(
+        scriptOf('republishPush'),
+        { WT: dir, BRANCH: 'feature/test', OBSERVED_TIP: observed, REPAIR_BASE: 'master' },
+        dir,
+      );
+      expect(staleLease.ok).toBe(false);
+      expect(staleLease.mode).toBe('rewrite-refused');
+      expect(String(staleLease.error)).toContain('moved to');
+      expect(remoteTip(origin, dir)).toBe(moved);
+    } finally {
+      removeDir(dir);
+      removeDir(origin);
+    }
+  });
+
+  it('classifies an UNREADABLE observation as unavailable, never as mergeable', () => {
+    const dir = tempDir('pa-unavailable-');
+    try {
+      initRepo(dir);
+      fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+      // No PR number and no repository: gh cannot be asked anything.
+      const observation = runJson(
+        scriptOf('observePullRequest'),
+        Object.assign({ WT: dir, PR_NUMBER: '', PR_STATE: 'OPEN', CYCLE: '0', OBSERVATION_FIXTURE: '', PR_REPO: '' }, ISOLATED_CONFIG),
+        dir,
+      );
+      expect(observation.ok).toBe(false);
+      expect(observation.state).toBe('unavailable');
+      expect(observation.state).not.toBe('clean');
+      expect(String(observation.reason)).toContain('could not be observed');
+
+      // The reader does not launder it into a pass.
+      expect(runScript(scriptOf('readPostPublishObservation'), { WT: dir }, dir)).toBe('unavailable');
+
+      // The blocked reason states that mergeability is UNKNOWN.
+      const reason = runScript(scriptOf('readPostPublishBlockReason'), { WT: dir, STATE: 'unavailable' }, dir);
+      expect(reason).toContain('could not be observed');
+      expect(reason).toContain('UNKNOWN');
+      expect(reason).toContain('cannot claim success');
+
+      // ...and the terminal text is a block, not a success.
+      const text = runScript(
+        scriptOf('describePostPublishBlock'),
+        { WT: dir, OUTCOME: 'blocked_human', REASON: reason, PR_URL: '', BOUND: '2' },
+        dir,
+      );
+      expect(text).toContain('NOT complete');
+      expect(text).toContain('could not be observed');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('ignores a CHANGES_REQUESTED review of an OLDER commit and reports the PR as awaiting a human', () => {
+    const dir = tempDir('pa-stale-review-');
+    try {
+      initRepo(dir);
+      sh('git config commit.gpgsign false', dir);
+      sh('git checkout -q -b feature/test', dir);
+      fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+      fs.writeFileSync(path.join(dir, 'work.ts'), 'export const v = 1;\n', 'utf8');
+      sh('git add -A && git commit -qm "AI engineering run: REF-1"', dir);
+      const head = sh('git rev-parse HEAD', dir);
+
+      const observationFor = (reviewCommit: string): any => {
+        const fixture = path.join(dir, '.ai-agent', 'observation.json');
+        fs.writeFileSync(
+          fixture,
+          JSON.stringify({
+            pr: { number: 18, state: 'OPEN', mergeStateStatus: 'BLOCKED', reviewDecision: 'CHANGES_REQUESTED', headRefOid: head },
+            reviews: [{ id: 9, state: 'CHANGES_REQUESTED', commit_id: reviewCommit, user: { login: 'human' }, body: 'split this function' }],
+            reviewThreads: { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } },
+            checkRuns: { check_runs: [] },
+            commits: [],
+            protection: null,
+          }),
+          'utf8',
+        );
+        return runJson(
+          scriptOf('observePullRequest'),
+          Object.assign({ WT: dir, PR_NUMBER: '18', PR_STATE: 'OPEN', CYCLE: '1', TIP: head, OBSERVATION_FIXTURE: fixture }, ISOLATED_CONFIG),
+          dir,
+        );
+      };
+
+      // The review reviewed an older commit: the fix that followed it is the answer.
+      const stale = observationFor('0123456789abcdef0123456789abcdef01234567');
+      expect(stale.headSha).toBe(head);
+      expect(stale.state).toBe('clean');
+      expect(stale.findings.length).toBe(0);
+      expect(stale.staleReviews.length).toBe(1);
+      expect(stale.staleReviews[0].author).toBe('human');
+      expect(String(stale.staleReviews[0].body)).toContain('not the current head');
+      expect(stale.awaitingReview).toBe(true);
+
+      // The same review ON the head is still an actionable finding.
+      const current = observationFor(head);
+      expect(current.state).toBe('fixable');
+      expect(current.findings.map((finding: any) => finding.kind)).toEqual(['review_requested_changes']);
+      expect(current.findings[0].commitId).toBe(head);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('refuses a post-publication verdict that is stale, unwindowed or from another cycle', () => {
+    const dir = tempDir('pa-provenance-');
+    try {
+      initRepo(dir);
+      fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-observation.json'),
+        JSON.stringify({ cycle: 1, findings: [] }),
+        'utf8',
+      );
+
+      // A verdict left over from cycle 0 exists BEFORE the window opens.
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review.json'),
+        JSON.stringify({ requiredChanges: ['stale cycle-0 finding'] }),
+        'utf8',
+      );
+
+      runScript(scriptOf('preparePostPublishReview'), { WT: dir, BOUND: '2', CYCLE: '1' }, dir);
+      // Opening the window clears it: a crashed reviewer cannot inherit it.
+      expect(fs.existsSync(path.join(dir, '.ai-agent', 'post-publish-review.json'))).toBe(false);
+      expect(fs.existsSync(path.join(dir, '.ai-agent', 'post-publish-review-window.json'))).toBe(true);
+
+      // With no verdict, the capture is invalid - never the previous cycle's.
+      const none = runJson(scriptOf('capturePostPublishReview'), { WT: dir, CYCLE: '1' }, dir);
+      expect(none.state).toBe('invalid');
+      expect(String(none.reason)).toContain('wrote no post-publish-review.json');
+      expect(runScript(scriptOf('readPostPublishDecision'), { WT: dir }, dir)).toBe('invalid');
+
+      // A file that predates the window is refused.
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review.json'),
+        JSON.stringify({ requiredChanges: ['stale'] }),
+        'utf8',
+      );
+      const past = new Date(Date.now() - 600000);
+      fs.utimesSync(path.join(dir, '.ai-agent', 'post-publish-review.json'), past, past);
+      const stale = runJson(scriptOf('capturePostPublishReview'), { WT: dir, CYCLE: '1' }, dir);
+      expect(stale.state).toBe('invalid');
+      expect(String(stale.reason)).toContain('predates this review window');
+
+      // A window belonging to another cycle is refused even for fresh bytes.
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review-window.json'),
+        JSON.stringify({ startedAtMs: Date.now() - 1000, reviewCycle: '0', nonce: 'n1' }),
+        'utf8',
+      );
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review.json'),
+        JSON.stringify({ requiredChanges: ['fresh but wrong cycle'] }),
+        'utf8',
+      );
+      const foreign = runJson(scriptOf('capturePostPublishReview'), { WT: dir, CYCLE: '1' }, dir);
+      expect(foreign.state).toBe('invalid');
+      expect(String(foreign.reason)).toContain('belongs to cycle 0');
+
+      // The accepted record carries the digest of the bytes that were judged.
+      runScript(scriptOf('preparePostPublishReview'), { WT: dir, BOUND: '2', CYCLE: '1' }, dir);
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review.json'),
+        JSON.stringify({ requiredChanges: ['real finding'] }),
+        'utf8',
+      );
+      const accepted = runJson(scriptOf('capturePostPublishReview'), { WT: dir, CYCLE: '1' }, dir);
+      expect(accepted.state).toBe('changes_required');
+      expect(accepted.requiredChanges).toEqual(['real finding']);
+      expect(String(accepted.reviewSha256)).toMatch(/^[0-9a-f]{64}$/);
+      expect(String(accepted.windowNonce)).not.toBe('');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('carries a real code-scanning alert number from the observation to the dismissal call', () => {
+    const dir = tempDir('pa-alerts-');
+    try {
+      initRepo(dir);
+      fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+      const fixture = path.join(dir, '.ai-agent', 'observation.json');
+      fs.writeFileSync(
+        fixture,
+        JSON.stringify({
+          pr: { number: 18, state: 'OPEN', mergeStateStatus: 'BLOCKED', headRefOid: 'abc123' },
+          reviews: [],
+          reviewThreads: { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } },
+          checkRuns: { check_runs: [] },
+          commits: [],
+          protection: null,
+          codeScanning: [
+            {
+              number: 42,
+              rule: { id: 'js/sql-injection', security_severity_level: 'high', description: 'Database query built from user-controlled sources' },
+              most_recent_instance: { ref: 'refs/pull/18/merge', commit_sha: 'abc123', location: { path: 'src/db.ts', start_line: 10 } },
+              html_url: 'https://x/alert/42',
+            },
+          ],
+        }),
+        'utf8',
+      );
+      const observation = runJson(
+        scriptOf('observePullRequest'),
+        Object.assign({ WT: dir, PR_NUMBER: '18', PR_STATE: 'OPEN', CYCLE: '0', OBSERVATION_FIXTURE: fixture }, ISOLATED_CONFIG),
+        dir,
+      );
+      expect(observation.state).toBe('fixable');
+      const alert = observation.findings.filter((finding: any) => finding.kind === 'code_scanning_alert')[0];
+      expect(alert.id).toBe('alert:42');
+      expect(alert.alertNumber).toBe(42);
+      expect(alert.path).toBe('src/db.ts');
+      expect(alert.line).toBe(10);
+
+      // The agent dismisses it; the number survives capture and reaches the API.
+      runScript(scriptOf('preparePostPublishReview'), { WT: dir, BOUND: '2', CYCLE: '0' }, dir);
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review.json'),
+        JSON.stringify({
+          verdict: 'no_action',
+          requiredChanges: [],
+          dismissals: [
+            {
+              findingId: 'alert:42',
+              justification: 'The identifier is validated upstream by the schema layer.',
+              dismissedReason: 'false positive',
+              dismissedComment: 'Validated upstream in src/schema.ts; CodeQL cannot see the guard.',
+            },
+          ],
+          resolvedFindingIds: ['alert:42'],
+        }),
+        'utf8',
+      );
+      const captured = runJson(scriptOf('capturePostPublishReview'), { WT: dir, CYCLE: '0' }, dir);
+      expect(captured.state).toBe('no_action');
+      expect(captured.dismissals[0].alertNumber).toBe(42);
+
+      const bin = path.join(dir, 'fakebin');
+      fs.mkdirSync(bin, { recursive: true });
+      const ghLog = path.join(dir, 'gh-args.log');
+      fs.writeFileSync(
+        path.join(bin, 'gh'),
+        ['#!/bin/sh', 'for a in "$@"; do printf "[%s]" "$a" >> "' + ghLog + '"; done', 'echo >> "' + ghLog + '"', "echo '{\"state\":\"dismissed\"}'", ''].join('\n'),
+        { mode: 0o755 },
+      );
+      const applied = runJson(
+        scriptOf('applyPostPublishDecisions'),
+        { WT: dir, PR_NUMBER: '18', PR_REPO: 'reactorynet/x', PATH: bin + ':' + process.env.PATH },
+        dir,
+      );
+      expect(applied.applied).toBe(1);
+      expect(applied.recordedOnly).toBe(0);
+      const calls = fs.readFileSync(ghLog, 'utf8');
+      expect(calls).toContain('repos/reactorynet/x/code-scanning/alerts/42');
+      expect(calls).toContain('[dismissed_comment=Validated upstream in src/schema.ts; CodeQL cannot see the guard.]');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('says a dismissal was NOT applied when no alert number could be resolved', () => {
+    const dir = tempDir('pa-alerts-none-');
+    try {
+      initRepo(dir);
+      fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review-normalised.json'),
+        JSON.stringify({
+          resolvedFindingIds: [],
+          dismissals: [
+            { findingId: 'check:build', kind: 'check_run', justification: 'flaky', dismissedReason: 'false positive', dismissedComment: 'Flaky upstream check.' },
+          ],
+        }),
+        'utf8',
+      );
+      const bin = path.join(dir, 'fakebin');
+      fs.mkdirSync(bin, { recursive: true });
+      const ghLog = path.join(dir, 'gh-args.log');
+      fs.writeFileSync(
+        path.join(bin, 'gh'),
+        ['#!/bin/sh', 'for a in "$@"; do printf "[%s]" "$a" >> "' + ghLog + '"; done', 'echo >> "' + ghLog + '"', 'echo ok', ''].join('\n'),
+        { mode: 0o755 },
+      );
+      const applied = runJson(
+        scriptOf('applyPostPublishDecisions'),
+        { WT: dir, PR_NUMBER: '18', PR_REPO: 'reactorynet/x', PATH: bin + ':' + process.env.PATH },
+        dir,
+      );
+      expect(applied.applied).toBe(0);
+      expect(applied.recordedOnly).toBe(1);
+      expect(applied.dismissals[0].status).toBe('recorded-only');
+      // Nothing was PATCHed at an alert that does not exist...
+      const calls = fs.readFileSync(ghLog, 'utf8');
+      expect(calls).not.toContain('code-scanning/alerts');
+      // ...and the pull request comment says so rather than claiming a dismissal.
+      expect(calls).toContain('NO GitHub dismissal was written');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
+
+
+/**
+ * PROCESS-002 review round 3: the three blocking defects that survived round 2.
+ *
+ *  - a PR merely WAITING for CI was classified as a human-only policy block;
+ *  - applyPostPublishDecisions never received a repository, so every GitHub
+ *    write (dismissal, PR comment, review re-request) was inert;
+ *  - a cycle in which the engineer changed nothing was recorded as a fix, so an
+ *    unfinished required change could reach awaiting_human.
+ */
+describe('ProcessAITicket post-publication correctness (PROCESS-002 round 3)', () => {
+  const ISOLATED_CONFIG = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+
+  const pubRepo = (): string => {
+    const dir = tempDir('pa-r3-');
+    sh('git init -q -b master .', dir);
+    sh('git config user.email owner@example.com', dir);
+    sh('git config user.name "Key Owner"', dir);
+    sh('git config commit.gpgsign false', dir);
+    fs.writeFileSync(path.join(dir, 'README.md'), '# fixture\n', 'utf8');
+    sh('git add -A && git commit -qm base', dir);
+    sh('git checkout -q -b feature/test', dir);
+    fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'w.ts'), 'export const v = 1;\n', 'utf8');
+    sh('git add -A && git commit -qm "AI engineering run: REF-1"', dir);
+    return dir;
+  };
+
+  const observeWith = (dir: string, payload: Record<string, any>): any => {
+    const file = path.join(dir, '.ai-agent', 'observation.json');
+    fs.writeFileSync(file, JSON.stringify(payload), 'utf8');
+    return runJson(
+      scriptOf('observePullRequest'),
+      Object.assign({ WT: dir, PR_NUMBER: '18', PR_STATE: 'OPEN', CYCLE: '0', OBSERVATION_FIXTURE: file }, ISOLATED_CONFIG),
+      dir,
+    );
+  };
+
+  const blockedPr = (overrides: Record<string, any> = {}): Record<string, any> => Object.assign({
+    pr: { number: 18, state: 'OPEN', mergeStateStatus: 'BLOCKED', reviewDecision: '', headRefOid: 'abc123def456' },
+    reviews: [],
+    reviewThreads: { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } },
+    checkRuns: { check_runs: [] },
+    commits: [],
+    protection: { required_status_checks: { enabled: true } },
+  }, overrides);
+
+  it('classifies a PR waiting on a required check as pending, never human_only', () => {
+    const dir = pubRepo();
+    try {
+      const observation = observeWith(dir, blockedPr({
+        checkRuns: { check_runs: [{ name: 'build', status: 'in_progress', conclusion: null }] },
+      }));
+
+      // The exact regression: required_status_checks + one running check.
+      expect(observation.state).not.toBe('human_only');
+      expect(observation.state).toBe('pending');
+      expect(observation.awaitingChecks).toBe(true);
+      expect(observation.pendingChecks).toEqual([{ name: 'build', status: 'in_progress' }]);
+      expect(observation.findings.length).toBe(0);
+      // The reason names the running check instead of blaming branch protection.
+      expect(String(observation.reason)).toContain('build:in_progress');
+      expect(String(observation.reason)).not.toContain('branch-protection policy');
+      // The reader accepts 'pending' (it is not laundered into 'unavailable').
+      expect(runScript(scriptOf('readPostPublishObservation'), { WT: dir }, dir)).toBe('pending');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('treats every unfinished check status as pending, and a finished failure as fixable', () => {
+    const dir = pubRepo();
+    try {
+      ['queued', 'in_progress', 'requested', 'waiting', 'pending'].forEach((status) => {
+        const observation = observeWith(dir, blockedPr({
+          checkRuns: { check_runs: [{ name: 'build', status: status, conclusion: null }] },
+        }));
+        expect(observation.state).toBe('pending');
+      });
+      // A check that finished with no conclusion is also unfinished.
+      expect(observeWith(dir, blockedPr({ checkRuns: { check_runs: [{ name: 'build', status: 'completed', conclusion: null }] } })).state).toBe('pending');
+
+      // A terminal failure is a finding, not a wait.
+      const failed = observeWith(dir, blockedPr({
+        checkRuns: { check_runs: [{ name: 'build', status: 'completed', conclusion: 'failure', output: { summary: 'tsc failed' } }] },
+      }));
+      expect(failed.state).toBe('fixable');
+      expect(failed.findings.map((finding: any) => finding.kind)).toEqual(['check_run']);
+      expect(failed.awaitingChecks).toBe(false);
+
+      // A successful check leaves the genuine policy block to a human.
+      const policy = observeWith(dir, blockedPr({
+        checkRuns: { check_runs: [{ name: 'build', status: 'completed', conclusion: 'success' }] },
+      }));
+      expect(policy.state).toBe('human_only');
+      expect(String(policy.reason)).toContain('branch-protection policy');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('uses the LIVE pull request state, so a PR closed by a human is seen as closed', () => {
+    const dir = pubRepo();
+    try {
+      // PR_STATE is the creation-time variable and always says OPEN.
+      const closed = observeWith(dir, blockedPr({
+        pr: { number: 18, state: 'closed', mergeStateStatus: 'UNKNOWN', reviewDecision: '', headRefOid: 'abc123def456' },
+      }));
+      expect(closed.liveState).toBe('CLOSED');
+      expect(closed.state).toBe('human_only');
+      expect(String(closed.reason)).toContain('CLOSED');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('does not attribute another branch alert to this PR', () => {
+    const dir = pubRepo();
+    try {
+      const head = sh('git rev-parse HEAD', dir);
+      const observation = observeWith(dir, blockedPr({
+        headRefOid: head,
+        protection: null,
+        codeScanning: [
+          { number: 42, most_recent_instance: { ref: 'refs/pull/18/merge', commit_sha: head, location: { path: 'a.ts', start_line: 3 } }, rule: { id: 'js/sql-injection' } },
+          { number: 43, most_recent_instance: { ref: 'refs/heads/main', commit_sha: 'deadbeef', location: { path: 'b.ts', start_line: 4 } }, rule: { id: 'js/x' } },
+        ],
+      }));
+      // Only the alert on this PR's ref is dismissable here.
+      expect(observation.findings.map((finding: any) => finding.id)).toEqual(['alert:42']);
+      expect(observation.findings[0].alertNumber).toBe(42);
+      expect(observation.unattributedAlerts).toEqual([43]);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('issues the dismissal, the PR comment and the review re-request with only WT + PR_NUMBER', () => {
+    // The workflow supplies exactly these two env values; PR_REPO is unset.
+    const dir = pubRepo();
+    try {
+      // Origin names the repository, exactly as a real checkout does.
+      sh('git remote remove origin 2>/dev/null || true', dir);
+      sh('git remote add origin https://github.com/reactorynet/demo.git', dir);
+
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-observation.json'),
+        JSON.stringify({
+          repo: 'reactorynet/demo',
+          staleReviews: [{ id: 'review:9', author: 'human', commitId: 'deadbeefdeadbeef' }],
+          findings: [{ id: 'thread:THREAD_1', kind: 'review_thread' }, { id: 'thread:THREAD_2', kind: 'review_thread' }],
+        }),
+        'utf8',
+      );
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review-normalised.json'),
+        JSON.stringify({
+          // THREAD_1 was DISMISSED, THREAD_2 is still a REQUIRED fix.
+          resolvedFindingIds: ['thread:THREAD_1', 'thread:THREAD_2'],
+          requiredChanges: [{ findingId: 'thread:THREAD_2' }],
+          dismissals: [
+            { findingId: 'thread:THREAD_1', kind: 'review_thread', justification: 'the guard is in the caller', dismissedReason: 'false positive', dismissedComment: 'Guarded in the caller.' },
+            { findingId: 'alert:42', kind: 'code_scanning_alert', alertNumber: 42, justification: 'validated upstream', dismissedReason: 'false positive', dismissedComment: 'Guarded in src/schema.ts.' },
+          ],
+        }),
+        'utf8',
+      );
+
+      const bin = path.join(dir, 'fakebin');
+      fs.mkdirSync(bin, { recursive: true });
+      const log = path.join(dir, 'gh-args.log');
+      fs.writeFileSync(
+        path.join(bin, 'gh'),
+        [
+          '#!/bin/sh',
+          'for a in "$@"; do printf "[%s]" "$a" >> "' + log + '"; done',
+          'echo >> "' + log + '"',
+          'case "$*" in',
+          '  *graphql*) echo \'{"data":{"resolveReviewThread":{"thread":{"id":"THREAD_1","isResolved":true}}}}\' ;;',
+          '  *) echo \'{"ok":1}\' ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+
+      // EXACTLY the env the workflow supplies.
+      const applied = runJson(
+        scriptOf('applyPostPublishDecisions'),
+        { WT: dir, PR_NUMBER: '18', PATH: bin + ':' + process.env.PATH },
+        dir,
+      );
+
+      expect(applied.repo).toBe('reactorynet/demo');
+      expect(applied.repoProblem).toEqual([]);
+      // The code-scanning dismissal actually ran, with its justification.
+      // The alert dismissal is the one that reaches GitHub; the review-thread
+      // dismissal is recorded only (its thread is closed through the GraphQL call).
+      const alertDismissal = applied.dismissals.filter((entry: any) => entry.alertNumber === 42)[0];
+      expect(alertDismissal.status).toBe('dismissed');
+      expect(applied.applied).toBe(1);
+
+      // Only the DISMISSED thread was closed; the required one is deferred.
+      expect(applied.resolvedThreads).toBe(1);
+      expect(applied.deferredThreads).toEqual(['thread:THREAD_2']);
+      expect(applied.reRequestedReviews).toBe(1);
+
+      const calls = fs.readFileSync(log, 'utf8');
+      expect(calls).toContain('repos/reactorynet/demo/code-scanning/alerts/42');
+      expect(calls).toContain('[state=dismissed]');
+      expect(calls).toContain('[dismissed_reason=false positive]');
+      expect(calls).toContain('[dismissed_comment=Guarded in src/schema.ts.]');
+      expect(calls).toContain('repos/reactorynet/demo/pulls/18/requested_reviewers');
+      expect(calls).toContain('[reviewers[]=human]');
+      expect(calls).toContain('[pr][comment][18]');
+      // The comment explains the deferral rather than claiming everything is done.
+      expect(calls).toContain('Guarded in src/schema.ts.');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('falls back to gh repo view when origin is not a GitHub remote, and fails LOUDLY when nothing resolves', () => {
+    // Two links of the documented chain, each proven on its own: the observation
+    // may name the repo, origin may be a GitHub remote, and gh is the last
+    // resort. A silent '' was the round-2 defect.
+    const withFakeGh = (dir: string, repoAnswer: string): { bin: string; log: string } => {
+      const bin = path.join(dir, 'fakebin');
+      fs.mkdirSync(bin, { recursive: true });
+      const log = path.join(dir, 'gh-args.log');
+      fs.writeFileSync(
+        path.join(bin, 'gh'),
+        [
+          '#!/bin/sh',
+          'for a in "$@"; do printf "[%s]" "$a" >> "' + log + '"; done',
+          'echo >> "' + log + '"',
+          'case "$1 $2" in',
+          '  "repo view") echo "' + repoAnswer + '" ;;',
+          '  *) echo '{"ok":1}' ;;',
+          'esac',
+          '',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      return { bin, log };
+    };
+
+    // (a) origin is a LOCAL path, the observation names nothing: only gh can answer.
+    const viaGh = pubRepo();
+    try {
+      sh('git remote remove origin 2>/dev/null || true', viaGh);
+      sh('git remote add origin /tmp/not-a-github-remote.git', viaGh);
+      fs.writeFileSync(
+        path.join(viaGh, '.ai-agent', 'post-publish-observation.json'),
+        JSON.stringify({ staleReviews: [], findings: [] }),
+        'utf8',
+      );
+      fs.writeFileSync(
+        path.join(viaGh, '.ai-agent', 'post-publish-review-normalised.json'),
+        JSON.stringify({
+          resolvedFindingIds: [],
+          requiredChanges: [],
+          dismissals: [{ findingId: 'alert:7', alertNumber: 7, justification: 'n/a', dismissedReason: 'false positive', dismissedComment: 'n/a' }],
+        }),
+        'utf8',
+      );
+      const fake = withFakeGh(viaGh, 'reactorynet/via-gh');
+      const applied = runJson(
+        scriptOf('applyPostPublishDecisions'),
+        { WT: viaGh, PR_NUMBER: '18', PATH: fake.bin + ':' + process.env.PATH },
+        viaGh,
+      );
+      expect(applied.repo).toBe('reactorynet/via-gh');
+      expect(applied.repoProblem).toEqual([]);
+      expect(fs.readFileSync(fake.log, 'utf8')).toContain('[repo][view][--json][nameWithOwner]');
+      expect(fs.readFileSync(fake.log, 'utf8')).toContain('repos/reactorynet/via-gh/code-scanning/alerts/7');
+    } finally {
+      removeDir(viaGh);
+    }
+
+    // (b) Nothing resolves: the step says NOT-APPLIED and warns, never silent.
+    const nowhere = pubRepo();
+    try {
+      sh('git remote remove origin 2>/dev/null || true', nowhere);
+      fs.writeFileSync(
+        path.join(nowhere, '.ai-agent', 'post-publish-observation.json'),
+        JSON.stringify({ staleReviews: [], findings: [] }),
+        'utf8',
+      );
+      fs.writeFileSync(
+        path.join(nowhere, '.ai-agent', 'post-publish-review-normalised.json'),
+        JSON.stringify({
+          resolvedFindingIds: [],
+          requiredChanges: [],
+          dismissals: [{ findingId: 'alert:9', alertNumber: 9, justification: 'n/a', dismissedReason: 'false positive', dismissedComment: 'n/a' }],
+        }),
+        'utf8',
+      );
+      const fake = withFakeGh(nowhere, '');
+      const result = runScript(
+        scriptOf('applyPostPublishDecisions'),
+        { WT: nowhere, PR_NUMBER: '18', PATH: fake.bin + ':' + process.env.PATH },
+        nowhere,
+      );
+      const applied = JSON.parse(result);
+      expect(applied.repo).toBe(null);
+      expect(applied.repoProblem.length).toBe(1);
+      expect(String(applied.repoProblem[0])).toContain('could not be resolved');
+      expect(applied.applied).toBe(0);
+      expect(applied.dismissals[0].status).toBe('not-applied');
+      expect(String(applied.dismissals[0].reason)).toContain('could not be resolved');
+    } finally {
+      removeDir(nowhere);
+    }
+  });
+
+  it('records a no-op cycle as NO fix, so an unfinished required change cannot reach awaiting_human', () => {
+    const dir = pubRepo();
+    try {
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-log.json'),
+        JSON.stringify([{ cycle: 0, observed: [], judged: { requiredChanges: ['fix the parser'] }, fixed: [] }]),
+        'utf8',
+      );
+
+      // The engineer changed nothing: republishCommit reports committed:false and
+      // the push is a successful no-op.
+      const commit = JSON.stringify({ committed: false, reason: 'worktree clean' });
+      const push = JSON.stringify({ ok: true, mode: 'fast-forward', head: sh('git rev-parse HEAD', dir) });
+      const result = runScript(
+        scriptOf('readRepublishResult'),
+        { WT: dir, PUSH: push, COMMIT: commit, CYCLE: '0' },
+        dir,
+      ).trim();
+
+      // NOT 'pushed': the gate below can no longer treat this as a fix.
+      expect(result).toBe('no_change');
+
+      const log = JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'post-publish-log.json'), 'utf8'));
+      const entry = log.filter((item: any) => Number(item.cycle) === 0)[0];
+      expect(entry.fixed.length).toBe(1);
+      expect(entry.fixed[0].committed).toBe(false);
+      expect(entry.fixed[0].pushed).toBe(true);
+      expect(String(entry.fixed[0].error)).toContain('worktree clean');
+
+      // A real commit + push still reads as a fix.
+      const real = runScript(
+        scriptOf('readRepublishResult'),
+        { WT: dir, PUSH: push, COMMIT: JSON.stringify({ committed: true, sha: 'abc' }), CYCLE: '0' },
+        dir,
+      ).trim();
+      expect(real).toBe('pushed');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('stops for a human when the reviewer says changes are required but lists none', () => {
+    const dir = pubRepo();
+    try {
+      fs.writeFileSync(path.join(dir, '.ai-agent', 'post-publish-observation.json'), JSON.stringify({ findings: [] }), 'utf8');
+      runScript(scriptOf('preparePostPublishReview'), { WT: dir, BOUND: '2', CYCLE: '0' }, dir);
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review.json'),
+        JSON.stringify({ verdict: 'changes_required', requiredChanges: [] }),
+        'utf8',
+      );
+      const captured = runJson(scriptOf('capturePostPublishReview'), { WT: dir, CYCLE: '0' }, dir);
+      expect(captured.state).toBe('invalid');
+      expect(String(captured.reason)).toContain('recorded no requiredChanges');
+      expect(runScript(scriptOf('readPostPublishDecision'), { WT: dir }, dir)).toBe('invalid');
+      // The state the loop acts on is 'invalid', not 'no_action'.
+      expect(captured.state).not.toBe('no_action');
+
+      // 'no_action' with a genuinely empty list is still a pass.
+      runScript(scriptOf('preparePostPublishReview'), { WT: dir, BOUND: '2', CYCLE: '0' }, dir);
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review.json'),
+        JSON.stringify({ verdict: 'no_action', requiredChanges: [] }),
+        'utf8',
+      );
+      expect(runJson(scriptOf('capturePostPublishReview'), { WT: dir, CYCLE: '0' }, dir).state).toBe('no_action');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
+
+
+/**
+ * PROCESS-002 review round 4: the loop could not converge on what it was built for.
+ *
+ *  - a review thread the reviewer judged ADDRESSED (fixed) was never resolved,
+ *    because apply closed threads only for DISMISSED findings - so the same
+ *    thread was re-observed for ever;
+ *  - a dismiss-all cycle (the PR #13 false-positive case) was pushed through
+ *    commit/push, "worktree clean" became no_change, and the run stopped blocked
+ *    without ever re-observing the PR whose findings it had just dismissed.
+ */
+describe('ProcessAITicket post-publication convergence (PROCESS-002 round 4)', () => {
+  const ISOLATED_CONFIG = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+
+  const repo = (): { dir: string; origin: string } => {
+    const origin = tempDir('pa-o4-');
+    sh('git init -q --bare -b master .', origin);
+    const dir = tempDir('pa-w4-');
+    sh('git init -q -b master .', dir);
+    sh('git config user.email owner@example.com', dir);
+    sh('git config user.name "Key Owner"', dir);
+    sh('git config commit.gpgsign false', dir);
+    fs.writeFileSync(path.join(dir, 'README.md'), '# fixture\n', 'utf8');
+    sh('git add -A && git commit -qm base', dir);
+    sh('git remote add origin ' + origin, dir);
+    sh('git checkout -q -b feature/test', dir);
+    fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'work.ts'), 'export const v = 1;\n', 'utf8');
+    sh('git add -A && git commit -qm "AI engineering run: REF-1"', dir);
+    sh('git push -q --set-upstream origin feature/test', dir);
+    return { dir, origin };
+  };
+
+  const fakeGh = (_dir: string, resolveThreads = true): { bin: string; log: string } => {
+    // Kept OUTSIDE the worktree: a helper inside it would show up in
+    // `git status` and be picked up by `git add -A`.
+    const outside = tempDir('pa-gh-');
+    const bin = path.join(outside, 'fakebin');
+    fs.mkdirSync(bin, { recursive: true });
+    const log = path.join(outside, 'gh-args.log');
+    fs.writeFileSync(
+      path.join(bin, 'gh'),
+      [
+        '#!/bin/sh',
+        'for a in "$@"; do printf "[%s]" "$a" >> "' + log + '"; done',
+        'echo >> "' + log + '"',
+        'case "$*" in',
+        '  *graphql*) ' + (resolveThreads ? 'echo \'{"data":{"resolveReviewThread":{"thread":{"id":"T","isResolved":true}}}}\' ;;' : 'echo \'{"data":{}}\' ;;'),
+        '  *) echo \'{"ok":1}\' ;;',
+        'esac',
+        '',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    return { bin, log };
+  };
+
+  const ghPath = (bin: string): string => bin + ':' + process.env.PATH;
+
+  /** Open the review window, write the verdict, capture it - the pipeline order. */
+  const judge = (dir: string, verdict: Record<string, any>, cycle = '0'): any => {
+    runScript(scriptOf('preparePostPublishReview'), Object.assign({ WT: dir, BOUND: '2', CYCLE: cycle }, ISOLATED_CONFIG), dir);
+    fs.writeFileSync(
+      path.join(dir, '.ai-agent', 'post-publish-review.json'),
+      JSON.stringify(verdict),
+      'utf8',
+    );
+    return runJson(scriptOf('capturePostPublishReview'), Object.assign({ WT: dir, CYCLE: cycle }, ISOLATED_CONFIG), dir);
+  };
+
+  const observeFixture = (dir: string, payload: Record<string, any>): any => {
+    const file = path.join(dir, '.ai-agent', 'observation.json');
+    fs.writeFileSync(file, JSON.stringify(payload), 'utf8');
+    return runJson(
+      scriptOf('observePullRequest'),
+      Object.assign({ WT: dir, PR_NUMBER: '18', PR_STATE: 'OPEN', CYCLE: '0', OBSERVATION_FIXTURE: file }, ISOLATED_CONFIG),
+      dir,
+    );
+  };
+
+  it('resolves a FIXED thread after the fix is published, and the SECOND observation is clean', () => {
+    // The reviewer's defect: resolvedFindingIds was deferred for threads because
+    // apply demanded a dismissal record to close one.
+    const { dir, origin } = repo();
+    try {
+      const gh = fakeGh(dir);
+      const head = sh('git rev-parse HEAD', dir);
+      const thread = {
+        id: 'THREAD_1',
+        isResolved: false,
+        path: 'work.ts',
+        line: 4,
+        comments: { nodes: [{ author: { login: 'github-advanced-security' }, body: 'CodeQL: SQL built by concatenation.', url: 'u' }] },
+      };
+
+      // cycle 0: the thread is observed and the reviewer FIXED it.
+      const first = observeFixture(dir, {
+        pr: { number: 18, state: 'OPEN', mergeStateStatus: 'BLOCKED', headRefOid: head },
+        reviews: [],
+        reviewThreads: { data: { repository: { pullRequest: { reviewThreads: { nodes: [thread] } } } } },
+        checkRuns: { check_runs: [] },
+        commits: [],
+        protection: null,
+        repo: 'reactorynet/demo',
+      });
+      expect(first.state).toBe('fixable');
+      expect(first.findings.map((finding: any) => finding.id)).toEqual(['thread:THREAD_1']);
+
+      const captured = judge(dir, {
+        verdict: 'changes_required',
+        requiredChanges: ['Build the query with a parameterised statement.'],
+        resolvedFindingIds: ['thread:THREAD_1'],
+        dismissals: [],
+      });
+      expect(captured.state).toBe('changes_required');
+      // The id survives capture (requiredChanges used to be stringified away).
+      expect(Array.isArray(captured.requiredChangeIds)).toBe(true);
+
+      // apply must NOT close it yet: the fix has not been published.
+      const applied = runJson(
+        scriptOf('applyPostPublishDecisions'),
+        { WT: dir, PR_NUMBER: '18', PATH: ghPath(gh.bin) },
+        dir,
+      );
+      expect(applied.resolvedThreads).toBe(0);
+      expect(applied.deferredThreads).toEqual(['thread:THREAD_1']);
+      expect(String(applied.deferredThreadReasons[0].why)).toContain('has not been published yet');
+      expect(fs.existsSync(gh.log) ? fs.readFileSync(gh.log, 'utf8') : '').not.toContain('graphql');
+
+      // the engineer fixes; the pipeline commits and publishes
+      fs.writeFileSync(path.join(dir, 'work.ts'), 'export const v = 2; // parameterised\n', 'utf8');
+      const commit = runJson(scriptOf('republishCommit'), { WT: dir, REF: 'REF-1' }, dir);
+      expect(commit.committed).toBe(true);
+      const push = runJson(
+        scriptOf('republishPush'),
+        { WT: dir, BRANCH: 'feature/test', OBSERVED_TIP: head, REPAIR_BASE: '' },
+        dir,
+      );
+      expect(push.ok).toBe(true);
+
+      // the post-push step closes it, and says why
+      const resolved = runJson(
+        scriptOf('resolveAddressedThreads'),
+        Object.assign({ WT: dir, CYCLE: '0', PATH: ghPath(gh.bin) }, ISOLATED_CONFIG),
+        dir,
+      );
+      expect(resolved.resolved).toBe(1);
+      expect(resolved.results[0].findingId).toBe('thread:THREAD_1');
+      expect(String(resolved.results[0].why)).toContain('committed and published');
+      expect(fs.readFileSync(gh.log, 'utf8')).toContain('[graphql]');
+      // the per-cycle log records the closure
+      const cycleLog = JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'post-publish-log.json'), 'utf8'))
+        .filter((entry: any) => Number(entry.cycle) === 0)[0];
+      expect(cycleLog.resolvedThreads.length).toBe(1);
+
+      // SECOND observation: the thread is now resolved, so the PR converges.
+      const second = observeFixture(dir, {
+        pr: { number: 18, state: 'OPEN', mergeStateStatus: 'CLEAN', headRefOid: commit.sha },
+        reviews: [],
+        reviewThreads: {
+          data: { repository: { pullRequest: { reviewThreads: { nodes: [Object.assign({}, thread, { isResolved: true })] } } } },
+        },
+        checkRuns: { check_runs: [] },
+        commits: [{ sha: commit.sha, verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+        protection: null,
+        repo: 'reactorynet/demo',
+      });
+      expect(second.findings.length).toBe(0);
+      expect(second.state).toBe('clean');
+      expect(runScript(scriptOf('readPostPublishObservation'), Object.assign({ WT: dir }, ISOLATED_CONFIG), dir)).toBe('clean');
+      expect(origin.length).toBeGreaterThan(0);
+    } finally {
+      removeDir(dir);
+      removeDir(origin);
+    }
+  });
+
+  it('keeps a thread OPEN when the fix did not land', () => {
+    const { dir } = repo();
+    try {
+      const gh = fakeGh(dir);
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-observation.json'),
+        JSON.stringify({ repo: 'reactorynet/demo', findings: [{ id: 'thread:THREAD_2', kind: 'review_thread' }], staleReviews: [] }),
+        'utf8',
+      );
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review-normalised.json'),
+        JSON.stringify({
+          state: 'changes_required',
+          requiredChanges: ['fix it'],
+          requiredChangeIds: ['thread:THREAD_2'],
+          resolvedFindingIds: ['thread:THREAD_2'],
+          dismissals: [],
+        }),
+        'utf8',
+      );
+      const applied = runJson(
+        scriptOf('applyPostPublishDecisions'),
+        { WT: dir, PR_NUMBER: '18', PATH: ghPath(gh.bin) },
+        dir,
+      );
+      expect(applied.resolvedThreads).toBe(0);
+      expect(applied.deferredThreadReasons[0].findingId).toBe('thread:THREAD_2');
+      expect(fs.existsSync(gh.log) ? fs.readFileSync(gh.log, 'utf8') : '').not.toContain('graphql');
+
+      // With no commit, the pushing arm is never reached, so nothing closes it.
+      const commit = runJson(scriptOf('republishCommit'), { WT: dir, REF: 'REF-1' }, dir);
+      expect(commit.committed).toBe(false);
+      const result = runScript(
+        scriptOf('readRepublishResult'),
+        { WT: dir, PUSH: JSON.stringify({ ok: true, head: sh('git rev-parse HEAD', dir) }), COMMIT: JSON.stringify(commit), CYCLE: '0' },
+        dir,
+      ).trim();
+      expect(result).toBe('no_change');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('dismissing every finding re-observes and reaches awaiting_human, with no commit forced', () => {
+    // The PR #13 false-positive case. Previously: forced commit -> no_change ->
+    // blocked_human, never re-observing the PR it had just unblocked.
+    const { dir } = repo();
+    try {
+      const gh = fakeGh(dir);
+      const head = sh('git rev-parse HEAD', dir);
+      const thread = {
+        id: 'THREAD_9',
+        isResolved: false,
+        path: 'work.ts',
+        line: 2,
+        comments: { nodes: [{ author: { login: 'github-advanced-security' }, body: 'CodeQL: unused variable (false positive).', url: 'u' }] },
+      };
+      const observed = observeFixture(dir, {
+        pr: { number: 18, state: 'OPEN', mergeStateStatus: 'BLOCKED', headRefOid: head },
+        reviews: [],
+        reviewThreads: { data: { repository: { pullRequest: { reviewThreads: { nodes: [thread] } } } } },
+        checkRuns: { check_runs: [] },
+        commits: [],
+        protection: null,
+        repo: 'reactorynet/demo',
+      });
+      expect(observed.state).toBe('fixable');
+
+      const captured = judge(dir, {
+        verdict: 'no_action',
+        requiredChanges: [],
+        dismissals: [{
+          findingId: 'thread:THREAD_9',
+          justification: 'The variable is read by the test harness; CodeQL cannot see it.',
+          dismissedReason: 'false positive',
+          dismissedComment: 'Read by the test harness; see work.ts:40.',
+        }],
+        resolvedFindingIds: ['thread:THREAD_9'],
+      });
+      expect(captured.state).toBe('no_action');
+
+      // The dismissal-closed thread is resolved now: nothing is owed.
+      const applied = runJson(
+        scriptOf('applyPostPublishDecisions'),
+        { WT: dir, PR_NUMBER: '18', PATH: ghPath(gh.bin) },
+        dir,
+      );
+      expect(applied.resolvedThreads).toBe(1);
+      expect(applied.deferredThreads).toEqual([]);
+
+      // The per-cycle log records the dismissal AND its justification.
+      const cycleLog = JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'post-publish-log.json'), 'utf8'))
+        .filter((entry: any) => Number(entry.cycle) === 0)[0];
+      expect(cycleLog.judged.dismissals[0].findingId).toBe('thread:THREAD_9');
+      expect(String(cycleLog.judged.dismissals[0].justification)).toContain('test harness');
+      expect(cycleLog.judged.state).toBe('no_action');
+
+      // No code changed, so a commit would be a no-op - it must not be attempted
+      // as a "fix". The no_action arm re-observes instead.
+      expect(sh('git status --porcelain -- . ":!:.ai-agent"', dir)).toBe('');
+
+      // Next observation: the thread is resolved and the PR is clean.
+      const second = observeFixture(dir, {
+        pr: { number: 18, state: 'OPEN', mergeStateStatus: 'CLEAN', headRefOid: head },
+        reviews: [],
+        reviewThreads: {
+          data: { repository: { pullRequest: { reviewThreads: { nodes: [Object.assign({}, thread, { isResolved: true })] } } } },
+        },
+        checkRuns: { check_runs: [] },
+        commits: [{ sha: head, verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+        protection: null,
+        repo: 'reactorynet/demo',
+      });
+      expect(second.state).toBe('clean');
+      // clean -> awaiting_human, and the no-change failure is unreachable from a
+      // no_action cycle: it lives only inside the changes_required arm.
+      expect(byId('postPublishMergeableGate').config!.condition).toBe("variables.postPublishState === 'clean'");
+      const handBack = byId('postPublishHandBackGate').config!;
+      const noActionArm = (handBack.elseSteps || []).map((step: any) => step.id);
+      expect(noActionArm).not.toContain('setPostPublishNoChange');
+      expect(noActionArm).toContain('postPublishReobserveGate');
+      // and nothing in the no_action arm can set the blocked outcome for no-change
+      const noChangeTrail = all
+        .filter((entry: any) => entry.id === 'setPostPublishNoChange')
+        .map((entry: any) => String(entry.config && entry.config.value));
+      expect(noChangeTrail).toEqual(['blocked_human']);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('bounds the no-fix re-observe and stops for a human instead of spinning', () => {
+    const { dir } = repo();
+    try {
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-log.json'),
+        JSON.stringify([{ cycle: 0, observed: [], judged: {}, fixed: [] }]),
+        'utf8',
+      );
+      // The counter increments exactly as the arm does it.
+      const bumped = runScript(
+        scriptOf('bumpPostPublishReobserve'),
+        { N: '2' },
+        dir,
+      ).trim();
+      expect(bumped).toBe('3');
+      // Bound is 3, so the gate refuses the 4th wait/observe and blocks.
+      expect(Number(runScript(scriptOf('readPostPublishBlockReason'), { WT: dir, STATE: 'human_only' }, dir).length)).toBeGreaterThan(0);
+      expect(String(byId('setPostPublishReobserveBlocked').config!.value)).toBe('blocked_human');
+      expect(String(byId('setPostPublishReobserveContinue').config!.value)).toBe('false');
+    } finally {
+      removeDir(dir);
+    }
   });
 });

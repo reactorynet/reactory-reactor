@@ -64,6 +64,16 @@ const byId = (id: string): IStep => {
 const indexOf = (id: string): number => all.findIndex((n) => n.step.id === id);
 
 describe('core.ProcessAITicket definition', () => {
+  it('describes post-publication observation and the publish lifecycle', () => {
+    const description = String(def.description);
+    expect(description).toContain('OBSERVES');
+    expect(description).toContain('maxPostPublishFixCycles');
+    expect(description).toContain('awaiting_human');
+    expect(description).toContain('blocked_needs_human');
+    // The old text claimed the run only polled for the merge.
+    expect(description).not.toContain('Once the review passes it\n  commits, pushes and opens a pull request, raises a human approval task');
+  });
+
   it('declares the expected identity', () => {
     expect(def.nameSpace).toBe('core');
     expect(def.name).toBe('ProcessAITicket');
@@ -1184,5 +1194,606 @@ describe('core.ProcessAITicket signed-commit contracts (PROCESS-001)', () => {
     // documented in workflow/README.md instead.
     expect(String(def.version)).toBe('1.4.8');
     expect(String(def.version)).not.toBe('');
+  });
+});
+
+/**
+ * PROCESS-002 structural contracts.
+ *
+ * Two defects, both reproduced on SPEECH-010 (PR #18):
+ *
+ *  1. The integrity guards ran ONCE, after the first engineer session. The
+ *     reviewer-rejection path re-enters the SAME engineer session via `handBack`,
+ *     and nothing re-ran guardEngineerCommits or verifyCommitSignatures on that
+ *     revision. Commits made during a revision were published verbatim.
+ *  2. Nothing read the pull request after it was opened. CodeQL/code-scanning
+ *     review threads, failing checks and review comments arrived on the PR and
+ *     reached nobody.
+ *
+ * These assertions pin the SHAPE that makes the fix work: the guard is re-run on
+ * every revision, the observation loop is bounded and separately budgeted,
+ * agent-fixable blocks hand back to the same engineer session, human-only blocks
+ * do not loop, and the terminal states are honest.
+ */
+describe('core.ProcessAITicket revision integrity and post-publication loop (PROCESS-002)', () => {
+  const scriptOf = (id: string): string => String(byId(id).config!.args[1]);
+  const valueOf = (id: string): string => String(byId(id).config!.value);
+  const trailOf = (id: string): string[] =>
+    (all.find((node) => node.step.id === id) || { trail: [] as string[] }).trail;
+  const descendants = (id: string): string[] => {
+    const out: string[] = [];
+    const visit = (steps: IStep[]): void => {
+      (steps || []).forEach((step) => {
+        out.push(step.id);
+        const cfg = step.config || {};
+        ['thenSteps', 'elseSteps', 'steps'].forEach((key) => {
+          if (Array.isArray(cfg[key])) visit(cfg[key]);
+        });
+      });
+    };
+    visit(byId(id).config!.thenSteps || []);
+    visit(byId(id).config!.elseSteps || []);
+    return out;
+  };
+
+  // ── A. The guard runs on every revision ───────────────────────────────────
+  it('re-runs the engineer-commit guard after every revision, from one implementation', () => {
+    // PROCESS-001 ran the guard once. `handBack` re-enters the same session and
+    // the revision path never returned through it, so b46bcd6 and 67ffdc were
+    // published with committer 'Reactor AI' and GitHub reported verified:false.
+    const revisionGuard = byId('guardRevisionCommits');
+    expect(revisionGuard.type).toBe('cli_command');
+
+    // ONE implementation: the revision guard runs the SAME script as the first-
+    // session guard (a YAML anchor), so the two cannot drift.
+    expect(scriptOf('guardRevisionCommits')).toBe(scriptOf('guardEngineerCommits'));
+    // ...and the post-publication fix guard reuses it as well.
+    expect(scriptOf('guardPostPublishCommits')).toBe(scriptOf('guardEngineerCommits'));
+
+    // It runs INSIDE the review loop, after the hand-back and before the report
+    // status is re-read, so the reset happens before the loop can re-review.
+    expect(trailOf('guardRevisionCommits')).toContain('reviewLoop');
+    expect(trailOf('guardRevisionCommits')).toContain('verdictBranch');
+    expect(indexOf('handBack')).toBeLessThan(indexOf('guardRevisionCommits'));
+    expect(indexOf('guardRevisionCommits')).toBeLessThan(indexOf('reReadReportStatus'));
+    expect((byId('reReadReportStatus') as any).dependsOn).toBe('revisionCommitGate');
+
+    // The same fail-closed semantics as the first session: blocked halts the run.
+    expect(byId('revisionIntegrityGate').config!.condition).toBe(
+      "steps.readRevisionCommitState.stdout === 'blocked'",
+    );
+    expect(valueOf('setIntegrityBlockedTrue')).toBe('true');
+    expect(valueOf('setRevisionRunHalt')).toBe('true');
+    expect(valueOf('setRevisionRunStatusBlocked')).toBe('blocked');
+  });
+
+  it('keeps the revision guard measured against the published tip after publication', () => {
+    // Resetting a POST-publication revision to the repository base would discard
+    // the commit origin already has. BASE_REF is the published tip.
+    expect(String(byId('guardEngineerCommits').config!.args[1])).toContain("process.env.BASE_REF");
+    expect(String(byId('guardEngineerCommits').config!.args[1])).toContain('explicit-base');
+    expect(byId('guardPostPublishCommits').config!.env.BASE_REF).toBe(
+      '${steps.resolvePublishedTip.outputs.stdout}',
+    );
+    expect(indexOf('resolvePublishedTip')).toBeGreaterThan(indexOf('createPullRequest'));
+
+    // BLOCKING (review round 2): resolved ONCE, outside the loop, the SECOND fix
+    // cycle measured against the tip the FIRST cycle had already replaced. It saw
+    // a phantom commit, reset the branch to the stale tip and then refused to
+    // push. The tip is re-resolved at the TOP of every iteration, so the guard,
+    // the lease and the push all see what origin has NOW.
+    expect(trailOf('resolvePublishedTip')).toContain('postPublishLoop');
+    expect(indexOf('resolvePublishedTip')).toBeLessThan(indexOf('observePullRequest'));
+    expect(indexOf('resolvePublishedTip')).toBeGreaterThan(indexOf('postPublishLoop'));
+    // Exactly ONE such step, so there is no stale second copy to read by mistake.
+    expect(all.filter((entry) => entry.step.id === 'resolvePublishedTip').length).toBe(1);
+    // The observation, the guard and the push all consume THAT value.
+    expect(byId('observePullRequest').config!.env.TIP).toBe('${steps.resolvePublishedTip.outputs.stdout}');
+    expect(byId('republishPush').config!.env.OBSERVED_TIP).toBe('${steps.resolvePublishedTip.outputs.stdout}');
+  });
+
+  it('allows a repair rewrite with an explicitly bound lease, and only that', () => {
+    // BLOCKING (review round 2): the unverifiable-commit repair re-creates the
+    // commits on the publication base, so the old tip is EXPECTED not to be an
+    // ancestor. The unconditional fast-forward rule made the repair dead code.
+    const push = scriptOf('republishPush');
+    expect(push).toContain("const repairBase = String(process.env.REPAIR_BASE || '').trim()");
+    expect(push).toContain("done({ ok: true, mode: 'fast-forward'");
+    expect(push).toContain("mode: 'rewrite-refused'");
+    expect(push).toContain("mode: 'repair-rewrite'");
+    // The lease names the tip the observation saw, and the push is refused when
+    // origin no longer matches it.
+    expect(push).toContain("'git push --force-with-lease=refs/heads/' + branch + ':' + observedTip");
+    expect(push).toContain('remoteTip !== observedTip');
+    expect(push).toContain("git ls-remote origin refs/heads/");
+    // A repair needs a base; resolveRepairBase must return the PUBLICATION base,
+    // never the published tip (which would repair nothing).
+    expect(byId('republishPush').config!.env.REPAIR_BASE).toBe('${steps.resolveRepairBase.outputs.stdout}');
+    const repairBase = scriptOf('resolveRepairBase');
+    expect(repairBase).toContain("observation.base");
+    expect(repairBase).toContain("publish-readiness.json");
+    expect(byId('resolveRepairBase').config!.env.BASE).toBeUndefined();
+  });
+
+  it('vetoes publication when a revision commit cannot be proven neutralised', () => {
+    // integrityBlocked is set by the revision guard, then applied to the publish
+    // decision BEFORE the outcome branch reads it. It can only close the gate.
+    const veto = byId('integrityVetoGate');
+    expect(veto.config!.condition).toContain("variables.integrityBlocked === 'true'");
+    expect(veto.config!.condition).toContain("variables.publishable === 'true'");
+    expect(valueOf('setPublishableFalseOnIntegrity')).toBe('false');
+    expect(indexOf('setPublishable')).toBeLessThan(indexOf('integrityVetoGate'));
+    expect(indexOf('integrityVetoGate')).toBeLessThan(indexOf('outcome'));
+  });
+
+  // ── D3 hardening: committer identity, not only %G? ────────────────────────
+  it('verifies the committer is the key owner, not only that a signature exists', () => {
+    // %G? = G proves the signature is mathematically valid. GitHub attributes it
+    // through the COMMITTER, so the SPEECH-010 commits were locally 'G' and
+    // remotely verified:false (no_user). Both conditions are now required.
+    const verify = scriptOf('verifyCommitSignatures');
+    expect(verify).toContain("commit.signature !== 'G'");
+    expect(verify).toContain('keyOwner');
+    expect(verify).toContain('committer_not_key_owner');
+    expect(verify).toContain("git config --get user.email");
+    expect(verify).toContain('keyOwner: keyOwner');
+    // The re-publish passes the same gate, from the same implementation.
+    expect(scriptOf('verifyPostPublishSignatures')).toBe(verify);
+    expect(scriptOf('republishCommit')).toBe(scriptOf('commitChanges'));
+  });
+
+  // ── B. Observation and routing ────────────────────────────────────────────
+  it('observes the pull request after publication using gh api only', () => {
+    const observe = scriptOf('observePullRequest');
+    expect(byId('observePullRequest').config!.command).toBe('node');
+    // Every read is `gh` against the repository already in use.
+    expect(observe).toContain('gh pr view');
+    expect(observe).toContain('gh api repos/');
+    expect(observe).toContain('gh api graphql');
+    expect(observe).toContain('/pulls/');
+    expect(observe).toContain('/reviews');
+    expect(observe).toContain('/check-runs');
+    expect(observe).toContain('/protection');
+    expect(observe).toContain('reviewThreads');
+    // No paid dependency, no hosted service, no direct HTTP client.
+    expect(observe).not.toContain('axios');
+    expect(observe).not.toContain('curl ');
+    expect(observe).not.toContain('api.github.com');
+    // It runs only once a pull request exists.
+    expect(trailOf('observePullRequest')).toContain('prPublishedGate');
+    expect(trailOf('observePullRequest')).toContain('postPublishLoop');
+    expect(indexOf('createPullRequest')).toBeLessThan(indexOf('observePullRequest'));
+  });
+
+  it('bounds the post-publication loop separately from reviewCycleBound', () => {
+    // The pre-publish bound is untouched...
+    const review = String(byId('reviewLoop').config!.condition);
+    expect(review).toContain('variables.reviewCycleBound');
+    expect(review).not.toContain('postPublish');
+    // ...and the new loop has its own counter and its own input.
+    const loop = byId('postPublishLoop');
+    expect(loop.type).toBe('while');
+    expect(String(loop.config!.condition)).toContain('postPublishContinue');
+    expect(Number(loop.config!.maxIterations)).toBeGreaterThan(0);
+    expect(String(byId('postPublishBudgetGate').config!.condition)).toContain('postPublishFixBound');
+    expect(byId('resolvePostPublishBound').config!.env.BOUND).toBe('${input.maxPostPublishFixCycles}');
+    expect((def.inputs as any).maxPostPublishFixCycles.default).toBe(2);
+    // The loop cannot run before a PR exists, and the merge poll still waits for
+    // the human approval that follows a mergeable observation.
+    expect(trailOf('postPublishLoop')).toContain('prPublishedGate');
+    expect(indexOf('postPublishOutcomeGate')).toBeLessThan(indexOf('prApprovalGate'));
+  });
+
+  it('hands agent-fixable findings back to the SAME engineer session', () => {
+    const handBack = byId('postPublishHandBack');
+    expect(handBack.type).toBe('agent_conversation');
+    expect(handBack.config!.sessionId).toBe('${variables.engineerSessionId}');
+    expect(handBack.config!.personaId).toBe('${input.agentId}');
+    // The findings reach the engineer as the briefing the pipeline built: the
+    // thread BODY, verbatim, is the input - not a summary of it.
+    expect(String(handBack.config!.message)).toContain('${steps.preparePostPublishReview.outputs.stdout}');
+    expect(String(byId('preparePostPublishReview').config!.args[1])).toContain('finding.body');
+    // It is reachable only from the fixable arm.
+    expect(trailOf('postPublishHandBack')).toContain('postPublishRoute');
+    expect(trailOf('postPublishHandBack')).toContain('postPublishHandBackGate');
+    expect(byId('postPublishHandBackGate').config!.condition).toBe(
+      "variables.postPublishDecision === 'changes_required'",
+    );
+  });
+
+  it('does NOT loop on a block only a human can clear', () => {
+    // required_signatures with no configured key (or an unidentified
+    // branch-protection rule) is human-only: looping would burn every cycle and
+    // still be unmergeable.
+    expect(String(byId('postPublishMergeableGate').config!.condition)).toBe(
+      "variables.postPublishState === 'clean'",
+    );
+    expect(valueOf('setPostPublishHumanBlocked')).toBe('blocked_human');
+    expect(valueOf('setPostPublishHumanContinue')).toBe('false');
+    // Nothing that hands work back to the engineer is reachable from that arm.
+    const humanArm = descendants('postPublishMergeableGate');
+    expect(humanArm).not.toContain('postPublishHandBack');
+    expect(humanArm).not.toContain('guardPostPublishCommits');
+    expect(humanArm).not.toContain('republishPush');
+    // The observation step classifies that condition rather than the YAML.
+    const observe = scriptOf('observePullRequest');
+    expect(observe).toContain('required_signatures');
+    expect(observe).toContain('human_only');
+    expect(observe).toContain('BLOCKED with no agent-fixable finding');
+  });
+
+  it('never reports an UNREADABLE observation as success', () => {
+    // BLOCKING (review round 2): the old shape asked "is this human_only?" and
+    // sent every other value - including 'unavailable' - to awaiting_human, so a
+    // gh outage set runStatus=completed for a PR nobody had read.
+    const gate = byId('postPublishMergeableGate');
+    expect(String(gate.config!.condition)).toBe("variables.postPublishState === 'clean'");
+    expect(String(gate.config!.condition)).not.toContain('unavailable');
+    // 'unavailable' can therefore only reach the blocked branch.
+    const blockedArm = descendants('postPublishMergeableGate');
+    expect(blockedArm).toContain('setPostPublishBlockReason');
+    expect(blockedArm).toContain('readPostPublishBlockReason');
+    expect(blockedArm).toContain('setPostPublishHumanBlocked');
+    // ...and the outcome gate turns that into the blocked lifecycle state.
+    expect(trailOf('setPublishStateBlockedHuman')).toContain('postPublishOutcomeGate');
+    // The reason says the mergeability is UNKNOWN rather than guessing.
+    const reason = scriptOf('readPostPublishBlockReason');
+    expect(reason).toContain("state === 'unavailable'");
+    expect(reason).toContain('UNKNOWN');
+    // awaiting_human is NOT reachable from anywhere else.
+    expect(trailOf('setPostPublishAwaitingHuman')).toContain('postPublishMergeableGate');
+  });
+
+  it('converges on a review that requested changes on an older commit', () => {
+    // BLOCKING (review round 2): GitHub keeps reviewDecision=CHANGES_REQUESTED
+    // after the fix, so re-reporting the same review as a fresh finding meant the
+    // loop could never converge and always exhausted its budget.
+    const observe = scriptOf('observePullRequest');
+    expect(observe).toContain('commit_id');
+    expect(observe).toContain('staleReviews');
+    expect(observe).toContain('headSha');
+    expect(observe).toContain('awaitingReview');
+    // A stale review is re-requested, never re-handed.
+    const apply = scriptOf('applyPostPublishDecisions');
+    expect(apply).toContain('requested_reviewers');
+    expect(apply).toContain('staleReviews');
+    // REVIEW_REQUIRED is a human wait, not a human-only block.
+    expect(observe).not.toContain("REVIEW_REQUIRED') && fixable.length === 0");
+  });
+
+  it('gives the post-publication judgement the same provenance as review.json', () => {
+    // SECONDARY (review round 2): postPublishReview is continueOnError, so a
+    // crashed reviewer silently consumed the previous cycle's verdict.
+    const prepare = scriptOf('preparePostPublishReview');
+    expect(prepare).toContain('post-publish-review-window.json');
+    expect(prepare).toContain('startedAtMs');
+    expect(prepare).toContain('nonce');
+    expect(prepare).toContain("'post-publish-review.json', 'post-publish-review-normalised.json'");
+    expect(prepare).toContain('cleared.push');
+
+    const capture = scriptOf('capturePostPublishReview');
+    expect(capture).toContain('post-publish-review-window.json');
+    expect(capture).toContain('predates this review window');
+    expect(capture).toContain('belongs to cycle');
+    expect(capture).toContain('reviewSha256');
+    // A refusal must WRITE the invalid record, or the reader picks up the
+    // previous cycle's file.
+    expect(capture).toContain('writeNormalised(payload)');
+    expect(capture).toContain("state: 'invalid'");
+    expect(byId('preparePostPublishReview').config!.env.CYCLE).toBe('${variables.postPublishCycle}');
+  });
+
+  it('carries a real code-scanning alert number to the dismissal call', () => {
+    // SECONDARY (review round 2): alertNumber was copied from the observation but
+    // never populated, so the PATCH path was unreachable in a real run.
+    const observe = scriptOf('observePullRequest');
+    expect(observe).toContain('code-scanning/alerts?state=open');
+    expect(observe).toContain('refs/pull/');
+    expect(observe).toContain('alertNumber');
+    expect(observe).toContain("kind: 'code_scanning_alert'");
+
+    const apply = scriptOf('applyPostPublishDecisions');
+    expect(apply).toContain('code-scanning/alerts/');
+    // ...and an unresolvable alert is never presented as applied.
+    expect(apply).toContain("status: 'recorded-only'");
+    expect(apply).toContain('NO GitHub dismissal was written');
+  });
+
+  // ── C. The quality agent judges; the workflow applies ─────────────────────
+  it('gives the quality agent a fix-or-dismiss decision with a mandatory justification', () => {
+    // The judgement lives in the agent, not in YAML string matching: 3 of 16
+    // CodeQL findings on PR #13 were false positives.
+    expect(byId('postPublishReview').type).toBe('agent_conversation');
+    expect(byId('postPublishReview').config!.personaId).toBe('${input.reviewerId}');
+    const instructions = String(byId('postPublishReview').config!.instructions);
+    expect(instructions).toContain('dismiss');
+    expect(instructions).toContain('justification');
+    expect(instructions).toContain('false positive');
+
+    const capture = scriptOf('capturePostPublishReview');
+    expect(capture).toContain('invalidDismissals');
+    expect(capture).toContain('justification');
+    expect(capture).toContain('dismissedComment');
+    expect(capture).toContain("state = 'invalid'");
+    // The "fix" set uses the SAME shape the pre-publish reviewer produces.
+    expect(capture).toContain("['requiredChanges', 'required_changes', 'changes']");
+
+    // A dismissal is written to GitHub with its justification, not silently.
+    const apply = scriptOf('applyPostPublishDecisions');
+    expect(apply).toContain('code-scanning/alerts/');
+    expect(apply).toContain('state=dismissed');
+    expect(apply).toContain('dismissed_reason');
+    expect(apply).toContain('dismissed_comment');
+    expect(apply).toContain('gh pr comment');
+    // An addressed review thread is resolved through the agent's own judgement.
+    expect(apply).toContain('resolveReviewThread');
+    expect(capture).toContain('resolvedFindingIds');
+  });
+
+  it('records a structured log for every post-publication cycle', () => {
+    const capture = scriptOf('capturePostPublishReview');
+    expect(capture).toContain('post-publish-log.json');
+    expect(capture).toContain('observed:');
+    expect(capture).toContain('judged:');
+    expect(capture).toContain('dismissals: dismissals.map');
+    // What was fixed is appended by the re-publish step, and it records BOTH
+    // facts so the log cannot claim a fix that was never committed.
+    expect(scriptOf('readRepublishResult')).toContain('entry.fixed');
+    expect(scriptOf('readRepublishResult')).toContain('committed: committed');
+    expect(scriptOf('readRepublishResult')).toContain('pushed: pushed');
+  });
+
+  // ── D. Honest terminal states ─────────────────────────────────────────────
+  it('reports a published-but-unmergeable pull request as blocked, never as success', () => {
+    // 'completed' is now reachable ONLY from the mergeable observation.
+    expect(trailOf('setRunStatusCompleted')).toContain('postPublishOutcomeGate');
+    expect(valueOf('setRunStatusCompleted')).toBe('completed');
+    expect(trailOf('setPublishStateAwaitingHuman')).toContain('postPublishOutcomeGate');
+    expect(valueOf('setPublishStateAwaitingHuman')).toBe('awaiting_human');
+
+    expect(trailOf('setRunStatusUnmergeable')).toContain('postPublishOutcomeGate');
+    expect(valueOf('setRunStatusUnmergeable')).toBe('blocked');
+    expect(valueOf('setPublishStateBlockedHuman')).toBe('blocked_needs_human');
+    expect(byId('postPublishBlockedTask').type).toBe('user_activity');
+    // The note does not move to complete while the PR cannot merge.
+    expect(trailOf('retainWorkspaceNoteUnmergeable')).toContain('postPublishOutcomeGate');
+    // The run-level status is what the programme reconciler reports on.
+    expect(String(byId('readProgrammeReportStatus').config!.args[1])).toContain("=== 'completed'");
+  });
+
+  it('states the exact reason when the post-publication budget is exhausted', () => {
+    expect(valueOf('setPostPublishExhausted')).toBe('exhausted');
+    const describe = scriptOf('describePostPublishBlock');
+    expect(describe).toContain('budget was exhausted');
+    expect(describe).toContain('still blocked');
+    expect(describe).toContain('NOT complete');
+    expect(String(byId('describePostPublishBlock').config!.env.OUTCOME)).toBe(
+      '${variables.postPublishOutcome}',
+    );
+    expect(String(byId('describePostPublishBlock').config!.env.BOUND)).toBe(
+      '${variables.postPublishFixBound}',
+    );
+  });
+
+  it('waits for running checks instead of calling them a policy block', () => {
+    // BLOCKING (review round 3): only terminal check FAILURES were findings, so a
+    // queued/in_progress required check was invisible; BLOCKED + no finding became
+    // a "human-only branch-protection policy" and every PR against a repository
+    // with required status checks ended blocked before CI had finished.
+    const observe = scriptOf('observePullRequest');
+    expect(observe).toContain('const pendingChecks = []');
+    expect(observe).toContain('PENDING_STATUSES');
+    expect(observe).toContain("classification = 'pending'");
+    // A pending check is neither a finding nor a human-only reason.
+    expect(observe).toContain('awaitingChecks');
+    expect(String(byId('observePullRequest').config!.args[1])).toContain('!awaitingAnything');
+
+    // The wait is its own arm: bounded, delayed, and it does not consume the
+    // fix budget.
+    expect(byId('postPublishPendingGate').type).toBe('condition');
+    expect(String(byId('postPublishPendingGate').config!.condition)).toBe(
+      "variables.postPublishState === 'pending'",
+    );
+    expect(byId('postPublishWait').type).toBe('delay');
+    expect(Number(byId('postPublishWait').config!.duration)).toBeGreaterThan(0);
+    expect(String(byId('postPublishWaitBudgetGate').config!.condition)).toContain('postPublishWaitCount');
+    expect(String(byId('postPublishWaitBudgetGate').config!.condition)).toContain('postPublishWaitBound');
+    expect(valueOf('setPostPublishPendingExhausted')).toBe('awaiting_human');
+    expect((def.steps as IStep[]).map((step) => step.id)).toContain('seedPostPublishWaitCount');
+    // The WAIT arm (thenSteps) never hands work back to the engineer, and it
+    // never claims a human-only policy. The elseSteps legitimately contains the
+    // mergeable gate, which is a different arm.
+    const waitArm = (byId('postPublishPendingGate').config!.thenSteps || []).map((step: IStep) => step.id);
+    expect(waitArm).toContain('postPublishWaitBudgetGate');
+    expect(waitArm).not.toContain('postPublishHandBack');
+    expect(waitArm).not.toContain('setPostPublishHumanBlocked');
+    expect(waitArm).not.toContain('postPublishMergeableGate');
+  });
+
+  it('uses the LIVE pull request state and attributes only this PR\'s alerts', () => {
+    const observe = scriptOf('observePullRequest');
+    // SECONDARY (review round 3): PR_STATE is the creation-time variable.
+    expect(observe).toContain("const liveState = String(pr.state || '').toUpperCase()");
+    expect(observe).toContain("liveState === 'CLOSED'");
+    expect(observe).not.toContain("state === 'CLOSED'");
+    // The unscoped alert fallback must not lend its alerts to this PR.
+    expect(observe).toContain('codeScanningRefScoped');
+    expect(observe).toContain('unattributedAlerts');
+    expect(observe).toContain('const attributable = (alert)');
+    expect(observe).toContain("instanceRef.indexOf(pullRefFragment) !== -1");
+  });
+
+  it('resolves a repository for the dismissals instead of silently doing nothing', () => {
+    // BLOCKING (review round 3): the step's env is WT + PR_NUMBER only, and the
+    // script read PR_REPO with no fallback - so every GitHub write was inert.
+    const apply = scriptOf('applyPostPublishDecisions');
+    expect(apply).toContain('const resolveRepo = () => {');
+    expect(apply).toContain("gh repo view --json nameWithOwner -q .nameWithOwner");
+    expect(apply).toContain("git remote get-url origin");
+    expect(apply).toContain('repoProblem');
+    expect(apply).toContain('POST-PUBLICATION WRITES SKIPPED');
+    // A failed resolution is reported, never presented as applied.
+    expect(apply).toContain("status: 'not-applied'");
+    expect(byId('applyPostPublishDecisions').config!.env.PR_REPO).toBeUndefined();
+  });
+
+  it('only closes a review thread for a DISMISSED finding', () => {
+    // BLOCKING (review round 3): every resolvedFindingIds thread was closed
+    // BEFORE the hand-back, including threads whose finding was also a required
+    // change - so an unfinished fix looked finished on the next observation.
+    const apply = scriptOf('applyPostPublishDecisions');
+    expect(apply).toContain('const dismissedIds = new Set');
+    expect(apply).toContain('requiredForThread');
+    expect(apply).toContain('deferredThreads.push');
+    expect(apply).toContain('deferredThreads: deferredThreads');
+  });
+
+  it('does not report a no-op cycle as a fix', () => {
+    // BLOCKING (review round 3): the engineer could change nothing, republishCommit
+    // would return committed:false, and the log still said fixed:[{pushed:true}].
+    const result = scriptOf('readRepublishResult');
+    expect(result).toContain("process.env.COMMIT");
+    expect(result).toContain('const committed = commit.committed === true');
+    expect(result).toContain('committed: committed');
+    expect(result).toContain('committed: committed,');
+    expect(result).toContain("pushed && committed ? 'pushed' : (pushed ? 'no_change' : 'push_failed')");
+    expect(byId('readRepublishResult').config!.env.COMMIT).toBe('${steps.republishCommit.outputs.stdout}');
+
+    expect(byId('republishNoChangeGate').type).toBe('condition');
+    expect(String(byId('republishNoChangeGate').config!.condition)).toBe(
+      "steps.readRepublishResult.stdout === 'no_change'",
+    );
+    expect(valueOf('setPostPublishNoChange')).toBe('blocked_human');
+    expect(valueOf('setPostPublishNoChangeContinue')).toBe('false');
+    expect(trailOf('setPostPublishNoChange')).toContain('republishResultGate');
+  });
+
+  it('treats changes_required with no required change as invalid', () => {
+    // SECONDARY (review round 3): a forgotten requiredChanges field became
+    // 'no_action' and the reviewer's judgement was discarded.
+    const capture = scriptOf('capturePostPublishReview');
+    expect(capture).toContain('claimsChanges');
+    expect(capture).toContain("state = 'invalid'");
+    expect(capture).toContain('but recorded no requiredChanges');
+  });
+
+  it('closes a review thread the reviewer FIXED, but only after the fix is published', () => {
+    // BLOCKING (round 4): applyPostPublishDecisions closed a thread only when the
+    // finding was ALSO a dismissal, and capture stringified requiredChanges so
+    // requiredForThread never matched. A fixed thread was therefore deferred for
+    // ever and the same thread was re-observed on every cycle.
+    const capture = scriptOf('capturePostPublishReview');
+    expect(capture).toContain('const requiredChangeIds');
+    expect(capture).toContain('requiredIds');
+    // The ids survive into the artefact the apply step reads.
+    expect(capture).toContain('requiredChangeIds: requiredIds');
+    // A prose required change may quote a finding id.
+    expect(capture).toContain('ID_TOKEN');
+
+    const apply = scriptOf('applyPostPublishDecisions');
+    // Dismissed, or nothing owed at all -> close now.
+    expect(apply).toContain("const noAction = String(record.state || '') === 'no_action'");
+    // Anything else (a required fix) waits for the published commit.
+    expect(apply).toContain('const pendingFix = !dismissed && !noAction');
+    expect(apply).toContain('deferredThreads.push');
+
+    // The post-push step is the only place a FIXED thread is closed, and it is
+    // reachable only from the "committed AND pushed" arm.
+    const resolve = scriptOf('resolveAddressedThreads');
+    expect(resolve).toContain('resolveReviewThread');
+    expect(resolve).toContain('dismissedIds.has');
+    expect(byId('resolveAddressedThreads').config!.env.CYCLE).toBe('${variables.postPublishCycle}');
+    expect((byId('resolveAddressedThreads') as any).dependsOn).toBe('setPostPublishCycleNext');
+    expect(trailOf('resolveAddressedThreads')).toContain('republishResultGate');
+    expect(trailOf('resolveAddressedThreads')).toContain('republishReadinessGate');
+    // Never reachable when the fix did not land.
+    expect(trailOf('resolveAddressedThreads')).toContain('postPublishHandBackGate');
+  });
+
+  it('does not force a commit when the reviewer required no change', () => {
+    // BLOCKING (round 4): the commit/push chain ran for a dismiss-all verdict, so
+    // "worktree clean" became no_change and the run stopped blocked without ever
+    // re-observing the PR whose findings it had just dismissed.
+    const gate = byId('postPublishHandBackGate');
+    expect(String(gate.config!.condition)).toBe("variables.postPublishDecision === 'changes_required'");
+
+    const thenIds = (gate.config!.thenSteps || []).map((step: IStep) => step.id);
+    const elseIds = (gate.config!.elseSteps || []).map((step: IStep) => step.id);
+    // The commit/push chain lives in the changes_required arm only.
+    expect(thenIds).toContain('reCapturePostPublishReport');
+    expect(thenIds).toContain('postPublishIntegrityProceedGate');
+    expect(elseIds).not.toContain('republishCommit');
+    expect(elseIds).not.toContain('republishPush');
+    expect(elseIds).not.toContain('reCapturePostPublishReport');
+    // The no_action arm re-observes instead, bounded separately from the fix budget.
+    expect(elseIds).toContain('bumpPostPublishReobserve');
+    expect(elseIds).toContain('postPublishReobserveGate');
+    expect(String(byId('postPublishReobserveGate').config!.condition)).toContain('postPublishReobserveBound');
+    expect(byId('bumpPostPublishReobserve').config!.env.N).toBe('${variables.postPublishReobserveCount}');
+    // Exhausting the re-observes is a human stop, not a success.
+    expect(trailOf('setPostPublishReobserveBlocked')).toContain('postPublishReobserveGate');
+    expect(valueOf('setPostPublishReobserveBlocked')).toBe('blocked_human');
+    expect(valueOf('setPostPublishReobserveContinue')).toBe('false');
+    // A no-op fix in a changes_required cycle is still a failure.
+    expect(valueOf('setPostPublishNoChange')).toBe('blocked_human');
+  });
+
+  it('cannot reach approval or merge polling from the blocked arm', () => {
+    // BLOCKING (round 4): dependsOn is ORDERING-ONLY in this engine, not a skip,
+    // so the blocked arm fell through into prApprovalGate and pollMerge and an
+    // unmergeable PR still raised an "Approve and merge" task and polled.
+    const outcome = byId('postPublishOutcomeGate');
+    expect(String(outcome.config!.condition)).toBe("variables.postPublishOutcome === 'awaiting_human'");
+
+    const mergeableArm = (outcome.config!.thenSteps || []).map((step: IStep) => step.id);
+    const blockedArm = (outcome.config!.elseSteps || []).map((step: IStep) => step.id);
+
+    // The merge path is INSIDE the mergeable arm...
+    expect(mergeableArm).toContain('prApprovalGate');
+    expect(mergeableArm).toContain('pollMerge');
+    expect(mergeableArm).toContain('mergeOutcome');
+    // ...and structurally absent from the blocked one.
+    expect(blockedArm).not.toContain('prApprovalGate');
+    expect(blockedArm).not.toContain('pollMerge');
+    expect(blockedArm).not.toContain('mergeOutcome');
+    expect(blockedArm).not.toContain('prApproval');
+    // The blocked arm ends at the human task, and the merge path is not beneath it.
+    expect(blockedArm).toContain('postPublishBlockedTask');
+    ['prApprovalGate', 'pollMerge', 'mergeOutcome'].forEach((id) => {
+      expect(trailOf(id)).not.toContain('postPublishBlockedTask');
+      expect(trailOf(id)).not.toContain('setRunStatusUnmergeable');
+    });
+
+    // prApprovalGate / pollMerge / mergeOutcome are NO LONGER siblings of the gate.
+    const published = all.find((entry) => entry.step.id === 'prPublishedGate')!;
+    const publishedThen = (published.step.config!.thenSteps || []).map((step: IStep) => step.id);
+    expect(publishedThen).toContain('postPublishOutcomeGate');
+    expect(publishedThen).not.toContain('prApprovalGate');
+    expect(publishedThen).not.toContain('pollMerge');
+    expect(publishedThen).not.toContain('mergeOutcome');
+    expect(trailOf('prApprovalGate')).toContain('postPublishOutcomeGate');
+    expect(trailOf('pollMerge')).toContain('postPublishOutcomeGate');
+  });
+
+  it('keeps every new step inside a config scope and reachable from the publish branch', () => {
+    // Guards against the shape that silently breaks the engine: control-flow
+    // lists must live under `config`, not beside it.
+    const misplaced = all
+      .filter(({ step }) => (step as Record<string, any>).thenSteps || (step as Record<string, any>).elseSteps)
+      .map(({ step }) => step.id);
+    expect(misplaced).toEqual([]);
+
+    const produced = [
+      'observePullRequest',
+      'postPublishRoute',
+      'postPublishMergeableGate',
+      'postPublishOutcomeGate',
+      'republishReadinessGate',
+      'guardPostPublishCommits',
+      'verifyPostPublishSignatures',
+    ];
+    produced.forEach((id) => {
+      expect(trailOf(id)).toContain('prPublishedGate');
+    });
   });
 });
