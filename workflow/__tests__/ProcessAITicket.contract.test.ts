@@ -1396,8 +1396,13 @@ describe('core.ProcessAITicket revision integrity and post-publication loop (PRO
     // It is reachable only from the fixable arm.
     expect(trailOf('postPublishHandBack')).toContain('postPublishRoute');
     expect(trailOf('postPublishHandBack')).toContain('postPublishHandBackGate');
-    expect(byId('postPublishHandBackGate').config!.condition).toBe(
+    // The engineer is engaged only for a real code change; the REPAIR arm is
+    // entered independently (a signing fault is not a code change).
+    expect(byId('postPublishEngineerGate').config!.condition).toBe(
       "variables.postPublishDecision === 'changes_required'",
+    );
+    expect(String(byId('postPublishHandBackGate').config!.condition)).toContain(
+      "variables.postPublishRepairNeeded === 'true'",
     );
   });
 
@@ -1481,6 +1486,12 @@ describe('core.ProcessAITicket revision integrity and post-publication loop (PRO
     expect(capture).toContain('writeNormalised(payload)');
     expect(capture).toContain("state: 'invalid'");
     expect(byId('preparePostPublishReview').config!.env.CYCLE).toBe('${variables.postPublishCycle}');
+
+    // An INVALID judgement writes NOTHING: the valid-looking dismissals inside
+    // an invalid record must not reach GitHub, or the invalid arm's
+    // "nothing was dismissed" is a lie.
+    expect(scriptOf('applyPostPublishDecisions')).toContain("if (String(record.state || '') === 'invalid')");
+    expect(scriptOf('applyPostPublishDecisions')).toContain('no dismissal, thread resolution, review request or PR comment was performed');
   });
 
   it('carries a real code-scanning alert number to the dismissal call', () => {
@@ -1691,11 +1702,13 @@ describe('core.ProcessAITicket revision integrity and post-publication loop (PRO
     expect(capture).toContain('ID_TOKEN');
 
     const apply = scriptOf('applyPostPublishDecisions');
-    // Dismissed, or nothing owed at all -> close now.
-    expect(apply).toContain("const noAction = String(record.state || '') === 'no_action'");
-    // Anything else (a required fix) waits for the published commit.
-    expect(apply).toContain('const pendingFix = !dismissed && !noAction');
+    // ONLY a dismissed finding closes here: a bare resolvedFindingIds entry
+    // carries no recorded justification, so a human's thread must not be closed
+    // on it. Everything else waits for the published commit.
+    expect(apply).toContain('if (!dismissed) {');
+    expect(apply).toContain('it was not dismissed, so there is no recorded justification');
     expect(apply).toContain('deferredThreads.push');
+    expect(apply).not.toContain('const pendingFix = !dismissed && !noAction');
 
     // The post-push step is the only place a FIXED thread is closed, and it is
     // reachable only from the "committed AND pushed" arm.
@@ -1715,7 +1728,12 @@ describe('core.ProcessAITicket revision integrity and post-publication loop (PRO
     // "worktree clean" became no_change and the run stopped blocked without ever
     // re-observing the PR whose findings it had just dismissed.
     const gate = byId('postPublishHandBackGate');
-    expect(String(gate.config!.condition)).toBe("variables.postPublishDecision === 'changes_required'");
+    // A repair need can enter the chain, but never a no_action with nothing to
+    // repair: that is the engineer gate below.
+    expect(String(gate.config!.condition)).toContain("variables.postPublishDecision === 'changes_required'");
+    expect(byId('postPublishEngineerGate').config!.condition).toBe(
+      "variables.postPublishDecision === 'changes_required'",
+    );
 
     const thenIds = (gate.config!.thenSteps || []).map((step: IStep) => step.id);
     const elseIds = (gate.config!.elseSteps || []).map((step: IStep) => step.id);
@@ -1743,15 +1761,22 @@ describe('core.ProcessAITicket revision integrity and post-publication loop (PRO
     // so the blocked arm fell through into prApprovalGate and pollMerge and an
     // unmergeable PR still raised an "Approve and merge" task and polled.
     const outcome = byId('postPublishOutcomeGate');
-    expect(String(outcome.config!.condition)).toBe("variables.postPublishOutcome === 'awaiting_human'");
+    // awaitahuman AND merged are the only two success outcomes.
+    const condition = String(outcome.config!.condition);
+    expect(condition).toContain("variables.postPublishOutcome === 'awaiting_human'");
+    expect(condition).toContain("variables.postPublishOutcome === 'merged'");
+    expect(condition).not.toContain('blocked_human');
+    expect(condition).not.toContain('exhausted');
 
     const mergeableArm = (outcome.config!.thenSteps || []).map((step: IStep) => step.id);
     const blockedArm = (outcome.config!.elseSteps || []).map((step: IStep) => step.id);
 
     // The merge path is INSIDE the mergeable arm...
-    expect(mergeableArm).toContain('prApprovalGate');
-    expect(mergeableArm).toContain('pollMerge');
+    expect(mergeableArm).toContain('postPublishLifecycleGate');
     expect(mergeableArm).toContain('mergeOutcome');
+    const mergePath = descendants('prMergePathGate');
+    expect(mergePath).toContain('prApprovalGate');
+    expect(mergePath).toContain('pollMerge');
     // ...and structurally absent from the blocked one.
     expect(blockedArm).not.toContain('prApprovalGate');
     expect(blockedArm).not.toContain('pollMerge');
@@ -1772,7 +1797,11 @@ describe('core.ProcessAITicket revision integrity and post-publication loop (PRO
     expect(publishedThen).not.toContain('pollMerge');
     expect(publishedThen).not.toContain('mergeOutcome');
     expect(trailOf('prApprovalGate')).toContain('postPublishOutcomeGate');
+    expect(trailOf('prApprovalGate')).toContain('prMergePathGate');
     expect(trailOf('pollMerge')).toContain('postPublishOutcomeGate');
+    expect(trailOf('pollMerge')).toContain('prMergePathGate');
+    // An already-merged PR skips the approval/poll path entirely.
+    expect(String(byId('prMergePathGate').config!.condition)).toBe("variables.prState !== 'MERGED'");
   });
 
   it('keeps every new step inside a config scope and reachable from the publish branch', () => {

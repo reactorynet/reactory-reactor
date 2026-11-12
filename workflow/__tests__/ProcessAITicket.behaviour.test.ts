@@ -4255,7 +4255,12 @@ describe('ProcessAITicket post-publication observation loop (PROCESS-002 B/C)', 
         JSON.stringify({ base: 'master', state: 'ok' }),
         'utf8',
       );
-      expect(runScript(scriptOf('resolveRepairBase'), { WT: dir, BASE: 'deadbeef' }, dir)).toBe('master');
+      // Comment 6: the repair base is the MERGE BASE of the publication base
+      // and HEAD, so upstream work merged since the branch was cut is never
+      // reverted by the repair.
+      expect(runScript(scriptOf('resolveRepairBase'), { WT: dir, BASE: 'deadbeef' }, dir).trim()).toBe(
+        sh('git merge-base master HEAD', dir),
+      );
     } finally {
       removeDir(dir);
     }
@@ -4628,9 +4633,11 @@ describe('ProcessAITicket post-publication loop convergence (PROCESS-002 round 2
       expect(observation.findings[0].kind).toBe('unverifiable_commit');
       expect(observation.findings[0].fixable).toBe(true);
 
-      // The repair base is the PUBLICATION base, never the published tip.
+      // The repair base is the MERGE BASE of the publication base and HEAD -
+      // never the published tip, and never the base branch's current tip.
       const repairBase = runScript(scriptOf('resolveRepairBase'), { WT: dir }, dir).trim();
-      expect(repairBase).toBe('master');
+      expect(repairBase).toBe(sh('git merge-base master HEAD', dir));
+      expect(repairBase).not.toBe(sh('git rev-parse HEAD', dir));
 
       const commit = runJson(
         scriptOf('republishCommit'),
@@ -5236,7 +5243,7 @@ describe('ProcessAITicket post-publication correctness (PROCESS-002 round 3)', (
           'echo >> "' + log + '"',
           'case "$1 $2" in',
           '  "repo view") echo "' + repoAnswer + '" ;;',
-          '  *) echo '{"ok":1}' ;;',
+          '  *) echo \'{"ok":1}\' ;;',
           'esac',
           '',
         ].join('\n'),
@@ -5512,7 +5519,10 @@ describe('ProcessAITicket post-publication convergence (PROCESS-002 round 4)', (
       );
       expect(applied.resolvedThreads).toBe(0);
       expect(applied.deferredThreads).toEqual(['thread:THREAD_1']);
-      expect(String(applied.deferredThreadReasons[0].why)).toContain('has not been published yet');
+      // Comment 7: nothing closes without a recorded justification, so a fixed
+      // thread waits for the published commit.
+      expect(String(applied.deferredThreadReasons[0].why)).toContain('was not dismissed');
+      expect(String(applied.deferredThreadReasons[0].why)).toContain('once the fix for it is published');
       expect(fs.existsSync(gh.log) ? fs.readFileSync(gh.log, 'utf8') : '').not.toContain('graphql');
 
       // the engineer fixes; the pipeline commits and publishes
@@ -5716,5 +5726,339 @@ describe('ProcessAITicket post-publication convergence (PROCESS-002 round 4)', (
     } finally {
       removeDir(dir);
     }
+  });
+});
+
+
+/**
+ * PR #53 review findings (12 comments).
+ *
+ * Two were CodeQL duplicate syntax errors in a test fixture; the other ten were
+ * substantive defects in the post-publication loop. Each test here fails against
+ * the pre-fix body.
+ */
+describe('ProcessAITicket PR #53 review findings', () => {
+  const ISOLATED_CONFIG = { GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_SYSTEM: '/dev/null' };
+
+  const repo = (): { dir: string; origin: string } => {
+    const origin = tempDir('pa-r5o-');
+    sh('git init -q --bare -b master .', origin);
+    const dir = tempDir('pa-r5w-');
+    sh('git init -q -b master .', dir);
+    sh('git config user.email owner@example.com', dir);
+    sh('git config user.name "Key Owner"', dir);
+    sh('git config commit.gpgsign false', dir);
+    fs.writeFileSync(path.join(dir, 'README.md'), '# fixture\n', 'utf8');
+    sh('git add -A && git commit -qm base', dir);
+    sh('git remote add origin ' + origin, dir);
+    sh('git checkout -q -b feature/test', dir);
+    fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'work.ts'), 'export const v = 1;\n', 'utf8');
+    sh('git add -A && git commit -qm "AI engineering run: REF-1"', dir);
+    sh('git push -q --set-upstream origin feature/test', dir);
+    return { dir, origin };
+  };
+
+  /** A fake gh OUTSIDE the worktree, recording every argv. */
+  const fakeGh = (script: string): { bin: string; log: string } => {
+    const outside = tempDir('pa-r5gh-');
+    const bin = path.join(outside, 'fakebin');
+    fs.mkdirSync(bin, { recursive: true });
+    const log = path.join(outside, 'gh.log');
+    fs.writeFileSync(
+      path.join(bin, 'gh'),
+      ['#!/bin/sh', 'for a in "$@"; do printf "[%s]" "$a" >> "' + log + '"; done', 'echo >> "' + log + '"', script, ''].join('\n'),
+      { mode: 0o755 },
+    );
+    return { bin, log };
+  };
+
+  const observeWith = (dir: string, payload: Record<string, any>): any => {
+    const file = path.join(dir, '.ai-agent', 'observation.json');
+    fs.writeFileSync(file, JSON.stringify(payload), 'utf8');
+    return runJson(
+      scriptOf('observePullRequest'),
+      Object.assign({ WT: dir, PR_NUMBER: '18', PR_STATE: 'OPEN', CYCLE: '0', OBSERVATION_FIXTURE: file }, ISOLATED_CONFIG),
+      dir,
+    );
+  };
+
+  // ── comments 1 & 2 (CodeQL 354/355) ──────────────────────────────────────
+  it('has no syntax error in the behaviour suite (CodeQL 354/355)', () => {
+    // Both alerts pointed at one line whose inner single quotes closed the
+    // string literal. tsc catches it as TS1005.
+    const source = fs.readFileSync(__filename, 'utf8');
+    expect(source).toContain("'  *) echo \\'{\"ok\":1}\\' ;;',");
+    expect(source).not.toContain("'  *) echo '{\"ok\":1}' ;;',");
+  });
+
+  // ── comment 3: a failed read is unavailable, never clean ────────────────
+  it('reports an unreadable pull request as unavailable instead of clean', () => {
+    // Every live read fails (expired token / outage): the old body built an
+    // EMPTY payload, which classified the PR clean and raised "Approve and merge"
+    // for a PR nobody had read.
+    const { dir } = repo();
+    try {
+      const broken = fakeGh('exit 1');
+      const observation = runJson(
+        scriptOf('observePullRequest'),
+        { WT: dir, PR_NUMBER: '18', PR_STATE: 'OPEN', CYCLE: '0', PR_REPO: 'reactorynet/demo', PATH: broken.bin + ':' + process.env.PATH },
+        dir,
+      );
+      expect(observation.ok).toBe(false);
+      expect(observation.state).toBe('unavailable');
+      expect(observation.state).not.toBe('clean');
+      expect(String(observation.reason)).toContain('could not be read');
+      // The reader does not launder it into a pass.
+      expect(runScript(scriptOf('readPostPublishObservation'), ISOLATED_CONFIG, dir)).toBe('unavailable');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  // ── comment 4: an invalid judgement writes nothing ──────────────────────
+  it('performs no GitHub write when the judgement is invalid', () => {
+    const { dir } = repo();
+    try {
+      const gh = fakeGh("echo ok");
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-observation.json'),
+        JSON.stringify({ repo: 'reactorynet/demo', staleReviews: [{ id: 'review:1', author: 'human', commitId: 'deadbeef' }], findings: [] }),
+        'utf8',
+      );
+      // The record is invalid but still carries a valid-looking dismissal.
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review-normalised.json'),
+        JSON.stringify({
+          state: 'invalid',
+          reason: 'a dismissal carries no justification',
+          resolvedFindingIds: ['thread:THREAD_1'],
+          dismissals: [{ findingId: 'alert:5', alertNumber: 5, justification: 'x', dismissedReason: 'false positive', dismissedComment: 'x' }],
+        }),
+        'utf8',
+      );
+      const applied = runJson(
+        scriptOf('applyPostPublishDecisions'),
+        { WT: dir, PR_NUMBER: '18', PATH: gh.bin + ':' + process.env.PATH },
+        dir,
+      );
+      expect(applied.skipped).toBe(true);
+      expect(applied.applied).toBe(0);
+      expect(applied.resolvedThreads).toBe(0);
+      expect(applied.reRequestedReviews).toBe(0);
+      // Not one call reached GitHub: no dismissal, no thread, no comment,
+      // no review request.
+      expect(fs.existsSync(gh.log)).toBe(false);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  // ── comment 7: no_action cannot silently close an un-dismissed thread ───
+  it('does not close a thread on a no_action verdict with no dismissal', () => {
+    const { dir } = repo();
+    try {
+      const gh = fakeGh('echo \'{"data":{"resolveReviewThread":{"thread":{"id":"X","isResolved":true}}}}\'');
+      fs.writeFileSync(path.join(dir, '.ai-agent', 'post-publish-observation.json'), JSON.stringify({ repo: 'reactorynet/demo', findings: [], staleReviews: [] }), 'utf8');
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review-normalised.json'),
+        JSON.stringify({ state: 'no_action', requiredChanges: [], resolvedFindingIds: ['thread:X'], dismissals: [] }),
+        'utf8',
+      );
+      const applied = runJson(
+        scriptOf('applyPostPublishDecisions'),
+        { WT: dir, PR_NUMBER: '18', PATH: gh.bin + ':' + process.env.PATH },
+        dir,
+      );
+      // No justification, no closure: "a dismissal is never silent".
+      expect(applied.resolvedThreads).toBe(0);
+      expect(applied.deferredThreads).toEqual(['thread:X']);
+      expect(String(applied.deferredThreadReasons[0].why)).toContain('was not dismissed');
+      expect(fs.existsSync(gh.log) ? fs.readFileSync(gh.log, 'utf8') : '').not.toContain('graphql');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  // ── comment 9: closure logged against the cycle the fix belongs to ──────
+  it('logs a thread closure under the cycle the fix belongs to', () => {
+    const { dir } = repo();
+    try {
+      const gh = fakeGh('echo \'{"data":{"resolveReviewThread":{"thread":{"id":"X","isResolved":true}}}}\'');
+      // capture wrote cycle 0; the workflow counter is ALREADY 1 by the time this
+      // step runs (it follows setPostPublishCycleNext).
+      fs.writeFileSync(path.join(dir, '.ai-agent', 'post-publish-log.json'), JSON.stringify([{ cycle: 0, observed: [], judged: {}, fixed: [] }]), 'utf8');
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review-normalised.json'),
+        JSON.stringify({ state: 'changes_required', resolvedFindingIds: ['thread:X'], dismissals: [], requiredChangeIds: [] }),
+        'utf8',
+      );
+      const resolved = runJson(
+        scriptOf('resolveAddressedThreads'),
+        Object.assign({ WT: dir, CYCLE: '1', PATH: gh.bin + ':' + process.env.PATH }, ISOLATED_CONFIG),
+        dir,
+      );
+      expect(resolved.resolved).toBe(1);
+      const log = JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'post-publish-log.json'), 'utf8'));
+      expect(log[0].resolvedThreadsCycle).toBe(0);
+      expect(log[0].resolvedThreads.length).toBe(1);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  // ── comment 6: the repair resets to the merge base ──────────────────────
+  it('repairs from the merge base so upstream work is not reverted', () => {
+    const { dir } = repo();
+    try {
+      // Upstream advances AFTER the branch was cut.
+      sh('git checkout -q master', dir);
+      fs.writeFileSync(path.join(dir, 'upstream.ts'), 'export const u = 1;\n', 'utf8');
+      sh('git add -A && git commit -qm "upstream work"', dir);
+      const masterTip = sh('git rev-parse master', dir);
+      sh('git checkout -q feature/test', dir);
+
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-observation.json'),
+        JSON.stringify({ base: 'master', findings: [{ kind: 'unverifiable_commit', fixable: true }] }),
+        'utf8',
+      );
+      sh('git config user.signingkey ABCDEF0123456789', dir);
+
+      const base = runScript(scriptOf('resolveRepairBase'), { WT: dir }, dir).trim();
+      expect(base).toBe(sh('git merge-base master HEAD', dir));
+      // ...and NOT the base branch's current tip.
+      expect(base).not.toBe(masterTip);
+
+      const prDiffBefore = sh('git diff --name-only ' + base + ' HEAD', dir);
+      const treeBefore = sh('git rev-parse HEAD^{tree}', dir);
+
+      const commit = runJson(scriptOf('republishCommit'), { WT: dir, REF: 'REF-1', REPAIR_BASE_REF: base }, dir);
+      expect(commit.committed).toBe(true);
+      // The repaired commit is parented on the merge base and carries the same tree.
+      expect(sh('git rev-parse HEAD~1', dir)).toBe(base);
+      expect(sh('git rev-parse HEAD^{tree}', dir)).toBe(treeBefore);
+      // The PR diff is byte-identical: only the branch's own file, and merging
+      // into master does not delete upstream.ts.
+      expect(sh('git diff --name-only ' + base + ' HEAD', dir)).toBe(prDiffBefore);
+      expect(sh('git diff --name-only ' + base + ' HEAD', dir)).toBe('work.ts');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  // ── comment 5: MERGED is terminal success ───────────────────────────────
+  it('classifies a MERGED pull request as merged, not as a block', () => {
+    const { dir } = repo();
+    try {
+      const head = sh('git rev-parse HEAD', dir);
+      const observation = observeWith(dir, {
+        pr: { number: 18, state: 'MERGED', mergeStateStatus: 'UNKNOWN', headRefOid: head },
+        reviews: [],
+        reviewThreads: { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } },
+        checkRuns: { check_runs: [] },
+        commits: [],
+        protection: null,
+      });
+      expect(observation.state).toBe('merged');
+      expect(observation.state).not.toBe('human_only');
+      expect(observation.prState).toBe('MERGED');
+      expect(String(observation.reason)).toContain('MERGED');
+      // The reader accepts it, and it routes to its own terminal arm.
+      expect(runScript(scriptOf('readPostPublishObservation'), ISOLATED_CONFIG, dir)).toBe('merged');
+      expect(String(byId('postPublishMergedGate').config!.condition)).toBe("variables.postPublishState === 'merged'");
+      expect(String(byId('setPostPublishMerged').config!.value)).toBe('merged');
+      expect(String(byId('setPostPublishMergedState').config!.value)).toBe('MERGED');
+      // ...and the approval/merge-poll path is skipped for it.
+      expect(String(byId('prMergePathGate').config!.condition)).toBe("variables.prState !== 'MERGED'");
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  // ── comment 8: a repair-only PR is repaired without a code change ───────
+  it('routes a repair need independently of the reviewer verdict', () => {
+    const { dir } = repo();
+    try {
+      // Observation: the only fixable finding is an unverifiable published commit.
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-observation.json'),
+        JSON.stringify({
+          base: 'master',
+          repairNeeded: true,
+          findings: [{ id: 'commit:abc', kind: 'unverifiable_commit', fixable: true }],
+        }),
+        'utf8',
+      );
+      // The reviewer correctly says there is no code to change.
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-review-normalised.json'),
+        JSON.stringify({ state: 'no_action', requiredChanges: [], resolvedFindingIds: [], dismissals: [] }),
+        'utf8',
+      );
+      expect(runScript(scriptOf('readPostPublishRepairNeed'), { WT: dir }, dir)).toBe('true');
+
+      // The repair arm is entered even for no_action...
+      const gate = byId('postPublishHandBackGate').config!;
+      expect(String(gate.condition)).toContain("variables.postPublishRepairNeeded === 'true'");
+      // ...but the engineer is not asked to fix a signing configuration.
+      expect(String(byId('postPublishEngineerGate').config!.condition)).toBe(
+        "variables.postPublishDecision === 'changes_required'",
+      );
+      // The repair step lives in that arm.
+      const proceed = byId('postPublishIntegrityProceedGate').config!;
+      expect((proceed.thenSteps || []).map((step: any) => step.id)).toContain('resolveRepairBase');
+      expect(byId('resolveRepairBase').config!.env.BASE).toBeUndefined();
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  // ── comment 10: the check-wait budget is per head ───────────────────────
+  it('resets the check-wait budget when a fix is pushed, and bounds the loop above the budget', () => {
+    // A cycle that spent all six waits used to starve the NEXT cycle's CI.
+    const reset = byId('resetPostPublishWaitCount');
+    expect(reset.type).toBe('set_variable');
+    expect(String(reset.config!.key)).toBe('postPublishWaitCount');
+    expect(Number(reset.config!.value)).toBe(0);
+    expect((reset as any).dependsOn).toBe('setPostPublishCycleNext');
+    // ...and it runs only on the pushed arm (republishResultGate.then).
+    const resultGate = byId('republishResultGate').config!;
+    expect((resultGate.thenSteps || []).map((step: any) => step.id)).toContain('resetPostPublishWaitCount');
+    expect((resultGate.elseSteps || []).map((step: any) => step.id)).not.toContain('resetPostPublishWaitCount');
+
+    // maxIterations must exceed the worst-case budget (1 + 6 + 2 + 3 + 1 = 13).
+    const maxIterations = Number(byId('postPublishLoop').config!.maxIterations);
+    expect(maxIterations).toBeGreaterThan(13);
+
+    // An outcome left at 'observing' gets an explicit reason.
+    expect(String(byId('postPublishObservingReasonGate').config!.condition)).toBe(
+      "variables.postPublishOutcome === 'observing'",
+    );
+    expect(String(byId('setPostPublishObservingReason').config!.key)).toBe('postPublishReason');
+  });
+
+  // ── comment 11: every live read is paginated ────────────────────────────
+  it('paginates every live read that can exceed one page', () => {
+    const observe = scriptOf('observePullRequest');
+    // REST reads: --paginate + per_page=100.
+    expect(observe).toContain("gh api --paginate -X GET");
+    expect(observe).toContain("per_page=100");
+    // reviewThreads: cursor paging, not a bare first:100.
+    expect(observe).toContain('reviewThreads(first:100,after:$cursor)');
+    expect(observe).toContain('pageInfo{hasNextPage endCursor}');
+    expect(observe).toContain('threadCursor = conn.pageInfo.endCursor');
+    // A truncated read must surface as a problem, not as silence.
+    expect(observe).toContain("readProblems.push('the review threads could not be read')");
+  });
+
+  // ── comment 12: the alert list is read once ─────────────────────────────
+  it('reads the code-scanning alerts once and derives the scoped flag from that read', () => {
+    const observe = scriptOf('observePullRequest');
+    const scopedCalls = observe.split("code-scanning/alerts?state=open&per_page=100&ref=refs/pull/").length - 1;
+    // One scoped read (assigned to scopedAlerts), not two.
+    expect(scopedCalls).toBe(1);
+    expect(observe).toContain('const scopedAlerts = tryJson');
+    expect(observe).toContain('let alertsRefScoped = scopedAlerts !== null');
   });
 });

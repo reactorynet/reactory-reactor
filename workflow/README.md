@@ -338,3 +338,22 @@ Verification for these three is mutation-tested: making `resolveAddressedThreads
 fails the fixed-thread test; letting `no_action` enter the commit arm fails the "does not force a
 commit" contract; loosening the terminal gate's condition fails the "cannot reach approval"
 contract.
+
+### PR #53 review — twelve comments
+
+Two were CodeQL duplicate alerts (`354`, `355`) on one line of a test fixture whose inner single
+quotes closed the string literal; `tsc` reports it as TS1005. The other ten were real defects in
+the post-publication loop.
+
+| # | Defect | Fix |
+| --- | --- | --- |
+| 3 | A failed `gh` read left empty arrays, which classified the PR `clean` — an expired token reported success for a PR nobody had read. | Every live read is recorded in `readProblems`; any failure makes the observation `unavailable`. `pr`/`reviews`/threads/commits/check-runs are required; protection and code scanning stay optional (they legitimately 404). |
+| 4 | `applyPostPublishDecisions` ran before the judgement gate, so an `invalid` review still PATCHed its valid-looking dismissals, resolved threads, re-requested reviews and commented — while the invalid arm claimed "nothing was dismissed". | The step exits immediately, with a `skipped` result and a stderr warning, when `record.state === 'invalid'`. |
+| 5 | `MERGED` landed in `humanOnly`, so a PR a human merged mid-wait was reported `blocked_needs_human`, the ticket never resolved. | New `merged` verdict → `postPublishMergedGate` → `postPublishOutcome = merged`; the terminal gate accepts it, `publishState = merged`, and `prMergePathGate` (`prState !== 'MERGED'`) skips approval and polling so `mergeOutcome` resolves the ticket. |
+| 6 | The repair soft-reset to the base branch's **tip**, so its diff reverted every upstream commit merged since the branch was cut — and then force-pushed it. | `resolveRepairBase` returns `git merge-base <base> HEAD`; the repaired commit is parented on the merge base and the PR diff is byte-identical. |
+| 7 | A `no_action` verdict closed every `resolvedFindingIds` thread even with no dismissal — a human's thread closed silently. | Only a **dismissed** finding closes a thread here. Anything else is deferred with a reason and left for the published fix. |
+| 8 | The repair lived only in the `changes_required` arm, so a repair-only PR (unverifiable commit, no code change) never got repaired and ended `blocked_human`. | `postPublishHandBackGate` also runs when `postPublishRepairNeeded === 'true'`; a nested `postPublishEngineerGate` keeps the *engineer* engaged only for `changes_required`. |
+| 9 | Thread closures were logged against the already-incremented cycle, so the record never matched an entry. | `resolveAddressedThreads` writes to the **last** log entry (the one capture wrote for this cycle) and records `resolvedThreadsCycle`. |
+| 10 | The check-wait budget was global (a fix's CI starved), and `maxIterations: 12` sat inside the worst-case budget, exiting as `observing` with no reason. | `resetPostPublishWaitCount` on the pushed arm; `maxIterations: 30` (worst case 13); `postPublishObservingReasonGate` names an iteration-cap exit. |
+| 11 | `check-runs`, `pulls/{n}/commits` and `pulls/{n}/reviews` used the REST default of 30 per page; `reviewThreads(first:100)` had no paging. A failed check or unverifiable commit beyond page 1 was invisible. | `gh api --paginate` + `per_page=100`, and cursor paging for `reviewThreads`; a truncated read is a `readProblems` failure. |
+| 12 | The ref-scoped code-scanning query ran twice, so the flag could disagree with the data used. | One `scopedAlerts` read; `alertsRefScoped` is derived from it. |
