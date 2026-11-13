@@ -63,7 +63,40 @@ describe("User Macros", () => {
       expect(result.data?.found).toBe(true);
       expect(result.data?.id).toBe("user-123");
       expect(result.data?.displayName).toBe("Jane Doe");
-      expect(mockState.vars.lastGetUser.user).toEqual(mockUser);
+      // `vars` is persisted with the conversation, so it stores the projection too -
+      // not the document (which carries password/salt/session material).
+      expect(mockState.vars.lastGetUser.user).toEqual({
+        id: "user-123",
+        firstName: "Jane",
+        lastName: "Doe",
+        email: "jane.doe@example.com",
+        found: true,
+        displayName: "Jane Doe",
+      });
+    });
+
+    it("never persists a full user document in state.vars", async () => {
+      const mockUser = {
+        id: "user-9",
+        firstName: "Jane",
+        lastName: "Doe",
+        email: "jane@example.com",
+        password: "pbkdf2$10000$abcdef$0123456789abcdef",
+        salt: "c0ffee-c0ffee-c0ffee",
+        sessionInfo: [{ refresh: "refresh-token-value" }],
+        authentications: [{ provider: "google", props: { accessToken: "ya29.secret" } }],
+      };
+
+      mockUserService.findUserWithEmail.mockResolvedValue(mockUser);
+
+      const result = await GetUser({ email: "jane@example.com" }, mockState);
+      const persisted = JSON.stringify(mockState.vars.lastGetUser);
+
+      expect(persisted).not.toContain("pbkdf2$");
+      expect(persisted).not.toContain("refresh-token-value");
+      expect(persisted).not.toContain("ya29.secret");
+      expect(mockState.vars.lastGetUser.user.sessionInfo).toBeUndefined();
+      expect(result.data?.sessionInfo).toBeUndefined();
     });
   });
 
@@ -163,5 +196,52 @@ describe("User Macros", () => {
       });
       expect(mockState.vars.lastCreateUser.created).toBe(true);
     });
+  });
+});
+
+/**
+ * `metadata.user` must be a string id, never a User document (acceptance criterion 3).
+ *
+ * Asserted against a *real macro return* with a document-bearing context, so a regression
+ * that put `state.context.user` back into metadata fails here rather than passing on a
+ * hand-built fixture.
+ */
+describe('User macros — metadata.user identity', () => {
+  const userDocument = {
+    _id: '5f1d7f000000000000000001',
+    firstName: 'Ada',
+    lastName: 'Lovelace',
+    email: 'ada@example.com',
+    password: 'pbkdf2$10000$abcdef$0123456789abcdef',
+    salt: 'c0ffee-c0ffee-c0ffee',
+    sessionInfo: [{ refresh: 'refresh-token-value' }],
+  };
+
+  const buildState = () => {
+    const userService = { findUserWithEmail: jest.fn().mockResolvedValue(userDocument) };
+
+    return createMockState({
+      user: { id: '5f1d7f000000000000000001' },
+      context: {
+        user: userDocument,
+        getService: jest.fn((serviceId: string) =>
+          serviceId === 'core.UserService@1.0.0' ? userService : null
+        ),
+      },
+      vars: {},
+    });
+  };
+
+  it('getUser reports the acting user id as metadata.user, not the document', async () => {
+    const result = await GetUser({ email: 'ada@example.com' }, buildState());
+
+    expect(result.success).toBe(true);
+    expect(typeof result.metadata?.user).toBe('string');
+    expect(result.metadata?.user).toBe('5f1d7f000000000000000001');
+
+    // The metadata payload carries no credential material either.
+    const serialised = JSON.stringify(result.metadata);
+    expect(serialised).not.toContain('pbkdf2');
+    expect(serialised).not.toContain('refresh-token-value');
   });
 });

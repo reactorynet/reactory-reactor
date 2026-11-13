@@ -36,6 +36,23 @@ const HTML_ENTITY_MAP: Record<string, string> = {
   '&#39;': "'", '&#x27;': "'", '&apos;': "'", '&nbsp;': ' ',
 };
 
+/**
+ * Response headers that carry credentials and must never be returned to the model.
+ *
+ * `set-cookie` hands the caller a live session cookie - enough to impersonate the
+ * request's user against the fetched host - and `authorization`/
+ * `proxy-authorization` can echo a bearer token from the upstream. The rest of the
+ * header set is useful (content-type, caching, rate limits), so only these are dropped.
+ */
+const CREDENTIAL_RESPONSE_HEADERS = new Set([
+  'set-cookie',
+  'set-cookie2',
+  'authorization',
+  'proxy-authorization',
+  'x-api-key',
+  'api-key',
+]);
+
 const shortHash = (input: string): string =>
   createHash('sha256').update(input).digest('hex').slice(0, 12);
 
@@ -361,9 +378,13 @@ export const HttpMacro: Macro<HttpMacroResult, HttpMacroProps> = async (
         };
     }
 
-    // Convert headers to plain object
+    // Convert headers to plain object, dropping credential-bearing ones.
+    // The previous shape returned every header verbatim, `set-cookie` included, so the
+    // tool result - and therefore the conversation and the model provider - carried a
+    // usable session cookie.
     const headers: Record<string, string> = {};
     response.headers.forEach((value, key) => {
+      if (CREDENTIAL_RESPONSE_HEADERS.has(key.toLowerCase())) return;
       headers[key] = value;
     });
 
@@ -544,7 +565,7 @@ ${summarySection}
 
 ### Available Data:
 - **content**: ${inlined ? 'Response content (formatted according to returnFormat)' : 'Reference object pointing at the cached body file — read the file for the full payload'}
-- **headers**: Response headers as key-value pairs
+- **headers**: Response headers as key-value pairs (credential-bearing headers such as \`set-cookie\` and \`authorization\` are removed)
 - **status**: HTTP status code
 - **statusText**: HTTP status text
 - **responseTime**: Time taken for the HTTP request
