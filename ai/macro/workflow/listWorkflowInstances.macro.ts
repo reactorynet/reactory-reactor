@@ -55,12 +55,16 @@ export const listWorkflowInstances: Macro<unknown, ListWorkflowInstancesProps> =
 
     const result = await workflowService.getWorkflowInstances(filter, pagination);
 
+    const total = typeof result.pagination?.total === 'number' ? result.pagination.total : result.instances.length;
+
     const payload: Record<string, any> = {
       success: true,
-      // This query reads the in-memory lifecycle registry only. A run that was just dispatched
-      // (still `pending`) may not be registered there yet, and a finished run is not in it at
-      // all — that is the persisted history, which is a different surface.
+      // This query reads the in-memory lifecycle registry (LifecycleManager), and that registry is
+      // never populated for engine runs: getWorkflowInstances has no persistence fallback and
+      // LifecycleManager.createWorkflowInstance has no production caller. For YAML and
+      // workflow-es instances this list is therefore empty, not merely late.
       source: 'in-memory lifecycle registry',
+      engineRunsTracked: false,
       instances: result.instances.map((inst: any) => ({
         id: inst.id,
         workflowId: inst.workflowId,
@@ -77,12 +81,14 @@ export const listWorkflowInstances: Macro<unknown, ListWorkflowInstancesProps> =
       pagination: result.pagination,
     };
 
-    if (result.instances.length === 0) {
+    // Only when there is nothing at all — not when this page happens to be past the end of a
+    // non-empty result, where "nothing is tracked here" would be misleading.
+    if (total === 0) {
       payload.note =
-        'No instances matched the in-memory lifecycle registry. A just-dispatched (pending) run ' +
-        'may not appear here yet, and a completed run never does. Use getRecentExecutions for ' +
-        'recent runs across all workflows, or getWorkflowHistory(instanceId=...) with the ' +
-        'instanceId returned by executeYamlWorkflow/startWorkflow.';
+        'This registry is not populated for workflow-es/YAML engine runs in this build, so an ' +
+        'empty result does not mean no run exists. Use getRecentExecutions for recent runs across ' +
+        'all workflows, or getWorkflowHistory(instanceId=...) with the instanceId returned by ' +
+        'executeYamlWorkflow/startWorkflow.';
     }
 
     return payload;
@@ -100,17 +106,18 @@ export const ListWorkflowInstancesRegistry: MacroComponentDefinition<typeof list
   component: listWorkflowInstances,
   roles: ['ADMIN', 'DEVELOPER', 'WORKFLOW_ADMIN', 'WORKFLOW_OPERATOR'],
   description: `# listWorkflowInstances
-  Lists the workflow instances currently tracked by the engine's in-memory lifecycle registry
-  (live runs: pending, running, paused). Supports filtering by workflow identity, status,
-  creator, and start time range.
+  Lists workflow instances from the engine's in-memory lifecycle registry (LifecycleManager).
 
-  ## This is not a history query
-  It is not a complete or durable view of runs:
-  - a run that was just dispatched may not be registered yet;
-  - a run that finished is no longer in the registry — use \`getRecentExecutions\` for recent
-    runs across all workflows, or \`getWorkflowHistory(instanceId=...)\` with the id returned by
-    \`executeYamlWorkflow\` / \`startWorkflow\` for one specific run.
-  An empty result therefore does not mean the run never existed.
+  ## This registry does not track engine runs
+  In this build the registry is never populated for workflow-es/YAML runs: the query has no
+  persistence fallback and LifecycleManager.createWorkflowInstance has no production caller. An
+  empty result is therefore the normal answer and does NOT mean no run exists. Do not poll this
+  looking for a run to appear.
+
+  Use instead:
+  - \`getRecentExecutions\` — recent runs across all workflows;
+  - \`getWorkflowHistory(instanceId=...)\` — one run, by the id returned from
+    \`executeYamlWorkflow\` / \`startWorkflow\`.
 
   ## Usage
   @listWorkflowInstances(nameSpace?, name?, status?, page?, limit?)
@@ -133,10 +140,11 @@ export const ListWorkflowInstancesRegistry: MacroComponentDefinition<typeof list
       function: {
         name: "listWorkflowInstances",
         description:
-          "Lists the workflow instances currently held in the engine's in-memory lifecycle registry " +
-          "(live runs only). Not a history query: a just-dispatched run may be missing and finished " +
-          "runs are absent. Use getRecentExecutions or getWorkflowHistory(instanceId=...) to find a " +
-          "specific run by the instanceId returned from executeYamlWorkflow/startWorkflow.",
+          "Lists the instances held in the engine's in-memory lifecycle registry. IMPORTANT: that " +
+          "registry is not populated for workflow-es/YAML engine runs in this build, so an empty " +
+          "list does not mean no run exists and polling will not make one appear. Use " +
+          "getRecentExecutions for recent runs, or getWorkflowHistory(instanceId=...) with the " +
+          "instanceId returned from executeYamlWorkflow/startWorkflow.",
         parameters: {
           type: "object",
           properties: {

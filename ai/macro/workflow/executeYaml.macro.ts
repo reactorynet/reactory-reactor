@@ -1,5 +1,6 @@
 import Reactory from "@reactorynet/reactory-core";
 import fs from 'fs';
+import path from 'path';
 import yaml from 'js-yaml';
 import { ChatState, Macro, MacroComponentDefinition } from "@reactory/server-modules/reactory-reactor/ai/openai/types/chat";
 import { IWorkflowDefinitionInput } from "@reactory/server-modules/reactory-core/services/Workflow/types";
@@ -7,25 +8,33 @@ import { IWorkflowDefinitionInput } from "@reactory/server-modules/reactory-core
 /**
  * Lifecycle discriminator of an executeYamlWorkflow call.
  *
- * - 'dispatched' — the run was accepted by the workflow engine and instanceId identifies it.
- *   The run continues asynchronously; poll it with getWorkflowHistory(instanceId=...).
- * - 'failed' — the file could not be read, parsed, validated, registered or dispatched.
+ * - 'dispatched' — the engine accepted the run and instanceId identifies it. Poll it with
+ *   getWorkflowHistory(instanceId=...).
+ * - 'dispatched_unconfirmed' — the dispatch call was made but the tool could not confirm it
+ *   (no instance id came back, or the call threw after the dispatch attempt began). A run MAY BE
+ *   LIVE. Do NOT retry blindly: a second dispatch of a side-effecting workflow (e.g.
+ *   core.ProcessAITicket) duplicates branches and pull requests. Check getRecentExecutions first.
+ * - 'failed' — the call was rejected before anything was dispatched. Safe to retry after fixing
+ *   the cause.
  *
- * This tool never reports 'completed' or 'failed' for the *run*: dispatch returns as soon as the
- * engine has accepted the instance, so any statement about the run's own outcome would be a lie.
- * There is deliberately no run-status field on the receipt — see definitionSource for the one
- * piece of provenance that IS known at dispatch time.
+ * `success` is true only for 'dispatched'. This tool never reports 'completed'/'failed' for the
+ * RUN: dispatch returns as soon as the engine accepts the instance, so any statement about the
+ * run's own outcome would be a lie. There is deliberately no run-status field on the receipt —
+ * the service's instance status is a hardcoded constant (see step 7) and history is the only
+ * honest source for it.
  */
-export type ExecuteYamlWorkflowStatus = 'dispatched' | 'failed';
+export type ExecuteYamlWorkflowStatus = 'dispatched' | 'dispatched_unconfirmed' | 'failed';
 
 /**
- * Which definition the dispatched run will execute.
+ * Which definition the dispatched run executes.
  *
- * - 'file' — the file's definition was registered in this process' runner registry by this call.
- * - 'registry' — a definition for the same nameSpace.name@version was ALREADY registered in this
- *   process, so the file's steps were not used and the engine runs the registered definition.
- *   This is reported rather than silently tolerated because the tool is normally used to test
- *   worktree-local YAML against a workflow that is also registered from the catalog.
+ * - 'file' — the run executes the steps in the file this call was given. Either this call
+ *   registered them, or an already-registered entry resolves to this same content.
+ * - 'registry' — the process already holds a definition for this nameSpace.name@version whose
+ *   executable content differs from the file. The run executes that one; `warning` says so.
+ *
+ * This is computed by comparing executable content (steps/inputs/outputs/variables), not by
+ * asking whether the FQN is known: a repeat run of an unchanged file is 'file' and stays silent.
  */
 export type ExecuteYamlWorkflowDefinitionSource = 'file' | 'registry';
 
@@ -37,8 +46,9 @@ export interface ExecuteYamlWorkflowProps {
    *
    * Defaults to false: the definition is validated and loaded into the runner's in-memory
    * registry only, so an existing catalog entry with the same nameSpace.name@version is left
-   * untouched. Set to true only when the intent is to (re)register the definition — use the
-   * dedicated saveWorkflowYaml tool for catalog writes.
+   * untouched. Set to true only when the intent is to update the catalog — and note that a
+   * catalog write does not replace a definition this process has already loaded (see the
+   * `definitionStale` field and the warning).
    */
   register?: boolean;
 }
@@ -46,29 +56,82 @@ export interface ExecuteYamlWorkflowProps {
 export interface ExecuteYamlWorkflowResult {
   success: boolean;
   status: ExecuteYamlWorkflowStatus;
-  /** nameSpace.name@version of the definition in the file. */
+  /** nameSpace.name@version of the definition in the file. Always present once the file parsed. */
   fqn?: string;
   /** Engine instance id of the dispatched run — the handle for every follow-up query. */
   instanceId?: string;
-  /** True when the file's definition was written to the on-disk workflow catalog. */
+  /** True when this call wrote the file's definition to the on-disk workflow catalog. */
   registered?: boolean;
-  /** Which definition the run executes: the file's, or one already registered in this process. */
+  /**
+   * Reported when `registered` is true. SUCCESS or PARTIAL; PARTIAL means the definition loaded
+   * with validation warnings, so the caller knows something was degraded.
+   */
+  loadStatus?: string;
+  /** Which definition the run executes: this file's content, or a different registered one. */
   definitionSource?: ExecuteYamlWorkflowDefinitionSource;
-  /** Present when definitionSource is 'registry': the file's steps were not used. */
+  /**
+   * True only when this call wrote the catalog but the run still executes a DIFFERENT, already
+   * loaded definition. `registered: true` is then a catalog fact, not an execution fact.
+   */
+  definitionStale?: boolean;
+  /** Present when definitionSource is 'registry': the file's steps are not what runs. */
   warning?: string;
   error?: string;
   stack?: string;
 }
 
 /**
- * Format validation / load errors into a single readable string.
+ * Format validation / load errors into a single readable string, keeping the error codes —
+ * a bare message loses the machine-readable reason the caller needs.
  */
 const formatErrors = (errors: any[] | undefined): string => {
   if (!Array.isArray(errors) || errors.length === 0) return '';
   return errors
-    .map((error: any) => (typeof error === 'string' ? error : error?.message))
-    .filter((message: unknown): message is string => typeof message === 'string' && message.length > 0)
+    .map((error: any) => {
+      if (typeof error === 'string') return error;
+      const message = typeof error?.message === 'string' ? error.message : undefined;
+      const code = typeof error?.code === 'string' ? error.code : undefined;
+      if (message && code) return `${message} (${code})`;
+      return message || code;
+    })
+    .filter((text: unknown): text is string => typeof text === 'string' && text.length > 0)
     .join('; ');
+};
+
+/**
+ * JSON with sorted keys (cycle-safe) so two definitions can be compared without depending on
+ * property order.
+ */
+const stableStringify = (value: any): string | undefined => {
+  const seen = new WeakSet<object>();
+  const walk = (node: any): any => {
+    if (node === null || typeof node !== 'object') return node;
+    if (seen.has(node)) return '[circular]';
+    seen.add(node);
+    if (Array.isArray(node)) return node.map(walk);
+    const out: Record<string, any> = {};
+    for (const key of Object.keys(node).sort()) out[key] = walk(node[key]);
+    return out;
+  };
+  try {
+    return JSON.stringify(walk(value));
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * The parts of a definition that decide what actually executes. Designer metadata, descriptions
+ * and version bumps for cosmetics must not make a definition look "stale".
+ */
+const executableShape = (definition: any): string | undefined => {
+  if (!definition || typeof definition !== 'object') return undefined;
+  return stableStringify({
+    steps: definition.steps ?? null,
+    inputs: definition.inputs ?? null,
+    outputs: definition.outputs ?? null,
+    variables: definition.variables ?? null,
+  });
 };
 
 export const executeYamlWorkflow: Macro<unknown, ExecuteYamlWorkflowProps> = async (
@@ -78,6 +141,11 @@ export const executeYamlWorkflow: Macro<unknown, ExecuteYamlWorkflowProps> = asy
 ): Promise<unknown> => {
   const ctx = context || state.context;
   const { filePath, inputs = {}, register = false } = props;
+
+  // Hoisted so the catch can report what the attempt had reached. `dispatchAttempted` is what
+  // separates a safe-to-retry 'failed' from a may-be-live 'dispatched_unconfirmed'.
+  let attemptedFqn: string | undefined;
+  let dispatchAttempted = false;
 
   const failure = (error: string, extra: Partial<ExecuteYamlWorkflowResult> = {}): ExecuteYamlWorkflowResult => ({
     success: false,
@@ -111,6 +179,7 @@ export const executeYamlWorkflow: Macro<unknown, ExecuteYamlWorkflowProps> = asy
     }
 
     const fqn = `${definition.nameSpace}.${definition.name}@${definition.version}`;
+    attemptedFqn = fqn;
 
     // 3. Get the Workflow Service
     if (!ctx) return failure("No execution context available.", { fqn });
@@ -124,26 +193,42 @@ export const executeYamlWorkflow: Macro<unknown, ExecuteYamlWorkflowProps> = asy
       await workflowService.onStartup();
     }
 
-    // 5. Validate — and only write the catalog when the caller explicitly asks for it.
+    const runner = workflowService.workflowRunner;
+    const lookup = (): any => (
+      typeof runner.getWorkflowByName === 'function'
+        ? runner.getWorkflowByName(definition.nameSpace, definition.name, definition.version)
+        : undefined
+    );
+
+    // 5. Snapshot the registry entry BEFORE anything writes to it.
     //
-    //    This step used to call saveWorkflowDefinition(definition) unconditionally, which
-    //    overwrote whatever was registered under nameSpace.name@version with the contents of
-    //    the file. Pointing the tool at a stale or worktree-local YAML therefore silently
-    //    replaced the live definition: no diff, no confirmation, no audit entry. The default is
-    //    now validation only; catalog writes belong to saveWorkflowYaml / register: true.
+    //    `saveWorkflowDefinition` registers the FQN in the runner itself once it has written the
+    //    catalog, so a lookup taken after the save is always truthy — which made a first-ever
+    //    `register: true` call report `definitionSource: 'registry'` and warn that the caller's
+    //    own file had been ignored. The snapshot is the only way to tell "already there before I
+    //    arrived" from "I just put it there".
+    const preExisting = lookup();
+
+    // 6. Validate — and only write the catalog when the caller explicitly asks for it.
+    //
+    //    This step used to call saveWorkflowDefinition unconditionally, overwriting whatever was
+    //    registered under nameSpace.name@version with the file's contents: pointing the tool at a
+    //    stale or worktree-local YAML silently replaced the live definition with no diff and no
+    //    audit entry. The default is validation only.
     let registered = false;
+    let loadStatus: string | undefined;
     if (register === true) {
       const saveResult = await workflowService.saveWorkflowDefinition(definition);
-      const loadStatus = saveResult?.loadStatus;
-      // A missing result or a missing loadStatus is a registration failure, not a success: the
-      // catalog write is the whole point of register: true, so an unconfirmed write must abort
-      // the dispatch rather than proceed on an unknown catalog state.
+      loadStatus = saveResult?.loadStatus;
+      // A missing result or a missing loadStatus is a registration failure: the catalog write is
+      // the whole point of register: true, so an unconfirmed write must not dispatch as if it
+      // had succeeded.
       if (loadStatus !== 'SUCCESS' && loadStatus !== 'PARTIAL') {
         const details = formatErrors(saveResult?.errors);
         return failure(
           `Failed to register workflow definition ${fqn}: ${loadStatus || 'no loadStatus returned by saveWorkflowDefinition'}${details ? ` — ${details}` : ''}. ` +
-          'The catalog was not written; re-run with register: false to dispatch the file without writing it.',
-          { fqn }
+          'The catalog write could not be confirmed. Re-run with register: false to dispatch the file without writing the catalog.',
+          { fqn, ...(loadStatus ? { loadStatus } : {}) }
         );
       }
       registered = true;
@@ -158,24 +243,38 @@ export const executeYamlWorkflow: Macro<unknown, ExecuteYamlWorkflowProps> = asy
       }
     }
 
-    // 6. Load the file's definition into this process' in-memory runner registry.
+    // 7. Decide what the run will actually execute.
     //
-    //    registerWorkflow APPENDS to runner.state.workflows, and the runner resolves a start with
-    //    a first-match lookup (startWorkflow uses .find(); getWorkflowByName uses
-    //    selectWorkflowByName, which returns matches.find(...) for an explicit version). So when
-    //    this FQN is already registered — the normal case for a catalog workflow — an extra append
-    //    would be dead weight AND the run would execute the ALREADY REGISTERED definition, not the
-    //    file's. Re-bridging a changed definition would additionally require
-    //    registerYamlWorkflowOnHost to rebuild the host class, which is idempotent per engine id.
-    //    Both facts are reported to the caller through definitionSource instead of being hidden.
-    const runner = workflowService.workflowRunner;
-    const existing = typeof runner.getWorkflowByName === 'function'
-      ? runner.getWorkflowByName(definition.nameSpace, definition.name, definition.version)
-      : undefined;
+    //    An entry that pre-existed only competes with the file if its executable content differs.
+    //    Comparing content (not merely "is this FQN known") keeps a repeat run of an unchanged
+    //    file silent — otherwise every later call warned that the file was ignored and the
+    //    warning became noise on the one run where it mattered.
+    //
+    //    A pre-existing entry with no cached steps resolves its definition lazily from
+    //    `location`, so in that case location identity is what decides.
+    const executedFromFile = ((): boolean => {
+      if (!preExisting) return true; // this call registers the file (or the save just did)
+      const cached = preExisting.props;
+      const hasCachedSteps = !!(cached && Array.isArray(cached.steps) && cached.steps.length > 0);
+      if (!hasCachedSteps) {
+        const location = typeof preExisting.location === 'string' ? path.resolve(preExisting.location) : undefined;
+        return location === path.resolve(filePath);
+      }
+      return executableShape(cached) === executableShape(definition);
+    })();
 
-    const definitionSource: ExecuteYamlWorkflowDefinitionSource = existing ? 'registry' : 'file';
+    const definitionSource: ExecuteYamlWorkflowDefinitionSource = executedFromFile ? 'file' : 'registry';
+    // A catalog write that did not change what runs: `registered` is a catalog fact, not an
+    // execution fact.
+    const definitionStale = registered && definitionSource === 'registry';
 
-    if (!existing) {
+    // 8. Register the file's definition when nothing else did.
+    //
+    //    `registerWorkflow` APPENDS and every lookup is a first match, so re-registering an FQN
+    //    the process already holds cannot displace the existing entry — it only grows the
+    //    registry. Skipped when a pre-existing entry exists, and skipped when register: true has
+    //    already made the service register the catalog target.
+    if (!preExisting && !registered && !lookup()) {
       runner.registerWorkflow({
         nameSpace: definition.nameSpace,
         name: definition.name,
@@ -186,14 +285,12 @@ export const executeYamlWorkflow: Macro<unknown, ExecuteYamlWorkflowProps> = asy
       });
     }
 
-    // Reset circuit breaker for this workflow in case a previous run failed
-    if (typeof runner.resetCircuitBreaker === 'function') {
-      runner.resetCircuitBreaker(fqn);
-      runner.resetCircuitBreaker(definition.name);
-      runner.resetCircuitBreaker(`${fqn}@1`);
-    }
+    // NOTE: no circuit-breaker reset here. YAML starts go through WorkflowRunner.startYamlWorkflow,
+    // which returns before errorHandler.executeWithRetry ever runs — so no breaker is set on this
+    // path and there is nothing to reset. Resetting `definition.name` and `${fqn}@1` (the residue
+    // of the retired major-version truncation) implied retry semantics this path does not have.
 
-    // 7. Dispatch the workflow
+    // 9. Dispatch the workflow
     let parsedInputs = inputs;
     if (typeof inputs === 'string' && inputs.trim().length > 0) {
       try {
@@ -204,65 +301,97 @@ export const executeYamlWorkflow: Macro<unknown, ExecuteYamlWorkflowProps> = asy
     }
 
     // IReactoryWorkflowService.startWorkflow returns the IWorkflowInstance and is the same entry
-    // point the GraphQL startWorkflow mutation uses. The runner's own startWorkflow returns the
-    // bare instance id string — reading .outputs / .state off it is what made this macro report
-    // { success: true } with no handle in the first place.
-    //
-    // Only `id` is taken from the instance. Its `status` is NOT surfaced: nothing in production
-    // calls LifecycleManager.startWorkflow, so ReactoryWorkflowService.startWorkflow's
-    // lifecycle-manager lookup always misses and it returns a fallback whose status is a hardcoded
-    // WorkflowStatus.RUNNING (ReactoryWorkflowService.ts:1085). Emitting that would present a
-    // constant as an observation — the very "two surfaces, two vocabularies" problem this ticket
-    // is about. The engine's real state is read from getWorkflowHistory(instanceId=...).
+    // point the GraphQL startWorkflow mutation uses; it takes { input } because startYamlWorkflow
+    // unwraps data.input. Only `id` is read from the instance — its `status` is a hardcoded
+    // WorkflowStatus.RUNNING in the service's lifecycle-miss fallback (ReactoryWorkflowService.ts
+    // :1085), because nothing in production calls LifecycleManager.startWorkflow. Reporting it
+    // would present a constant as an observation.
     let instanceId: string | undefined;
+    let unconfirmedReason: string | undefined;
 
+    dispatchAttempted = true;
     if (typeof workflowService.startWorkflow === 'function') {
       const instance = await workflowService.startWorkflow(fqn, { input: parsedInputs });
-      instanceId = instance?.id || instance?.instanceId;
-      if (!instanceId) {
-        return failure(
-          `Workflow ${fqn} was dispatched but the workflow service did not return an instance id.`,
-          { fqn, definitionSource }
-        );
-      }
+      instanceId = instance?.id;
+      if (!instanceId) unconfirmedReason = 'the workflow service returned no instance id';
     } else {
-      // Service implementations without the instance-returning entry point: the runner's
-      // startWorkflow does return the instance id (never an object).
-      const startedId = await runner.startWorkflow(fqn, definition.version, parsedInputs, ctx);
+      // Same { input } envelope as the primary branch: the fallback is the same contract, and
+      // passing inputs raw would unwrap to a different depth when a workflow input is itself
+      // named `input`.
+      const startedId = await runner.startWorkflow(fqn, definition.version, { input: parsedInputs }, ctx);
       if (!startedId || typeof startedId !== 'string') {
-        return failure(
-          `Workflow ${fqn} was dispatched but the workflow runner did not return an instance id.`,
-          { fqn, definitionSource }
-        );
+        unconfirmedReason = 'the workflow runner returned no instance id';
+      } else {
+        instanceId = startedId;
       }
-      instanceId = startedId;
     }
 
-    // 8. Return the dispatch receipt. No outputs / state (dispatch returns before the run
-    //    finishes), and no run-status field (see step 7).
+    if (!instanceId) {
+      // The dispatch call was made. A run may be live, so this must not look retryable.
+      return {
+        success: false,
+        status: 'dispatched_unconfirmed',
+        fqn,
+        registered,
+        ...(loadStatus ? { loadStatus } : {}),
+        definitionSource,
+        definitionStale,
+        error:
+          `${fqn} was dispatched but ${unconfirmedReason}. The run may be live — do NOT retry. ` +
+          'Check getRecentExecutions for a run started moments ago, and use getWorkflowHistory once you have its id.',
+      };
+    }
+
+    // 10. Return the dispatch receipt. No outputs/state (dispatch returns before the run
+    //     finishes) and no run-status field (see step 9).
     const result: ExecuteYamlWorkflowResult = {
       success: true,
       status: 'dispatched',
       fqn,
       instanceId,
       registered,
+      ...(loadStatus ? { loadStatus } : {}),
       definitionSource,
+      definitionStale,
     };
 
     if (definitionSource === 'registry') {
       result.warning =
-        `${fqn} was already registered in this process before the call, so the run executes that ` +
-        'definition, not the steps in the file you passed. To run the file itself, use a definition ' +
-        'whose nameSpace.name@version is not already registered, or re-save it with saveWorkflowYaml.';
+        `${fqn} is already loaded in this process with a definition whose steps differ from ${filePath}, ` +
+        'so this run executes the loaded definition, not the steps in this file.' +
+        (definitionStale
+          ? ' The catalog was updated, but a running process keeps executing the definition it loaded at startup.'
+          : '') +
+        ' To make changed steps take effect, bump `version` in the YAML (a new nameSpace.name@version gets ' +
+        'a fresh engine id) or restart the server. Re-saving the same version does not replace a definition ' +
+        'the process has already loaded.';
     }
 
     return result;
 
   } catch (err: any) {
     ctx?.log(`executeYamlWorkflow Macro Error: ${err.message}`, 'error');
+
+    if (dispatchAttempted) {
+      // A throw after the dispatch attempt began is indistinguishable from a throw after the
+      // engine accepted the instance (e.g. inside the service, or a post-accept finalizer), so
+      // the conservative report is "may be live" — retrying could duplicate a real run.
+      const result: ExecuteYamlWorkflowResult = {
+        success: false,
+        status: 'dispatched_unconfirmed',
+        ...(attemptedFqn ? { fqn: attemptedFqn } : {}),
+        error:
+          `${err.message} — the dispatch attempt had already started, so a run may be live. ` +
+          'Do NOT retry blindly; check getRecentExecutions first.',
+      };
+      if (err?.stack) result.stack = err.stack;
+      return result;
+    }
+
     const result: ExecuteYamlWorkflowResult = {
       success: false,
       status: 'failed',
+      ...(attemptedFqn ? { fqn: attemptedFqn } : {}),
       error: err.message,
     };
     if (err?.stack) result.stack = err.stack;
@@ -286,29 +415,33 @@ export const ExecuteYamlWorkflowRegistry: MacroComponentDefinition<typeof execut
   finish, does not return workflow outputs, and does not report the run's status — read that from
   getWorkflowHistory(instanceId=...), which is the durable record.
 
-  Returns:
-  - status 'dispatched' with:
-    - instanceId — the engine instance id, the handle for every follow-up query;
-    - fqn — nameSpace.name@version from the file;
-    - registered — true when the on-disk catalog was written (only with register: true);
-    - definitionSource — 'file' when this call registered the file's definition, or 'registry'
-      when that workflow id was already registered in the process, in which case the run executes
-      the registered definition and warning says so.
-  - status 'failed' with error when the file cannot be read, parsed, validated, registered or
-    dispatched. success is never true without a status.
+  ## Status tells you whether it is safe to retry
+  - 'dispatched' — accepted, instanceId identifies it. success is true.
+  - 'dispatched_unconfirmed' — the dispatch call was made but could not be confirmed (no instance
+    id returned, or it threw after the attempt began). A run MAY BE LIVE. Do NOT retry; check
+    getRecentExecutions.
+  - 'failed' — rejected before anything was dispatched. Safe to retry once the cause is fixed.
 
-  Follow the run up with getWorkflowHistory(instanceId=...) (state, steps and pointers) or
-  controlWorkflowInstance (pause/resume/cancel).
+  ## Receipt fields
+  instanceId, fqn, registered (catalog written by this call), loadStatus (SUCCESS or PARTIAL when
+  registered), definitionSource and definitionStale.
+
+  - definitionSource 'file' — the run executes this file's steps.
+  - definitionSource 'registry' — the process already holds a definition for this
+    nameSpace.name@version whose steps differ from the file, so the run executes that one and
+    warning says so.
+  - definitionStale — true when this call wrote the catalog but the run still executes a different
+    already-loaded definition. registered is then a catalog fact, not an execution fact.
+
+  ## Changing a definition the process already loaded
+  Re-saving or bumping nothing does not replace it: the runner keeps the definition it loaded, and
+  the engine bridge is registered once per workflow id. To make changed steps take effect, bump
+  'version' in the YAML or restart the server.
 
   ## The catalog is not touched by default
   The definition is validated and loaded into the runner's in-memory registry only. Pass
-  register: true to overwrite the catalog entry nameSpace.name@version with the file's contents;
-  use saveWorkflowYaml for deliberate catalog writes.
-
-  ## A changed file for an already-registered workflow is not picked up
-  Dispatch cannot replace a definition the process already holds: the check is a first-match
-  registry lookup and the engine bridge is registered once per workflow id. Watch
-  definitionSource — when it is 'registry' the file's steps were not used.
+  register: true to write the catalog entry nameSpace.name@version; use saveWorkflowYaml for
+  deliberate catalog edits.
 
   ## Usage
   @executeYamlWorkflow(filePath, inputs, register)
@@ -330,13 +463,15 @@ export const ExecuteYamlWorkflowRegistry: MacroComponentDefinition<typeof execut
       name: "executeYamlWorkflow",
       description:
         "Loads a YAML workflow definition from a file and dispatches it to the Reactory Workflow " +
-        "Engine. Returns { success, status: 'dispatched', fqn, instanceId, registered, " +
-        "definitionSource } as soon as the run is accepted; it does not wait for completion, " +
-        "returns no outputs and reports no run status. Poll the run with " +
-        "getWorkflowHistory(instanceId=...). The on-disk workflow catalog is only written when " +
-        "register: true. definitionSource is 'registry' when that workflow id was already " +
-        "registered in the process, meaning the run executes the registered definition rather " +
-        "than the file's steps.",
+        "Engine. Returns { success, status, fqn, instanceId, registered, loadStatus, " +
+        "definitionSource, definitionStale, warning } as soon as the run is accepted; it does not " +
+        "wait for completion, returns no outputs and reports no run status (read that from " +
+        "getWorkflowHistory(instanceId=...)). status is 'dispatched' (accepted), " +
+        "'dispatched_unconfirmed' (a run MAY BE LIVE — do not retry, check getRecentExecutions) or " +
+        "'failed' (nothing dispatched, safe to retry). definitionSource 'registry' means the " +
+        "process already holds a different definition for that workflow id, so the run executes " +
+        "that one, not the file's steps; to make changed steps take effect, bump version or " +
+        "restart the server. The on-disk catalog is only written when register: true.",
       parameters: {
         type: "object",
         properties: {
@@ -345,15 +480,21 @@ export const ExecuteYamlWorkflowRegistry: MacroComponentDefinition<typeof execut
             description: "Absolute path to the YAML file"
           },
           inputs: {
-            type: "object",
-            description: "Inputs to pass to the workflow"
-          },
+            // Models frequently send a JSON string; the macro accepts both, so the schema says
+            // so instead of leaving a reachable shape unadvertised.
+            oneOf: [
+              { type: "object", description: "Inputs to pass to the workflow" },
+              { type: "string", description: "JSON-encoded inputs object" }
+            ]
+          } as any,
           register: {
             type: "boolean",
             description:
               "Write the file's definition into the on-disk workflow catalog before dispatching, " +
               "overwriting any definition registered under the same nameSpace.name@version. " +
-              "Defaults to false: the definition is validated and loaded in memory only."
+              "Defaults to false: the definition is validated and loaded in memory only. A catalog " +
+              "write does not replace a definition this process has already loaded — see " +
+              "definitionStale."
           }
         },
         required: ["filePath"]
