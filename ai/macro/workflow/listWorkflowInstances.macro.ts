@@ -55,8 +55,12 @@ export const listWorkflowInstances: Macro<unknown, ListWorkflowInstancesProps> =
 
     const result = await workflowService.getWorkflowInstances(filter, pagination);
 
-    return {
+    const payload: Record<string, any> = {
       success: true,
+      // This query reads the in-memory lifecycle registry only. A run that was just dispatched
+      // (still `pending`) may not be registered there yet, and a finished run is not in it at
+      // all — that is the persisted history, which is a different surface.
+      source: 'in-memory lifecycle registry',
       instances: result.instances.map((inst: any) => ({
         id: inst.id,
         workflowId: inst.workflowId,
@@ -72,6 +76,16 @@ export const listWorkflowInstances: Macro<unknown, ListWorkflowInstancesProps> =
       })),
       pagination: result.pagination,
     };
+
+    if (result.instances.length === 0) {
+      payload.note =
+        'No instances matched the in-memory lifecycle registry. A just-dispatched (pending) run ' +
+        'may not appear here yet, and a completed run never does. Use getRecentExecutions for ' +
+        'recent runs across all workflows, or getWorkflowHistory(instanceId=...) with the ' +
+        'instanceId returned by executeYamlWorkflow/startWorkflow.';
+    }
+
+    return payload;
   } catch (err: any) {
     ctx?.log(`listWorkflowInstances Macro Error: ${err.message}`, 'error');
     return { success: false, error: err.message };
@@ -86,8 +100,17 @@ export const ListWorkflowInstancesRegistry: MacroComponentDefinition<typeof list
   component: listWorkflowInstances,
   roles: ['ADMIN', 'DEVELOPER', 'WORKFLOW_ADMIN', 'WORKFLOW_OPERATOR'],
   description: `# listWorkflowInstances
-  Lists active in-memory workflow instances from the Reactory Workflow Engine.
-  Supports filtering by workflow identity, status, creator, and start time range.
+  Lists the workflow instances currently tracked by the engine's in-memory lifecycle registry
+  (live runs: pending, running, paused). Supports filtering by workflow identity, status,
+  creator, and start time range.
+
+  ## This is not a history query
+  It is not a complete or durable view of runs:
+  - a run that was just dispatched may not be registered yet;
+  - a run that finished is no longer in the registry — use \`getRecentExecutions\` for recent
+    runs across all workflows, or \`getWorkflowHistory(instanceId=...)\` with the id returned by
+    \`executeYamlWorkflow\` / \`startWorkflow\` for one specific run.
+  An empty result therefore does not mean the run never existed.
 
   ## Usage
   @listWorkflowInstances(nameSpace?, name?, status?, page?, limit?)
@@ -109,13 +132,19 @@ export const ListWorkflowInstancesRegistry: MacroComponentDefinition<typeof list
       safeForAutoExecution: true,
       function: {
         name: "listWorkflowInstances",
-        description: "Lists active in-memory workflow instances. Filter by workflow namespace, name, version, status, or time window.",
+        description:
+          "Lists the workflow instances currently held in the engine's in-memory lifecycle registry " +
+          "(live runs only). Not a history query: a just-dispatched run may be missing and finished " +
+          "runs are absent. Use getRecentExecutions or getWorkflowHistory(instanceId=...) to find a " +
+          "specific run by the instanceId returned from executeYamlWorkflow/startWorkflow.",
         parameters: {
           type: "object",
           properties: {
             id: {
               type: "string",
-              description: "Filter by a specific instance ID",
+              description:
+                "Filter by workflow id (the definition id, e.g. core.MyWorkflow@1.0.0) — not an " +
+                "instance id. Use getWorkflowHistory(instanceId=...) to look up one instance.",
             },
             nameSpace: {
               type: "string",
