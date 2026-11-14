@@ -108,6 +108,39 @@ const isConversationId = (value: unknown): value is string =>
   typeof value === "string" && /^[a-f0-9]{24}$/i.test(value);
 
 /**
+ * The acting user's **id**, for queries and records.
+ *
+ * `state.context.user` is a full User document - password hash, salt, session refresh
+ * tokens and third-party access tokens included. Passing it as `user:` in a create or a
+ * query filter writes (or stores) the whole document in conversation state, which is
+ * persisted and replayed. `.user` on a conversation is an ObjectId reference, so the id
+ * is the only thing that belongs there.
+ *
+ * It THROWS rather than returning undefined when no id can be resolved. Mongoose drops
+ * an undefined predicate when casting, so `find({ user: undefined })` matches every
+ * conversation - a silent cross-tenant read. The previous code passed the document,
+ * which cast to its `_id` (or raised a CastError), so returning undefined here would
+ * trade a loud failure for a much worse quiet one. The throw is caught by the macro's
+ * own try/catch and returned as a normal `{ success: false, error }` envelope.
+ */
+const actorUserId = (state: ChatState): string => {
+  const candidate =
+    (state.user as any)?.id ??
+    (state.context?.user as any)?._id ??
+    (state.context?.user as any)?.id;
+
+  const id = candidate === null || candidate === undefined ? '' : String(candidate).trim();
+
+  if (id.length === 0) {
+    throw new Error(
+      'No acting user: the chats tool requires an authenticated user context and could not resolve a user id. Refusing to query conversations without an owner.'
+    );
+  }
+
+  return id;
+};
+
+/**
  * Resolve a delegationId to the sub-agent conversation it belongs to.
  *
  * Two independent sources, tried in order:
@@ -135,7 +168,7 @@ async function resolveDelegationSessionId(
 
   try {
     const sub = await ReactorConversationModel.findOne(
-      { "vars.delegationId": id, user: state.context?.user },
+      { "vars.delegationId": id, user: actorUserId(state) },
       { _id: 1 },
     ).lean().exec();
     if (sub?._id) return String(sub._id);
@@ -263,7 +296,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
       }
       case "list": {
         const chats = await ReactorConversationModel.find({
-          user: state.context.user,
+          user: actorUserId(state),
           parentSessionId: { $in: [null, undefined] },
         }).then();
         if (chats && chats.length > 0) {
@@ -299,7 +332,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
       case "cont": {
         if (!id) {
           const chat = await ReactorConversationModel.findOne({
-            user: state.context.user,
+            user: actorUserId(state),
           })
             .sort({ started: -1 })
             .then();
@@ -492,7 +525,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
             await ReactorConversationModel.create({
               _id: subagentSessionId,
               personaId: persona.id,
-              user: state.context.user,
+              user: actorUserId(state),
               // Owning client (WP-B2): a sub-agent session must carry the same
               // tenant key as the parent that spawned it.
               clientKey: (state.context as any)?.partner?.key ?? undefined,
@@ -771,7 +804,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
           // Send a follow-up message to the existing sub-agent conversation
           const existingConv = await ReactorConversationModel.findOne({
             _id: conversationId,
-            user: state.context.user,
+            user: actorUserId(state),
           });
           if (!existingConv) {
             return {
@@ -827,7 +860,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
         // No message: retrieve recent history from the sub-agent conversation (read-only)
         const existingConv = await ReactorConversationModel.findOne({
           _id: conversationId,
-          user: state.context.user,
+          user: actorUserId(state),
         });
         if (!existingConv) {
           return {
@@ -886,7 +919,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
             ? id
             : await resolveDelegationSessionId(state, id);
           const subConv = resolvedSessionId
-            ? await ReactorConversationModel.findOne({ _id: resolvedSessionId, user: state.context.user }).lean().exec()
+            ? await ReactorConversationModel.findOne({ _id: resolvedSessionId, user: actorUserId(state) }).lean().exec()
             : null;
           if (!subConv) {
             return {
@@ -1033,7 +1066,7 @@ export const ChatsMacro: Macro<unknown, ChatsMacroProps> = async (
       }
       case "clear": {
         const chats = await ReactorConversationModel.find({
-          user: state.context.user,
+          user: actorUserId(state),
           parentSessionId: { $in: [null, undefined] },
         }).then();
         const deletedCount = chats?.length || 0;

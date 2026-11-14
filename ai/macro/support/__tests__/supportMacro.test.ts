@@ -88,10 +88,29 @@ describe("Support Ticket Macros", () => {
       const result = await GetSupportTicket({ id: OBJECT_ID }, mockState);
 
       expect(result.success).toBe(true);
-      expect(result.data).toEqual(mockTicket);
+      // The result is the projected ticket view, not the raw document.
+      expect(result.data).toEqual(
+        expect.objectContaining({
+          id: OBJECT_ID,
+          reference: "REF-001",
+          request: "Login issue",
+          status: "open",
+          priority: "high",
+          requestType: "bug",
+          description: "Cannot login with Google auth",
+          createdBy: {
+            id: null,
+            firstName: "Alice",
+            lastName: "Smith",
+            email: "alice@example.com",
+            displayName: "Alice Smith",
+          },
+          assignedTo: null,
+        })
+      );
       expect(mockSupportService.getTicket).toHaveBeenCalledWith(OBJECT_ID);
       expect(mockSupportService.pagedRequest).not.toHaveBeenCalled();
-      expect(mockState.vars.lastSupportTicket).toEqual(mockTicket);
+      expect(mockState.vars.lastSupportTicket).toEqual(result.data);
     });
 
     it("should fall back to a reference lookup when the id is not an ObjectId", async () => {
@@ -116,14 +135,28 @@ describe("Support Ticket Macros", () => {
       const result = await GetSupportTicket({ id: reference.toLowerCase() }, mockState);
 
       expect(result.success).toBe(true);
-      expect(result.data).toEqual(mockTicket);
+      expect(result.data).toEqual(
+        expect.objectContaining({
+          id: OBJECT_ID,
+          reference,
+          request: "Login issue",
+          status: "open",
+        })
+      );
+      expect(result.data.createdBy).toEqual({
+        id: null,
+        firstName: "Alice",
+        lastName: "Smith",
+        email: "alice@example.com",
+        displayName: "Alice Smith",
+      });
       expect(mockSupportService.getTicket).not.toHaveBeenCalled();
       // The reference is queried in both its raw and upper-cased form.
       expect(mockSupportService.pagedRequest).toHaveBeenCalledWith(
         { reference: [reference.toLowerCase(), reference] },
         { page: 1, pageSize: 1 }
       );
-      expect(mockState.vars.lastSupportTicket).toEqual(mockTicket);
+      expect(mockState.vars.lastSupportTicket).toEqual(result.data);
     });
 
     it("should report not found when a reference does not resolve", async () => {
@@ -164,7 +197,19 @@ describe("Support Ticket Macros", () => {
       );
 
       expect(result.success).toBe(true);
-      expect(result.data).toEqual(mockPagedResult);
+      // Paging envelope preserved; each row projected.
+      expect(result.data.paging).toEqual(mockPagedResult.paging);
+      expect(result.data.tickets).toHaveLength(1);
+      expect(result.data.tickets[0]).toEqual(
+        expect.objectContaining({
+          id: "ticket-1",
+          reference: "REF-001",
+          request: "Survey round stalled",
+          status: "open",
+          priority: "critical",
+          assignedTo: expect.objectContaining({ displayName: "Susan Support" }),
+        })
+      );
       expect(mockSupportService.pagedRequest).toHaveBeenCalledWith(
         expect.objectContaining({ status: ["open"], priority: ["critical"] }),
         { page: 1, pageSize: 10 }
@@ -203,7 +248,17 @@ describe("Support Ticket Macros", () => {
       );
 
       expect(result.success).toBe(true);
-      expect(result.data).toEqual(mockCreatedTicket);
+      expect(result.data).toEqual(
+        expect.objectContaining({
+          id: "ticket-new-1",
+          reference: "REF-NEW-1",
+          request: "Add missing user to round",
+          description: "Please add participant to feedback round 3",
+          status: "new",
+          priority: "high",
+          requestType: "round_support",
+        })
+      );
       expect(mockSupportService.createRequest).toHaveBeenCalledWith(
         "Add missing user to round",
         "Please add participant to feedback round 3",
@@ -211,7 +266,7 @@ describe("Support Ticket Macros", () => {
         { priority: "high" },
         undefined
       );
-      expect(mockState.vars.lastCreatedSupportTicket).toEqual(mockCreatedTicket);
+      expect(mockState.vars.lastCreatedSupportTicket).toEqual(result.data);
     });
   });
 
@@ -237,7 +292,14 @@ describe("Support Ticket Macros", () => {
       );
 
       expect(result.success).toBe(true);
-      expect(result.data).toEqual(mockUpdatedTicket);
+      expect(result.data).toEqual(
+        expect.objectContaining({
+          id: "ticket-1",
+          status: "in_progress",
+          priority: "high",
+          assignedTo: expect.objectContaining({ displayName: "Ivy Infrastructure" }),
+        })
+      );
       expect(mockSupportService.updateTicket).toHaveBeenCalledWith(
         "ticket-1",
         expect.objectContaining({
@@ -246,7 +308,7 @@ describe("Support Ticket Macros", () => {
           comment: "Assigned to Infrastructure Ivy for server investigation",
         })
       );
-      expect(mockState.vars.lastUpdatedSupportTicket).toEqual(mockUpdatedTicket);
+      expect(mockState.vars.lastUpdatedSupportTicket).toEqual(result.data);
     });
   });
 
@@ -269,14 +331,22 @@ describe("Support Ticket Macros", () => {
       );
 
       expect(result.success).toBe(true);
-      expect(result.data).toEqual(mockComment);
+      expect(result.data).toEqual(
+        expect.objectContaining({
+          id: "comment-1",
+          text: "Checked telemetry logs, database connection spike identified.",
+          author: { id: null, name: null },
+          parentId: null,
+          attachments: [],
+        })
+      );
       expect(mockSupportService.addComment).toHaveBeenCalledWith(
         "ticket-1",
         "Checked telemetry logs, database connection spike identified.",
         undefined,
         undefined
       );
-      expect(mockState.vars.lastSupportTicketComment).toEqual(mockComment);
+      expect(mockState.vars.lastSupportTicketComment).toEqual(result.data);
     });
   });
 
