@@ -24,12 +24,12 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "0.59.0",
-    "@aws-sdk/client-bedrock": "3.1163.0",
+    "@aws-sdk/client-bedrock": "3.1166.0",
     "@google/genai": "1.24.0",
     "@modelcontextprotocol/sdk": "1.32.2",
     "neo-blessed": "^0.2.0",
-    "ollama": "0.6.3",
+    "ollama": "0.6.4",
     "openai": "4.87.3",
-    "playwright": "1.59.1"
+    "playwright": "1.65.0"
   }
 }
