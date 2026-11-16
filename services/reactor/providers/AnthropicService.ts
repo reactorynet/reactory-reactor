@@ -1023,17 +1023,19 @@ class AnthropicService extends AIProviderBase {
       : persona.tools;
     const personaTools = this.convertToolsToAnthropicFormat(toolsList);
 
-    // Sampling support is still resolved from providers.yaml (it is the source of
-    // truth for what the model understands), but as of API version 2026-10-21 the
-    // Messages endpoint accepts NO sampling parameter at all: any of
-    // `temperature`, `top_p` or `top_k` is answered with
+    // The drop of sampling parameters is UNCONDITIONAL as of API version 2026-10-21:
+    // the Messages endpoint accepts none of `temperature`, `top_p` or `top_k`, and
+    // answers any of them with
     //   400 invalid_request_error "<param>: Extra inputs are not permitted"
-    // for every model — including the ones providers.yaml still marks
-    // `sampling.temperature: true` such as claude-haiku-4-5 and
-    // claude-sonnet-4-6. Pinning the previous `anthropic-version: 2023-06-01`
-    // makes the same request succeed, so this is a wire-version change rather
-    // than a model-capability one. They are therefore never emitted; the single
-    // drop point is the sweep at the end of this method.
+    // for every model. Pinning the previous `anthropic-version: 2023-06-01` makes the
+    // same request succeed, so this is a wire-version change, not a model-capability
+    // one.
+    //
+    // Nothing in this method resolves sampling support any more, and nothing below
+    // reads it. The `sampling:` flags in providers.yaml are POLICY METADATA only —
+    // they no longer describe what can be put on the wire, and no caller value from
+    // either source is emitted. The single drop point is the sweep at the end of this
+    // method.
 
     // How this model does thinking (adaptive / budget / none). Thinking is disabled
     // for structured output only: a forced tool_choice conflicts with it.

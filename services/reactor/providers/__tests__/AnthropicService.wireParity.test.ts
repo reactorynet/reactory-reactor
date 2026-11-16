@@ -54,6 +54,8 @@ interface Capture {
 }
 
 const captures: Capture[] = [];
+/** Headers captured by the R2 control client, which is not the service under test. */
+let capturedControlHeaders: Record<string, string> = {};
 let responder: (capture: Capture) => Response = () => {
   throw new Error("no responder installed");
 };
@@ -408,20 +410,75 @@ describe("anthropic@1.8.0 wire contract", () => {
     // uses the global tracer provider and `propagation` defaults to true, so it
     // injects the global propagator's traceparent/tracestate/baggage into every
     // request to api.anthropic.com.
-    responder = () => messageResponse({ text: "ok" });
-    const { service } = createService({ modelId: "claude-sonnet-4-6" });
+    //
+    // A propagator is registered for the duration of this test. Without one the
+    // global propagator is a no-op, `inject()` writes nothing, and the header
+    // assertions below would pass even with `propagation: true` — which is exactly
+    // what the reviewer pointed out. Registering a real one makes the header half
+    // of this test able to fail, and the CONTROL case at the end proves it can.
+    const api: any = require("@opentelemetry/api");
+    const TRACE_ID = "4bf92f3577b34da6a3ce929d0e0e4736";
+    const injectablePropagator = {
+      inject: (_ctx: any, carrier: any) => {
+        carrier["traceparent"] = `00-${TRACE_ID}-00f067aa0ba902b7-01`;
+        carrier["baggage"] = "reactory=secret";
+      },
+      extract: (ctx: any) => ctx,
+      fields: () => ["traceparent", "baggage"],
+    };
 
-    await dispatch(service, "hello");
+    try {
+      // `setGlobalPropagator` refuses a second registration, so reset first. This is
+      // the documented pattern (mirrors trace.disable()) and the finally clause
+      // restores the default no-op propagator for every other test in this file.
+      api.propagation.disable();
+      api.propagation.setGlobalPropagator(injectablePropagator);
 
-    // The settled option is frozen on the client, so this is exactly what the SDK
-    // will act on at request time.
-    expect((service.anthropic as any).openTelemetry.propagation).toBe(false);
+      responder = () => messageResponse({ text: "ok" });
+      const { service } = createService({ modelId: "claude-sonnet-4-6" });
 
-    // And no trace context went out on the request.
-    const headers = captures[0].headers;
-    expect(headers.traceparent).toBeUndefined();
-    expect(headers.tracestate).toBeUndefined();
-    expect(headers.baggage).toBeUndefined();
+      await dispatch(service, "hello");
+
+      // The settled option is frozen on the client, so this is exactly what the SDK
+      // will act on at request time.
+      expect((service.anthropic as any).openTelemetry.propagation).toBe(false);
+
+      // And no trace context went out on the request, even though a propagator that
+      // would have supplied some is installed.
+      const headers = captures[0].headers;
+      expect(headers.traceparent).toBeUndefined();
+      expect(headers.tracestate).toBeUndefined();
+      expect(headers.baggage).toBeUndefined();
+
+      // CONTROL: the same registered propagator DOES write headers when the SDK is
+      // allowed to propagate. This is what makes the assertion above meaningful —
+      // it proves the absence is caused by propagation:false and not by a no-op
+      // propagator or an inert code path.
+      const permissive = new (require("@anthropic-ai/sdk").Anthropic ?? require("@anthropic-ai/sdk"))({
+        apiKey: "wire-test-key",
+        fetch: async (_url: any, init: any) => {
+          const h = init?.headers;
+          capturedControlHeaders = {};
+          if (h && typeof h.forEach === "function") {
+            h.forEach((v: string, k: string) => { capturedControlHeaders[String(k).toLowerCase()] = String(v); });
+          }
+          return new Response(JSON.stringify({ error: { message: "recorded" } }), {
+            status: 400,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      });
+      try {
+        await permissive.messages.create({ model: "claude-sonnet-4-6", max_tokens: 8, messages: [{ role: "user", content: "x" }] });
+      } catch {
+        /* the stub answers 400 on purpose */
+      }
+      // With propagation defaulted on and our propagator installed, trace context
+      // does travel. Same propagator, opposite outcome — the difference is the option.
+      expect(capturedControlHeaders.traceparent).toBe(`00-${TRACE_ID}-00f067aa0ba902b7-01`);
+    } finally {
+      api.propagation.disable();
+    }
   });
 
   it("still sends thinking + output_config for an adaptive-thinking model", async () => {

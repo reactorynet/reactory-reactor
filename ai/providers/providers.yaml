@@ -1197,7 +1197,9 @@ providers:
       - id: claude-sonnet-4-6
         name: Claude Sonnet 4.6
         version: "4.6"
-        # Sonnet 4.6 still accepts temperature/top_p/top_k.
+        # POLICY ONLY: anthropic-version 2026-10-21 rejects temperature/top_p/top_k
+        # for every model, so these flags no longer describe what can be sent. They
+        # are kept as metadata; AnthropicService drops every sampling param.
         sampling:
           temperature: true
           topP: true
@@ -1228,7 +1230,9 @@ providers:
       - id: claude-haiku-4-5
         name: Claude Haiku 4.5
         version: "4.5"
-        # Haiku 4.5 still accepts temperature/top_p/top_k.
+        # POLICY ONLY: anthropic-version 2026-10-21 rejects temperature/top_p/top_k
+        # for every model, so these flags no longer describe what can be sent. They
+        # are kept as metadata; AnthropicService drops every sampling param.
         sampling:
           temperature: true
           topP: true
