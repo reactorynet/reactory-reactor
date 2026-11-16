@@ -69,6 +69,34 @@ The trade-off: this body and the provisioned catalog copy must be kept in step m
 next coordinated release; the operator must re-provision the catalog copy of `1.4.8` for the fix to
 take effect.
 
+### The reviewer findings schema (REACTORY-302016408/20261116/2437438300) — shipped in place at 1.4.8
+
+1.4.8 resolved findings by listing synonyms of its OWN key names (`blockingFindings` /
+`blocking_findings`), so a reviewer that emitted `blocking_issues` was read as having produced
+nothing: `blockingissues` and `blockingfindings` are different **nouns**, and `resolveKey` compares
+whole normalised names, so no casing rule could ever match. The verdict resolved (the reviewer wrote
+`decision`) while every findings list came back empty, and the run was parked for a human with the
+false reason "the reviewer produced no verdict".
+
+This body now reads `review.json` through ONE published schema — a `// >>> shared review schema`
+block that is byte-identical (modulo indentation) in `captureReview` and `readPublishable` and is
+pinned by a test — covering `decision`, `headline`, `blocking_issues`, `non_blocking_issues`,
+`required_actions_next_cycle` and `acceptance_criteria_assessment`. Three consequences:
+
+- A rejection that carries findings is handed to the engineer as a fix cycle instead of blocking.
+- A rejection that genuinely names nothing still blocks, and says so as a review, not as a parser fault.
+- A findings-shaped list under a key the schema does not know is reported as a **pipeline parser
+  fault** and the key is named, because that is a defect here, not a review that said nothing.
+
+The reviewer prompts state this same shape, so the workflow no longer asks for one schema and parses
+another. The pre-fix prompt drift — `{verdict, findings[], requiredChanges[]}` in the loop versus
+per-finding `blocking: true|false` in the confirmation pass — is closed.
+
+It ships **in place at 1.4.8**, not as 1.4.9, for exactly the reason in the section above: the
+identity cannot move until `PROCESS_AI_TICKET_WORKFLOW_ID` and the catalog copy move with it.
+A 1.4.9 bump is filed as a coordinated-release follow-up and must go through the procedure below as
+one unit.
+
 ### Coordinated version-bump procedure (do this instead of editing `version:` alone)
 
 1. Edit `workflow/ProcessAITicket.yaml` (`nameSpace: core`, `name: ProcessAITicket`).

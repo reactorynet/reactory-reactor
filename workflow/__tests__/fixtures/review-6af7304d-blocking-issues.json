@@ -1,0 +1,183 @@
+{
+  "reviewer": "QualityQuinn",
+  "reviewCycle": 0,
+  "reviewedAt": "2026-11-16T08:06:00.000Z",
+  "reference": "REACTORY-302016408/20261113/3990900673",
+  "decision": "changes_requested",
+  "blocking": true,
+  "headline": "The dependency bump, the three tool-call-union fixes and the new wire-parity suite are all real and verified. But the upgrade introduces a NEW boot-time regression the engineer never saw because they replaced the ticket's test scope with a providers-only run: openai 7 throws at client construction when the API key is empty, and ai/openai/chat/questions/factory.ts builds a client at module scope with `apiKey: process.env.OPENAI_API_KEY || \"\"`. 14 existing suites in this module now fail to load without OPENAI_API_KEY. Must be fixed before publish.",
+
+  "verification_performed": [
+    {
+      "claim": "package.json: openai 4.87.3 -> 7.56.0, nothing else moved",
+      "method": "git diff package.json; semantic diff of package-lock.json (old vs new packages maps)",
+      "result": "CONFIRMED. Single dependency changed. Lockfile: entries 195 -> 174, 1 version change (node_modules/openai 4.87.3 -> 7.56.0), 21 entries removed, all openai-4.x-only transitives (node-fetch, form-data, agentkeepalive, ...). 0 entries added. Root dependency list identical apart from openai.",
+      "verdict": "pass"
+    },
+    {
+      "claim": "Lockfile is in sync (npm ci --dry-run / install clean)",
+      "method": "Ran `PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm ci` in the worktree against the committed package-lock.json",
+      "result": "CONFIRMED. exit 0; resolves openai 7.56.0 with zero hard dependencies and seven optional peers; zod absent (optional peer, nothing imports it). Worktree restored to exactly this state afterwards.",
+      "verdict": "pass"
+    },
+    {
+      "claim": "Typecheck: 737 module errors before, 737 after, 0 new / 0 gone signatures",
+      "method": "Independent re-run of `/Users/wernerw/Projects/reactory/reactory-express-server/node_modules/.bin/tsc -p /tmp/ws2-typecheck/tsconfig.module.json --pretty false` (tsc 5.5.3), then signature multiset diff vs the engineer's recorded 4.87.3 baseline and vs their recorded after-run",
+      "result": "CONFIRMED. My output is signature-identical to the engineer's final run (988 total / 737 inside the worktree module). vs the openai-4.87.3 baseline: NEW 0, GONE 1 (a duplicate-typings TS2322 in cli/reactor-cli/ReactorCli.ts caused by two openai copies, which disappears once the worktree has its own). The '0 new errors' claim is accurate and I reproduced it byte-for-byte at signature level.",
+      "verdict": "pass"
+    },
+    {
+      "claim": "Streaming usage accounting was already dead and is now fixed",
+      "method": "Root-caused the code (`chunk.usage` read after `if (!choice) continue`), then empirically reverse-patched only that hunk back to pre-fix semantics and ran the new suite; restored the file and verified sha256 identical to the original (e32f8cd6...)",
+      "result": "CONFIRMED AS A REAL BUG AND A REAL FIX. With pre-fix ordering, all 5 'streams text and keeps stream_options.include_usage accounting' tests fail on `response.usage` being undefined. With the fix, they pass. This is a genuine regression guard, not a tautology. prompt_tokens_details is also carried through to the returned usage.",
+      "verdict": "pass"
+    },
+    {
+      "claim": "New wire-parity suite: 39 tests, real openai@7 client, only transport stubbed",
+      "method": "Read the file in full; ran it; inspected assertions",
+      "result": "CONFIRMED. `globalThis.fetch` is the only stub, installed before client construction (openai@7 captures fetch at construction). Assertions are specific: base URL + Authorization header per family, stream_options {include_usage:true}, tools/tool_choice=auto/parallel_tool_calls=true, fragmented tool-call delta reassembly, response_format json_schema + tool suppression, Azure defaultQuery api-version (default and overridden), image /images/generations with response_format b64_json. 39 = 5 families x 7 + 2 Azure + 2 normalizeCompletion. No credential or network access.",
+      "verdict": "pass"
+    },
+    {
+      "claim": "Provider suite green: 15 suites / 195 tests, baseline 14 / 156",
+      "method": "Ran `node scripts/ai/run-worktree-tests.js services/reactor/providers/__tests__`",
+      "result": "CONFIRMED. 15 suites / 195 tests / exit 0.",
+      "verdict": "pass"
+    },
+    {
+      "claim": "./bin/jest.sh reactory local --testPathPattern=reactor green (stated acceptance criterion)",
+      "method": "Ran the equivalent pattern through the same harness: `node scripts/ai/run-worktree-tests.js --testPathPattern=reactor`",
+      "result": "NOT MET. 205 suites collected: 20 failed, 185 passed; 2980 tests: 6 failed, 2974 passed; exit 1. The engineer declared this criterion met by substituting a providers-only run, which hides every failure outside services/reactor/providers. See blocking finding B1.",
+      "verdict": "fail"
+    },
+    {
+      "claim": "No test was weakened, skipped or deleted",
+      "method": "git diff --stat / --name-status over the worktree",
+      "result": "CONFIRMED. No existing test file is modified or deleted. The only test artefact is the new untracked wire-parity suite; the temporary live probe is absent, as reported.",
+      "verdict": "pass"
+    }
+  ],
+
+  "blocking_issues": [
+    {
+      "id": "B1",
+      "severity": "critical",
+      "title": "openai 7 throws at construction with an empty API key, and factory.ts constructs a client at module scope — 14 suites now fail to load, and any key-less deployment crashes on import",
+      "file": "ai/openai/chat/questions/factory.ts:74 (module scope) — same pattern at factory.ts:648 and cli/reactor-cli/ReactorCli.ts:87",
+      "code": "export const INITIAL_CHAT_STATE: ChatState = { ... ai: new OpenAI({ apiKey: process.env.OPENAI_API_KEY || \"\", baseURL: process.env.OPENAI_BASE_URL || \"https://api.openai.com/v1\" }), ... }",
+      "observed_error": "OpenAIError: Missing credentials. Please pass an `apiKey`, `workloadIdentity`, `adminAPIKey`, or set the `OPENAI_API_KEY` or `OPENAI_ADMIN_KEY` environment variable. — thrown at new OpenAI (node_modules/openai/src/client.ts:631) during module evaluation of factory.ts",
+      "evidence": [
+        "Direct constructor probe: openai@7.56.0 with apiKey: \"\" THROWS OpenAIError 'Missing credentials'; openai@4.87.3 with apiKey: \"\" constructs fine. This is a behaviour change of the upgrade, not of the module.",
+        "Full-scope run (--testPathPattern=reactor, no OPENAI_API_KEY): 14 suites fail to load with exactly this error — ai/macro/{support,shell,fs,chats/*,__tests__,develop}, ai/persona/__tests__/toolIncludes.contract.test.ts, services/reactor/__tests__/{ImageToolProviderResolution,ReactorProviderService.auth,.crud,.contextLength,.structuredOutput}.",
+        "Causality A: with OPENAI_API_KEY=sk-dummy-not-real the same 3 representative suites pass (104 tests).",
+        "Causality B: with openai 4.87.3 installed and NO OPENAI_API_KEY the same 3 suites pass (104 tests).",
+        "Import chain: ai/macro/support/__tests__/supportMacro.test.ts -> ai/macro/index.ts -> ai/macro/develop/index.ts -> .../review/macro.ts -> factory.ts:74."
+      ],
+      "impact": "Not a test-only defect. Anything that imports the macro system (ai/macro/index.ts is on the normal module import path via src/modules/__index.ts in the host) evaluates factory.ts, so a process with no OPENAI_API_KEY — CI, a developer box, or a deployment that only uses azure-openai / xai / copilot / local models — now throws during module load. That is a boot-time regression for exactly the non-OpenAI provider families this ticket claims to protect.",
+      "suggested_fix": "Do not pass an empty string. Either construct lazily (make `ai` a getter / initialize on first use), or supply a non-empty placeholder when the key is absent (e.g. `apiKey: process.env.OPENAI_API_KEY || \"not-configured\"`), and/or guard with `process.env.OPENAI_API_KEY ? new OpenAI(...) : undefined` — the request path already fails with a clear provider error when no key is configured. Apply the same treatment to factory.ts:648 and cli/reactor-cli/ReactorCli.ts:87. Then add a regression test that imports factory.ts (or ai/macro/index.ts) with OPENAI_API_KEY unset, and re-run `--testPathPattern=reactor` as the real gate."
+    }
+  ],
+
+  "non_blocking_issues": [
+    {
+      "id": "N1",
+      "severity": "medium",
+      "title": "Tool-call narrowing is stricter than the old runtime check and can silently drop tool calls from OpenAI-compatible providers that omit `type`",
+      "file": "ai/openai/chat/questions/factory.ts:195, services/reactor/providers/OpenAIService.ts:~1180",
+      "detail": "The old guard was `!toolCall.id || !toolCall.function`, which accepted any call carrying a `function` payload. openai 7's union only *requires* `type`, but the SDK passes provider JSON through verbatim — it does not inject `type`. With `toolCall.type !== \"function\"` a provider that omits the field now hits 'Invalid tool call structure' and the call is dropped; in normalizeCompletion `tc.type === \"function\" ? … : { name: \"\", arguments: \"\" }` turns such a call into an empty function, so dispatch fails silently instead of loudly.",
+      "risk_note": "All of the providers exercised live/wire (openai, xai, deepseek, azure) do emit type:'function'. The families with no live coverage — ollama / llamacpp / vllm and copilot — are precisely where an omitted `type` is plausible. Untested either way.",
+      "suggested_fix": "Narrow the other way round: treat everything that is not the *custom* variant as a function call, e.g. `if (!toolCall.id || toolCall.type === \"custom\")` in factory.ts and `tc.type === \"custom\" ? { name: \"\", arguments: \"\" } : { name: tc.function.name, arguments: tc.function.arguments }` in normalizeCompletion. That keeps the openai 7 types happy while preserving 4.87.3 runtime behaviour for every provider."
+    },
+    {
+      "id": "N2",
+      "severity": "low",
+      "title": "GoogleAIService fix casts past the union instead of narrowing it",
+      "file": "services/reactor/providers/GoogleAIService.ts:724-731",
+      "detail": "`(toolCall as { function?: ... }).function` type-checks but deliberately discards the discriminated union the other two fixes respect. Runtime behaviour equals openai 4.x (a `custom` call yields undefined function, falls through to the Google-shaped fallbacks), so this is not a defect — it is an inconsistency worth aligning for the next reader, and it hides the same omitted-`type` case as N1."
+    },
+    {
+      "id": "N3",
+      "severity": "low",
+      "title": "The 'reasoning model omits max_tokens' matrix item is close to vacuous",
+      "file": "services/reactor/providers/__tests__/OpenAIService.wireParity.test.ts ('omits max_tokens for a reasoning model and includes it only when asked')",
+      "detail": "toOpenAIParams only sets max_tokens when config.maxTokens is a number — no model gets a default. So the first assertion (`'max_tokens' in body === false`) would pass for every model, reasoning or not. Only the control (`maxTokens: 512` -> body.max_tokens === 512) carries information. Either rename the case to say what it proves, or add a non-reasoning model to the same test so the reasoning distinction is actually asserted."
+    },
+    {
+      "id": "N4",
+      "severity": "low",
+      "title": "Report scope substitution overstates an acceptance criterion",
+      "detail": "report.json maps `./bin/jest.sh reactory local --testPathPattern=reactor green` to a providers-only run and calls it MET. The actual pattern yields 20 failed suites / 6 failed tests. The report is otherwise unusually honest (it labels un-run families clearly), which makes this substitution the more important to correct — a reader who trusts the acceptance table would ship a red module."
+    },
+    {
+      "id": "N5",
+      "severity": "low",
+      "title": "3 remaining broad-suite failures are unrelated to this diff but unexplained",
+      "detail": "__tests__/unit/SchemaValidity.unit.test.ts (5 tests, GraphQL 'Unknown type JSON/User/DateTime') fails with and without an API key and has no openai involvement; ReactorConversationService.updateChatData.test.ts (OverwriteModelError, model name built from Date.now()); forms/__tests__/* (3 suites, ENOENT on a sibling worktree path src/modules/reactory-worktrees/reactory-core/forms/Widgets/...). All look environmental/pre-existing, but the engineer never ran them, so they should be confirmed against master rather than assumed.",
+      "suggested_action": "Record them as a known-red baseline for the reactor-scoped test gate so the next dependency bump is judged against a real baseline."
+    },
+    {
+      "id": "N6",
+      "severity": "low",
+      "title": "zod was intentionally not added",
+      "detail": "The ticket's scope item 2 says 'Land openai 7.56.0 + zod 4.6.7'. The engineer did not add zod, with the justification that openai 7 declares it only as an optional peer and nothing in the module imports zod. I verified both facts (installed manifest + repo-wide grep). Accepting the deviation, but it should be stated as a deliberate deviation in the PR body so it does not read as an omission."
+    },
+    {
+      "id": "N7",
+      "severity": "info",
+      "title": "Publication / rollout still outstanding",
+      "detail": "package.json is still @reactory/reactor 1.1.0 and nothing is published or rolled into the host, so production keeps resolving openai 4.104.0. Pipeline-owned per the run instructions, listed here so it is not lost. Also: the 39-test suite is still untracked (?? in git status) — confirm the publisher stages untracked files, or it will not ship."
+    }
+  ],
+
+  "acceptance_criteria_assessment": [
+    {
+      "criterion": "PR #50 closed, PR #59 merged",
+      "status": "out_of_scope_for_agent",
+      "note": "Agent is forbidden from touching dependabot PRs; pipeline/human action. Change is prepared on feature/6af7304df164280348fee65f."
+    },
+    {
+      "criterion": "Host `tsc --noEmit` clean",
+      "status": "met_as_no_new_errors",
+      "note": "Independently reproduced: 988 total / 737 module errors, signature-identical to the engineer's run, 0 new / 1 gone vs the 4.87.3 baseline. An absolute zero is not achievable in this module (737 pre-existing), so 'no new errors' is the correct form of this gate."
+    },
+    {
+      "criterion": "./bin/jest.sh reactory local --testPathPattern=reactor green",
+      "status": "NOT MET",
+      "note": "20 failed suites / 6 failed tests; 14 of those suites are a new regression caused by openai 7 (see B1). The engineer's substitute run covered only services/reactor/providers."
+    },
+    {
+      "criterion": "One live conversation per provider family (openai, xai, copilot, azure-openai) + one local OpenAI-compatible endpoint, incl. tool-call and structured-output turns",
+      "status": "PARTIALLY MET — honestly labelled",
+      "note": "Live: xai 4/4 (text, streaming usage 213/14/547, tool call, structured output) and deepseek 3/3 (text, streaming usage 55/54/109, tool call). NOT RUN: openai (no key), copilot (no GITHUB_TOKEN), azure-openai (no key/endpoint), local ollama/vllm/llamacpp (nothing listening). Wire coverage exists for all five families but proves call shape, not server semantics. The remaining gate is real and should be an explicit pre-merge/pre-deploy step rather than folded into 'done'."
+    },
+    {
+      "criterion": "No regression in streaming token counts / usage accounting from stream_options.include_usage",
+      "status": "MET — and improved",
+      "note": "Accounting was broken before the change (usage unreachable behind the choices-less final chunk). Fixed, guarded by tests that I verified fail against the pre-fix code, and confirmed live on two providers."
+    }
+  ],
+
+  "what_went_well": [
+    "The two headline findings are genuine: the ticket's probe really did miss the function|custom tool-call union, and streaming usage really was dead. Both were root-caused precisely, and the usage fix is proven by a test that fails on the old code.",
+    "The wire-parity suite is the right instrument for this upgrade: real SDK, only fetch stubbed, no network or credentials, per-family assertions on URL, auth header, body shape and round-tripped usage. It is a real asset for the module and materially better than the existing mock-based provider tests.",
+    "Dependency hygiene is exemplary: one dependency moved, 21 obsolete transitives removed, `npm ci` verified, lockfile semantically diffed.",
+    "Un-run coverage is labelled NOT RUN with the exact reason rather than being folded into a pass. The DeepSeek tool-name pattern, the Azure Bearer-auth observation and the xAI total-vs-completion token note are useful, correctly scoped-as-pre-existing findings.",
+    "No test was weakened, skipped or deleted; the temporary live probe was cleaned up."
+  ],
+
+  "required_actions_next_cycle": [
+    "1 (blocking) Fix the empty-api-key construction in ai/openai/chat/questions/factory.ts (module scope, line 74), factory.ts:648 and cli/reactor-cli/ReactorCli.ts:87 — lazily initialise or use a non-empty placeholder — and add a test that imports ai/macro/index.ts (or factory.ts) with OPENAI_API_KEY unset.",
+    "2 (blocking) Re-run the real acceptance gate, `node scripts/ai/run-worktree-tests.js --testPathPattern=reactor` (or ./bin/jest.sh reactory local --testPathPattern=reactor), with OPENAI_API_KEY unset, and report the actual counts. Expect 14 suites to turn green from fix 1; record the remaining environmental reds (SchemaValidity, updateChatData, forms) explicitly.",
+    "3 (should fix in this PR) Invert the tool-call narrow to `type === \"custom\"` in factory.ts and OpenAIService.normalizeCompletion so providers that omit `type` keep working (N1).",
+    "4 (should fix) Correct the acceptance-criteria table in report.json: the test-path criterion is not met by a providers-only run (N4).",
+    "5 (nice to have) Align GoogleAIService's cast with the narrowing used elsewhere (N2) and make the reasoning-model max_tokens case assert something model-specific (N3).",
+    "6 (carry as an explicit gate) Live turn per remaining family (openai, copilot, azure-openai, local ollama/vllm/llamacpp) in staging, including tool-call and structured-output turns, plus publish @reactory/reactor 1.2.0 and roll it into the host."
+  ],
+
+  "worktree_state_after_review": {
+    "tracked_changes": "unchanged from review start: factory.ts, GoogleAIService.ts, OpenAIService.ts, package.json, package-lock.json",
+    "untracked": ".ai-agent/, services/reactor/providers/__tests__/OpenAIService.wireParity.test.ts",
+    "node_modules": "restored with `npm ci` from the committed lockfile — openai 7.56.0, lockfile byte-identical to before my experiments",
+    "side_effects": "None left behind. The OpenAIService.ts reverse-patch experiment was reverted and verified by sha256; the temporary openai@4.87.3 install was reverted with npm ci."
+  }
+}
