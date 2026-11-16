@@ -1,7 +1,13 @@
-import { describe, it, expect, beforeAll } from "@jest/globals";
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from "@jest/globals";
 import { GoogleGenAI, Modality } from "@google/genai";
+import fs from "fs";
+import os from "os";
+import path from "path";
 import { loadProviders } from "../../../../ai/providers/provider-loader";
-import { resolveGoogleApiVersion } from "../GoogleAIService";
+import {
+  DEFAULT_GOOGLE_AI_API_VERSION,
+  KNOWN_GOOGLE_AI_API_VERSIONS,
+} from "../GoogleAIService";
 
 /**
  * Wire-level proof that the configured API version is what the SDK actually puts on
@@ -96,9 +102,10 @@ const versionSegment = (url: string): string => new URL(url).pathname.split("/")
 let configuredVersion = "";
 
 beforeAll(() => {
-  delete process.env.GOOGLE_AI_API_VERSION;
-  const google = loadProviders().find((provider) => provider.id === "google");
-  configuredVersion = resolveGoogleApiVersion({ yaml: google?.apiVersion }).apiVersion;
+  // The provider is configured in `providers.yaml`, which is seeded into the provider
+  // registry. Pin the value to the code default so this suite is independent of every
+  // ambient input: nothing here reads `providers.yaml`, `~/.reactor` or the environment.
+  configuredVersion = DEFAULT_GOOGLE_AI_API_VERSION;
 });
 
 describe("@google/genai — the default this change exists to override", () => {
@@ -111,11 +118,11 @@ describe("@google/genai — the default this change exists to override", () => {
   });
 });
 
-describe("providers.yaml apiVersion reaches the wire", () => {
-  it("is configured (providers.yaml declares the google provider's version)", () => {
-    expect(configuredVersion).toBeTruthy();
-    expect(configuredVersion).not.toBe("v1");
+describe("the version the provider forwards reaches the wire", () => {
+  it("defaults to v1beta when the provider carries no explicit version", () => {
+    expect(configuredVersion).toBe(DEFAULT_GOOGLE_AI_API_VERSION);
     expect(configuredVersion).toBe("v1beta");
+    expect(KNOWN_GOOGLE_AI_API_VERSIONS).toContain(configuredVersion);
   });
 
   it.each(MODELS)("models.get(%s) is addressed to the configured version", async (model) => {
@@ -158,5 +165,58 @@ describe("providers.yaml apiVersion reaches the wire", () => {
     await ai.models.get({ model: "gemini-3.8-flash" });
 
     expect(versionSegment(recorded[0].url)).toBe("v1");
+  });
+});
+
+/**
+ * The seeded config itself, loaded deterministically.
+ *
+ * `loadProviders()` overlays `${HOME}/.reactor/providers.yaml`, so `HOME` is pointed at
+ * an empty directory for the duration of each test and removed afterwards. Without
+ * that, an operator whose own overlay says something else would see this suite fail —
+ * a bug in the test, not in the config. Failing to clean up would also leave a temp
+ * directory behind per test.
+ */
+describe("providers.yaml seeds a usable version", () => {
+  let home: string;
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    originalHome = process.env.HOME;
+    home = fs.mkdtempSync(path.join(os.tmpdir(), "genai-wire-home-"));
+    process.env.HOME = home;
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.HOME;
+    else process.env.HOME = originalHome;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it("resolves ${GOOGLE_AI_API_VERSION:-v1beta} to v1beta when the env var is unset", () => {
+    const previous = process.env.GOOGLE_AI_API_VERSION;
+    delete process.env.GOOGLE_AI_API_VERSION;
+    try {
+      const google = loadProviders().find((provider) => provider.id === "google");
+
+      // Not the raw placeholder: the loader's `${VAR:-default}` interpolation must have
+      // produced a real version, or every request would be addressed to a literal.
+      expect(google?.apiVersion).toBe("v1beta");
+      expect(google?.apiVersion).not.toContain("$");
+    } finally {
+      if (previous !== undefined) process.env.GOOGLE_AI_API_VERSION = previous;
+    }
+  });
+
+  it("lets the env var override the seeded default", () => {
+    const previous = process.env.GOOGLE_AI_API_VERSION;
+    process.env.GOOGLE_AI_API_VERSION = "v1";
+    try {
+      const google = loadProviders().find((provider) => provider.id === "google");
+      expect(google?.apiVersion).toBe("v1");
+    } finally {
+      if (previous === undefined) delete process.env.GOOGLE_AI_API_VERSION;
+      else process.env.GOOGLE_AI_API_VERSION = previous;
+    }
   });
 });

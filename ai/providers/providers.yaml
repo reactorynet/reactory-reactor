@@ -537,10 +537,14 @@ providers:
     name: Google Gemini
     endpointUrl: "${GOOGLE_AI_API_URL:-https://generativelanguage.googleapis.com}"
     # API version forwarded to the @google/genai client by
-    # GoogleAIService.initializeClient(). This key used to be decorative: 1.24.0
-    # ignores it and always called v1beta, so the v1 written here never reached the
-    # wire. 3.1.0 ignores it too - but its default is v1, which is why the upgrade
-    # alone would move every request to a different endpoint version.
+    # GoogleAIService.initializeClient(). It is read from the provider REGISTRY at
+    # runtime (PostgreSQL is the source of truth); this value seeds a new install
+    # and remains the deployment default.
+    #
+    # This key used to be decorative: 1.24.0 ignored it and always called v1beta, so
+    # the v1 written here never reached the wire. 3.1.0 ignores it too - but its
+    # default is v1, which is why the upgrade alone would move every request to a
+    # different endpoint version.
     #
     # v1beta is deliberate:
     #   * it is the version every model below has actually been served on so far;
@@ -549,11 +553,15 @@ providers:
     #     audio output, explicit context caching, agents);
     #   * no model listed here requires v1, so choosing v1 would change behaviour
     #     silently as a side effect of a dependency bump.
+    #
+    # The env override is interpolation, not code - the loader already supports
+    # `${VAR:-default}` (see endpointUrl above), so there is one precedence rule.
+    #
     # Per-model overrides do not exist: ProviderModelConfig (ai/providers/
     # provider-loader.ts) has no apiVersion field, so a model set that genuinely
     # split across versions would need that mechanism added first - do not assume
-    # one. GOOGLE_AI_API_VERSION overrides this value at runtime.
-    apiVersion: v1beta
+    # one.
+    apiVersion: "${GOOGLE_AI_API_VERSION:-v1beta}"
     defaultModel: gemini-3.8-flash
     capabilities:
       - text-generation

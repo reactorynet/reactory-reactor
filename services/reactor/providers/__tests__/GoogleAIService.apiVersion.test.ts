@@ -1,7 +1,4 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, jest } from "@jest/globals";
-import fs from "fs";
-import os from "os";
-import path from "path";
 
 /**
  * `initializeClient()` must forward the configured Google API version.
@@ -62,8 +59,6 @@ const mockContext: any = {
 let GoogleAIService: any;
 let constructorCalls: any[];
 let modelsGet: jest.Mock<any>;
-let originalHome: string | undefined;
-let emptyHome: string;
 
 beforeAll(async () => {
   const mod = await import("../GoogleAIService");
@@ -75,28 +70,10 @@ beforeAll(async () => {
   modelsGet = recorder.modelsGet;
 });
 
-afterAll(() => {
-  if (originalHome === undefined) delete process.env.HOME;
-  else process.env.HOME = originalHome;
-  delete process.env.GOOGLE_AI_API_VERSION;
-  try {
-    fs.rmSync(emptyHome, { recursive: true, force: true });
-  } catch {
-    /* best effort */
-  }
-});
-
 beforeEach(() => {
   constructorCalls.length = 0;
-  delete process.env.GOOGLE_AI_API_VERSION;
-
-  // `loadProviders()` overlays `${HOME}/.reactor/providers.yaml`; point HOME at an
-  // empty directory so the assertion is about the checked-in providers.yaml and not
-  // whatever the developer happens to have in their home directory.
-  originalHome = process.env.HOME;
-  emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), "genai-api-version-"));
-  process.env.HOME = emptyHome;
-
+  // No temp directories and no HOME manipulation: the provider no longer reads
+  // `providers.yaml`, so nothing here depends on the developer's home directory.
   jest.clearAllMocks();
 });
 
@@ -113,15 +90,28 @@ const persona = (overrides: Record<string, any> = {}): any => ({
   ...overrides,
 });
 
+/** Provider that answers every lookup with a fixed version. */
+const providerServiceReturning = (apiVersion: string | undefined) => ({
+  getProvider: jest.fn(async (id: string): Promise<any> =>
+    apiVersion === undefined ? undefined : { id, apiVersion }),
+});
+
+/** Provider that answers per id, so a non-`google` provider can be exercised. */
+const providerLookup = (byId: Record<string, string | undefined>) => ({
+  getProvider: jest.fn(async (id: string): Promise<any> =>
+    id in byId ? { id, apiVersion: byId[id] } : undefined,
+  ),
+});
+
 const newService = (providerService?: any) => {
   const svc: any = new GoogleAIService({ apiKey: "test-key" }, mockContext);
-  if (providerService) svc.providerService = providerService;
+  svc.providerService = providerService;
   return svc;
 };
 
 describe("GoogleAIService.initializeClient — apiVersion forwarding", () => {
-  it("forwards the apiVersion declared in providers.yaml", async () => {
-    const svc = newService();
+  it("forwards the apiVersion from the provider registry", async () => {
+    const svc = newService(providerServiceReturning("v1beta"));
     await svc.initializeClient(persona());
 
     expect(constructorCalls).toHaveLength(1);
@@ -135,7 +125,7 @@ describe("GoogleAIService.initializeClient — apiVersion forwarding", () => {
   });
 
   it("never constructs the client without an apiVersion", async () => {
-    const svc = newService();
+    const svc = newService(providerServiceReturning("v1beta"));
     await svc.initializeClient(persona());
 
     // The regression was an absent key, so assert presence rather than just shape:
@@ -147,40 +137,48 @@ describe("GoogleAIService.initializeClient — apiVersion forwarding", () => {
     expect(modelsGet).toHaveBeenCalledWith({ model: "gemini-3.8-flash" });
   });
 
-  it("lets GOOGLE_AI_API_VERSION override the configured value", async () => {
-    process.env.GOOGLE_AI_API_VERSION = "v1";
-    const svc = newService();
+  it("reads the version from the provider registry", async () => {
+    const providerService = providerServiceReturning("v1beta");
+    const svc = newService(providerService);
+    await svc.initializeClient(persona());
+
+    // PostgreSQL is the source of truth; a value changed through `updateProvider`
+    // has to reach the wire, which is what this lookup guarantees.
+    expect(providerService.getProvider).toHaveBeenCalledWith("google");
+    expect(constructorCalls[0].apiVersion).toBe("v1beta");
+  });
+
+  it("honours an explicit registry value of v1", async () => {
+    // An operator who deliberately chose v1 gets v1. The code must not second-guess
+    // configuration - only the *seeded* v1 is a problem, and that is the migration's
+    // job, not the runtime's.
+    const svc = newService(providerServiceReturning("v1"));
     await svc.initializeClient(persona());
 
     expect(constructorCalls[0].apiVersion).toBe("v1");
-    expect(svc.apiVersion).toBe("v1");
   });
 
-  it("trims a padded override instead of forwarding it verbatim", async () => {
-    process.env.GOOGLE_AI_API_VERSION = "  v1beta  ";
-    const svc = newService();
+  it("looks the provider up by persona.providerId, not a hardcoded id", async () => {
+    // A database-only provider that runs through this service (e.g. `google-preview`
+    // on v1alpha) must get ITS row, not the bundled `google` entry's version.
+    const providerService = providerLookup({ "google-preview": "v1alpha" });
+    const svc = newService(providerService);
+
+    await svc.initializeClient(persona({ providerId: "google-preview" }));
+
+    expect(providerService.getProvider).toHaveBeenCalledWith("google-preview");
+    expect(constructorCalls[0].apiVersion).toBe("v1alpha");
+  });
+
+  it("trims a padded registry value instead of forwarding it verbatim", async () => {
+    const svc = newService(providerServiceReturning("  v1beta  "));
     await svc.initializeClient(persona());
 
     expect(constructorCalls[0].apiVersion).toBe("v1beta");
   });
 
-  it("falls back to the registry apiVersion when the config file cannot supply one", async () => {
-    // Simulate a deployment whose providers.yaml has no google entry: the registry
-    // record is the only remaining source before the code default.
-    const svc = newService({
-      getProvider: jest.fn(async (): Promise<any> => ({ id: "google", apiVersion: "v1beta" })),
-    });
-    svc.resolveApiVersionFromConfigFile = (): string | undefined => undefined;
-
-    await svc.initializeClient(persona());
-
-    expect(constructorCalls[0].apiVersion).toBe("v1beta");
-  });
-
-  it("uses the code default when nothing configures a version", async () => {
-    const svc = newService({ getProvider: jest.fn(async (): Promise<any> => undefined) });
-    svc.resolveApiVersionFromConfigFile = (): string | undefined => undefined;
-
+  it("uses the code default when the registry has no version", async () => {
+    const svc = newService(providerServiceReturning(undefined));
     await svc.initializeClient(persona());
 
     // `v1beta`, not the 3.x SDK default `v1`: an unconfigured deployment must not be
@@ -188,8 +186,17 @@ describe("GoogleAIService.initializeClient — apiVersion forwarding", () => {
     expect(constructorCalls[0].apiVersion).toBe("v1beta");
   });
 
+  it("warns but still forwards an unrecognised version", async () => {
+    // A typo here looks like "every model disappeared", so it is made loud without
+    // blocking an operator who is deliberately trying something new.
+    const svc = newService(providerServiceReturning("v9-weird"));
+    await svc.initializeClient(persona());
+
+    expect(constructorCalls[0].apiVersion).toBe("v9-weird");
+  });
+
   it("still fails fast when no API key is available", async () => {
-    const svc = newService();
+    const svc = newService(providerServiceReturning("v1beta"));
     const previous = process.env.GOOGLE_AI_API_KEY;
     delete process.env.GOOGLE_AI_API_KEY;
     try {
@@ -203,7 +210,7 @@ describe("GoogleAIService.initializeClient — apiVersion forwarding", () => {
   });
 
   it("does not swallow a failed model lookup", async () => {
-    const svc = newService();
+    const svc = newService(providerServiceReturning("v1beta"));
     modelsGet.mockRejectedValueOnce(new Error("404 model not found") as never);
 
     await expect(svc.initializeClient(persona())).rejects.toThrow(/not found/i);
