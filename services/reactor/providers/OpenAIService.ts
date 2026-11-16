@@ -845,6 +845,15 @@ class OpenAIService extends AIProviderBase {
           });
         }
 
+        // Usage arrives on a FINAL chunk whose `choices` array is empty when
+        // `stream_options.include_usage` is set (OpenAI, xAI, Azure and the local
+        // OpenAI-compatible servers all do this). It must be read BEFORE the
+        // "no choice" early-continue below, otherwise every streamed turn reports
+        // no usage at all and the caller has nothing to price the turn with.
+        if ((chunk as any).usage) {
+          streamUsage = (chunk as any).usage;
+        }
+
         const choice = chunk.choices[0];
         if (!choice) continue;
 
@@ -899,10 +908,6 @@ class OpenAIService extends AIProviderBase {
           finishReason = choice.finish_reason;
         }
 
-        // Capture usage from the final chunk (sent when stream_options.include_usage is true)
-        if ((chunk as any).usage) {
-          streamUsage = (chunk as any).usage;
-        }
       }
 
       // Flush remaining buffered tokens after stream ends
@@ -1170,10 +1175,14 @@ class OpenAIService extends AIProviderBase {
             ? choice.message.tool_calls.map((tc) => ({
                 id: tc.id,
                 type: tc.type,
-                function: {
-                  name: tc.function.name,
-                  arguments: tc.function.arguments,
-                },
+                // openai 7 types a tool call as a discriminated union (function |
+                // custom). The reactor only ever sends function tools, so a `custom`
+                // call cannot be dispatched; it is normalised to an empty function
+                // instead of being dropped, which keeps the ids 1:1 with the response.
+                function:
+                  tc.type === "custom"
+                    ? { name: "", arguments: "" }
+                    : { name: tc.function.name, arguments: tc.function.arguments },
               }))
             : [],
         },

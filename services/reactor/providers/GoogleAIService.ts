@@ -721,9 +721,17 @@ class GoogleAIService extends AIProviderBase {
       msg.tool_calls.length > 0
     ) {
       for (const toolCall of msg.tool_calls) {
+        // openai 7 types a tool call as a discriminated union (function | custom).
+        // Narrow to the `custom` variant rather than asserting past the union: only a
+        // `custom` call lacks `function`, and providers that omit `type` entirely are
+        // still function calls (the SDK passes provider JSON through verbatim).
+        const functionCall =
+          toolCall.type === "custom"
+            ? undefined
+            : (toolCall as { function?: { name?: string; arguments?: any } }).function;
+
         // Google expects functionCall in a specific format
-        let args =
-          toolCall.function?.arguments ?? (toolCall as any).arguments ?? {};
+        let args = functionCall?.arguments ?? (toolCall as any).arguments ?? {};
 
         // If args is a string, try to parse it as JSON
         if (typeof args === "string") {
@@ -741,7 +749,7 @@ class GoogleAIService extends AIProviderBase {
 
         const functionCallPart: any = {
           functionCall: {
-            name: toolCall.function?.name || (toolCall as any).name,
+            name: functionCall?.name || (toolCall as any).name,
             args: args,
           },
         };
