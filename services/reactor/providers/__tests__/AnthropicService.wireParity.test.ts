@@ -368,6 +368,62 @@ describe("anthropic@1.8.0 wire contract", () => {
     expect(debugLogs.join("\n")).toMatch(/Dropped sampling param\(s\) \[temperature, top_p\]/);
   });
 
+  it("keeps thinking on when the caller asks for sampling, on both yaml sampling flavours (R1)", async () => {
+    // R1: the gate used to key on the providers.yaml sampling flags, so identical
+    // caller config did two different things:
+    //   claude-sonnet-4-6 (yaml temperature: true)  -> thinking DISABLED
+    //   claude-opus-4-8   (yaml temperature: false) -> thinking KEPT
+    // while temperature was dropped on both. Sampling is unsendable on
+    // anthropic-version 2026-10-21, so it cannot influence the model and must not
+    // cost the caller reasoning either. Both models are mode: adaptive, so the
+    // expected block is the adaptive one.
+    for (const modelId of ["claude-sonnet-4-6", "claude-opus-4-8"]) {
+      captures.length = 0;
+      responder = () => messageResponse({ text: "ok" });
+      const { service } = createService({ modelId });
+
+      await dispatch(service, "hello", { temperature: 0.3, topP: 0.9 });
+
+      const { body } = captures[0];
+      // Thinking survives the caller's sampling request on BOTH flavours...
+      expect(body.thinking).toEqual({ type: "adaptive", display: "summarized" });
+      // ...and the unsendable params are still dropped on both.
+      expect("temperature" in body).toBe(false);
+      expect("top_p" in body).toBe(false);
+    }
+  });
+
+  it("still disables thinking for structured output, which is the remaining gate (R1)", async () => {
+    // Guard the other half: only structured output may turn thinking off now.
+    responder = () => messageResponse({ text: "ok" });
+    const { service } = createService({ modelId: "claude-sonnet-4-6" });
+
+    await dispatch(service, "hello", { structuredOutput: { schema: { type: "object" } } as any });
+
+    expect(captures[0].body.thinking).toBeUndefined();
+  });
+
+  it("constructs the client with OpenTelemetry propagation disabled (R2)", async () => {
+    // @anthropic-ai/sdk 1.x traces by default: with no `openTelemetry` option it
+    // uses the global tracer provider and `propagation` defaults to true, so it
+    // injects the global propagator's traceparent/tracestate/baggage into every
+    // request to api.anthropic.com.
+    responder = () => messageResponse({ text: "ok" });
+    const { service } = createService({ modelId: "claude-sonnet-4-6" });
+
+    await dispatch(service, "hello");
+
+    // The settled option is frozen on the client, so this is exactly what the SDK
+    // will act on at request time.
+    expect((service.anthropic as any).openTelemetry.propagation).toBe(false);
+
+    // And no trace context went out on the request.
+    const headers = captures[0].headers;
+    expect(headers.traceparent).toBeUndefined();
+    expect(headers.tracestate).toBeUndefined();
+    expect(headers.baggage).toBeUndefined();
+  });
+
   it("still sends thinking + output_config for an adaptive-thinking model", async () => {
     responder = () => messageResponse({ text: "ok" });
     const { service } = createService({ modelId: "claude-opus-4-8" });

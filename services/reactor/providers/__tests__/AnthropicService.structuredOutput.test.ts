@@ -85,7 +85,7 @@ describe("AnthropicService — providerConfig / structured output", () => {
       expect((params as any).output_config).toBeUndefined();
     });
 
-    it("drops caller sampling, disables thinking and keeps the other overrides", () => {
+    it("drops caller sampling, KEEPS thinking, and keeps the other overrides", () => {
       const svc = createService({
         thinking: { mode: "budget" },
         sampling: { temperature: true, topP: true, topK: true },
@@ -93,7 +93,13 @@ describe("AnthropicService — providerConfig / structured output", () => {
       const params = svc.buildRequestParams([], persona, {
         providerConfig: { temperature: 0.2, maxTokens: 500 },
       });
-      expect(params.thinking).toBeUndefined();
+      // Sampling no longer gates thinking. anthropic-version 2026-10-21 rejects
+      // temperature/top_p/top_k outright, so the caller's value can never reach the
+      // model — an unsendable knob must not cost the caller reasoning. The previous
+      // rule disabled thinking here on models whose providers.yaml entry said
+      // `sampling.temperature: true`, which made identical caller config behave
+      // differently per model depending on a flag this upgrade declares wire-irrelevant.
+      expect(params.thinking).toEqual({ type: "enabled", budget_tokens: 10000 });
       // API version 2026-10-21 (the @anthropic-ai/sdk 1.x default) answers any
       // sampling parameter with 400 "temperature: Extra inputs are not
       // permitted" — for models providers.yaml still marks sampling-capable

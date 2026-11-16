@@ -167,6 +167,21 @@ class AnthropicService extends AIProviderBase {
 
     this.anthropic = new Anthropic({
       apiKey,
+      // OpenTelemetry is opt-out in @anthropic-ai/sdk 1.x: with no `openTelemetry`
+      // option the client uses the GLOBAL tracer provider, and `propagation` defaults
+      // to true, so it injects the global propagator's traceparent/tracestate/baggage
+      // into every request to api.anthropic.com. This host depends on
+      // @opentelemetry/sdk-node plus auto-instrumentations-node and the SDK's
+      // @opentelemetry/api ^1.4.1 dedupes onto the host's ^1.9.0, so the day the host
+      // starts a NodeSDK this module would begin sending trace context to a third
+      // party with no change here. ANTHROPIC_OPEN_TELEMETRY_TRACES_CONTENT_MODE=content
+      // would additionally put prompts and completions on those spans.
+      //
+      // propagation:false keeps local spans for our own visibility while sending no
+      // trace context outward - which is also what the SDK docs recommend when
+      // undici is auto-instrumented, since that already propagates traceparent and
+      // two sources would double the headers.
+      openTelemetry: { propagation: false },
     });
 
     this.modelId = persona.modelId || process.env.ANTHROPIC_MODEL_ID || "claude-sonnet-4-5-20250929";
@@ -975,8 +990,14 @@ class AnthropicService extends AIProviderBase {
    *
    * POLICY ONLY as of API version 2026-10-21: the wire rejects every sampling
    * parameter regardless of model, so nothing buildRequestParams() resolves here
-   * is emitted. See the note there. The remaining consumer is the "caller asked
-   * for sampling, so do not think" gate.
+   * is emitted. See the note there.
+   *
+   * It has NO production consumer since sampling stopped gating thinking (see
+   * buildRequestParams). It is retained rather than deleted for two reasons: the
+   * provider suites stub it, and it documents which models the registry still marks
+   * sampling-capable — flags that are now policy metadata, not wire capability.
+   * N1: `topK` has no reader at all; it is kept only so the return shape matches
+   * resolveSamplingSupport(). Delete both together if the yaml schema drops topK.
    */
   private getSamplingSupport(): { temperature: boolean; topP: boolean; topK: boolean } {
     const found = findModelById(getProviderRegistry(), this.modelId);
@@ -1013,22 +1034,24 @@ class AnthropicService extends AIProviderBase {
     // makes the same request succeed, so this is a wire-version change rather
     // than a model-capability one. They are therefore never emitted; the single
     // drop point is the sweep at the end of this method.
-    const samplingSupport = this.getSamplingSupport();
 
-    // How this model does thinking (adaptive / budget / none). Thinking is
-    // disabled for structured output (forced tool_choice conflicts with it) and
-    // whenever the caller asks for sampling. The pairing rule is now moot on the
-    // wire — nothing sampling-related can be sent — but the caller's explicit
-    // temperature/top_p is still an instruction not to reason, so the gate stays.
+    // How this model does thinking (adaptive / budget / none). Thinking is disabled
+    // for structured output only: a forced tool_choice conflicts with it.
+    //
+    // Sampling deliberately does NOT gate thinking. anthropic-version 2026-10-21
+    // rejects temperature/top_p/top_k outright, so a caller's sampling value is
+    // dropped before it reaches the wire and cannot influence the model — an
+    // unsendable knob must therefore not cost the caller reasoning either.
+    //
+    // This replaces an earlier gate keyed on the providers.yaml sampling flags, which
+    // made identical caller config disable thinking on a `temperature: true` model and
+    // leave it on for a `temperature: false` one — i.e. the outcome depended on a flag
+    // this upgrade itself declares wire-irrelevant. Pinned by tests on both flavours.
     const thinkingSupport = this.getThinkingSupport();
-    const samplingActuallyApplies =
-      (providerConfig?.temperature != null && samplingSupport.temperature) ||
-      (providerConfig?.topP != null && samplingSupport.topP);
     const enableThinking =
       thinkingSupport.mode !== "none" &&
       persona.modelConfig?.enableThinking !== false &&
-      !providerConfig?.structuredOutput &&
-      !samplingActuallyApplies;
+      !providerConfig?.structuredOutput;
 
     const params: Anthropic.Messages.MessageCreateParams & SamplingParams = {
       model: this.modelId,
@@ -1058,10 +1081,9 @@ class AnthropicService extends AIProviderBase {
       );
       (params as any).thinking = { type: "enabled", budget_tokens: budget };
     }
-    // No `else` for persona sampling: the model's `temperature`/`topP` from
-    // providers.yaml would once have been applied here and is now unsendable
-    // (see the note above `samplingSupport`). The final sweep removes any that a
-    // caller or a `raw` override merged in below.
+    // No `else` for persona sampling: the model's `temperature`/`topP` from providers.yaml
+    // would once have been applied here and is now unsendable. The final sweep removes any
+    // that a caller or a `raw` override merged in below.
 
     // Tools: structured output (without an explicit tool choice) replaces the
     // persona tools with the single forced schema tool.
