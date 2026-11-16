@@ -217,10 +217,15 @@ export async function processToolCalls(
 
   if (message.tool_calls && Array.isArray(message.tool_calls)) {
     for (const toolCall of message.tool_calls) {
-      // openai 7 types a tool call as a discriminated union (function | custom);
-      // only the `function` variant carries `function`. Anything else is a shape this
-      // module cannot dispatch, so it takes the existing invalid-structure path.
-      if (!toolCall.id || toolCall.type === "custom") {
+      // openai 7 types a tool call as a discriminated union (function | custom).
+      // Narrow to the `custom` variant rather than asserting past the union: only a
+      // `custom` call lacks `function`, and providers that omit `type` entirely are
+      // still function calls (the SDK passes provider JSON through verbatim).
+      // The `!toolCall.function` arm is load-bearing: an OpenAI-compatible provider can
+      // pass through `{ id }` with neither `type` nor `function`, and without it the loop
+      // reaches `toolCall.function.name` below and throws, dropping EVERY tool result for
+      // the turn rather than skipping the one malformed call.
+      if (!toolCall.id || toolCall.type === "custom" || !toolCall.function) {
         console.error("Invalid tool call structure");
         continue;
       }

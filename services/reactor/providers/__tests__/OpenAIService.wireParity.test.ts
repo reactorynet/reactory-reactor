@@ -181,6 +181,8 @@ interface ServiceOptions {
   modelId: string;
   tools?: any[];
   streamingMode?: StreamingMode;
+  /** When false, no apiKey is passed to the service so the env path is exercised. */
+  withApiKey?: boolean;
 }
 
 function createService(options: ServiceOptions) {
@@ -195,7 +197,9 @@ function createService(options: ServiceOptions) {
   };
 
   const props: any = {
-    apiKey: "wire-test-key",
+    // Omitted entirely when withApiKey is false: `props.apiKey || process.env.<FAMILY>` then
+    // reaches the environment, which is the path openai 4 -> 7 changed.
+    ...(options.withApiKey === false ? {} : { apiKey: "wire-test-key" }),
     streamingMode: options.streamingMode ?? StreamingMode.NONE,
     $services: {},
   };

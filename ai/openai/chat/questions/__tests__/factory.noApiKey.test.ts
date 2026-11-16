@@ -29,18 +29,40 @@ import { describe, it, expect, beforeAll, afterAll, jest } from "@jest/globals";
  * something that never fails, which would be a worse bug than the one being fixed.
  */
 
-const KEY = "OPENAI_API_KEY";
-let savedKey: string | undefined;
+/**
+ * openai 7 satisfies its credential check with `apiKey`, `adminAPIKey` OR
+ * `workloadIdentity`:
+ *
+ *   if (!providerRuntime && !apiKey && !adminAPIKey && !workloadIdentity) throw ...
+ *
+ * So deleting only OPENAI_API_KEY is not enough on a runner that exports
+ * OPENAI_ADMIN_KEY — the client would construct and the "fails loudly" cases below
+ * would pass for the wrong reason. Both are cleared, and both restored.
+ */
+const CREDENTIAL_ENV_VARS = ["OPENAI_API_KEY", "OPENAI_ADMIN_KEY"] as const;
+const savedEnv: Partial<Record<(typeof CREDENTIAL_ENV_VARS)[number], string>> = {};
+
+const clearCredentials = () => {
+  for (const name of CREDENTIAL_ENV_VARS) delete process.env[name];
+};
+
+const restoreCredentials = () => {
+  for (const name of CREDENTIAL_ENV_VARS) {
+    const value = savedEnv[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+};
 
 beforeAll(() => {
-  savedKey = process.env[KEY];
-  delete process.env[KEY];
+  for (const name of CREDENTIAL_ENV_VARS) {
+    const value = process.env[name];
+    if (value !== undefined) savedEnv[name] = value;
+  }
+  clearCredentials();
 });
 
-afterAll(() => {
-  if (savedKey === undefined) delete process.env[KEY];
-  else process.env[KEY] = savedKey;
-});
+afterAll(restoreCredentials);
 
 describe("importing the macro system without OPENAI_API_KEY", () => {
   it("loads the questions factory without throwing", () => {
@@ -71,7 +93,7 @@ describe("importing the macro system without OPENAI_API_KEY", () => {
   });
 
   it("builds the client when a key is present", () => {
-    process.env[KEY] = "sk-wire-test-key";
+    process.env.OPENAI_API_KEY = "sk-wire-test-key";
     try {
       jest.isolateModules(() => {
         const { INITIAL_CHAT_STATE } = require("../factory") as {
@@ -82,12 +104,12 @@ describe("importing the macro system without OPENAI_API_KEY", () => {
         expect(client.apiKey).toBe("sk-wire-test-key");
       });
     } finally {
-      delete process.env[KEY];
+      clearCredentials();
     }
   });
 
   it("memoises the client rather than rebuilding it per access", () => {
-    process.env[KEY] = "sk-wire-test-key";
+    process.env.OPENAI_API_KEY = "sk-wire-test-key";
     try {
       jest.isolateModules(() => {
         const { INITIAL_CHAT_STATE } = require("../factory") as {
@@ -96,7 +118,7 @@ describe("importing the macro system without OPENAI_API_KEY", () => {
         expect(INITIAL_CHAT_STATE.ai).toBe(INITIAL_CHAT_STATE.ai);
       });
     } finally {
-      delete process.env[KEY];
+      clearCredentials();
     }
   });
 });
