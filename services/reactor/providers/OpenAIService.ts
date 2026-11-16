@@ -231,6 +231,15 @@ class OpenAIService extends AIProviderBase {
       openAIArgs.apiKey = openAIArgs.apiKey ? openAIArgs.apiKey : null;
       openAIArgs.organization = null;
       openAIArgs.project = null;
+      // adminAPIKey is the third credential the v7 constructor accepts:
+      //   if (!apiKey && !adminAPIKey && !workloadIdentity) throw
+      // Leaving it undefined lets the SDK default read OPENAI_ADMIN_KEY, so on a host that
+      // exports it the client CONSTRUCTS successfully and the chat call then fails with
+      // "Could not resolve authentication method" instead of "Missing credentials".
+      // Nulling it makes the fail-loud claim in this block actually true. (The admin key is
+      // never sent anyway - chat completions are bearer-only - so this is about the error,
+      // not a leak.)
+      openAIArgs.adminAPIKey = null;
       // OPENAI_CUSTOM_HEADERS is read and merged by the SDK for EVERY client (new in
       // v7). buildHeaders treats a null value as "delete this header", so naming the
       // env header keys explicitly is what actually suppresses them - an empty object

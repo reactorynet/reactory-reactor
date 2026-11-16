@@ -151,27 +151,20 @@ describe("R2 — per-family credential resolution", () => {
     });
 
     it(`${providerId}: no family key does NOT send the OpenAI key to ${host}`, async () => {
+      // Every credential v7 accepts is set EXCEPT a family key, so this is the
+      // deterministic fail-loud case. OPENAI_ADMIN_KEY matters: the constructor check is
+      // `!apiKey && !adminAPIKey && !workloadIdentity`, so leaving it set let the client
+      // construct and the test passed for the wrong reason - the chat call then failed
+      // with "Could not resolve authentication method" rather than "Missing credentials".
       process.env.OPENAI_API_KEY = "sk-openai-key";
+      process.env.OPENAI_ADMIN_KEY = "sk-openai-admin-key";
       if (providerId === "azure-openai") process.env.AZURE_OPENAI_ENDPOINT = "https://wire.openai.azure.com";
 
       const service = makeService(providerId);
 
-      // Either construction fails loudly (correct) or it must not have emitted the OpenAI
-      // key. Both are acceptable outcomes; silently borrowing is not.
-      let threw = false;
-      try {
-        await emitOneRequest(service);
-      } catch {
-        threw = true;
-      }
-
-      if (threw) {
-        expect(captures).toHaveLength(0);
-      } else {
-        for (const capture of captures) {
-          expect(capture.headers.authorization ?? "").not.toContain("sk-openai-key");
-        }
-      }
+      await expect(emitOneRequest(service)).rejects.toThrow(/Missing credentials/i);
+      // Nothing left the process, so no OpenAI credential reached the third party.
+      expect(captures).toHaveLength(0);
     });
   }
 });
