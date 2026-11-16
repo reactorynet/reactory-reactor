@@ -65,17 +65,45 @@ export const getInitializerMessage = async (
   }
 };
 
+/**
+ * Lazily built so importing this module does not require an OpenAI API key.
+ *
+ * openai 4.x accepted `apiKey: ""` and only failed when a request was made, so a
+ * module-scope client was harmless. openai 7.x throws from the *constructor*:
+ *
+ *   OpenAIError: Missing credentials. Please pass an `apiKey`, ...
+ *
+ * `factory.ts` is on the normal module import path (`ai/macro/index.ts` ->
+ * `src/modules/__index.ts`), so the module-scope client in `INITIAL_CHAT_STATE`
+ * turned "no OPENAI_API_KEY" into a boot-time crash for deployments that use
+ * azure-openai, xai, copilot or a local endpoint — none of which need this client.
+ *
+ * Deferring construction keeps the import side-effect free while preserving the
+ * old fail-loud behaviour at the point of use. The instance is memoised, so
+ * repeated reads still share one client.
+ */
+let initialOpenAIClient: OpenAI | null = null;
+
+const getInitialOpenAIClient = (): OpenAI => {
+  if (initialOpenAIClient === null) {
+    initialOpenAIClient = new OpenAI({
+      apiKey: process.env.OPENAI_API_KEY || "",
+      // organization: process.env.OPENAI_ORG
+      baseURL: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
+    });
+  }
+  return initialOpenAIClient;
+};
+
 export const INITIAL_CHAT_STATE: ChatState = {
   modelId: process.env.OPENAI_MODEL_ID || "",
   started: new Date(),
   history: [SYSTEM_INITIALIZER_MESSAGE],
   apiKey: process.env.OPENAI_API_KEY || "",
   apiOrg: process.env.OPENAI_ORG || "",
-  ai: new OpenAI({
-    apiKey: process.env.OPENAI_API_KEY || "", 
-    // organization: process.env.OPENAI_ORG
-    baseURL: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
-  }),
+  get ai(): OpenAI {
+    return getInitialOpenAIClient();
+  },
   personaId: "Reactor",
   persona: null,
   macros: MacroRegistry,
@@ -189,7 +217,15 @@ export async function processToolCalls(
 
   if (message.tool_calls && Array.isArray(message.tool_calls)) {
     for (const toolCall of message.tool_calls) {
-      if (!toolCall.id || !toolCall.function) {
+      // openai 7 types a tool call as a discriminated union (function | custom).
+      // Narrow to the `custom` variant rather than asserting past the union: only a
+      // `custom` call lacks `function`, and providers that omit `type` entirely are
+      // still function calls (the SDK passes provider JSON through verbatim).
+      // The `!toolCall.function` arm is load-bearing: an OpenAI-compatible provider can
+      // pass through `{ id }` with neither `type` nor `function`, and without it the loop
+      // reaches `toolCall.function.name` below and throws, dropping EVERY tool result for
+      // the turn rather than skipping the one malformed call.
+      if (!toolCall.id || toolCall.type === "custom" || !toolCall.function) {
         console.error("Invalid tool call structure");
         continue;
       }

@@ -204,6 +204,57 @@ class OpenAIService extends AIProviderBase {
       if (persona.config.apiBaseURL) openAIArgs.baseURL = persona.config.apiBaseURL;
     }
 
+    // R3 — stop OpenAI credentials and headers leaking to third-party endpoints.
+    //
+    // openai 7 (and 4.x) destructure their options with DEFAULTS that read the
+    // environment:
+    //   apiKey       = readEnv('OPENAI_API_KEY')  ?? null
+    //   organization = readEnv('OPENAI_ORG_ID')   ?? null
+    //   project      = readEnv('OPENAI_PROJECT_ID') ?? null
+    // A `undefined` apiKey therefore makes the SDK reach for OPENAI_API_KEY, so an
+    // xai / copilot / azure-openai persona with no family key would send the OPENAI key
+    // as `Authorization: Bearer` to api.x.ai, models.inference.ai.azure.com or whatever
+    // `persona.config.apiBaseURL` points at. `delete openAIArgs.organization` has the same
+    // shape: absent means "read OPENAI_ORG_ID", not "send nothing".
+    //
+    // An explicit `null` is what the SDK treats as "no value": apiKey null fails loudly
+    // at construction instead of borrowing a key, and organization/project null suppress
+    // the env read entirely.
+    //
+    // v7 also reads OPENAI_CUSTOM_HEADERS and merges it into defaultHeaders for every
+    // client (4.87.3 has no such read), so any header configured for OpenAI would reach
+    // every provider. It is dropped for every non-OpenAI endpoint by pinning
+    // defaultHeaders, since the module sets none of its own.
+    const openAIDefaultBaseURL = process.env.OPENAI_API_BASE_URL || "https://api.openai.com/v1";
+    const isFirstPartyOpenAI = !openAIArgs.baseURL || openAIArgs.baseURL === openAIDefaultBaseURL;
+    if (!isFirstPartyOpenAI) {
+      openAIArgs.apiKey = openAIArgs.apiKey ? openAIArgs.apiKey : null;
+      openAIArgs.organization = null;
+      openAIArgs.project = null;
+      // adminAPIKey is the third credential the v7 constructor accepts:
+      //   if (!apiKey && !adminAPIKey && !workloadIdentity) throw
+      // Leaving it undefined lets the SDK default read OPENAI_ADMIN_KEY, so on a host that
+      // exports it the client CONSTRUCTS successfully and the chat call then fails with
+      // "Could not resolve authentication method" instead of "Missing credentials".
+      // Nulling it makes the fail-loud claim in this block actually true. (The admin key is
+      // never sent anyway - chat completions are bearer-only - so this is about the error,
+      // not a leak.)
+      openAIArgs.adminAPIKey = null;
+      // OPENAI_CUSTOM_HEADERS is read and merged by the SDK for EVERY client (new in
+      // v7). buildHeaders treats a null value as "delete this header", so naming the
+      // env header keys explicitly is what actually suppresses them - an empty object
+      // would leave the SDK-merged values in place.
+      const suppressedHeaders: Record<string, null> = {};
+      for (const line of (process.env.OPENAI_CUSTOM_HEADERS || "").split("\n")) {
+        const colon = line.indexOf(":");
+        if (colon > 0) suppressedHeaders[line.slice(0, colon).trim()] = null;
+      }
+      openAIArgs.defaultHeaders = {
+        ...(openAIArgs.defaultHeaders ?? {}),
+        ...suppressedHeaders,
+      } as any;
+    }
+
     // Bound time-to-first-byte and make retries observable.
     //
     // Before this, the client was constructed with `baseURL`/`apiKey` only, so the
@@ -845,6 +896,15 @@ class OpenAIService extends AIProviderBase {
           });
         }
 
+        // Usage arrives on a FINAL chunk whose `choices` array is empty when
+        // `stream_options.include_usage` is set (OpenAI, xAI, Azure and the local
+        // OpenAI-compatible servers all do this). It must be read BEFORE the
+        // "no choice" early-continue below, otherwise every streamed turn reports
+        // no usage at all and the caller has nothing to price the turn with.
+        if ((chunk as any).usage) {
+          streamUsage = (chunk as any).usage;
+        }
+
         const choice = chunk.choices[0];
         if (!choice) continue;
 
@@ -899,10 +959,6 @@ class OpenAIService extends AIProviderBase {
           finishReason = choice.finish_reason;
         }
 
-        // Capture usage from the final chunk (sent when stream_options.include_usage is true)
-        if ((chunk as any).usage) {
-          streamUsage = (chunk as any).usage;
-        }
       }
 
       // Flush remaining buffered tokens after stream ends
@@ -1170,10 +1226,17 @@ class OpenAIService extends AIProviderBase {
             ? choice.message.tool_calls.map((tc) => ({
                 id: tc.id,
                 type: tc.type,
-                function: {
-                  name: tc.function.name,
-                  arguments: tc.function.arguments,
-                },
+                // openai 7 types a tool call as a discriminated union (function |
+                // custom). The reactor only ever sends function tools, so a `custom`
+                // call cannot be dispatched; it is normalised to an empty function
+                // instead of being dropped, which keeps the ids 1:1 with the response.
+                // `!tc.function` is the same load-bearing guard as in factory.ts: an
+                // OpenAI-compatible provider can pass through a typeless call with no
+                // function payload, and reading tc.function.name would throw.
+                function:
+                  tc.type === "custom" || !tc.function
+                    ? { name: "", arguments: "" }
+                    : { name: tc.function.name, arguments: tc.function.arguments },
               }))
             : [],
         },
