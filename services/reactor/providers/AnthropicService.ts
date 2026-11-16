@@ -97,6 +97,23 @@ const BUDGET_THINKING_MODEL_PATTERNS = [
   "claude-3-5-sonnet",
 ];
 
+/**
+ * The sampling parameters that Messages used to accept, kept representable so
+ * this service can talk about them without `any`.
+ *
+ * They are NOT sent: API version 2026-10-21 — the version the @anthropic-ai/sdk
+ * 1.x client puts in `anthropic-version` — removed `temperature`, `top_p` and
+ * `top_k` from the Messages request. `@anthropic-ai/sdk` dropped the three
+ * fields from `MessageCreateParams` in the same release, which is what turns
+ * "stop sending them" from a silent behavioural change into a compile error.
+ * See buildRequestParams() for the live evidence and the single drop point.
+ */
+type SamplingParams = {
+  temperature?: number;
+  top_p?: number;
+  top_k?: number;
+};
+
 @service({
   id: "reactor.AnthropicService@1.0.0",
   name: "Anthropic AI Service",
@@ -955,6 +972,11 @@ class AnthropicService extends AIProviderBase {
    * model accepts. Consults providers.yaml first (the source of truth); if the
    * model isn't found there, falls back to a substring deny-list of known
    * families that reject sampling params with a 400. Cached per process.
+   *
+   * POLICY ONLY as of API version 2026-10-21: the wire rejects every sampling
+   * parameter regardless of model, so nothing buildRequestParams() resolves here
+   * is emitted. See the note there. The remaining consumer is the "caller asked
+   * for sampling, so do not think" gate.
    */
   private getSamplingSupport(): { temperature: boolean; topP: boolean; topK: boolean } {
     const found = findModelById(getProviderRegistry(), this.modelId);
@@ -980,20 +1002,25 @@ class AnthropicService extends AIProviderBase {
       : persona.tools;
     const personaTools = this.convertToolsToAnthropicFormat(toolsList);
 
-    // Which sampling params this model accepts (temperature/top_p/top_k). Newer
-    // Anthropic models (Opus 4.7+, Sonnet 5, Fable 5) reject them with a 400.
+    // Sampling support is still resolved from providers.yaml (it is the source of
+    // truth for what the model understands), but as of API version 2026-10-21 the
+    // Messages endpoint accepts NO sampling parameter at all: any of
+    // `temperature`, `top_p` or `top_k` is answered with
+    //   400 invalid_request_error "<param>: Extra inputs are not permitted"
+    // for every model — including the ones providers.yaml still marks
+    // `sampling.temperature: true` such as claude-haiku-4-5 and
+    // claude-sonnet-4-6. Pinning the previous `anthropic-version: 2023-06-01`
+    // makes the same request succeed, so this is a wire-version change rather
+    // than a model-capability one. They are therefore never emitted; the single
+    // drop point is the sweep at the end of this method.
     const samplingSupport = this.getSamplingSupport();
 
     // How this model does thinking (adaptive / budget / none). Thinking is
     // disabled for structured output (forced tool_choice conflicts with it) and
-    // whenever the caller's requested sampling will actually be sent — thinking
-    // and explicit temperature/top_p are mutually exclusive. If the requested
-    // sampling isn't supported by the model it gets stripped below, so it poses
-    // no conflict and thinking stays on.
+    // whenever the caller asks for sampling. The pairing rule is now moot on the
+    // wire — nothing sampling-related can be sent — but the caller's explicit
+    // temperature/top_p is still an instruction not to reason, so the gate stays.
     const thinkingSupport = this.getThinkingSupport();
-    const wantsSampling =
-      !!providerConfig &&
-      (providerConfig.temperature != null || providerConfig.topP != null);
     const samplingActuallyApplies =
       (providerConfig?.temperature != null && samplingSupport.temperature) ||
       (providerConfig?.topP != null && samplingSupport.topP);
@@ -1003,7 +1030,7 @@ class AnthropicService extends AIProviderBase {
       !providerConfig?.structuredOutput &&
       !samplingActuallyApplies;
 
-    const params: Anthropic.Messages.MessageCreateParams = {
+    const params: Anthropic.Messages.MessageCreateParams & SamplingParams = {
       model: this.modelId,
       max_tokens: persona.modelConfig?.maxTokens || 16000,
       // Replayed reasoning blocks are only legal when this request enables
@@ -1030,21 +1057,11 @@ class AnthropicService extends AIProviderBase {
         Math.min(requested, (params.max_tokens as number) - 1024)
       );
       (params as any).thinking = { type: "enabled", budget_tokens: budget };
-    } else if (!wantsSampling && !providerConfig?.structuredOutput) {
-      // Persona-driven sampling (only when the caller hasn't supplied its own).
-      // Anthropic does not allow both temperature and top_p simultaneously, and
-      // only sends a sampling param the model actually accepts.
-      if (
-        samplingSupport.topP &&
-        persona.modelConfig?.topP != null &&
-        persona.modelConfig?.temperature == null
-      ) {
-        (params as any).top_p = persona.modelConfig.topP;
-      } else if (samplingSupport.temperature) {
-        params.temperature = persona.modelConfig?.temperature ?? 0.7;
-      }
     }
-    // else: sampling (if any) comes from the caller's providerConfig, merged below.
+    // No `else` for persona sampling: the model's `temperature`/`topP` from
+    // providers.yaml would once have been applied here and is now unsendable
+    // (see the note above `samplingSupport`). The final sweep removes any that a
+    // caller or a `raw` override merged in below.
 
     // Tools: structured output (without an explicit tool choice) replaces the
     // persona tools with the single forced schema tool.
@@ -1067,26 +1084,30 @@ class AnthropicService extends AIProviderBase {
     // Caller sampling / max_tokens / stop_sequences override persona defaults.
     Object.assign(params, augmented.params);
 
-    // Defensive final sweep: strip any sampling param the model rejects. This
-    // catches both persona defaults and caller-supplied overrides merged above,
-    // so an unsupported temperature/top_p/top_k can never reach the API (which
-    // returns a 400 "`temperature` is deprecated for this model" on newer models).
+    // The single drop point for sampling parameters. API version 2026-10-21
+    // rejects all three for every model (400 "<param>: Extra inputs are not
+    // permitted"), so none may leave this method — whether it arrived from the
+    // persona config (providers.yaml), from the caller's providerConfig
+    // (toAnthropicParams maps `temperature`/`topP` into `params`), or from a
+    // `raw` override merged above. Keeping the drop here rather than at each
+    // emission site means one guarantee, one place to read it.
     const stripped: string[] = [];
-    if (!samplingSupport.temperature && (params as any).temperature != null) {
-      delete (params as any).temperature;
+    if (params.temperature != null) {
+      delete params.temperature;
       stripped.push("temperature");
     }
-    if (!samplingSupport.topP && (params as any).top_p != null) {
-      delete (params as any).top_p;
+    if (params.top_p != null) {
+      delete params.top_p;
       stripped.push("top_p");
     }
-    if (!samplingSupport.topK && (params as any).top_k != null) {
-      delete (params as any).top_k;
+    if (params.top_k != null) {
+      delete params.top_k;
       stripped.push("top_k");
     }
     if (stripped.length > 0) {
       this.context.debug(
-        `Stripped unsupported sampling param(s) [${stripped.join(", ")}] for model ${this.modelId}`,
+        `Dropped sampling param(s) [${stripped.join(", ")}] for model ${this.modelId}: ` +
+          `anthropic-version 2026-10-21 rejects them (400 "Extra inputs are not permitted")`,
         {},
         "AnthropicService.buildRequestParams"
       );

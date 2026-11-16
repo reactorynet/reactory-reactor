@@ -85,7 +85,7 @@ describe("AnthropicService — providerConfig / structured output", () => {
       expect((params as any).output_config).toBeUndefined();
     });
 
-    it("applies caller sampling and disables thinking", () => {
+    it("drops caller sampling, disables thinking and keeps the other overrides", () => {
       const svc = createService({
         thinking: { mode: "budget" },
         sampling: { temperature: true, topP: true, topK: true },
@@ -94,7 +94,12 @@ describe("AnthropicService — providerConfig / structured output", () => {
         providerConfig: { temperature: 0.2, maxTokens: 500 },
       });
       expect(params.thinking).toBeUndefined();
-      expect(params.temperature).toBe(0.2);
+      // API version 2026-10-21 (the @anthropic-ai/sdk 1.x default) answers any
+      // sampling parameter with 400 "temperature: Extra inputs are not
+      // permitted" — for models providers.yaml still marks sampling-capable
+      // too, so the caller's value never reaches the wire. Wire-level proof:
+      // AnthropicService.wireParity.test.ts.
+      expect((params as any).temperature).toBeUndefined();
       expect(params.max_tokens).toBe(500);
     });
 
