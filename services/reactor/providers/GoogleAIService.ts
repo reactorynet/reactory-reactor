@@ -30,6 +30,7 @@ import {
   toGeminiConfig,
   structuredOutputDisablesTools,
 } from "./providerConfigTranslators";
+import { loadProviders } from "../../../ai/providers/provider-loader";
 import { ReactorProviderConfig } from "../../../types/model.types";
 import { ObjectId } from "mongodb";
 import ReactorMacroService from "./ReactorMacroService";
@@ -64,6 +65,134 @@ import { TokenPacer } from "../streaming/TokenPacer";
 import { StreamingSessionManager } from "../StreamingSessionManager";
 import { StreamingTransportManager } from "../StreamingTransportManager";
 import { IReactorProviderService } from "../../../types/service.types";
+
+/**
+ * ---------------------------------------------------------------------------
+ * Google Gemini API version resolution
+ * ---------------------------------------------------------------------------
+ *
+ * `@google/genai` changed its default API version between major lines:
+ *
+ *   @google/genai@1.24.0  GOOGLE_AI_API_DEFAULT_VERSION = 'v1beta'
+ *   @google/genai@3.1.0   GOOGLE_AI_API_DEFAULT_VERSION = 'v1'
+ *
+ * (both read from the shipped `dist/index.cjs`). `GoogleAIService.initializeClient()`
+ * used to build the client with `{ apiKey, vertexai: false }` only, so the upgrade
+ * alone moved every Gemini request from `/v1beta/...` to `/v1/...` — no compile
+ * error, no throw, just a different endpoint version. That is the silent half of
+ * the failure: a version the config never chose cannot show up in a diff.
+ *
+ * The provider config declares the version (`providers.yaml`, `apiVersion:`), and
+ * `IAIProviderConfig.apiVersion` (types/service.types.ts) already carries it — the
+ * value existed but nothing forwarded it. `resolveGoogleApiVersion()` below decides
+ * which value is forwarded, in one place, so the rule is observable and testable.
+ *
+ * PRECEDENCE (first non-empty wins)
+ * ---------------------------------
+ *   1. `GOOGLE_AI_API_VERSION`     - operator override; the escape hatch that does not
+ *                                    need a deploy. Mirrors the SDK's own
+ *                                    `GOOGLE_GENAI_API_VERSION` convention.
+ *   2. `providers.yaml`            - the deployment config, read through the same loader
+ *                                    the provider registry uses (`loadProviders()`, which
+ *                                    also merges `~/.reactor/providers.yaml`).
+ *   3. provider registry           - the DB/in-memory `ProviderConfig.apiVersion`, needed
+ *                                    for a provider that only exists in the database.
+ *   4. `DEFAULT_GOOGLE_AI_API_VERSION`
+ *
+ * WHY THE YAML OUTRANKS THE REGISTRY
+ * ----------------------------------
+ * `seedAiProviders(..., overwrite = false)` only writes `providers.yaml` into
+ * PostgreSQL when the provider table is EMPTY, so an installation that was seeded
+ * before this change keeps the OLD `apiVersion` (`v1`) in its row forever. Reading
+ * the registry first would therefore re-introduce exactly the v1beta -> v1 flip this
+ * change exists to prevent, on precisely the long-lived installations that matter.
+ * The file is the value a human edits, so it wins.
+ *
+ * WHY `v1beta`
+ * ------------
+ * `v1beta` is what this provider has actually been calling (1.24.0's default). It is
+ * also the documented superset endpoint: Google's "API versions explained" page states
+ * that all models are served on both `v1` and `v1beta`, and that `v1beta` additionally
+ * carries the features not yet promoted (live, audio output, explicit context caching,
+ * agents). Choosing `v1` here would not fail loudly — it would silently drop those
+ * features and change the endpoint version of every request as a side effect of a
+ * dependency bump. Preserving the wire version and making it explicit is the point.
+ */
+
+/** Provider id used in `providers.yaml` and the provider registry. */
+export const GOOGLE_PROVIDER_ID = "google";
+
+/**
+ * Forwarded when nothing configures a version. Matches the behaviour of
+ * `@google/genai@1.x` (the major line this provider ran on before 3.1.0), so an
+ * unconfigured deployment is not silently moved to `v1`.
+ */
+export const DEFAULT_GOOGLE_AI_API_VERSION = "v1beta";
+
+/**
+ * Versions this provider is prepared to forward. Anything else is forwarded too —
+ * explicit configuration wins — but is reported so the mistake is visible instead
+ * of surfacing as an unexplained 404 on every model.
+ */
+export const KNOWN_GOOGLE_AI_API_VERSIONS = ["v1", "v1beta", "v1alpha"] as const;
+
+export type GoogleApiVersionSource =
+  | "env"
+  | "providers.yaml"
+  | "provider-registry"
+  | "default";
+
+export interface GoogleApiVersionResolution {
+  /** The value to hand to `new GoogleGenAI({ apiVersion })`. */
+  apiVersion: string;
+  /** Where it came from — logged with the client initialisation. */
+  source: GoogleApiVersionSource;
+  /** Set when the chosen value is not one of {@link KNOWN_GOOGLE_AI_API_VERSIONS}. */
+  unrecognised?: boolean;
+}
+
+/** Candidate values, in precedence order. */
+export interface GoogleApiVersionCandidates {
+  /** `process.env.GOOGLE_AI_API_VERSION` */
+  env?: string | null;
+  /** `apiVersion` of the `google` entry in `providers.yaml`. */
+  yaml?: string | null;
+  /** `apiVersion` on the provider's registry record (DB-backed deployments). */
+  registry?: string | null;
+}
+
+const normalize = (value: string | null | undefined): string | undefined => {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+};
+
+/**
+ * Pick the API version to forward from the provider configuration.
+ *
+ * Pure: no environment, filesystem, database or SDK access. Every input is passed
+ * in, which is what makes the precedence testable without a live provider.
+ */
+export function resolveGoogleApiVersion(
+  candidates: GoogleApiVersionCandidates,
+): GoogleApiVersionResolution {
+  const ordered: Array<[GoogleApiVersionSource, string | undefined]> = [
+    ["env", normalize(candidates.env)],
+    ["providers.yaml", normalize(candidates.yaml)],
+    ["provider-registry", normalize(candidates.registry)],
+  ];
+
+  for (const [source, value] of ordered) {
+    if (value) {
+      const known = (KNOWN_GOOGLE_AI_API_VERSIONS as readonly string[]).includes(value);
+      return known
+        ? { apiVersion: value, source }
+        : { apiVersion: value, source, unrecognised: true };
+    }
+  }
+
+  return { apiVersion: DEFAULT_GOOGLE_AI_API_VERSION, source: "default" };
+}
 
 @service({
   id: "reactor.GoogleAIService@1.0.0",
@@ -103,6 +232,12 @@ class GoogleAIService extends AIProviderBase {
   streamingTransportManager!: StreamingTransportManager;
   providerService!: IReactorProviderService;
   models: GoogleGenAI.Pager<GoogleGenAI.Model> | null = null;
+  /**
+   * The API version handed to the GoogleGenAI client on the last
+   * {@link initializeClient} call, e.g. `v1beta`. Exposed so a caller (or a test)
+   * can see what actually reached the SDK instead of inferring it from config.
+   */
+  apiVersion: string | null = null;
 
   constructor(props: any, context: Reactory.Server.IReactoryContext) {
     super(props, context);
@@ -183,6 +318,75 @@ class GoogleAIService extends AIProviderBase {
     return config.capabilities?.includes("image-generation") ?? false;
   }
 
+  /**
+   * Read the `apiVersion` declared for this provider in `providers.yaml`.
+   *
+   * Uses the same loader as `ReactorProviderService` — including its `~/.reactor`
+   * overlay — so this is the value an operator actually edited, not a derived one.
+   * Returns `undefined` (rather than throwing) so a missing or unreadable file
+   * degrades to the next source instead of failing every Google request.
+   */
+  private resolveApiVersionFromConfigFile(): string | undefined {
+    try {
+      const providers = loadProviders();
+      const google = providers.find(
+        (provider) => String(provider?.id || "").toLowerCase() === GOOGLE_PROVIDER_ID,
+      );
+      return google?.apiVersion;
+    } catch (error) {
+      this.slog("warn", "Could not read the Google apiVersion from providers.yaml", {
+        error,
+      });
+      return undefined;
+    }
+  }
+
+  /**
+   * Read the `apiVersion` off the provider registry record.
+   *
+   * Only a fallback: the registry can be backed by a PostgreSQL row that was seeded
+   * from an older `providers.yaml` and never refreshed (see
+   * `resolveGoogleApiVersion`), which is how a stale `v1` could otherwise reach the
+   * wire.
+   */
+  private async resolveApiVersionFromRegistry(): Promise<string | undefined> {
+    if (!this.providerService?.getProvider) return undefined;
+    try {
+      const provider = await this.providerService.getProvider(GOOGLE_PROVIDER_ID);
+      return provider?.apiVersion;
+    } catch (error) {
+      this.slog("warn", "Could not read the Google apiVersion from the provider registry", {
+        error,
+      });
+      return undefined;
+    }
+  }
+
+  /**
+   * Decide which API version the client is built with.
+   *
+   * `@google/genai` 3.x defaults to `v1` where 1.x defaulted to `v1beta`, so leaving
+   * this unset silently changes the endpoint version of every request. The value is
+   * therefore always resolved and always forwarded.
+   */
+  protected async resolveApiVersion(): Promise<GoogleApiVersionResolution> {
+    const resolution = resolveGoogleApiVersion({
+      env: process.env.GOOGLE_AI_API_VERSION,
+      yaml: this.resolveApiVersionFromConfigFile(),
+      registry: await this.resolveApiVersionFromRegistry(),
+    });
+
+    if (resolution.unrecognised) {
+      // Forwarded anyway — an explicit setting outranks this guard — but made loud,
+      // because a typo here looks like "every model disappeared".
+      this.slog("warn", `Unrecognised Google apiVersion "${resolution.apiVersion}"`, {
+        source: resolution.source,
+      });
+    }
+
+    return resolution;
+  }
+
   protected async initializeClient(persona: IAIPersona): Promise<void> {
     // Reset cached model config for the new session/model
     this._resolvedModelConfig = null;
@@ -192,9 +396,26 @@ class GoogleAIService extends AIProviderBase {
       throw new AIProviderError("Google AI API key is not set");
     }
 
+    // Forward the configured API version explicitly.
+    //
+    // Without this the constructor applies the SDK default, which moved from
+    // `v1beta` (1.24.0) to `v1` (3.1.0). The config already declared a version and
+    // `IAIProviderConfig.apiVersion` already carried it; nothing consumed it for
+    // Google, so the upgrade changed every request's endpoint version silently.
+    const { apiVersion, source } = await this.resolveApiVersion();
+    this.apiVersion = apiVersion;
+
     this.ai = new GoogleGenAI.GoogleGenAI({
       apiKey,
       vertexai: false,
+      apiVersion,
+    });
+
+    this.slog("info", "Google AI client initialised", {
+      apiVersion,
+      apiVersionSource: source,
+      providerId: persona.providerId,
+      modelId: persona.modelId || process.env.GOOGLE_AI_MODEL_ID || "gemini-pro",
     });
 
     const modelId =

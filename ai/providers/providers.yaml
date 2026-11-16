@@ -536,7 +536,24 @@ providers:
   - id: google
     name: Google Gemini
     endpointUrl: "${GOOGLE_AI_API_URL:-https://generativelanguage.googleapis.com}"
-    apiVersion: v1
+    # API version forwarded to the @google/genai client by
+    # GoogleAIService.initializeClient(). This key used to be decorative: 1.24.0
+    # ignores it and always called v1beta, so the v1 written here never reached the
+    # wire. 3.1.0 ignores it too - but its default is v1, which is why the upgrade
+    # alone would move every request to a different endpoint version.
+    #
+    # v1beta is deliberate:
+    #   * it is the version every model below has actually been served on so far;
+    #   * Google documents all Gemini models as available on BOTH v1 and v1beta, and
+    #     v1beta as the superset for features not yet promoted to stable (live,
+    #     audio output, explicit context caching, agents);
+    #   * no model listed here requires v1, so choosing v1 would change behaviour
+    #     silently as a side effect of a dependency bump.
+    # Per-model overrides do not exist: ProviderModelConfig (ai/providers/
+    # provider-loader.ts) has no apiVersion field, so a model set that genuinely
+    # split across versions would need that mechanism added first - do not assume
+    # one. GOOGLE_AI_API_VERSION overrides this value at runtime.
+    apiVersion: v1beta
     defaultModel: gemini-3.8-flash
     capabilities:
       - text-generation
@@ -548,6 +565,17 @@ providers:
       - apiKey
     credentialEnvVars:
       apiKey: GOOGLE_AI_STUDIO_API_KEY
+    # Model ids checked against the published Gemini model catalogue on 2026-11-16.
+    # Three of them cannot be served on ANY API version - a config defect, not an
+    # apiVersion issue, and it was already broken before the @google/genai upgrade:
+    #   gemini-2.0-flash              listed as "Shut down"
+    #   gemini-3-pro-image-preview    shut down 2026-06-25; replacement gemini-3-pro-image
+    #   gemini-3.1-pro-image-preview  never existed; live image ids are
+    #                                 gemini-3.1-flash-image / gemini-3-pro-image
+    # Deprecated, still served, but re-routed from 2026-12-01:
+    #   gemini-2.5-pro   -> gemini-3.8-flash
+    #   gemini-2.5-flash -> gemini-3.5-flash-lite
+    # Fixing the ids changes the model picker, so it is left to a follow-up.
     models:
       - id: gemini-3.8-flash
         name: Gemini 3.8 Flash
