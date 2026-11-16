@@ -9,6 +9,7 @@ import {
   createQueryResult
 } from '../utils';
 import { isDatabaseVariant } from '../variants';
+import ToolResultProcessor from '../../runtime/ToolResultProcessor';
 import logger from '@reactory/server-core/logging';
 
 // ─── Props interfaces ────────────────────────────────────────────────────────
@@ -133,7 +134,70 @@ function isConnectionError(result: MongoConnection | { error: any }): result is 
 // ─── MongoReadMacro ──────────────────────────────────────────────────────────
 
 /**
+ * Fields that must not leave the database on a read of a user collection.
+ *
+ * This is a read-side denylist, applied by the macro itself: `find` accepts an
+ * arbitrary collection name and an arbitrary projection, so `mongo` could read the
+ * `users` collection with no projection and hand back a User document complete with
+ * its PBKDF2 `password`, `salt`, `sessionInfo` refresh tokens and third-party
+ * `authentications[].props.accessToken`. The rows are then formatted, possibly written
+ * to a file, and returned to a model provider.
+ */
+const SENSITIVE_USER_FIELDS = [
+  'password',
+  'salt',
+  'sessionInfo',
+  'authentications',
+  'memberships',
+  'jwtToken',
+  'jwtPayload',
+  'jwtPayloadJson',
+  'refresh',
+  'refreshToken',
+  'accessToken',
+  'apiKey',
+  'clientSecret',
+  'secret',
+];
+
+/** `users`, `reactory_users`, `core.users` — never a collection merely containing "user". */
+const USER_COLLECTION_PATTERN = /(^|[._-])(users?|reactory_users?)$/i;
+
+const isUserCollection = (collection?: string): boolean =>
+  typeof collection === 'string' && USER_COLLECTION_PATTERN.test(collection.trim());
+
+/** True when a caller projection asks for specific fields to be returned. */
+const isInclusionProjection = (projection: any): boolean => {
+  if (!projection || typeof projection !== 'object' || Array.isArray(projection)) return false;
+  return Object.entries(projection).some(
+    ([key, value]) => key !== '_id' && value !== 0 && value !== false
+  );
+};
+
+/**
+ * Extend a projection with the sensitive-field exclusions.
+ *
+ * MongoDB forbids mixing inclusion and exclusion in one projection (except `_id`), so
+ * this is only applied to an exclusion-style or absent projection; inclusion projections
+ * are covered by the post-read redaction instead.
+ */
+const withSensitiveFieldExclusions = (projection: any): Record<string, any> => {
+  const exclusion: Record<string, any> = {};
+  for (const field of SENSITIVE_USER_FIELDS) exclusion[field] = 0;
+
+  if (projection && typeof projection === 'object' && !Array.isArray(projection)) {
+    return { ...projection, ...exclusion };
+  }
+  return exclusion;
+};
+
+/**
  * MongoDB read macro – executes find, aggregation, or raw JSON queries.
+ *
+ * Read-side guarding: a `users`/`reactory_users` collection (or a find with no explicit
+ * projection) gets `SENSITIVE_USER_FIELDS` excluded, and aggregation/inclusion-projection
+ * results are passed through the shared redaction pass before formatting, caching or
+ * writing to disk. See the tool description.
  */
 export const MongoReadMacro: Macro<DatabaseMacroResult, MongoReadMacroProps> = async (
   props: MongoReadMacroProps,
@@ -249,13 +313,23 @@ Retrieved cached results for: **${name.trim()}**
     let result: any;
     let queryType = 'unknown';
 
+    // Read-side guard. A `users` collection (or a find with no projection) must not
+    // return credential fields at all; an inclusion projection or an aggregation has to
+    // be filtered after the read, because an exclusion cannot be mixed into it.
+    const userCollection = isUserCollection(collection);
+    const safeProjection = isInclusionProjection(projection)
+      ? projection
+      : userCollection || !projection
+        ? withSensitiveFieldExclusions(projection)
+        : projection;
+
     if (pipeline && Array.isArray(pipeline)) {
       if (!collection) throw new Error('Collection name is required for aggregation pipeline');
       result = await conn.db.collection(collection).aggregate(pipeline).toArray();
       queryType = 'aggregation';
     } else if (filter) {
       if (!collection) throw new Error('Collection name is required for find query');
-      let cursor = conn.db.collection(collection).find(filter, projection);
+      let cursor = conn.db.collection(collection).find(filter, safeProjection);
       if (sort) cursor = cursor.sort(sort);
       if (skip) cursor = cursor.skip(skip);
       if (limit) cursor = cursor.limit(limit);
@@ -265,13 +339,21 @@ Retrieved cached results for: **${name.trim()}**
       if (!collection) throw new Error('Collection name is required for raw query');
       try {
         const queryObj = JSON.parse(query);
-        result = await conn.db.collection(collection).find(queryObj).toArray();
+        // A raw JSON query carries no projection argument, so the default exclusion applies.
+        result = await conn.db.collection(collection).find(queryObj, safeProjection).toArray();
         queryType = 'find';
       } catch {
         throw new Error('Invalid query format. Please use valid JSON for find operations.');
       }
     } else {
       throw new Error('No valid query parameters provided');
+    }
+
+    // Defence in depth: whatever the projection could not exclude (aggregation output,
+    // an inclusion projection, a computed field named e.g. `secret`) is redacted before
+    // it is formatted, cached or written to a file by `saveToFile`.
+    if (Array.isArray(result)) {
+      result = result.map((row) => ToolResultProcessor.redactSensitive(row));
     }
 
     const queryExecutionTime = Date.now() - queryStartTime;
@@ -577,7 +659,7 @@ export const MongoReadMacroRegistry: MacroComponentDefinition<typeof MongoReadMa
   name: 'mongo',
   version: '1.0.0',
   component: MongoReadMacro,
-  description: 'Execute read queries against MongoDB databases (find, aggregation, raw JSON query)',
+  description: 'Execute read queries against MongoDB databases (find, aggregation, raw JSON query). Reads of a users collection - and any find without an explicit projection - always exclude credential fields (password, salt, sessionInfo, authentications, memberships, jwt*/refresh/access tokens, secrets); aggregation and inclusion-projection results are redacted before they are returned or saved.',
   features: [],
   stem: 'mongo',
   roles: ['DEVELOPER', 'ADMIN'],
@@ -586,7 +668,7 @@ export const MongoReadMacroRegistry: MacroComponentDefinition<typeof MongoReadMa
     type: "function",
     function: {
       name: "mongo",
-      description: "Execute read queries against MongoDB databases (find, aggregation, raw JSON query)",
+      description: "Execute read queries against MongoDB databases (find, aggregation, raw JSON query). Reads of a users collection - and any find without an explicit projection - always exclude credential fields (password, salt, sessionInfo, authentications, memberships, jwt*/refresh/access tokens, secrets); no projection can opt back in. Aggregation and inclusion-projection results are redacted before they are returned or saved.",
       icon: "storage",
       parameters: {
         type: "object",

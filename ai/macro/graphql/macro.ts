@@ -15,6 +15,16 @@ const DEFAULT_GQL = `
 
 /**
  * Executes a GraphQL query and returns the result
+ *
+ * NOTE — credential exposure is NOT fixed here, and deliberately so. `query` is an
+ * arbitrary document, so there is no macro-local way to know which selection set maps
+ * to a sensitive field: the caller can request `users { password salt sessionInfo }`
+ * and any attempt to parse or deny-list GraphQL in this file would be a partial
+ * re-implementation of the schema. The structural fix is to remove `salt` and
+ * `password` from the `User` GraphQL type in the core module (owned by the sibling
+ * ticket); `ToolResultProcessor` still redacts any such field that reaches the tool
+ * result, so this is defence in depth rather than an open hole.
+ *
  * @param props - QueryGQLProps - { query, variables, options, format, outmap } 
  * @param state - ChatState
  * @returns 

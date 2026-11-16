@@ -77,6 +77,62 @@ export interface AttachSupportTicketFileProps {
   name?: string;
 }
 
+/**
+ * A person referenced by a support ticket, as exposed in a tool result.
+ *
+ * This is deliberately NOT a User document. The populated reference used to be
+ * serialised whole into the tool result - password hash, `salt`, `sessionInfo`
+ * refresh tokens, third-party OAuth `accessToken`s, `memberships` and `roles` -
+ * and that result is appended to the conversation and sent to the model provider.
+ * Everything here is an allow-list; a field added to the User model cannot widen
+ * this shape by accident.
+ */
+export interface SupportTicketPersonView {
+  /** String id; never a Buffer or an object. Null when the reference was absent. */
+  id: string | null;
+  firstName: string | null;
+  lastName: string | null;
+  email: string | null;
+  /** "First Last", else username, else email; null for an unpopulated reference. */
+  displayName: string | null;
+}
+
+/**
+ * A support ticket as exposed in a tool result.
+ *
+ * An explicit projection instead of the raw Mongoose document: `data` used to be
+ * the document, so whatever the service happened to populate was serialised
+ * verbatim. Comments and documents are present only when the caller loaded them
+ * populated.
+ */
+export interface SupportTicketView {
+  id: string;
+  reference: string | null;
+  request: string | null;
+  description: string | null;
+  status: string | null;
+  priority: string | null;
+  requestType: string | null;
+  formId: string | null;
+  tags: string[];
+  meta: any;
+  createdDate: Date | null;
+  updatedDate: Date | null;
+  reportedDate: Date | null;
+  slaDeadline: Date | null;
+  isOverdue: boolean;
+  triage: any;
+  escalation: any;
+  createdBy: SupportTicketPersonView | null;
+  reportedBy: SupportTicketPersonView | null;
+  updatedBy: SupportTicketPersonView | null;
+  assignedTo: SupportTicketPersonView | null;
+  /** Present only when the ticket was loaded with its comments populated. */
+  comments?: SupportTicketCommentView[];
+  /** Present only when the ticket was loaded with its files populated. */
+  documents?: SupportTicketFileView[];
+}
+
 /** The author of a comment, resolved to something a reader can name. */
 export interface SupportTicketCommentAuthorView {
   id: string | null;

@@ -11,6 +11,8 @@ import {
   AttachSupportTicketFileProps,
   SupportTicketCommentView,
   SupportTicketFileView,
+  SupportTicketPersonView,
+  SupportTicketView,
   SupportMacroResult,
 } from "./types";
 import logger from "@reactory/server-core/logging";
@@ -137,11 +139,12 @@ export const GetSupportTicket: Macro<SupportMacroResult, GetSupportTicketProps> 
     if (!state.vars) {
       state.vars = {};
     }
-    state.vars.lastSupportTicket = ticket;
+    const ticketView = toTicketView(ticket);
+    state.vars.lastSupportTicket = ticketView;
 
     return {
       success: true,
-      data: ticket,
+      data: ticketView,
       tool: "getSupportTicket",
       params: props,
       metadata: {
@@ -152,15 +155,15 @@ export const GetSupportTicket: Macro<SupportMacroResult, GetSupportTicketProps> 
       instructions: `
 ## Support Ticket Details
 
-- **ID**: ${ticket.id || (ticket as any)._id}
-- **Reference**: ${ticket.reference || "N/A"}
-- **Request**: ${ticket.request}
-- **Status**: ${ticket.status}
-- **Priority**: ${ticket.priority || "medium"}
-- **Request Type**: ${ticket.requestType || "general"}
-- **Created By**: ${(ticket.createdBy as any)?.firstName} ${(ticket.createdBy as any)?.lastName} (${(ticket.createdBy as any)?.email})
-- **Assigned To**: ${ticket.assignedTo ? `${(ticket.assignedTo as any)?.firstName} ${(ticket.assignedTo as any)?.lastName}` : "Unassigned"}
-- **Description**: ${ticket.description}
+- **ID**: ${ticketView.id}
+- **Reference**: ${ticketView.reference || "N/A"}
+- **Request**: ${ticketView.request}
+- **Status**: ${ticketView.status}
+- **Priority**: ${ticketView.priority || "medium"}
+- **Request Type**: ${ticketView.requestType || "general"}
+- **Created By**: ${ticketView.createdBy?.displayName || "Unknown"} (${ticketView.createdBy?.email || "no email"})
+- **Assigned To**: ${ticketView.assignedTo?.displayName || "Unassigned"}
+- **Description**: ${ticketView.description}
       `,
     };
   } catch (error) {
@@ -269,24 +272,27 @@ export const ListSupportTickets: Macro<SupportMacroResult, ListSupportTicketsPro
     const result = await supportService.pagedRequest(filter, paging);
     const executionTime = Date.now() - startTime;
 
+    // Project every row: a list result used to carry each ticket's populated users
+    // whole. The paging envelope is preserved so existing consumers are unaffected.
+    const tickets: SupportTicketView[] = (result?.tickets || []).map(toTicketView);
+    const total = result?.paging?.total || tickets.length;
+    const pagedResult = { ...(result || {}), tickets };
+
     if (!state.vars) {
       state.vars = {};
     }
-    state.vars.lastSupportTickets = result;
-
-    const tickets = result?.tickets || [];
-    const total = result?.paging?.total || tickets.length;
+    state.vars.lastSupportTickets = pagedResult;
 
     const ticketListSummary = tickets
       .map(
-        (t: any, idx: number) =>
-          `${idx + 1}. [${t.status?.toUpperCase() || "NEW"}] (${t.priority || "normal"}) **${t.request}** (Ref: ${t.reference || t.id || t._id}) - Assigned: ${t.assignedTo ? `${t.assignedTo.firstName} ${t.assignedTo.lastName}` : "Unassigned"}`
+        (t, idx) =>
+          `${idx + 1}. [${t.status?.toUpperCase() || "NEW"}] (${t.priority || "normal"}) **${t.request}** (Ref: ${t.reference || t.id}) - Assigned: ${t.assignedTo?.displayName || "Unassigned"}`
       )
       .join("\n");
 
     return {
       success: true,
-      data: result,
+      data: pagedResult,
       tool: "listSupportTickets",
       params: props,
       metadata: {
@@ -448,13 +454,14 @@ export const CreateSupportTicket: Macro<SupportMacroResult, CreateSupportTicketP
     if (!state.vars) {
       state.vars = {};
     }
-    state.vars.lastCreatedSupportTicket = ticket;
+    const createdTicketView = toTicketView(ticket);
+    state.vars.lastCreatedSupportTicket = createdTicketView;
 
     logger.info(`CreateSupportTicket macro created ticket: ${ticket.reference || ticket.id} by user: ${state.user?.id}`);
 
     return {
       success: true,
-      data: ticket,
+      data: createdTicketView,
       tool: "createSupportTicket",
       params: props,
       metadata: {
@@ -465,12 +472,12 @@ export const CreateSupportTicket: Macro<SupportMacroResult, CreateSupportTicketP
       instructions: `
 ## Support Ticket Created Successfully
 
-- **ID**: ${ticket.id || (ticket as any)._id}
-- **Reference**: ${ticket.reference}
-- **Request**: ${ticket.request}
-- **Status**: ${ticket.status}
-- **Priority**: ${priority}
-- **Request Type**: ${requestType}
+- **ID**: ${createdTicketView.id}
+- **Reference**: ${createdTicketView.reference}
+- **Request**: ${createdTicketView.request}
+- **Status**: ${createdTicketView.status}
+- **Priority**: ${createdTicketView.priority || priority}
+- **Request Type**: ${createdTicketView.requestType || requestType}
       `,
     };
   } catch (error) {
@@ -595,13 +602,14 @@ export const UpdateSupportTicket: Macro<SupportMacroResult, UpdateSupportTicketP
     if (!state.vars) {
       state.vars = {};
     }
-    state.vars.lastUpdatedSupportTicket = updatedTicket;
+    const updatedTicketView = toTicketView(updatedTicket);
+    state.vars.lastUpdatedSupportTicket = updatedTicketView;
 
     logger.info(`UpdateSupportTicket macro updated ticket ${ticketId} by user: ${state.user?.id}`);
 
     return {
       success: true,
-      data: updatedTicket,
+      data: updatedTicketView,
       tool: "updateSupportTicket",
       params: props,
       metadata: {
@@ -612,10 +620,10 @@ export const UpdateSupportTicket: Macro<SupportMacroResult, UpdateSupportTicketP
       instructions: `
 ## Support Ticket Updated
 
-- **ID**: ${updatedTicket.id || (updatedTicket as any)._id}
-- **Status**: ${updatedTicket.status}
-- **Priority**: ${updatedTicket.priority}
-- **Assigned To**: ${updatedTicket.assignedTo ? `${(updatedTicket.assignedTo as any)?.firstName} ${(updatedTicket.assignedTo as any)?.lastName}` : "Unassigned"}
+- **ID**: ${updatedTicketView.id}
+- **Status**: ${updatedTicketView.status}
+- **Priority**: ${updatedTicketView.priority}
+- **Assigned To**: ${updatedTicketView.assignedTo?.displayName || "Unassigned"}
 - **Last Updated**: ${new Date().toISOString()}
       `,
     };
@@ -749,11 +757,12 @@ export const AddSupportTicketComment: Macro<SupportMacroResult, AddSupportTicket
     if (!state.vars) {
       state.vars = {};
     }
-    state.vars.lastSupportTicketComment = commentDoc;
+    const commentView = toCommentView(commentDoc);
+    state.vars.lastSupportTicketComment = commentView;
 
     return {
       success: true,
-      data: commentDoc,
+      data: commentView,
       tool: "addSupportTicketComment",
       params: props,
       metadata: {
@@ -764,8 +773,8 @@ export const AddSupportTicketComment: Macro<SupportMacroResult, AddSupportTicket
       instructions: `
 ## Comment Added to Ticket ${ticketId}
 
-- **Comment ID**: ${commentDoc.id || (commentDoc as any)._id}
-- **Text**: ${commentDoc.text}
+- **Comment ID**: ${commentView.id}
+- **Text**: ${commentView.text}
 - **Created Date**: ${new Date().toISOString()}
       `,
     };
@@ -1187,18 +1196,169 @@ const resolveSupportTicket = async (
   return { ticketId, ticket, lookup: "reference" };
 };
 
-/** Normalise a comment to the shape the agent consumes (never trust optional fields). */
-const toCommentView = (comment: any): SupportTicketCommentView => ({
-  id: String(comment?.id ?? comment?._id ?? ""),
-  text: typeof comment?.text === "string" ? comment.text : "",
-  createdAt: comment?.createdAt ? new Date(comment.createdAt) : null,
-  author: {
-    id: comment?.author?.id ?? null,
-    name: comment?.author?.name ?? null,
-  },
-  parentId: comment?.parentId ?? null,
-  attachments: Array.isArray(comment?.attachments) ? comment.attachments.map(toAttachmentView) : [],
-});
+/** True when the value is a reference (string, Buffer or bson id) rather than a populated document. */
+const isReference = (value: any): boolean =>
+  value === null ||
+  value === undefined ||
+  typeof value !== "object" ||
+  Buffer.isBuffer(value) ||
+  typeof value._bsontype === "string";
+
+/** String id of a document or reference, or null. */
+const personIdOf = (value: any): string | null => {
+  if (value === null || value === undefined) return null;
+
+  const isBson = (candidate: any): boolean =>
+    candidate !== null && typeof candidate === "object" && typeof candidate._bsontype === "string";
+
+  // A populated document contributes `_id`/`id`; a bare reference is its own id.
+  const id = isBson(value) || Buffer.isBuffer(value) || typeof value !== "object"
+    ? value
+    : value._id ?? value.id ?? null;
+
+  if (id === null || id === undefined) return null;
+  if (typeof id === "object" && !Buffer.isBuffer(id) && !isBson(id)) return null;
+
+  const text = Buffer.isBuffer(id) ? id.toString("hex") : String(id);
+  return text.length > 0 ? text : null;
+};
+
+/**
+ * Human-readable label for a person, falling back through username and email.
+ *
+ * A comment author may already be decorated as `{ id, name }` (by the service or a
+ * caller), so an explicit `name` wins before the name is recomposed.
+ */
+const personDisplayNameOf = (person: any): string | null => {
+  if (isReference(person)) return null;
+  if (typeof person?.name === "string" && person.name.trim().length > 0) return person.name;
+  const parts = [person?.firstName, person?.lastName].filter(
+    (part) => typeof part === "string" && part.trim().length > 0
+  );
+  if (parts.length > 0) return parts.join(" ").trim();
+  if (typeof person?.username === "string" && person.username.length > 0) return person.username;
+  if (typeof person?.email === "string" && person.email.length > 0) return person.email;
+  return null;
+};
+
+/**
+ * Project any user reference on a support ticket to a reader-facing view.
+ *
+ * This is the credential boundary. The populated value is a full User document -
+ * `password` (PBKDF2 hash), `salt`, `sessionInfo[]` with refresh tokens,
+ * `authentications[]` with third-party OAuth access tokens, `memberships` and
+ * `roles` - and this macro result is appended to the conversation and sent to the
+ * model provider. Everything below is an allow-list: a field added to the User
+ * model can never widen this shape by accident.
+ */
+const toPersonView = (person: any): SupportTicketPersonView | null => {
+  if (person === null || person === undefined) return null;
+
+  const id = personIdOf(person);
+  if (isReference(person)) {
+    // A populate miss leaves the raw ObjectId: the id is useful, the name is not known.
+    return { id, firstName: null, lastName: null, email: null, displayName: null };
+  }
+
+  const stringOrNull = (value: any): string | null =>
+    typeof value === "string" && value.trim().length > 0 ? value : null;
+
+  const firstName = stringOrNull(person.firstName);
+  const lastName = stringOrNull(person.lastName);
+  const email = stringOrNull(person.email);
+
+  return {
+    id,
+    firstName,
+    lastName,
+    email,
+    displayName: personDisplayNameOf(person),
+  };
+};
+
+const dateOrNull = (value: any): Date | null => {
+  if (!value) return null;
+  const date = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+};
+
+/**
+ * Normalise a comment to the shape the agent consumes (never trust optional fields).
+ *
+ * The service populates the comment's `user`; a few call sites decorate the object
+ * with `author`. Both are accepted, and the projection is applied so a populated
+ * comment author cannot carry a User document into the result either.
+ */
+const toCommentView = (comment: any): SupportTicketCommentView => {
+  const author = comment?.author ?? comment?.user;
+  const parentId = comment?.parentId ?? comment?.parent ?? null;
+
+  return {
+    id: String(comment?.id ?? comment?._id ?? ""),
+    text: typeof comment?.text === "string" ? comment.text : "",
+    createdAt: dateOrNull(comment?.createdAt),
+    author: {
+      id: personIdOf(author),
+      name: personDisplayNameOf(author),
+    },
+    parentId: parentId === null || parentId === undefined ? null : String(parentId),
+    attachments: Array.isArray(comment?.attachments) ? comment.attachments.map(toAttachmentView) : [],
+  };
+};
+
+/**
+ * Project a support ticket to an explicit, credential-free view.
+ *
+ * `data` used to be the raw Mongoose document, so whatever the service happened to
+ * populate was serialised into the tool result: the ticket's users arrived whole,
+ * password hash and tokens included. This builder is the allow-list the ticket
+ * contract is defined by; comments and documents are included only when the caller
+ * loaded them populated, so a list result does not grow a row of empty file views.
+ */
+const toTicketView = (ticket: any): SupportTicketView => {
+  const slaDeadline = dateOrNull(ticket?.slaDeadline);
+  const populatedComments = Array.isArray(ticket?.comments)
+    ? ticket.comments.filter((comment: any) => !isReference(comment))
+    : [];
+  const populatedDocuments = Array.isArray(ticket?.documents)
+    ? ticket.documents.filter((file: any) => !isReference(file))
+    : [];
+
+  return {
+    id: supportTicketIdOf(ticket) ?? "",
+    reference: supportTicketReferenceOf(ticket),
+    request: typeof ticket?.request === "string" ? ticket.request : null,
+    description: typeof ticket?.description === "string" ? ticket.description : null,
+    status: typeof ticket?.status === "string" ? ticket.status : null,
+    priority: typeof ticket?.priority === "string" ? ticket.priority : null,
+    requestType: typeof ticket?.requestType === "string" ? ticket.requestType : null,
+    formId: typeof ticket?.formId === "string" ? ticket.formId : null,
+    tags: Array.isArray(ticket?.tags)
+      ? ticket.tags.filter((tag: any) => typeof tag === "string")
+      : [],
+    meta: ticket?.meta ?? null,
+    createdDate: dateOrNull(ticket?.createdDate),
+    updatedDate: dateOrNull(ticket?.updatedDate),
+    reportedDate: dateOrNull(ticket?.reportedDate),
+    slaDeadline,
+    isOverdue:
+      typeof ticket?.isOverdue === "boolean"
+        ? ticket.isOverdue
+        : Boolean(slaDeadline && Date.now() > slaDeadline.getTime()),
+    triage: ticket?.triage ?? null,
+    escalation: ticket?.escalation ?? null,
+    createdBy: toPersonView(ticket?.createdBy),
+    reportedBy: toPersonView(ticket?.reportedBy),
+    updatedBy: toPersonView(ticket?.updatedBy),
+    assignedTo: toPersonView(ticket?.assignedTo),
+    ...(populatedComments.length > 0
+      ? { comments: populatedComments.map(toCommentView) }
+      : {}),
+    ...(populatedDocuments.length > 0
+      ? { documents: populatedDocuments.map(toAttachmentView) }
+      : {}),
+  };
+};
 
 /** Normalise a file to reader-facing metadata. */
 function toAttachmentView(file: any): SupportTicketFileView {

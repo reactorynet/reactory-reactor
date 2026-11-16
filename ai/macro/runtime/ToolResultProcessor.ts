@@ -44,6 +44,232 @@ export class ToolResultProcessor {
   /** Default per-field character budget applied when curating a `data` object. */
   private static readonly DEFAULT_FIELD_BUDGET = 2000;
 
+  /** Replacement written in place of a credential value. */
+  public static readonly REDACTED = '[REDACTED]';
+
+  /** Marker substituted for a repeated object reference, so cycles stay serialisable. */
+  private static readonly CIRCULAR = '[Circular]';
+
+  /**
+   * Marker substituted for a subtree deeper than {@link MAX_REDACTION_DEPTH}.
+   *
+   * Replacing rather than passing the subtree through is deliberate: the walk cannot
+   * prove an unwalked subtree is clean, so it must not be returned. Real credential
+   * payloads are shallow (User -> sessionInfo[] -> jwtPayload), so this only ever
+   * fires on pathological nesting.
+   */
+  private static readonly DEPTH_LIMIT = '[DEPTH-LIMIT]';
+
+  /**
+   * Maximum object depth walked by {@link redactSensitive}.
+   *
+   * A cap rather than unbounded recursion: tool results can embed deeply nested
+   * provider payloads and an adversarial or accidental graph must not overflow the
+   * stack. Credentials in this platform are shallow (User -> sessionInfo[] ->
+   * jwtPayload), so 12 levels is far deeper than anything real.
+   *
+   * The ceiling is fail-closed: once reached, the subtree is replaced with
+   * {@link DEPTH_LIMIT}. Returning it uninspected would mean "too deep to check" was
+   * silently reported as "clean".
+   */
+  private static readonly MAX_REDACTION_DEPTH = 12;
+
+  /**
+   * Field names whose values are credential material and must never reach the model.
+   *
+   * This is the last line of defence, not the first: macros must project their own
+   * results (see the support/user macros) and services must select fields. It exists
+   * because the only pass over a tool result used to bound *size*, so a payload that
+   * happened to carry a serialised User document - password hash, `salt`,
+   * `sessionInfo[].jwtPayload.refresh`, `authentications[].props.accessToken` - was
+   * appended to the conversation, sent to the model provider and, when oversized,
+   * also written to `*-output-*.json` in the agent workspace.
+   *
+   * Keys are compared after stripping non-alphanumerics and lower-casing, so
+   * `set-cookie`, `setCookie` and `SET_COOKIE` are the same entry. Prefixed HTTP
+   * spellings (`x-api-key`, `proxy-authorization`) are listed explicitly because
+   * normalisation does not strip the prefix.
+   */
+  public static readonly SENSITIVE_KEYS: ReadonlySet<string> = new Set([
+    'password',
+    'salt',
+    'sessioninfo',
+    'authentications',
+    'memberships',
+    'jwttoken',
+    'jwtpayload',
+    'jwtpayloadjson',
+    'refresh',
+    'refreshtoken',
+    'accesstoken',
+    'apikey',
+    'secret',
+    'clientsecret',
+    'authorization',
+    'proxyauthorization',
+    'xapikey',
+    'setcookie',
+  ]);
+
+  /** Normalise a field name for comparison (case and punctuation insensitive). */
+  private static normaliseKey(key: string): string {
+    return String(key).replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  }
+
+  /** True when this field name holds credential material. */
+  public static isSensitiveKey(key: string): boolean {
+    return ToolResultProcessor.SENSITIVE_KEYS.has(ToolResultProcessor.normaliseKey(key));
+  }
+
+  /**
+   * Deep-walk a tool result and replace credential values with the redaction marker.
+   *
+   * Applied to the whole result, which covers the three surfaces a macro returns:
+   * `data` (the payload), `metadata` and the echoed `params`. It is deliberately
+   * key-based and in place: the shape is preserved (the key survives, its value becomes
+   * the marker) so existing consumers and renders keep working, and nothing that was
+   * not already a credential changes identity. Arrays and nested objects are walked.
+   *
+   * Safety properties:
+   *  - **Cycles**: a repeated object reference becomes the circular marker; the walk
+   *    terminates and `JSON.stringify` still succeeds downstream.
+   *  - **Very large objects**: traversal is bounded in depth, so it is O(nodes) time
+   *    with a hard recursion ceiling. The ceiling is fail-closed: a subtree at the
+   *    limit is replaced with the depth marker rather than returned uninspected.
+   *  - **Special values**: Dates, Buffers and bson ObjectIds pass through untouched;
+   *    walking them would either destroy the value or explode Mongoose internals.
+   *  - **Mongoose documents** are converted with `toObject()` first, so the walk sees
+   *    schema fields rather than internals.
+   */
+  public static redactSensitive<T = any>(value: T): T {
+    return ToolResultProcessor.redactNode(value, 0, new WeakSet<object>()) as T;
+  }
+
+  private static redactNode(value: any, depth: number, seen: WeakSet<object>): any {
+    if (value === null || value === undefined) return value;
+    if (typeof value !== 'object') return value;
+
+    // Values whose JSON form is already scalar/safe - do not walk their internals.
+    if (value instanceof Date) return value;
+    if (typeof Buffer !== 'undefined' && Buffer.isBuffer(value)) return value;
+    const bsonType = (value as any)._bsontype;
+    if (bsonType === 'ObjectID' || bsonType === 'ObjectId' || bsonType === 'Long') return value;
+
+    // Mongoose documents: walk the plain representation, not the document internals.
+    let node: any = value;
+    if (typeof (value as any).toObject === 'function') {
+      try {
+        node = (value as any).toObject({ virtuals: true, getters: false });
+      } catch {
+        node = value;
+      }
+    }
+
+    // A node already on the current path is a cycle, not shared data: the same object
+    // legitimately referenced twice (createdBy and updatedBy populated with one user
+    // document) must be walked at each reference, so this set is an ancestor path and
+    // is unwound on the way back up.
+    if (seen.has(node)) return ToolResultProcessor.CIRCULAR;
+    seen.add(node);
+
+    try {
+      // Fail closed: an unwalked subtree is replaced, never returned intact.
+      if (depth >= ToolResultProcessor.MAX_REDACTION_DEPTH) {
+        return ToolResultProcessor.DEPTH_LIMIT;
+      }
+
+      if (Array.isArray(node)) {
+        for (let index = 0; index < node.length; index += 1) {
+          node[index] = ToolResultProcessor.redactNode(node[index], depth + 1, seen);
+        }
+        return node;
+      }
+
+      for (const key of Object.keys(node)) {
+        if (ToolResultProcessor.isSensitiveKey(key)) {
+          node[key] = ToolResultProcessor.REDACTED;
+          continue;
+        }
+        node[key] = ToolResultProcessor.redactNode(node[key], depth + 1, seen);
+      }
+
+      return node;
+    } finally {
+      seen.delete(node);
+    }
+  }
+
+  /**
+   * Matches a `key: value` / `key=value` pair in free text, so credential material can
+   * be found in a payload that is not structured JSON (shell output, a rendered table,
+   * `util.inspect` output, an HTML snippet).
+   */
+  private static readonly CREDENTIAL_TEXT_PATTERN =
+    /("?[A-Za-z0-9_.-]+"?\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|[^\s,;\]})]+)/g;
+
+  /** A PBKDF2 password hash is recognisable by its algorithm prefix, wherever it sits. */
+  private static readonly CREDENTIAL_VALUE_PATTERN = /pbkdf2\S*/gi;
+
+  /** Textual replacement keeps the value quoted when it was quoted. */
+  private static redactTextPair(_match: string, prefix: string, rawValue: string): string {
+    const name = prefix.replace(/["'\s:=]/g, '');
+    const leaf = name.split('.').pop() || name;
+    if (!ToolResultProcessor.isSensitiveKey(leaf)) return _match;
+
+    const first = rawValue.charAt(0);
+    const quote = first === '"' || first === "'" ? first : '';
+    return `${prefix}${quote}${ToolResultProcessor.REDACTED}${quote}`;
+  }
+
+  /**
+   * Redact credential material from a **string** tool result.
+   *
+   * `redactSensitive()` is a structural walk, so it cannot see inside a string - and a
+   * string result is a normal shape here: the graphql macro returns
+   * `JSON.stringify(result)`, the data macros return `JSON.stringify(rows)`, and shell
+   * output is a string. A string result above `maxOutputSize` used to be written to
+   * `<tool>-output-*.log` verbatim, so a serialised User document in string form was
+   * persisted to disk with its password hash and salt intact.
+   *
+   * Two passes, strongest first:
+   *  1. If the string is a JSON document, parse it, redact it structurally and
+   *     re-serialise - exactly the object guarantee, including nested keys.
+   *  2. Otherwise scrub `key: value` pairs textually (by key name) and any
+   *     credential-shaped value such as a password hash.
+   */
+  public static redactSensitiveText(value: string): string {
+    if (typeof value !== 'string' || value.length === 0) return value;
+
+    const head = value.trimStart().charAt(0);
+    if (head === '{' || head === '[') {
+      try {
+        const parsed = JSON.parse(value);
+        if (parsed !== null && typeof parsed === 'object') {
+          const redacted = ToolResultProcessor.redactSensitive(parsed);
+          const indentMatch = value.match(/\n([ \t]+)\S/);
+          return JSON.stringify(redacted, null, indentMatch ? indentMatch[1] : undefined);
+        }
+      } catch {
+        // Not JSON: fall through to the textual scrub rather than persisting it raw.
+      }
+    }
+
+    return ToolResultProcessor.scrubCredentialText(value);
+  }
+
+  /** Redact credential key/value pairs and credential-shaped values in free text. */
+  private static scrubCredentialText(text: string): string {
+    const scrubbed = text.replace(
+      ToolResultProcessor.CREDENTIAL_TEXT_PATTERN,
+      ToolResultProcessor.redactTextPair
+    );
+
+    return scrubbed.replace(
+      ToolResultProcessor.CREDENTIAL_VALUE_PATTERN,
+      ToolResultProcessor.REDACTED
+    );
+  }
+
   /** Notice attached to a curated `params` field, distinguishing it from curated output. */
   private static readonly PARAMS_NOTICE =
     'The request payload was omitted from this result to avoid echoing your own input back to ' +
@@ -237,6 +463,18 @@ export class ToolResultProcessor {
       return { result: rawResult, outputTruncated: false };
     }
 
+    // Redact credential material FIRST - before the payload is measured, before the
+    // offload-to-file branch writes it to disk and before it is returned for the
+    // conversation. Doing this after the offload branch (or not at all) turns a leak
+    // into a persisted artefact in the agent workspace.
+    //
+    // Strings take the text path: a structural walk cannot see inside one, and a string
+    // result is a documented shape here (graphql/data return JSON strings, shell returns
+    // raw output). Both paths must be clean before the size check and the file write.
+    rawResult = typeof rawResult === 'string'
+      ? ToolResultProcessor.redactSensitiveText(rawResult)
+      : ToolResultProcessor.redactSensitive(rawResult);
+
     const maxOutputSize = options?.maxOutputSize && options.maxOutputSize > 0
       ? options.maxOutputSize
       : ToolResultProcessor.getDefaultMaxOutputSize();
@@ -341,7 +579,12 @@ export class ToolResultProcessor {
           message: noticeMessage,
           instructions: instructionsText,
           tool: toolName,
-          params: ToolResultProcessor.curateParams(params, paramsBudget)
+          // `params` may be the caller's own object rather than the one on the result,
+          // so it is redacted on its way in as well.
+          params: ToolResultProcessor.curateParams(
+            ToolResultProcessor.redactSensitive(params),
+            paramsBudget
+          )
         };
       }
     } else {

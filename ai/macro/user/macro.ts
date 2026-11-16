@@ -259,12 +259,25 @@ No user found with email: **${email.trim()}**
 
     const displayName = `${user.firstName} ${user.lastName}`.trim();
 
+    // The result view is what gets persisted too. `state.vars` is written into the
+    // conversation record and replayed on every later turn, so storing the raw user
+    // document here re-leaked the password hash, salt, session refresh tokens and
+    // third-party access tokens even though `data` was already projected.
+    const userView = {
+      id: user.id || (user as any)._id?.toString(),
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: email.trim(),
+      found: true,
+      displayName,
+    };
+
     // Store in chat state for AI reference
     if (!state.vars) {
       state.vars = {};
     }
     state.vars.lastGetUser = {
-      user,
+      user: userView,
       email: email.trim(),
       found: true,
       lastAccessed: new Date(),
@@ -275,14 +288,7 @@ No user found with email: **${email.trim()}**
 
     return {
       success: true,
-      data: {
-        id: user.id || (user as any)._id?.toString(),
-        firstName: user.firstName,
-        lastName: user.lastName,
-        email: email.trim(),
-        found: true,
-        displayName,
-      },
+      data: userView,
       tool: "getUser",
       params: props,
       metadata: {
@@ -519,12 +525,23 @@ User already exists: **${displayName}**
     const displayName = `${user.firstName} ${user.lastName}`.trim();
     const executionTime = Date.now() - startTime;
 
+    // Projected view - see the note on `lastGetUser` above. A newly created user is
+    // still a full document and carries a password hash and session material.
+    const userView = {
+      id: user.id || (user as any)._id?.toString(),
+      firstName: user.firstName,
+      lastName: user.lastName,
+      email: email.trim(),
+      created: true,
+      displayName,
+    };
+
     // Store in chat state for AI reference
     if (!state.vars) {
       state.vars = {};
     }
     state.vars.lastCreateUser = {
-      user,
+      user: userView,
       email: email.trim(),
       created: true,
       lastCreated: new Date(),
@@ -535,14 +552,7 @@ User already exists: **${displayName}**
 
     return {
       success: true,
-      data: {
-        id: user.id || (user as any)._id?.toString(),
-        firstName: user.firstName,
-        lastName: user.lastName,
-        email: email.trim(),
-        created: true,
-        displayName,
-      },
+      data: userView,
       tool: "createUser",
       params: props,
       metadata: {

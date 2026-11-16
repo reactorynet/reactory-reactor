@@ -1698,7 +1698,7 @@ export default class ReactorConversationService
       _id: conversationId,
       user: this.context.user,
     })
-      .populate("user")
+      .populate("user", "firstName lastName email avatar")
       .exec();
 
     if (!conversation) {
@@ -1867,7 +1867,7 @@ export default class ReactorConversationService
       _id: conversationId,
       user: this.context.user,
     })
-      .populate("user")
+      .populate("user", "firstName lastName email avatar")
       .exec();
 
     if (!conversation) {
@@ -2400,7 +2400,7 @@ export default class ReactorConversationService
       _id: chatSessionId,
       user: this.context.user,
     })
-      .populate("user")
+      .populate("user", "firstName lastName email avatar")
       .exec();
 
     if (!conversation) {
@@ -2560,7 +2560,7 @@ export default class ReactorConversationService
       _id: chatSessionId,
       user: this.context.user,
     })
-      .populate("user")
+      .populate("user", "firstName lastName email avatar")
       .exec();
 
     if (!conversation) {
@@ -3987,7 +3987,7 @@ export default class ReactorConversationService
       _id: chatSessionId,
       user: this.context.user,
     })
-      .populate("user")
+      .populate("user", "firstName lastName email avatar")
       .exec();
 
     if (!conversation) {
@@ -4255,7 +4255,7 @@ export default class ReactorConversationService
       .sort({ updated: -1 })
       .skip(offset)
       .limit(limit)
-      .populate("user")      
+      .populate("user", "firstName lastName email avatar")      
       .exec();
   }
 
@@ -5088,7 +5088,7 @@ export default class ReactorConversationService
       // unstamped legacy documents — see conversationReadScope.
       ...this.conversationReadScope(),
     })
-      .populate("user")
+      .populate("user", "firstName lastName email avatar")
       .populate("files")
       .exec();
 
@@ -5622,7 +5622,7 @@ export default class ReactorConversationService
           user: this.context.user,
           started: conversationData.started,
         })
-          .populate("user")
+          .populate("user", "firstName lastName email avatar")
           .exec();
 
         if (existingConversation) {
@@ -6513,7 +6513,7 @@ export default class ReactorConversationService
               // Fetch the conversation without modifying it so we can build the SSE init response
               const existingConversation = await ReactorConversationModel.findOne(
                 { _id: chatSessionId, user: this.context.user },
-              ).populate("user").exec();
+              ).populate("user", "firstName lastName email avatar").exec();
 
               if (!existingConversation) {
                 const errorResponse = this.createErrorResponse(
@@ -6547,7 +6547,7 @@ export default class ReactorConversationService
           if (isEmptyProbe) {
             const probeConv = await ReactorConversationModel.findOne(
               { _id: chatSessionId, user: this.context.user },
-            ).populate("user").exec();
+            ).populate("user", "firstName lastName email avatar").exec();
 
             if (!probeConv) {
               throw new Error(
@@ -6581,7 +6581,7 @@ export default class ReactorConversationService
             // the conversation and call the AI provider without adding a duplicate message.
             conversation = await ReactorConversationModel.findOne(
               { _id: chatSessionId, user: this.context.user },
-            ).populate("user").exec();
+            ).populate("user", "firstName lastName email avatar").exec();
           } else {
             // Use findOneAndUpdate to atomically find and update the conversation
             // This prevents race conditions that could lead to duplicate creation
@@ -6618,7 +6618,7 @@ export default class ReactorConversationService
               },
               { new: true, upsert: false }
             )
-              .populate("user")
+              .populate("user", "firstName lastName email avatar")
               .exec();
 
             // Phase 3 step 3a dual-write, applied AFTER the write so the row is
@@ -9061,7 +9061,7 @@ export default class ReactorConversationService
     const conversation = await ReactorConversationModel.findOne({
       _id: chatSessionId,
       user: this.context.user,
-    }).populate("user").exec();
+    }).populate("user", "firstName lastName email avatar").exec();
 
     if (!conversation) {
       throw new Error("Conversation not found or you do not have permission to access it");
@@ -9449,7 +9449,7 @@ export default class ReactorConversationService
       // streams to it. Return the initiate-SSE shape the client expects and run
       // the continuation in the background, exactly as before.
       const updatedConversation = await ReactorConversationModel.findById(chatSessionId)
-        .populate("user").exec();
+        .populate("user", "firstName lastName email avatar").exec();
 
       (async () => {
         try {
@@ -10510,7 +10510,7 @@ export default class ReactorConversationService
       _id: chatSessionId,
       user: this.context.user,
     })
-      .populate("user")
+      .populate("user", "firstName lastName email avatar")
       .exec();
 
     if (!chatSession) {
@@ -12024,7 +12024,7 @@ export default class ReactorConversationService
       _id: chatSessionId,
       user: this.context.user,
     })
-      .populate("user")
+      .populate("user", "firstName lastName email avatar")
       .exec();
 
     if (!conversation) {
