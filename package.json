@@ -24,13 +24,13 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "1.8.0",
-    "@aws-sdk/client-bedrock": "3.1163.0",
-    "@google/genai": "3.1.0",
+    "@aws-sdk/client-bedrock": "3.1169.0",
+    "@google/genai": "3.3.0",
     "@modelcontextprotocol/sdk": "1.32.2",
     "neo-blessed": "^0.2.0",
-    "ollama": "0.6.3",
-    "openai": "7.56.0",
-    "playwright": "1.59.1"
+    "ollama": "0.6.4",
+    "openai": "7.57.0",
+    "playwright": "1.65.1"
   },
   "engines": {
     "node": ">=22"
