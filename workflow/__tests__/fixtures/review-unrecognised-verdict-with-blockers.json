@@ -1,0 +1,16 @@
+{
+  "decision": "approved_with_comments",
+  "headline": "The ACL bypass is still reachable: the broker resolves the topic before it consults the ACL, so a publisher can reach a topic it should not.",
+  "blocking_issues": [
+    {
+      "id": "B1",
+      "severity": "critical",
+      "title": "The broker ignores the topic ACL",
+      "file": "src/acl.ts:12"
+    }
+  ],
+  "non_blocking_issues": [],
+  "required_actions_next_cycle": [
+    "Check the ACL before the topic lookup"
+  ]
+}

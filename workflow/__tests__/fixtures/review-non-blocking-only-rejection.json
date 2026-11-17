@@ -1,0 +1,20 @@
+{
+  "decision": "changes_requested",
+  "headline": "Nothing here blocks the merge; two habits in the new code are worth changing before the next ticket.",
+  "blocking_issues": [],
+  "required_actions_next_cycle": [],
+  "non_blocking_issues": [
+    {
+      "id": "N1",
+      "severity": "low",
+      "title": "Prefer an early return over the nested branch.",
+      "file": "src/acl.ts:20"
+    },
+    {
+      "id": "N2",
+      "severity": "low",
+      "title": "Name the parameter after the domain noun.",
+      "file": "src/acl.ts:34"
+    }
+  ]
+}

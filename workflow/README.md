@@ -69,6 +69,70 @@ The trade-off: this body and the provisioned catalog copy must be kept in step m
 next coordinated release; the operator must re-provision the catalog copy of `1.4.8` for the fix to
 take effect.
 
+#### Before re-provisioning 1.4.8 in place: inventory the in-flight runs (NOT optional)
+
+Re-provisioning `1.4.8` in place changes the body under a version id that running instances are
+already pinned to, and that is not a cosmetic difference:
+
+- `yamlDefinitionFingerprintSeed` (YamlFlowBuilder, milestone M10) is a **content digest** of the
+definition. Its own test asserts that an edited body yields a **different** seed.
+- `@reactorynet/workflow-es` compares that seed when it resumes an instance. A mismatch does not
+re-run the instance against the new graph: it **dead-letters** the instance with
+`reason: "definition-changed"` (see that package's `README.md:76`).
+
+So every `core.ProcessAITicket@1.4.8` instance that is *running or suspended* at the moment of
+re-provisioning dies silently. That includes the states this workflow deliberately parks in:
+`suspended` on the `prApproval` user task, on a halt task (`findingsHaltTask`,
+`reviewUnavailableTask`), and inside the merge poll. Their pull requests stay **open**, their tickets
+stay **in_progress**, and nothing tells anyone why. It also includes the runs this very fix is meant
+to rescue.
+
+Do this **first**, every time, in this order:
+
+1. **Inventory** every live `core.ProcessAITicket@1.4.8` instance — `running` and `suspended` — with
+   its ticket reference and, where it has one, its pull request. Do not rely on a dashboard that
+   only shows recent runs; query the instances, not the logs.
+2. For each instance, pick one and record which:
+   - **let it finish** on the old body (it is suspended on a human step, so it will resume when that
+     human acts — re-provision *after* it completes), or
+   - **plan a manual re-dispatch** on the new body (re-open the ticket so it is re-picked, or drive
+     the child again from the programme path), and note the ticket + PR so the stranded PR is closed
+     or reused rather than duplicated.
+3. Only then re-provision the catalog copy of `1.4.8`, and say in the hand-over note how many
+   instances were inventoried, how many were left to finish, and how many will be re-dispatched.
+
+This is a **required pre-step, not a nicety**: skipping it does not "upgrade the running work", it
+kills it, and the damage is invisible until someone notices a ticket that has been `in_progress`
+for a week with a green CI run and no pull request.
+
+### The reviewer findings schema (REACTORY-302016408/20261116/2437438300) — shipped in place at 1.4.8
+
+1.4.8 resolved findings by listing synonyms of its OWN key names (`blockingFindings` /
+`blocking_findings`), so a reviewer that emitted `blocking_issues` was read as having produced
+nothing: `blockingissues` and `blockingfindings` are different **nouns**, and `resolveKey` compares
+whole normalised names, so no casing rule could ever match. The verdict resolved (the reviewer wrote
+`decision`) while every findings list came back empty, and the run was parked for a human with the
+false reason "the reviewer produced no verdict".
+
+This body now reads `review.json` through ONE published schema — a `// >>> shared review schema`
+block that is byte-identical (modulo indentation) in `captureReview` and `readPublishable` and is
+pinned by a test — covering `decision`, `headline`, `blocking_issues`, `non_blocking_issues`,
+`required_actions_next_cycle` and `acceptance_criteria_assessment`. Three consequences:
+
+- A rejection that carries findings is handed to the engineer as a fix cycle instead of blocking.
+- A rejection that genuinely names nothing still blocks, and says so as a review, not as a parser fault.
+- A findings-shaped list under a key the schema does not know is reported as a **pipeline parser
+  fault** and the key is named, because that is a defect here, not a review that said nothing.
+
+The reviewer prompts state this same shape, so the workflow no longer asks for one schema and parses
+another. The pre-fix prompt drift — `{verdict, findings[], requiredChanges[]}` in the loop versus
+per-finding `blocking: true|false` in the confirmation pass — is closed.
+
+It ships **in place at 1.4.8**, not as 1.4.9, for exactly the reason in the section above: the
+identity cannot move until `PROCESS_AI_TICKET_WORKFLOW_ID` and the catalog copy move with it.
+A 1.4.9 bump is filed as a coordinated-release follow-up and must go through the procedure below as
+one unit.
+
 ### Coordinated version-bump procedure (do this instead of editing `version:` alone)
 
 1. Edit `workflow/ProcessAITicket.yaml` (`nameSpace: core`, `name: ProcessAITicket`).
@@ -81,9 +145,11 @@ take effect.
 5. Land the companion pin in `reactory-core`'s `services/supportWorkflowIds.ts`
    (`PROCESS_AI_TICKET_WORKFLOW_ID`) in the **same release window**. Its guard test compares the
    constant to the body, and `checkWorkflowRegistered` refuses to dispatch an unresolvable id.
-6. Re-provision `reactory-data/workflows/catalog/core/ProcessAITicket/<version>/` and run
-   `__tests__/WorkflowRegistry.test.ts` plus both `ProcessAITicket.*.test.ts` suites before
-   dispatching a real ticket.
+6. Re-provision `reactory-data/workflows/catalog/core/ProcessAITicket/<version>/` **after** the
+   in-flight inventory in the pre-step above, and run `__tests__/WorkflowRegistry.test.ts` plus both
+   `ProcessAITicket.*.test.ts` suites before dispatching a real ticket. Re-provisioning with live
+   instances on the old fingerprint dead-letters them (`definition-changed`) whether the version
+   number moved or not.
 
 Never bump this body alone: the failure mode is silent — every delegated AI ticket run stops
 dispatching until a human fixes the pin.

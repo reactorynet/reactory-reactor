@@ -1,0 +1,116 @@
+{
+  "decision": "changes_requested",
+  "review_cycle": 0,
+  "ticket": "REACTORY-302016408/20261116/3158964361",
+  "reviewer": "QualityQuinnAIPersona",
+  "worktree": "/Users/wernerw/Projects/reactory/reactory-express-server/src/modules/reactory-worktrees/ai-6afaefaf71886425f932959e",
+  "headline": "The bump, the source fix and every ticket-required wire assertion are correct and independently reproduced. One test in the new wire-parity suite is VACUOUS and the PR body presents it as evidence: deleting the unsigned-thinking-block guard from extractThinkingBlocks leaves the suite 13/13 green. That is the one thing to fix before publication.",
+
+  "blocking_issues": [
+    {
+      "id": "B1",
+      "severity": "blocking",
+      "file": "services/reactor/providers/__tests__/AnthropicService.wireParity.test.ts",
+      "lines": "703-733",
+      "test": "thinking-block capture and replay > does not replay an unsigned thinking block (the API would reject it)",
+      "summary": "The test cannot fail. It passes even with the signature filter in extractThinkingBlocks removed, so it does not guard the behaviour it names.",
+      "root_cause": "The fixture's assistant history item is `{ content: \"\", tool_calls: [], thinking_blocks: [{ type: \"thinking\", thinking: \"unsigned reasoning\" }] }`. In convertHistoryToAnthropicFormat (AnthropicService.ts ~332), an assistant turn builds contentBlocks from `extractTextContent(msg.content)` plus `msg.tool_calls`. Both are empty, so `contentBlocks.length === 0` and the function executes `continue` BEFORE `this.extractThinkingBlocks(msg)` is ever called. The whole assistant message is dropped for an unrelated reason, so the assertion `not.toContain(\"unsigned reasoning\")` holds no matter what the signature filter does.",
+      "reproduction": "I mutated the source temporarily and restored it (sha256 verified identical afterwards: 35b57b9aa499a1c250c566c8259a1da3299128bf16dd07101b82f590812e891c).",
+      "reproduction_output": "MUTATION: `if (block.type === \"thinking\") return typeof block.signature === \"string\" && block.signature.length > 0;`  ->  `return true;`\nRESULT: Test Suites: 1 passed | Tests: 13 passed, 13 total  (the unsigned-block test still passes)\nCONTROL: same technique on other guards DOES fail the suite:\n  - cacheReadTokens from message_start -> 0      => 'keeps prompt buckets that arrive only on message_start' FAILS\n  - inputJson += -> =                            => 'reassembles multiple input_json_delta fragments' FAILS\n  - drop collectedThinkingBlocks.push            => 'captures a signed thinking block ... persists it verbatim' FAILS\n  - completionTokens = 0                         => 3 tests FAIL\nSo the harness itself is sound; this one fixture is the hole.",
+      "why_blocking": "The ticket's whole thesis is 'the repo has NO test CI, so a green PR proves nothing'. The PR body cites this test verbatim as one of 'two negative controls' protecting thinking-block replay. A guard that survives deletion of the code it guards is false evidence, and the failure mode it claims to catch (replaying an unsigned thinking block -> API 400 'Expected thinking or redacted_thinking') is exactly the expensive, silent-in-CI class the ticket is about.",
+      "required_fix": "Make the assistant turn survive into convertHistoryToAnthropicFormat so extractThinkingBlocks actually runs. Minimal change: give that fixture a `tool_calls: [{ id: \"toolu_unsigned_1\", type: \"function\", function: { name: \"get_weather\", arguments: '{\"city\":\"Cape Town\"}' } }]` (and add the matching tool_result turn, plus `tools: [SEARCH_TOOL]` on the service) — mirroring the signed-replay test at lines 598-660. Then assert both: (a) `JSON.stringify(body.messages)` does not contain 'unsigned reasoning', and (b) the tool_use IS still present, proving the message was kept and only the unsigned block was filtered. Alternatively give the turn non-empty text content and assert the text block survives. After the fix, re-run the mutation above and confirm the test now FAILS.",
+      "estimated_effort": "one fixture edit, no source change"
+    }
+  ],
+
+  "non_blocking_issues": [
+    {
+      "id": "N1",
+      "file": "services/reactor/providers/__tests__/AnthropicService.wireParity.test.ts",
+      "lines": "387-417",
+      "summary": "The first prompt-cache test's name overstates what it proves.",
+      "detail": "I zeroed `cacheReadTokens` in the message_start handler and this test still passed, because its message_delta repeats the same usage and lines 1348-1352 overwrite cacheReadTokens from message_delta. The regression IS caught — but by the third test ('keeps prompt buckets that arrive only on message_start'). No action required, but if you want the first test to be self-sufficient, drop the cache buckets from its message_delta usage. Worth knowing so nobody later deletes the third test believing the first covers it."
+    },
+    {
+      "id": "N2",
+      "file": "services/reactor/providers/__tests__/AnthropicService.structuredOutput.test.ts",
+      "summary": "A baseline test's assertion was changed rather than added to.",
+      "detail": "`expect(params.temperature).toBe(0.2)` became `toBeUndefined()`. This is legitimate and I confirmed it against the live API (sampling params are a hard 400 on anthropic-version 2026-10-21), but it means the suite no longer proves 'caller sampling is honoured' because that behaviour no longer exists. The rename and inline comment are accurate. No action."
+    },
+    {
+      "id": "N3",
+      "file": "services/reactor/providers/AnthropicService.ts",
+      "lines": "972-990",
+      "summary": "getSamplingSupport() is now policy-only; consider whether it should keep a providers.yaml dependency that no longer affects the wire.",
+      "detail": "Its remaining consumer is the 'caller asked for sampling, so do not think' gate. That is a behavioural choice, not a wire requirement, and for models whose providers.yaml entry says sampling: false the gate silently does nothing. Pre-existing semantics, left unchanged — just flagging that the flag is now doing double duty. Follow-up, not this bump."
+    }
+  ],
+
+  "required_actions_next_cycle": [
+    "Fix B1: make the unsigned-thinking-block fixture reachable (assistant turn must carry text or a tool_call) and re-run the mutation to prove the test now fails when the signature filter is removed.",
+    "Re-run `node scripts/ai/run-worktree-tests.js services/reactor/providers/__tests__` and confirm 17 suites / 216 tests (or 217 if you split the assertions into two tests).",
+    "Update the PR body's thinking-replay bullet to match the new, actually-failing test — it currently reads 'an unsigned block (the flattened thinking string) is never replayed', which the fixture does not exercise today.",
+    "No source changes are required. Do not touch AnthropicService.ts for this."
+  ],
+
+  "acceptance_criteria_assessment": {
+    "(a) tsc delta at the same location": {
+      "status": "MET",
+      "independent_verification": "Re-ran `./node_modules/.bin/tsc -p /tmp/anth-typecheck/tsconfig.module.json --pretty false` from the host (tsc 5.5.3). Sorted diff against the engineer's /tmp/anth-typecheck/final.tsc.txt is EMPTY (0 lines).",
+      "observed": "987 errors before (0.59.0) / 987 after -> total unchanged. 8 errors in AnthropicService.ts, all pre-existing: TS2352 on the stream cast plus 7 Message|Stream narrowing errors. Normalised before-vs-after diff shows only the SDK's own type text gaining `_workspace_id` and line numbers shifting; zero new error codes, zero gone codes.",
+      "note": "The engineer's three saved artefacts corroborate the sequence: before-0.59.0.txt 987, after-bump.txt 988 (the single new TS2339 on `temperature`), after-fix.txt 987."
+    },
+    "(b) provider suites >= 18 suites / 211 tests": {
+      "status": "MET",
+      "independent_verification": "Ran both directories myself with OPENAI_API_KEY and ANTHROPIC_API_KEY unset.",
+      "observed": "services/reactor/providers/__tests__ -> 17 suites / 216 tests passed. ai/openai/chat/questions/__tests__ -> 2 suites / 8 tests passed. Combined 19/224 vs the 18/211 baseline. Wider services/reactor/__tests__ -> 64 suites / 964 tests passed. The 16/203 baseline is consistent with origin/master: that directory has 17 files but one is OpenAIService.streaming.test_plan.md, i.e. 16 suites."
+    },
+    "(c) wire-level proof of the SSE parser": {
+      "status": "MET for every ticket-required case; one extra negative control is vacuous (B1)",
+      "independent_verification": "Ran the suite (13/13) and then mutation-tested it. The real anthropic@1.8.0 client is exercised with only globalThis.fetch replaced; the SDK's own SSE decoder parses the frames.",
+      "case_by_case": {
+        "message_start cache_read + cache_creation reflected in usage": "COVERED and non-vacuous (third test fails when the message_start cache-read assignment is deleted). First test is partly masked by message_delta — see N1.",
+        "fragmented input_json_delta reassembles": "COVERED and non-vacuous (fails when += becomes =).",
+        "signed thinking block captured and replayed on the following request": "COVERED and non-vacuous (fails when the capture push is removed).",
+        "redacted_thinking replayed with its data": "COVERED in the same test; content[1] is asserted toEqual the redacted block, so a broken redacted branch fails it.",
+        "message_delta output_tokens reaches final usage": "COVERED and non-vacuous (fails when completionTokens is zeroed).",
+        "anthropic-version header recorded from the real client": "COVERED. Independently confirmed in the SDK itself: node_modules/@anthropic-ai/sdk/client.mjs:979 sets 'anthropic-version': '2026-10-21'. Also confirmed the auth scheme moved to `authorization: Bearer` (client.mjs:440-460)."
+      }
+    },
+    "(d) live call if a usable key exists": {
+      "status": "MET, not skipped",
+      "independent_verification": "ANTHROPIC_API_KEY is present in the environment (108 chars, sk-ant-api...). I ran my own raw-SDK probe and my own end-to-end probe through the real AnthropicService (temporary test file deleted afterwards; worktree git status verified back to the expected 4 modified + 1 untracked).",
+      "raw_sdk_evidence": "claude-haiku-4-5, max_tokens 16:\n  plain                -> 200, usage {input_tokens:9, output_tokens:16}\n  temperature=0.3      -> 400 invalid_request_error 'temperature: Extra inputs are not permitted'\n  top_p=0.5            -> 400 'top_p: Extra inputs are not permitted'\n  top_k=5              -> 400 'top_k: Extra inputs are not permitted'\n  temperature=0.3 with anthropic-version pinned to 2023-06-01 -> 200",
+      "service_end_to_end_evidence": "Temporary jest probe driving the real AnthropicService against api.anthropic.com: 3/3 passed — non-streaming turn (843 ms), non-streaming turn with caller temperature 0.3 (666 ms, proving the drop works live), streaming turn with a get_weather tool (1017 ms, COMPLETE event observed).",
+      "significance": "This independently confirms the report's central and least obvious claim. The source change is NOT scope creep: before the fix, every haiku-4-5 / sonnet-4-6 turn would have 400'd because buildRequestParams defaulted those personas to temperature 0.7."
+    },
+    "scope: bump only, keep the raw-SSE parser, fix only what breaks": {
+      "status": "MET",
+      "independent_verification": "Read the full source diff. The only production change is inside buildRequestParams plus a local SamplingParams type; the for-await/chunk.type switch, extractThinkingBlocks, the persistence $push and the non-streaming tool loop are untouched (the diff has no hunks in those regions).",
+      "observed": "package.json: one line, 0.59.0 -> 1.8.0. package-lock.json: exactly one removed version line (0.59.0) and 7 added packages (@opentelemetry/api, standardwebhooks, json-schema-to-ts, @babel/runtime, @stablelib/base64, fast-sha256, ts-algebra). No other package version changed. zod is absent from the lock (correctly not added), matching the optional-peer warning in the ticket. Installed SDK reports license Apache-2.0 and engines undefined, both as the ticket predicted. `npm ci --dry-run` exits 0.",
+      "additional_finding": "The SDK's own TypeScript agrees with the live wire: `grep -c temperature node_modules/@anthropic-ai/sdk/resources/messages/messages.d.ts` returns 0. The removed field is a real API-surface change, not a local typing accident."
+    }
+  },
+
+  "verified_claims": {
+    "only @anthropic-ai/sdk moved": true,
+    "zod not added": true,
+    "sdk declares no engines field": true,
+    "anthropic.completions unused in the module": true,
+    "SSE parser unchanged": true,
+    "anthropic-version 2026-10-21": true,
+    "auth moved to Bearer": true,
+    "live API rejects temperature/top_p/top_k": true,
+    "live API accepts them on 2023-06-01": true,
+    "tsc delta zero": true,
+    "provider suites green above baseline": true
+  },
+
+  "untouched_or_unverified": [
+    "I did not reproduce the 16/203 'before' count by reinstalling 0.59.0; I relied on origin/master's file list (16 suites) plus the engineer's saved tsc baseline. The after-counts I ran myself.",
+    "Not every model in providers.yaml was called live (I used claude-haiku-4-5 and the raw probes). The engineer's report already discloses this.",
+    "The live server on :4000 and the primary checkout were never touched; all work was inside the worktree."
+  ],
+
+  "worktree_state_note": "After my mutation tests the worktree is exactly as the engineer left it: M package-lock.json, M package.json, M services/reactor/providers/AnthropicService.ts, M .../AnthropicService.structuredOutput.test.ts, ?? .../AnthropicService.wireParity.test.ts. AnthropicService.ts sha256 verified restored to 35b57b9aa499a1c250c566c8259a1da3299128bf16dd07101b82f590812e891c. My temporary live probe file was deleted and npm ci --dry-run still exits 0."
+}

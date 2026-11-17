@@ -14,6 +14,14 @@ name: ProcessAITicket
 # 1.4.8 is the coordinated bump: (1)-(3) land here and (4) is the companion pin in
 # reactory-core that must ship in the same release window. Bumping this body alone
 # stops every delegated AI ticket run from dispatching.
+#
+# This body ALSO carries the reviewer-schema fix for
+# REACTORY-302016408/20261116/2437438300 (a verdict written with decision /
+# blocking_issues / non_blocking_issues / required_actions_next_cycle is now read,
+# instead of being reported as "no readable findings"). That fix ships IN PLACE at
+# 1.4.8 on purpose: the number is the workflow's identity, PROCESS_AI_TICKET_WORKFLOW_ID
+# is pinned to core.ProcessAITicket@1.4.8 in a repository this worktree cannot update,
+# and a body-only bump would make checkWorkflowRegistered refuse the next dispatch.
 version: 1.4.8
 description: Autonomous AI engineering run for a SINGLE support ticket. Loads the ticket,
   moves it to in_progress, prepares an isolated git worktree on a ticket-keyed
@@ -628,6 +636,27 @@ steps:
       key: publishState
       value: not_published
 
+  # Seeded so the review loop can read them before its first iteration: both are
+  # N3 flags (see readRequiredWork). 'unknown' means "no review has been read yet",
+  # which keeps the pre-N3 behaviour of handing a rejection back.
+  - id: seedReviewLoopSettled
+    name: Seed review-loop settled flag
+    type: set_variable
+    dependsOn: seedPublishLifecycle
+    config:
+      action: set
+      key: reviewLoopSettled
+      value: "false"
+
+  - id: seedReviewRequiredWork
+    name: Seed review-required-work flag
+    type: set_variable
+    dependsOn: seedReviewLoopSettled
+    config:
+      action: set
+      key: reviewRequiredWork
+      value: unknown
+
   - id: readProgrammeDispatch
     name: Read programme dispatch identity
     type: cli_command
@@ -651,7 +680,7 @@ steps:
   - id: ticketGuard
     name: Ticket exists
     type: condition
-    dependsOn: seedPublishLifecycle
+    dependsOn: seedReviewRequiredWork
     config:
       condition: steps.loadTicket.result && steps.loadTicket.result.id
       thenSteps:
@@ -3290,6 +3319,7 @@ steps:
                 config:
                   condition: variables.reviewVerdict !== 'approved' &&
                     variables.runHalt !== 'true' &&
+                    variables.reviewLoopSettled !== 'true' &&
                     Number(variables.reviewCycle) <
                     Number(variables.reviewCycleBound)
                   steps:
@@ -3447,20 +3477,56 @@ steps:
 
                           You MUST finish by writing your verdict as a JSON file to the exact path
 
-                          given to you as "REVIEW PATH":
+                          given to you as "REVIEW PATH", using EXACTLY this shape. The pipeline
+
+                          validates these key names, and it cannot guess a synonym, so a renamed key
+
+                          means your findings are discarded and the run is blocked:
 
                           {
-                            "verdict": "approved" | "rejected",
-                            "confidence": 0.0,
-                            "findings": ["what you actually observed"],
-                            "requiredChanges": ["precise, actionable changes the engineer must make"],
-                            "evidence": "the exact commands you ran and what they returned"
+                            "decision": "approved" | "changes_requested",
+                            "headline": "one sentence: what you concluded and why",
+                            "blocking_issues": [
+                              { "id": "B1", "severity": "critical|high|medium|low",
+                                "title": "what is wrong",
+                                "file": "path/to/file.ts:line",
+                                "detail": "what is wrong and what to do about it" }
+                            ],
+                            "non_blocking_issues": [
+                              { "id": "N1", "severity": "low", "title": "...", "file": "path:line",
+                                "detail": "..." }
+                            ],
+                            "required_actions_next_cycle": [
+                              "a precise, actionable change the engineer must make"
+                            ],
+                            "acceptance_criteria_assessment": [
+                              { "criterion": "...", "status": "met" | "not_met", "note": "how you verified it" }
+                            ]
                           }
 
+                          Rules:
 
-                          If you reject, every entry in requiredChanges must be specific enough that
+                          - `decision` is the ONLY verdict key. Do not write `verdict`, and do not nest
 
-                          the engineer can act on it without asking you a question.
+                            these keys under `review`.
+
+                          - EVERY issue you want fixed goes in `blocking_issues`. An approval is
+
+                            `decision: "approved"` with `blocking_issues: []`.
+
+                          - Put observations you are content to merge with in `non_blocking_issues`.
+
+                          - Use these key names as written. An unrecognised findings-shaped list (for
+
+                            example `issues` or `findings_blocking`) is reported to the operator as a
+
+                            pipeline parser fault rather than silently dropped, but it still costs you the
+
+                            review: your findings will not reach the engineer.
+
+                          - If you reject, every entry in `required_actions_next_cycle` must be
+
+                            specific enough that the engineer can act on it without asking you a question.
 
                           Finish with a short plain-text summary. Do not wrap your whole reply in a
 
@@ -3668,26 +3734,174 @@ steps:
                             const acceptedPath = path.join(wt, '.ai-agent', 'review-accepted.json');
 
                             // ---------------------------------------------------------------------------
-                            // The reviewer writes its verdict in whichever key convention it prefers:
-                            // camelCase (requiredChanges) or snake_case (required_changes), and the verdict
-                            // itself as verdict/decision with PASS/FAIL. The old workflow read camelCase
-                            // only, so six real findings were silently discarded and the engineer was
-                            // handed a generic "no specific required changes" message instead. Resolve keys
-                            // case-insensitively with '_' and '-' stripped so future drift cannot reintroduce
-                            // this class of defect.
+                            // The reviewer writes its verdict in whichever key convention it prefers.
+                            // The old workflow read camelCase only, so six real findings were silently
+                            // discarded (REACTORY-302016408), and the repair - a synonym list for its own
+                            // key names - discarded the next reviewer's findings entirely because that
+                            // reviewer used a different NOUN (REACTORY-302016408/20261116/2437438300).
+                            // Resolution now goes through ONE published schema, defined below, that both
+                            // this step and readPublishable read.
                             // ---------------------------------------------------------------------------
+                            // >>> shared review schema (byte-identical in captureReview, readVerdict and readPublishable,
+                            // modulo indentation - pinned by a test; do not fork it)
+                            //
+                            // REACTORY-302016408/20261116/2437438300. 1.4.8 resolved findings by listing
+                            // synonyms of its OWN key names, so it understood camelCase and snake_case spellings
+                            // of `blockingFindings` and nothing else. The reviewer that produced the reported
+                            // artefact emitted `blocking_issues`. That is not a casing variant:
+                            // "blockingissues" and "blockingfindings" are different nouns, and the resolver
+                            // compares WHOLE normalised names. A complete, actionable critique was therefore
+                            // discarded while the verdict - written as `decision` - resolved normally. That
+                            // asymmetry WAS the bug: one half of the normaliser read the reviewer, the other
+                            // half read a vocabulary of its own invention.
+                            //
+                            // The table below is the PUBLISHED schema. The reviewer prompt states the same keys,
+                            // schemaProblems() reports a shape this table does not recognise, and unknown key
+                            // names are reported as a PARSER fault rather than as a review that said nothing.
+                            // It is one table shared by both call sites, and it is not a synonym list to be
+                            // extended by guesswork: the next invented noun must surface as a defect in this
+                            // workflow, not as "the reviewer gave no findings".
+                            //
+                            // The VERDICT is resolved here as well, by resolveVerdict. There used to be three
+                            // resolvers and only the capture one read this table: readVerdict and readPublishable
+                            // read `verdict` FIRST and BY EXACT NAME, so a review written as {"Decision":"approved"}
+                            // was approved by captureReview and rejected by both gates. readVerdict then saw the
+                            // side-car disagree with the stamped bytes and halted the run as tampering - a
+                            // confident, false reason, on a valid approval.
                             const normaliseKey = (k) => String(k == null ? '' : k).toLowerCase().replace(/[^a-z0-9]/g, '');
-                            const resolveKey = (obj, names) => {
-                              if (!obj || typeof obj !== 'object') return undefined;
+                            const REVIEW_SCHEMA = {
+                              decision: ['decision', 'verdict'],
+                              blocking: ['blocking_issues', 'blockingIssues', 'blockingFindings', 'blocking_findings', 'blockers'],
+                              nonBlocking: ['non_blocking_issues', 'nonBlockingIssues', 'nonBlockingFindings', 'non_blocking_findings'],
+                              requiredActions: ['required_actions_next_cycle', 'requiredActions', 'requiredChanges', 'required_changes', 'changes'],
+                              acceptance: ['acceptance_criteria_assessment', 'acceptanceCriteria', 'acceptance_criteria'],
+                              findings: ['findings', 'observations'],
+                              headline: ['headline', 'verdictSummary', 'summary', 'reason'],
+                            };
+                            const schemaAliases = (name) => REVIEW_SCHEMA[name] || [];
+                            // Every spelling of one field that is PRESENT in obj, in schema order. One field can
+                            // arrive under more than one name (`blocking_issues` and `blockers`), and each must be
+                            // read: taking only the first one present reported a real blocker as "the review names
+                            // nothing" whenever the first spelling happened to be an empty list.
+                            const schemaEntries = (obj, name) => {
+                              if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return [];
+                              const aliases = schemaAliases(name);
                               const keys = Object.keys(obj);
-                              for (let i = 0; i < names.length; i += 1) {
-                                const wanted = normaliseKey(names[i]);
+                              const found = [];
+                              for (let i = 0; i < aliases.length; i += 1) {
                                 for (let j = 0; j < keys.length; j += 1) {
-                                  if (normaliseKey(keys[j]) === wanted) return obj[keys[j]];
+                                  if (normaliseKey(keys[j]) !== normaliseKey(aliases[i])) continue;
+                                  // The alias LIST holds near-duplicates of its own ('blocking_issues' and
+                                  // 'blockingIssues' both normalise to "blockingissues"), so a key must be collected
+                                  // ONCE, not once per matching alias - otherwise one finding is read twice and the
+                                  // publish gate counts two blockers where the reviewer reported one.
+                                  if (!found.some((entry) => entry.key === keys[j])) found.push({ key: keys[j], value: obj[keys[j]] });
                                 }
                               }
-                              return undefined;
+                              return found;
                             };
+                            // A value that says nothing: absent, null, blank, or an empty list. A blank spelling
+                            // must never shadow a populated one (`decision: ''` beside `Decision: 'approved'`).
+                            const isEmptyValue = (value) => {
+                              if (value === null || value === undefined) return true;
+                              if (typeof value === 'string') return value.trim() === '';
+                              if (Array.isArray(value)) return value.length === 0;
+                              return false;
+                            };
+                            // One SCALAR field (decision, headline): the first spelling with something to say.
+                            const schemaValue = (obj, name) => {
+                              const found = schemaEntries(obj, name);
+                              for (let i = 0; i < found.length; i += 1) {
+                                if (!isEmptyValue(found[i].value)) return found[i].value;
+                              }
+                              return found.length ? found[0].value : undefined;
+                            };
+                            // The ONE list coercion. readPublishable kept its own `Array.isArray(v) ? v : []`, so a
+                            // scalar `blocking_issues: "B1: fix the thing"` started a fix cycle in captureReview and
+                            // counted as NO finding at the publish gate, which then reported "no actionable finding
+                            // could be resolved". Same rule as the rendering block's asList, for the same reason: a
+                            // scalar is one entry, not nothing.
+                            const reviewList = (value) => {
+                              if (value === null || value === undefined) return [];
+                              if (Array.isArray(value)) return value.filter((item) => item !== null && item !== undefined);
+                              if (typeof value === 'string') return value.trim() ? [value.trim()] : [];
+                              if (typeof value === 'object') return Object.keys(value).length ? [value] : [];
+                              return [];
+                            };
+                            // One LIST field: EVERY spelling present is read and concatenated, and a field answered
+                            // twice is reported as a schema problem rather than resolved silently - the reviewer
+                            // answering one question under two names is the drift this table exists to expose.
+                            const schemaList = (obj, name, problems, label) => {
+                              const found = schemaEntries(obj, name);
+                              if (found.length > 1 && problems) {
+                                problems.push((label || name) + ' was supplied under more than one spelling ('
+                                  + found.map((entry) => entry.key).join(', ') + '); every one of them was read');
+                              }
+                              const out = [];
+                              found.forEach((entry) => {
+                                reviewList(entry.value).forEach((item) => out.push(item));
+                              });
+                              return out;
+                            };
+                            // A key whose NAME reads like findings but which the schema above did not consume.
+                            // Non-empty AND findings-shaped means the parser (or the prompt) is wrong - not the
+                            // review. Deliberately conservative: prose keys such as what_went_well,
+                            // verified_claims and untouched_or_unverified must NOT be mistaken for findings, or
+                            // an honestly-empty review would be misreported as a parser fault.
+                            const FINDINGS_STEM = /(issue|finding|required|action|blocker|blocking|problem|defect|change)/;
+                            const unknownFindingKeys = (obj) => {
+                              if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return [];
+                              const known = {};
+                              Object.keys(REVIEW_SCHEMA).forEach((name) => {
+                                schemaAliases(name).forEach((alias) => { known[normaliseKey(alias)] = true; });
+                              });
+                              return Object.keys(obj).filter((key) => {
+                                if (known[normaliseKey(key)]) return false;
+                                const value = obj[key];
+                                if (!Array.isArray(value) || value.length === 0) return false;
+                                return FINDINGS_STEM.test(normaliseKey(key));
+                              });
+                            };
+                            // The reviewer's words for a verdict, normalised once, so 'changes-requested',
+                            // 'changes_requested' and 'Changes Requested' are one word in all three call sites.
+                            const VERDICT_WORDS = {
+                              approved: ['approved', 'approve', 'pass', 'passed', 'accept', 'accepted', 'ok'],
+                              rejected: ['rejected', 'reject', 'fail', 'failed', 'declined', 'changesrequested', 'requestchanges', 'needschanges', 'needswork'],
+                              review_unavailable: ['reviewunavailable', 'capturefailed'],
+                            };
+                            // Show a verdict value to a human without ever producing "[object Object]".
+                            const showValue = (value) => {
+                              if (value === null || value === undefined) return '';
+                              if (typeof value === 'string') return value.trim();
+                              if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+                              try { return JSON.stringify(value); } catch (e) { return String(value); }
+                            };
+                            // THE verdict resolver. Unwraps {review:{...}} first, reads the ONE table above (so key
+                            // case and spelling cannot matter), and reports whether the review STATED a verdict:
+                            //   stated:false                    - no decision/verdict field with anything in it
+                            //   verdict:'approved'              - an approval, in any spelling
+                            //   verdict:'rejected'              - a rejection, in any spelling
+                            //   verdict:'review_unavailable'    - the pipeline's own "never judged" verdict
+                            //   stated:true, verdict:''         - a verdict WAS stated in a vocabulary this
+                            //                                     workflow does not know ('approved_with_comments').
+                            //                                     That is a defect HERE: it is never guessed at and
+                            //                                     never turned into a blind fix cycle.
+                            // Precedence is identical in every caller: the wrapper's own fields win, and inside
+                            // one object `decision` (the canonical key) beats `verdict` (its alias).
+                            const resolveVerdict = (raw) => {
+                              const inner = (raw && typeof raw.review === 'object' && !Array.isArray(raw.review) && raw.review) ? raw.review : raw;
+                              let value = schemaValue(inner, 'decision');
+                              if (isEmptyValue(value) && inner !== raw) value = schemaValue(raw, 'decision');
+                              const source = showValue(value).trim().toLowerCase();
+                              const norm = normaliseKey(source);
+                              if (!norm) return { verdict: '', source: '', stated: false };
+                              const classes = Object.keys(VERDICT_WORDS);
+                              for (let i = 0; i < classes.length; i += 1) {
+                                if (VERDICT_WORDS[classes[i]].indexOf(norm) !== -1) return { verdict: classes[i], source: source, stated: true };
+                              }
+                              return { verdict: '', source: source, stated: true };
+                            };
+                            // <<< shared review schema
                             // >>> shared findings rendering (byte-identical in captureReview,
                             // handBackBriefing and createPullRequest — pinned by a test; do not fork it.
                             // captureReport shares asText/asList with this block but has no renderItem.)
@@ -3768,9 +3982,17 @@ steps:
                                 findingsResolved: false,
                                 requiredChanges: [],
                                 blockingFindings: [],
+                                nonBlockingFindings: [],
                                 acceptanceCriteria: [],
                                 findings: [],
                                 summary: '',
+                                headline: '',
+                                // A capture failure is not a parser failure and not a rejection; it
+                                // keeps its own reason so downstream text cannot mislabel it.
+                                findingsUnresolvedReason: 'capture_failed',
+                                unrecognisedFindingKeys: [],
+                                schemaProblems: [],
+                                keysSeen: [],
                                 parseError: reason,
                                 reviewPath: reviewPath,
                               }, extra || {});
@@ -3861,23 +4083,44 @@ steps:
 
                             const rv = (raw && typeof raw.review === 'object' && raw.review) ? raw.review : raw;
 
-                            const norm = String(
-                              resolveKey(rv, ['verdict', 'decision']) || resolveKey(raw, ['verdict', 'decision']) || ''
-                            ).trim().toLowerCase();
+                            // ONE verdict resolver, shared with readVerdict and readPublishable through
+                            // the block above. Each script used to resolve the verdict its own way, so
+                            // {"Decision":"approved"} was an approval here and a REJECTION in both
+                            // gates: readVerdict then saw the side-car disagree with the stamped bytes
+                            // and halted a valid approval as tampered (B1).
+                            const verdictResolved = resolveVerdict(raw);
+                            const norm = verdictResolved.source;
+                            let verdict = verdictResolved.verdict;
 
-                            let verdict = '';
-                            if (['approved', 'approve', 'pass', 'passed', 'accept', 'accepted', 'ok'].indexOf(norm) !== -1) verdict = 'approved';
-                            else if (['rejected', 'reject', 'fail', 'failed', 'declined', 'changes_requested', 'changes-requested', 'request_changes', 'needs_changes', 'needs_work'].indexOf(norm) !== -1) verdict = 'rejected';
+                            // Shape problems are RECORDED, never silently repaired: they are the
+                            // signal that the prompt and the reviewer have drifted apart again. The
+                            // list is created BEFORE the reads below (they report into it) and before
+                            // any verdict fallback, because the fallback used to run first and made
+                            // the "not a recognised verdict" problem below unreachable (B3).
+                            const schemaProblems = [];
+                            if (!verdictResolved.stated) schemaProblems.push('review.json has no "decision" (or "verdict") key');
+                            else if (!verdict) schemaProblems.push('"decision" was "' + norm + '", which is not a recognised verdict');
 
-                            // Both conventions, first non-empty wins. Same resolver used by captureReport.
-                            const requiredChanges = asList(resolveKey(rv, ['requiredChanges', 'required_changes', 'changes']))
-                              .concat(asList(resolveKey(raw, ['requiredChanges', 'required_changes'])));
-                            const blockingFindings = asList(resolveKey(rv, ['blockingFindings', 'blocking_findings']))
-                              .concat(asList(resolveKey(raw, ['blockingFindings', 'blocking_findings'])));
-                            const acceptanceCriteria = asList(resolveKey(rv, ['acceptanceCriteria', 'acceptance_criteria']))
-                              .concat(asList(resolveKey(raw, ['acceptanceCriteria', 'acceptance_criteria'])));
-                            const findings = asList(resolveKey(rv, ['findings', 'observations']))
-                              .concat(asList(resolveKey(raw, ['findings'])));
+                            // EVERY spelling present is read and concatenated, from BOTH objects. Taking
+                            // only the first spelling present let an empty `blocking_issues: []` hide a
+                            // populated `blockers` (B2), and the coercion is the one shared reviewList,
+                            // so this script and the publish gate cannot disagree about a scalar (B4).
+                            // `blocking_issues` is the canonical spelling the prompt asks for;
+                            // `blockingFindings` is kept only because 1.4.8's own prompt asked for it,
+                            // so artefacts written against the older prompt still parse.
+                            const collect = (name, label) => {
+                              const items = schemaList(rv, name, schemaProblems, label + ' (review)');
+                              if (rv !== raw) schemaList(raw, name, schemaProblems, label + ' (root)').forEach((item) => items.push(item));
+                              return items;
+                            };
+                            const requiredChanges = collect('requiredActions', 'requiredActions');
+                            const blockingFindings = collect('blocking', 'blocking');
+                            // Non-blocking observations are READ (they are shown to the engineer, and
+                            // they let the publish gate classify "rejected, nothing blocking"), but
+                            // they are not work: they never create a required fix.
+                            const nonBlockingFindings = collect('nonBlocking', 'nonBlocking');
+                            const acceptanceCriteria = collect('acceptance', 'acceptance');
+                            const findings = collect('findings', 'findings');
 
                             // Key on the RENDERED content, but keep the ORIGINAL entry. The old form
                             // pushed the rendered string, so an object was replaced by the literal
@@ -3898,13 +4141,9 @@ steps:
 
                             const resolvedRequired = dedupe(requiredChanges);
                             const resolvedBlocking = dedupe(blockingFindings);
+                            const resolvedNonBlocking = dedupe(nonBlockingFindings);
                             const resolvedCriteria = dedupe(acceptanceCriteria);
                             const resolvedFindings = dedupe(findings);
-
-                            if (!verdict) {
-                              verdict = 'rejected';
-                              resolvedFindings.push('The reviewer verdict was not recognisable (raw: "' + norm + '"). Treating as rejected.');
-                            }
 
                             // A rejection with nothing actionable is NOT something to paper over with a
                             // generic sentence: the engineer would revise blind. Report it as unresolved so
@@ -3912,13 +4151,72 @@ steps:
                             // entries that render to real text, so this count can no longer be satisfied
                             // by a "[object Object]" placeholder left behind by the corruption path.
                             const actionable = resolvedRequired.length + resolvedBlocking.length + resolvedFindings.length;
-                            const findingsResolved = verdict === 'approved' ? true : actionable > 0;
+                            // "Readable" also counts non-blocking observations: a verdict that names
+                            // only non-blocking issues DID say something, so it must not be halted as
+                            // though it were unreadable. They carry no required work, and the publish
+                            // gate decides separately whether such a rejection may publish.
+                            const readable = actionable + resolvedNonBlocking.length;
+                            let findingsResolved = verdict === 'approved' ? true : readable > 0;
+                            let findingsUnresolvedReason = '';
+                            // The old fallback invented "the reviewer verdict was not recognisable" and
+                            // pushed it into resolvedFindings, so the pipeline's OWN note counted as
+                            // readable and the engineer was handed a fix cycle whose only finding was
+                            // that note (B3). No sentence is invented now: an unrecognised verdict is a
+                            // defect HERE, so the run halts with a reason that names the raw value.
+                            if (!verdict) {
+                              verdict = 'rejected';
+                              if (verdictResolved.stated) {
+                                findingsResolved = false;
+                                findingsUnresolvedReason = 'unrecognised_verdict';
+                              }
+                            }
 
-                            const summary = String(
-                              resolveKey(rv, ['verdictSummary', 'summary', 'reason']) ||
-                              resolveKey(raw, ['verdictSummary', 'summary', 'reason']) ||
-                              ''
-                            ).slice(0, 4000);
+                            // The reviewer's own summary sentence. 1.4.8 dropped `headline` entirely,
+                            // so the single most useful line in the artefact never reached the ticket.
+                            // asText, never String(): an object headline coerced to "[object Object]"
+                            // and the one sentence a human actually needs was destroyed (N1).
+                            const headlineValue = isEmptyValue(schemaValue(rv, 'headline'))
+                              ? schemaValue(raw, 'headline')
+                              : schemaValue(rv, 'headline');
+                            const summary = asText(headlineValue).trim().slice(0, 4000);
+
+                            // A findings-shaped key this schema does not know. If findings then come
+                            // back empty, the fault is HERE, not in the review: 1.4.8 reported exactly
+                            // this state as "the reviewer produced no verdict" and parked the run.
+                            const unrecognisedFindingKeys = unknownFindingKeys(rv)
+                              .concat(rv !== raw ? unknownFindingKeys(raw) : [])
+                              .filter((key, index, all) => all.indexOf(key) === index);
+                            if (!findingsResolved && !findingsUnresolvedReason) {
+                              findingsUnresolvedReason = unrecognisedFindingKeys.length ? 'parser_defect' : 'reviewer_reported_none';
+                            }
+
+                            const shapeCheck = (obj, label, name) => {
+                              if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return;
+                              const aliases = schemaAliases(name).map(normaliseKey);
+                              const keys = Object.keys(obj);
+                              for (let i = 0; i < keys.length; i += 1) {
+                                if (aliases.indexOf(normaliseKey(keys[i])) === -1) continue;
+                                const value = obj[keys[i]];
+                                if (value === null || value === undefined) continue;
+                                // A string where a list belongs used to be invisible here (only
+                                // boolean and number were flagged), so `blocking_issues: "B1: ..."`
+                                // was coerced by one path and dropped by the other with nothing
+                                // recorded (B4).
+                                if (typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') {
+                                  schemaProblems.push(label + '.' + keys[i] + ' should be a list, not ' + typeof value);
+                                }
+                              }
+                            };
+                            ['blocking', 'nonBlocking', 'requiredActions', 'acceptance', 'findings'].forEach((name) => {
+                              shapeCheck(rv, 'review', name);
+                              shapeCheck(raw, 'root', name);
+                            });
+                            if (unrecognisedFindingKeys.length) {
+                              schemaProblems.push('findings-shaped key(s) outside the schema: ' + unrecognisedFindingKeys.join(', '));
+                            }
+                            if (verdict === 'approved' && resolvedBlocking.length > 0) {
+                              schemaProblems.push('"decision" says approved but ' + String(resolvedBlocking.length) + ' blocking issue(s) were reported');
+                            }
 
                             const acceptedRecord = readJsonFile(acceptedPath) || {};
                             const payload = {
@@ -3933,14 +4231,36 @@ steps:
                               findingsResolved: findingsResolved,
                               requiredChanges: resolvedRequired,
                               blockingFindings: resolvedBlocking,
+                              nonBlockingFindings: resolvedNonBlocking,
                               acceptanceCriteria: resolvedCriteria,
                               findings: resolvedFindings,
                               summary: summary,
+                              // The reviewer's headline, verbatim, so the block comment can quote the
+                              // one sentence a human actually needs.
+                              headline: summary,
+                              // Why no fix cycle follows. 'reviewer_reported_none' is an accurate
+                              // reading of the review; 'parser_defect' is a defect in THIS workflow.
+                              // Conflating the two is what told a human the reviewer had no verdict.
+                              findingsUnresolvedReason: findingsUnresolvedReason,
+                              unrecognisedFindingKeys: unrecognisedFindingKeys,
+                              schemaProblems: schemaProblems,
+                              keysSeen: (rv && typeof rv === 'object' && !Array.isArray(rv) ? Object.keys(rv) : (raw && typeof raw === 'object' ? Object.keys(raw) : [])),
                               reviewPath: reviewPath,
                             };
 
                             if (verdict === 'rejected' && !findingsResolved) {
-                              payload.blockedReason = 'The reviewer REJECTED the work but no findings could be resolved from review.json (checked camelCase, snake_case and kebab-case keys).';
+                              // ONE message, BOTH facts: the verdict that WAS resolved, and why no
+                              // finding followed it. 1.4.8 asserted only the second and blamed the
+                              // reviewer's key casing for it, which was false in both directions.
+                              payload.blockedReason = 'The reviewer REJECTED the work (review.json said "'
+                                + (norm || 'nothing') + '") but no findings could be resolved from review.json: '
+                                + (findingsUnresolvedReason === 'parser_defect'
+                                  ? 'PARSER FAULT - a non-empty findings list sits under ' + unrecognisedFindingKeys.join(', ')
+                                    + ', which this workflow does not recognise. That is a defect in core.ProcessAITicket, not a review without findings.'
+                                  : findingsUnresolvedReason === 'unrecognised_verdict'
+                                    ? 'PARSER FAULT - the verdict itself was "' + (norm || 'nothing')
+                                      + '", which this workflow does not recognise as an approval or a rejection. That is a defect in core.ProcessAITicket (or drift between its prompt and the reviewer), so the run halts instead of asking the engineer to revise against a guess.'
+                                    : 'the review names no blocking issue, required action or observation to act on.');
                             }
 
                             try { fs.writeFileSync(normalisedPath, JSON.stringify(payload), 'utf8'); } catch (e) { /* best effort */ }
@@ -3987,13 +4307,61 @@ steps:
                         source: step_output
                         sourcePath: readFindingsGate.outputs.stdout
 
+                    # N3. "The findings resolved" is NOT the same as "the review asked for
+                    # work". A rejection whose findings are ALL explicitly non-blocking resolves
+                    # (the reviewer did say something) and the publish gate publishes it as
+                    # rejected_non_blocking. verdictBranch still handed it back every cycle,
+                    # telling the engineer to "address EVERY required change" when the review
+                    # required none, and a reviewer who does that repeatedly burned every
+                    # permitted cycle. This flag lets the loop leave such a run to the gate.
+                    - id: readRequiredWork
+                      name: Read whether the review asks for any required work
+                      type: cli_command
+                      dependsOn: setFindingsGate
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const fs = require('fs');
+                            const path = require('path');
+                            const wt = String(process.env.WT || '').trim();
+                            const count = (value) => (Array.isArray(value) ? value.length : 0);
+                            let required = 'unknown';
+                            try {
+                              const record = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'review-normalised.json'), 'utf8'));
+                              const total = count(record.requiredChanges) + count(record.blockingFindings) + count(record.findings);
+                              required = total > 0 ? 'true' : 'false';
+                            } catch (e) {
+                              // An unreadable record is NOT evidence that there is nothing to
+                              // fix: 'unknown' keeps the hand-back and lets the halt gate
+                              // decide, rather than silently settling the loop on a guess.
+                              required = 'unknown';
+                            }
+                            process.stdout.write(required);
+                        env:
+                          WT: ${steps.readWorktreePath.outputs.stdout}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+
+                    - id: setRequiredWork
+                      name: Record whether the review asks for any required work
+                      type: set_variable
+                      dependsOn: readRequiredWork
+                      config:
+                        action: set
+                        key: reviewRequiredWork
+                        source: step_output
+                        sourcePath: readRequiredWork.outputs.stdout
+
                     # The engineer gets the findings as structured text. The old hand-back
                     # interpolated the raw captureReview JSON and relied on the agent to go
                     # read review.json, which is how six snake_case findings were lost.
                     - id: handBackBriefing
                       name: Build reviewer findings brief
                       type: cli_command
-                      dependsOn: setFindingsGate
+                      dependsOn: setRequiredWork
                       config:
                         command: node
                         args:
@@ -4084,14 +4452,16 @@ steps:
 
                             const required = items(review.requiredChanges);
                             const blocking = items(review.blockingFindings);
+                            const nonBlocking = items(review.nonBlockingFindings);
                             const findings = items(review.findings);
                             const criteria = items(review.acceptanceCriteria);
 
                             const lines = [];
                             lines.push('Reviewer verdict: ' + String(review.verdict || 'rejected').toUpperCase());
-                            if (review.summary) {
+                            const headline = String(review.headline || review.summary || '').trim();
+                            if (headline) {
                               lines.push('');
-                              lines.push(String(review.summary));
+                              lines.push(headline);
                             }
 
                             if (required.length) {
@@ -4112,16 +4482,28 @@ steps:
                               lines.push(numbered(findings));
                             }
 
+                            if (nonBlocking.length) {
+                              lines.push('');
+                              lines.push('## Non-blocking observations (' + nonBlocking.length + ') - no action required unless you choose to take it');
+                              lines.push(numbered(nonBlocking));
+                            }
+
                             if (criteria.length) {
                               lines.push('');
                               lines.push('## Acceptance criteria the reviewer checked');
                               lines.push(numbered(criteria));
                             }
 
-                            if (String(review.verdict) !== 'approved' && !required.length && !blocking.length && !findings.length) {
+                            if (String(review.verdict) !== 'approved' && !required.length && !blocking.length && !nonBlocking.length && !findings.length) {
                               lines.push('');
                               lines.push('## No actionable findings could be resolved');
-                              lines.push('The reviewer rejected the work but review.json contained no readable findings (camelCase, snake_case and kebab-case keys were all checked). The run is being blocked for a human rather than asking you to revise blind.');
+                              // Name the reason the normaliser recorded, instead of asserting a
+                              // blanket claim about keys that were never enumerated.
+                              lines.push(String(review.findingsUnresolvedReason) === 'parser_defect'
+                                ? 'PARSER FAULT - review.json carries findings under '
+                                  + (Array.isArray(review.unrecognisedFindingKeys) ? review.unrecognisedFindingKeys.join(', ') : 'an unrecognised key')
+                                  + ', which this workflow cannot read. That is a pipeline defect, not a defect in your work.'
+                                : 'The reviewer rejected the work and review.json names no blocking issue, required action or observation to act on. The run is blocked for a human rather than asking you to revise blind.');
                             }
 
                             process.stdout.write(lines.join('\n'));
@@ -4159,13 +4541,176 @@ steps:
                             const readJson = (name) => {
                               try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch (e) { return null; }
                             };
-                            const normalise = (raw) => {
-                              const rv = (raw && typeof raw.review === 'object' && raw.review) ? raw.review : raw;
-                              const norm = String((rv && (rv.verdict || rv.decision)) || (raw && raw.verdict) || '').trim().toLowerCase();
-                              if (['approved', 'approve', 'pass', 'passed', 'accept', 'accepted', 'ok'].indexOf(norm) !== -1) return 'approved';
-                              if (['review_unavailable', 'reviewunavailable', 'capture_failed', 'capturefailed'].indexOf(norm) !== -1) return 'review_unavailable';
-                              return 'rejected';
+                            // >>> shared review schema (byte-identical in captureReview, readVerdict and readPublishable,
+                            // modulo indentation - pinned by a test; do not fork it)
+                            //
+                            // REACTORY-302016408/20261116/2437438300. 1.4.8 resolved findings by listing
+                            // synonyms of its OWN key names, so it understood camelCase and snake_case spellings
+                            // of `blockingFindings` and nothing else. The reviewer that produced the reported
+                            // artefact emitted `blocking_issues`. That is not a casing variant:
+                            // "blockingissues" and "blockingfindings" are different nouns, and the resolver
+                            // compares WHOLE normalised names. A complete, actionable critique was therefore
+                            // discarded while the verdict - written as `decision` - resolved normally. That
+                            // asymmetry WAS the bug: one half of the normaliser read the reviewer, the other
+                            // half read a vocabulary of its own invention.
+                            //
+                            // The table below is the PUBLISHED schema. The reviewer prompt states the same keys,
+                            // schemaProblems() reports a shape this table does not recognise, and unknown key
+                            // names are reported as a PARSER fault rather than as a review that said nothing.
+                            // It is one table shared by both call sites, and it is not a synonym list to be
+                            // extended by guesswork: the next invented noun must surface as a defect in this
+                            // workflow, not as "the reviewer gave no findings".
+                            //
+                            // The VERDICT is resolved here as well, by resolveVerdict. There used to be three
+                            // resolvers and only the capture one read this table: readVerdict and readPublishable
+                            // read `verdict` FIRST and BY EXACT NAME, so a review written as {"Decision":"approved"}
+                            // was approved by captureReview and rejected by both gates. readVerdict then saw the
+                            // side-car disagree with the stamped bytes and halted the run as tampering - a
+                            // confident, false reason, on a valid approval.
+                            const normaliseKey = (k) => String(k == null ? '' : k).toLowerCase().replace(/[^a-z0-9]/g, '');
+                            const REVIEW_SCHEMA = {
+                              decision: ['decision', 'verdict'],
+                              blocking: ['blocking_issues', 'blockingIssues', 'blockingFindings', 'blocking_findings', 'blockers'],
+                              nonBlocking: ['non_blocking_issues', 'nonBlockingIssues', 'nonBlockingFindings', 'non_blocking_findings'],
+                              requiredActions: ['required_actions_next_cycle', 'requiredActions', 'requiredChanges', 'required_changes', 'changes'],
+                              acceptance: ['acceptance_criteria_assessment', 'acceptanceCriteria', 'acceptance_criteria'],
+                              findings: ['findings', 'observations'],
+                              headline: ['headline', 'verdictSummary', 'summary', 'reason'],
                             };
+                            const schemaAliases = (name) => REVIEW_SCHEMA[name] || [];
+                            // Every spelling of one field that is PRESENT in obj, in schema order. One field can
+                            // arrive under more than one name (`blocking_issues` and `blockers`), and each must be
+                            // read: taking only the first one present reported a real blocker as "the review names
+                            // nothing" whenever the first spelling happened to be an empty list.
+                            const schemaEntries = (obj, name) => {
+                              if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return [];
+                              const aliases = schemaAliases(name);
+                              const keys = Object.keys(obj);
+                              const found = [];
+                              for (let i = 0; i < aliases.length; i += 1) {
+                                for (let j = 0; j < keys.length; j += 1) {
+                                  if (normaliseKey(keys[j]) !== normaliseKey(aliases[i])) continue;
+                                  // The alias LIST holds near-duplicates of its own ('blocking_issues' and
+                                  // 'blockingIssues' both normalise to "blockingissues"), so a key must be collected
+                                  // ONCE, not once per matching alias - otherwise one finding is read twice and the
+                                  // publish gate counts two blockers where the reviewer reported one.
+                                  if (!found.some((entry) => entry.key === keys[j])) found.push({ key: keys[j], value: obj[keys[j]] });
+                                }
+                              }
+                              return found;
+                            };
+                            // A value that says nothing: absent, null, blank, or an empty list. A blank spelling
+                            // must never shadow a populated one (`decision: ''` beside `Decision: 'approved'`).
+                            const isEmptyValue = (value) => {
+                              if (value === null || value === undefined) return true;
+                              if (typeof value === 'string') return value.trim() === '';
+                              if (Array.isArray(value)) return value.length === 0;
+                              return false;
+                            };
+                            // One SCALAR field (decision, headline): the first spelling with something to say.
+                            const schemaValue = (obj, name) => {
+                              const found = schemaEntries(obj, name);
+                              for (let i = 0; i < found.length; i += 1) {
+                                if (!isEmptyValue(found[i].value)) return found[i].value;
+                              }
+                              return found.length ? found[0].value : undefined;
+                            };
+                            // The ONE list coercion. readPublishable kept its own `Array.isArray(v) ? v : []`, so a
+                            // scalar `blocking_issues: "B1: fix the thing"` started a fix cycle in captureReview and
+                            // counted as NO finding at the publish gate, which then reported "no actionable finding
+                            // could be resolved". Same rule as the rendering block's asList, for the same reason: a
+                            // scalar is one entry, not nothing.
+                            const reviewList = (value) => {
+                              if (value === null || value === undefined) return [];
+                              if (Array.isArray(value)) return value.filter((item) => item !== null && item !== undefined);
+                              if (typeof value === 'string') return value.trim() ? [value.trim()] : [];
+                              if (typeof value === 'object') return Object.keys(value).length ? [value] : [];
+                              return [];
+                            };
+                            // One LIST field: EVERY spelling present is read and concatenated, and a field answered
+                            // twice is reported as a schema problem rather than resolved silently - the reviewer
+                            // answering one question under two names is the drift this table exists to expose.
+                            const schemaList = (obj, name, problems, label) => {
+                              const found = schemaEntries(obj, name);
+                              if (found.length > 1 && problems) {
+                                problems.push((label || name) + ' was supplied under more than one spelling ('
+                                  + found.map((entry) => entry.key).join(', ') + '); every one of them was read');
+                              }
+                              const out = [];
+                              found.forEach((entry) => {
+                                reviewList(entry.value).forEach((item) => out.push(item));
+                              });
+                              return out;
+                            };
+                            // A key whose NAME reads like findings but which the schema above did not consume.
+                            // Non-empty AND findings-shaped means the parser (or the prompt) is wrong - not the
+                            // review. Deliberately conservative: prose keys such as what_went_well,
+                            // verified_claims and untouched_or_unverified must NOT be mistaken for findings, or
+                            // an honestly-empty review would be misreported as a parser fault.
+                            const FINDINGS_STEM = /(issue|finding|required|action|blocker|blocking|problem|defect|change)/;
+                            const unknownFindingKeys = (obj) => {
+                              if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return [];
+                              const known = {};
+                              Object.keys(REVIEW_SCHEMA).forEach((name) => {
+                                schemaAliases(name).forEach((alias) => { known[normaliseKey(alias)] = true; });
+                              });
+                              return Object.keys(obj).filter((key) => {
+                                if (known[normaliseKey(key)]) return false;
+                                const value = obj[key];
+                                if (!Array.isArray(value) || value.length === 0) return false;
+                                return FINDINGS_STEM.test(normaliseKey(key));
+                              });
+                            };
+                            // The reviewer's words for a verdict, normalised once, so 'changes-requested',
+                            // 'changes_requested' and 'Changes Requested' are one word in all three call sites.
+                            const VERDICT_WORDS = {
+                              approved: ['approved', 'approve', 'pass', 'passed', 'accept', 'accepted', 'ok'],
+                              rejected: ['rejected', 'reject', 'fail', 'failed', 'declined', 'changesrequested', 'requestchanges', 'needschanges', 'needswork'],
+                              review_unavailable: ['reviewunavailable', 'capturefailed'],
+                            };
+                            // Show a verdict value to a human without ever producing "[object Object]".
+                            const showValue = (value) => {
+                              if (value === null || value === undefined) return '';
+                              if (typeof value === 'string') return value.trim();
+                              if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+                              try { return JSON.stringify(value); } catch (e) { return String(value); }
+                            };
+                            // THE verdict resolver. Unwraps {review:{...}} first, reads the ONE table above (so key
+                            // case and spelling cannot matter), and reports whether the review STATED a verdict:
+                            //   stated:false                    - no decision/verdict field with anything in it
+                            //   verdict:'approved'              - an approval, in any spelling
+                            //   verdict:'rejected'              - a rejection, in any spelling
+                            //   verdict:'review_unavailable'    - the pipeline's own "never judged" verdict
+                            //   stated:true, verdict:''         - a verdict WAS stated in a vocabulary this
+                            //                                     workflow does not know ('approved_with_comments').
+                            //                                     That is a defect HERE: it is never guessed at and
+                            //                                     never turned into a blind fix cycle.
+                            // Precedence is identical in every caller: the wrapper's own fields win, and inside
+                            // one object `decision` (the canonical key) beats `verdict` (its alias).
+                            const resolveVerdict = (raw) => {
+                              const inner = (raw && typeof raw.review === 'object' && !Array.isArray(raw.review) && raw.review) ? raw.review : raw;
+                              let value = schemaValue(inner, 'decision');
+                              if (isEmptyValue(value) && inner !== raw) value = schemaValue(raw, 'decision');
+                              const source = showValue(value).trim().toLowerCase();
+                              const norm = normaliseKey(source);
+                              if (!norm) return { verdict: '', source: '', stated: false };
+                              const classes = Object.keys(VERDICT_WORDS);
+                              for (let i = 0; i < classes.length; i += 1) {
+                                if (VERDICT_WORDS[classes[i]].indexOf(norm) !== -1) return { verdict: classes[i], source: source, stated: true };
+                              }
+                              return { verdict: '', source: source, stated: true };
+                            };
+                            // <<< shared review schema
+
+                            // The verdict is resolved by the SAME block captureReview and the publish gate use.
+                            // This script used to re-derive it with `rv.verdict || rv.decision` by EXACT name, so
+                            // {"Decision":"approved"} came back 'rejected' here while the side-car - written from
+                            // the same bytes - said approved, and the run halted claiming the two artefacts
+                            // disagreed. That false tampering verdict then blocked a valid approval (B1).
+                            // A stated-but-unknown verdict is never an approval, and an unstated verdict keeps
+                            // 1.4.8's conservative default: neither can publish, and captureReview has already
+                            // halted the run naming the value it could not read.
+                            const verdictOf = (raw) => resolveVerdict(raw).verdict || 'rejected';
 
                             // { ok: true, verdict } only when the pipeline accepted THESE bytes.
                             const stampedVerdict = (() => {
@@ -4188,12 +4733,12 @@ steps:
 
                               let raw;
                               try { raw = JSON.parse(content.toString('utf8')); } catch (e) { return { ok: false, reason: 'review.json is not valid JSON' }; }
-                              return { ok: true, verdict: normalise(raw) };
+                              return { ok: true, verdict: verdictOf(raw) };
                             })();
 
                             const sideCar = readJson('review-normalised.json');
                             const claimed = sideCar && typeof sideCar.verdict === 'string'
-                              ? normalise({ verdict: sideCar.verdict })
+                              ? verdictOf({ verdict: sideCar.verdict })
                               : '';
 
                             if (stampedVerdict.ok) {
@@ -4366,27 +4911,101 @@ steps:
                       config:
                         condition: variables.reviewVerdict === 'rejected' && variables.reviewFindingsResolved === 'false'
                         thenSteps:
+                          # REACTORY-302016408/20261116/2437438300. The old block message asserted
+                          # two things that were sometimes false - "the reviewer produced no
+                          # verdict", and "camelCase, snake_case and kebab-case keys were all
+                          # checked" - because both sentences were literal text, not observations.
+                          # The message is now BUILT from review-normalised.json, so it carries the
+                          # verdict that resolved, the reviewer's own headline verbatim, and the
+                          # difference between "the review named nothing" and "this parser cannot
+                          # read what the review named".
+                          - id: findingsHaltBrief
+                            name: Explain exactly why no fix cycle could start
+                            type: cli_command
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - |
+                                  const fs = require('fs');
+                                  const path = require('path');
+                                  const wt = String(process.env.WT || '').trim();
+                                  let record = {};
+                                  try { record = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'review-normalised.json'), 'utf8')); } catch (e) { record = {}; }
+
+                                  const verdict = String(record.verdict || 'rejected').toUpperCase();
+                                  const source = String(record.verdictSource || '').trim();
+                                  const reason = String(record.findingsUnresolvedReason || '');
+                                  const headline = String(record.headline || record.summary || '').trim();
+                                  const unknown = Array.isArray(record.unrecognisedFindingKeys) ? record.unrecognisedFindingKeys : [];
+                                  const keys = Array.isArray(record.keysSeen) ? record.keysSeen : [];
+                                  const problems = Array.isArray(record.schemaProblems) ? record.schemaProblems : [];
+
+                                  const lines = [];
+                                  // The opening lines are NOT interchangeable: a verdict this workflow could
+                                  // not read must not be reported as one it resolved (B3). "The verdict WAS
+                                  // resolved" was true for every run that reached this step, so it said
+                                  // nothing - and it would be a lie the moment an unrecognised verdict
+                                  // halts here, which is exactly what the dead branch used to prevent.
+                                  if (reason === 'unrecognised_verdict') {
+                                    lines.push('BLOCKED - the reviewer answered the verdict with "' + (source || 'nothing') + '", which this workflow does not recognise as an approval or a rejection. The work cannot be published on a guess and no fix cycle was started.');
+                                    lines.push('');
+                                    lines.push('Verdict: UNRECOGNISED (review.json said "' + (source || 'nothing') + '"). The verdict was NOT resolved. This is not a missing verdict and not a review without findings.');
+                                  } else {
+                                    lines.push('BLOCKED - the reviewer ' + verdict + ' the work, so it cannot be published, but no actionable finding could be turned into a fix cycle.');
+                                    lines.push('');
+                                    lines.push('Verdict: ' + verdict + ' (review.json said "' + (source || 'unknown') + '"). The verdict WAS resolved; this is not a missing verdict.');
+                                  }
+                                  if (headline) {
+                                    lines.push('');
+                                    lines.push('Reviewer headline, verbatim: ' + headline);
+                                  }
+                                  lines.push('');
+                                  if (reason === 'parser_defect') {
+                                    lines.push('Reason no findings were carried: PIPELINE PARSER FAULT. review.json carries a non-empty findings list under ' + unknown.join(', ') + ', which this workflow does not recognise.');
+                                    lines.push('The reviewer DID produce findings and they are intact in review.json. This is a defect in this workflow, not in the review and not in the engineer\'s work. Do not re-run blind (that wastes a full cycle) and do not publish past it: add the key(s) above to REVIEW_SCHEMA.');
+                                  } else if (reason === 'unrecognised_verdict') {
+                                    lines.push('Reason no findings were carried: UNRECOGNISED VERDICT. review.json answered the verdict as "' + (source || 'nothing') + '", which is neither an approval nor a rejection in this workflow.');
+                                    lines.push('The pipeline will not guess which cycle that was meant to start, so the engineer has NOT been asked to revise: that would be revising blind against a guess, and it would burn a cycle. This is a defect in this workflow (or drift between its prompt and the reviewer): add the word to the verdict vocabulary in REVIEW_SCHEMA, or have the reviewer answer "approved" or "changes_requested".');
+                                  } else {
+                                    lines.push('Reason no findings were carried: review.json names no blocking issue, no required action and no observation to act on. That is an accurate reading of the review, so the engineer was not asked to revise blind.');
+                                  }
+                                  if (keys.length) {
+                                    lines.push('');
+                                    lines.push('Keys present in review.json: ' + keys.join(', '));
+                                  }
+                                  if (problems.length) {
+                                    lines.push('');
+                                    lines.push('Schema problems detected: ' + problems.join('; '));
+                                  }
+                                  lines.push('');
+                                  lines.push('Human attention required.');
+                                  process.stdout.write(lines.join('\n'));
+                              env:
+                                WT: ${steps.readWorktreePath.outputs.stdout}
+                              failOnError: false
+                              output:
+                                captureStdout: true
                           - id: findingsHaltLog
                             name: Log blocked findings
                             type: log
+                            dependsOn: findingsHaltBrief
                             config:
                               level: error
                               message: Reviewer REJECTED ${steps.loadTicket.result.reference} but no
-                                findings resolved from review.json - blocking the run.
+                                actionable finding could be read from review.json - blocking the run.
+                                The ticket comment names the resolved verdict, the reviewer's
+                                headline and whether this is a parser fault.
                           - id: findingsHaltComment
                             name: Comment blocked findings on ticket
                             type: service_invoke
+                            dependsOn: findingsHaltBrief
                             config:
                               service: core.ReactorySupportWorkflowService@1.0.0
                               method: addComment
                               params:
                                 ticketId: ${steps.loadTicket.result.id}
-                                comment: "BLOCKED - the reviewer rejected the work but no findings
-                                  could be resolved from .ai-agent/review.json (camelCase,
-                                  snake_case and kebab-case keys were all checked). The run was
-                                  halted instead of asking the engineer to revise blind. Human
-                                  attention required. Reviewer evidence:
-                                  ${steps.captureReview.outputs.stdout}"
+                                comment: ${steps.findingsHaltBrief.outputs.stdout}
                           - id: findingsHaltTask
                             name: Human review of unreadable findings
                             type: user_activity
@@ -4395,7 +5014,9 @@ steps:
                               activityType: approval
                               assignee: ${steps.loadTicket.result.assignedToEmail}
                               message: Review blocked for ${steps.loadTicket.result.reference} - the
-                                reviewer verdict could not be parsed into findings
+                                reviewer verdict was ${variables.reviewVerdict} but no actionable
+                                finding could start a fix cycle. The ticket comment names the
+                                reviewer's headline and the exact reason.
                               props:
                                 ticketReference: ${steps.loadTicket.result.reference}
                                 ticketId: ${steps.loadTicket.result.id}
@@ -4423,6 +5044,7 @@ steps:
                       dependsOn: setCycle
                       config:
                         condition: variables.reviewVerdict === 'rejected' && variables.reviewFindingsResolved !== 'false'
+                          && variables.reviewRequiredWork !== 'false'
                         thenSteps:
 
                           - id: reopenWorkspaceNote
@@ -4678,6 +5300,19 @@ steps:
                               message: Review cycle ${variables.reviewCycle} ended with verdict
                                 '${variables.reviewVerdict}' for
                                 ${steps.loadTicket.result.reference} - no hand-back required.
+                          # N3. Reached by an approval (already terminal for the loop) and by a
+                          # rejection that asks for NO work. The second must not spin: the loop's
+                          # own condition would keep reviewing unchanged work until the bound ran
+                          # out. Settling it hands the decision to the publish gate, which already
+                          # classifies that exact state as rejectable-non-blocking and publishable.
+                          - id: setReviewLoopSettled
+                            name: Leave a settled verdict to the publish gate
+                            type: set_variable
+                            dependsOn: logApproved
+                            config:
+                              action: set
+                              key: reviewLoopSettled
+                              value: "true"
               # ── Confirmation review after the last permitted cycle ───────────
               # REACTORY-302016408 (option A). The loop stops when reviewCycle reaches the
               # bound. On that last cycle the engineer revises, but no further review runs,
@@ -4910,10 +5545,13 @@ steps:
                                 ${steps.readWorktreePath.outputs.stdout}/.ai-agent/review.json
 
 
-                                Tag every finding with its severity and with blocking true or false.
-                                A finding you record as blocking false must be one you are
-                                genuinely content to merge with; the pipeline publishes work whose
-                                only findings are explicitly non-blocking.
+                                Use the SAME schema your instructions define: `decision`, `headline`,
+                                `blocking_issues`, `non_blocking_issues`,
+                                `required_actions_next_cycle`, `acceptance_criteria_assessment`.
+                                Everything in `blocking_issues` must be fixed; an entry belongs in
+                                `non_blocking_issues` only if you are genuinely content to merge with
+                                it, because the pipeline publishes work whose only findings are
+                                non-blocking.
                           - id: stampConfirmationReview
                             name: Stamp the confirmation verdict
                             type: cli_command
@@ -5042,22 +5680,174 @@ steps:
                       const accepted = readJson('review-accepted.json');
                       const provenance = accepted && accepted.provenance;
 
-                      const resolveKey = (obj, names) => {
-                        if (!obj || typeof obj !== 'object') return undefined;
+                      // R6 (PR review, thread PRRT_kwDOJl700864SxNa). `runHalt` is consulted by the
+                      // review loop and by the confirmation gate, but it was NEVER consulted here,
+                      // so finishing a halt task (the user_activity in findingsHaltGate or
+                      // reviewUnavailableGate) released the work straight into publication. A halt is
+                      // a veto, not a hint. Read exactly the way readReviewOutcomeNarrative reads it:
+                      // env HALT <- variables.runHalt.
+                      const halted = String(process.env.HALT || '').trim() === 'true';
+
+                      // >>> shared review schema (byte-identical in captureReview, readVerdict and readPublishable,
+                      // modulo indentation - pinned by a test; do not fork it)
+                      //
+                      // REACTORY-302016408/20261116/2437438300. 1.4.8 resolved findings by listing
+                      // synonyms of its OWN key names, so it understood camelCase and snake_case spellings
+                      // of `blockingFindings` and nothing else. The reviewer that produced the reported
+                      // artefact emitted `blocking_issues`. That is not a casing variant:
+                      // "blockingissues" and "blockingfindings" are different nouns, and the resolver
+                      // compares WHOLE normalised names. A complete, actionable critique was therefore
+                      // discarded while the verdict - written as `decision` - resolved normally. That
+                      // asymmetry WAS the bug: one half of the normaliser read the reviewer, the other
+                      // half read a vocabulary of its own invention.
+                      //
+                      // The table below is the PUBLISHED schema. The reviewer prompt states the same keys,
+                      // schemaProblems() reports a shape this table does not recognise, and unknown key
+                      // names are reported as a PARSER fault rather than as a review that said nothing.
+                      // It is one table shared by both call sites, and it is not a synonym list to be
+                      // extended by guesswork: the next invented noun must surface as a defect in this
+                      // workflow, not as "the reviewer gave no findings".
+                      //
+                      // The VERDICT is resolved here as well, by resolveVerdict. There used to be three
+                      // resolvers and only the capture one read this table: readVerdict and readPublishable
+                      // read `verdict` FIRST and BY EXACT NAME, so a review written as {"Decision":"approved"}
+                      // was approved by captureReview and rejected by both gates. readVerdict then saw the
+                      // side-car disagree with the stamped bytes and halted the run as tampering - a
+                      // confident, false reason, on a valid approval.
+                      const normaliseKey = (k) => String(k == null ? '' : k).toLowerCase().replace(/[^a-z0-9]/g, '');
+                      const REVIEW_SCHEMA = {
+                        decision: ['decision', 'verdict'],
+                        blocking: ['blocking_issues', 'blockingIssues', 'blockingFindings', 'blocking_findings', 'blockers'],
+                        nonBlocking: ['non_blocking_issues', 'nonBlockingIssues', 'nonBlockingFindings', 'non_blocking_findings'],
+                        requiredActions: ['required_actions_next_cycle', 'requiredActions', 'requiredChanges', 'required_changes', 'changes'],
+                        acceptance: ['acceptance_criteria_assessment', 'acceptanceCriteria', 'acceptance_criteria'],
+                        findings: ['findings', 'observations'],
+                        headline: ['headline', 'verdictSummary', 'summary', 'reason'],
+                      };
+                      const schemaAliases = (name) => REVIEW_SCHEMA[name] || [];
+                      // Every spelling of one field that is PRESENT in obj, in schema order. One field can
+                      // arrive under more than one name (`blocking_issues` and `blockers`), and each must be
+                      // read: taking only the first one present reported a real blocker as "the review names
+                      // nothing" whenever the first spelling happened to be an empty list.
+                      const schemaEntries = (obj, name) => {
+                        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return [];
+                        const aliases = schemaAliases(name);
                         const keys = Object.keys(obj);
-                        for (let i = 0; i < names.length; i += 1) {
-                          const wanted = String(names[i]).toLowerCase().replace(/[^a-z0-9]/g, '');
+                        const found = [];
+                        for (let i = 0; i < aliases.length; i += 1) {
                           for (let j = 0; j < keys.length; j += 1) {
-                            if (String(keys[j]).toLowerCase().replace(/[^a-z0-9]/g, '') === wanted) return obj[keys[j]];
+                            if (normaliseKey(keys[j]) !== normaliseKey(aliases[i])) continue;
+                            // The alias LIST holds near-duplicates of its own ('blocking_issues' and
+                            // 'blockingIssues' both normalise to "blockingissues"), so a key must be collected
+                            // ONCE, not once per matching alias - otherwise one finding is read twice and the
+                            // publish gate counts two blockers where the reviewer reported one.
+                            if (!found.some((entry) => entry.key === keys[j])) found.push({ key: keys[j], value: obj[keys[j]] });
                           }
                         }
-                        return undefined;
+                        return found;
                       };
-                      const vocabulary = (norm) => {
-                        if (['approved', 'approve', 'pass', 'passed', 'accept', 'accepted', 'ok'].indexOf(norm) !== -1) return 'approved';
-                        if (['review_unavailable', 'reviewunavailable', 'capture_failed', 'capturefailed'].indexOf(norm) !== -1) return 'review_unavailable';
-                        return norm ? 'rejected' : '';
+                      // A value that says nothing: absent, null, blank, or an empty list. A blank spelling
+                      // must never shadow a populated one (`decision: ''` beside `Decision: 'approved'`).
+                      const isEmptyValue = (value) => {
+                        if (value === null || value === undefined) return true;
+                        if (typeof value === 'string') return value.trim() === '';
+                        if (Array.isArray(value)) return value.length === 0;
+                        return false;
                       };
+                      // One SCALAR field (decision, headline): the first spelling with something to say.
+                      const schemaValue = (obj, name) => {
+                        const found = schemaEntries(obj, name);
+                        for (let i = 0; i < found.length; i += 1) {
+                          if (!isEmptyValue(found[i].value)) return found[i].value;
+                        }
+                        return found.length ? found[0].value : undefined;
+                      };
+                      // The ONE list coercion. readPublishable kept its own `Array.isArray(v) ? v : []`, so a
+                      // scalar `blocking_issues: "B1: fix the thing"` started a fix cycle in captureReview and
+                      // counted as NO finding at the publish gate, which then reported "no actionable finding
+                      // could be resolved". Same rule as the rendering block's asList, for the same reason: a
+                      // scalar is one entry, not nothing.
+                      const reviewList = (value) => {
+                        if (value === null || value === undefined) return [];
+                        if (Array.isArray(value)) return value.filter((item) => item !== null && item !== undefined);
+                        if (typeof value === 'string') return value.trim() ? [value.trim()] : [];
+                        if (typeof value === 'object') return Object.keys(value).length ? [value] : [];
+                        return [];
+                      };
+                      // One LIST field: EVERY spelling present is read and concatenated, and a field answered
+                      // twice is reported as a schema problem rather than resolved silently - the reviewer
+                      // answering one question under two names is the drift this table exists to expose.
+                      const schemaList = (obj, name, problems, label) => {
+                        const found = schemaEntries(obj, name);
+                        if (found.length > 1 && problems) {
+                          problems.push((label || name) + ' was supplied under more than one spelling ('
+                            + found.map((entry) => entry.key).join(', ') + '); every one of them was read');
+                        }
+                        const out = [];
+                        found.forEach((entry) => {
+                          reviewList(entry.value).forEach((item) => out.push(item));
+                        });
+                        return out;
+                      };
+                      // A key whose NAME reads like findings but which the schema above did not consume.
+                      // Non-empty AND findings-shaped means the parser (or the prompt) is wrong - not the
+                      // review. Deliberately conservative: prose keys such as what_went_well,
+                      // verified_claims and untouched_or_unverified must NOT be mistaken for findings, or
+                      // an honestly-empty review would be misreported as a parser fault.
+                      const FINDINGS_STEM = /(issue|finding|required|action|blocker|blocking|problem|defect|change)/;
+                      const unknownFindingKeys = (obj) => {
+                        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return [];
+                        const known = {};
+                        Object.keys(REVIEW_SCHEMA).forEach((name) => {
+                          schemaAliases(name).forEach((alias) => { known[normaliseKey(alias)] = true; });
+                        });
+                        return Object.keys(obj).filter((key) => {
+                          if (known[normaliseKey(key)]) return false;
+                          const value = obj[key];
+                          if (!Array.isArray(value) || value.length === 0) return false;
+                          return FINDINGS_STEM.test(normaliseKey(key));
+                        });
+                      };
+                      // The reviewer's words for a verdict, normalised once, so 'changes-requested',
+                      // 'changes_requested' and 'Changes Requested' are one word in all three call sites.
+                      const VERDICT_WORDS = {
+                        approved: ['approved', 'approve', 'pass', 'passed', 'accept', 'accepted', 'ok'],
+                        rejected: ['rejected', 'reject', 'fail', 'failed', 'declined', 'changesrequested', 'requestchanges', 'needschanges', 'needswork'],
+                        review_unavailable: ['reviewunavailable', 'capturefailed'],
+                      };
+                      // Show a verdict value to a human without ever producing "[object Object]".
+                      const showValue = (value) => {
+                        if (value === null || value === undefined) return '';
+                        if (typeof value === 'string') return value.trim();
+                        if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+                        try { return JSON.stringify(value); } catch (e) { return String(value); }
+                      };
+                      // THE verdict resolver. Unwraps {review:{...}} first, reads the ONE table above (so key
+                      // case and spelling cannot matter), and reports whether the review STATED a verdict:
+                      //   stated:false                    - no decision/verdict field with anything in it
+                      //   verdict:'approved'              - an approval, in any spelling
+                      //   verdict:'rejected'              - a rejection, in any spelling
+                      //   verdict:'review_unavailable'    - the pipeline's own "never judged" verdict
+                      //   stated:true, verdict:''         - a verdict WAS stated in a vocabulary this
+                      //                                     workflow does not know ('approved_with_comments').
+                      //                                     That is a defect HERE: it is never guessed at and
+                      //                                     never turned into a blind fix cycle.
+                      // Precedence is identical in every caller: the wrapper's own fields win, and inside
+                      // one object `decision` (the canonical key) beats `verdict` (its alias).
+                      const resolveVerdict = (raw) => {
+                        const inner = (raw && typeof raw.review === 'object' && !Array.isArray(raw.review) && raw.review) ? raw.review : raw;
+                        let value = schemaValue(inner, 'decision');
+                        if (isEmptyValue(value) && inner !== raw) value = schemaValue(raw, 'decision');
+                        const source = showValue(value).trim().toLowerCase();
+                        const norm = normaliseKey(source);
+                        if (!norm) return { verdict: '', source: '', stated: false };
+                        const classes = Object.keys(VERDICT_WORDS);
+                        for (let i = 0; i < classes.length; i += 1) {
+                          if (VERDICT_WORDS[classes[i]].indexOf(norm) !== -1) return { verdict: classes[i], source: source, stated: true };
+                        }
+                        return { verdict: '', source: source, stated: true };
+                      };
+                      // <<< shared review schema
 
                       let reviewBytes = null;
                       try { reviewBytes = fs.readFileSync(reviewPath); } catch (e) { reviewBytes = null; }
@@ -5089,12 +5879,34 @@ steps:
                       }
 
                       const stampedInner = (stampedReview && typeof stampedReview.review === 'object' && stampedReview.review) ? stampedReview.review : stampedReview;
-                      const stampedRawVerdict = String(
-                        (stampedInner && (stampedInner.verdict || stampedInner.decision)) ||
-                        (stampedReview && stampedReview.verdict) || ''
-                      ).trim().toLowerCase();
-                      const stampedVerdict = stampedReview ? vocabulary(stampedRawVerdict) : '';
-                      const claimedVerdict = vocabulary(String(review.verdict || '').trim().toLowerCase());
+                      // Resolved by the SAME resolveVerdict captureReview and readVerdict use.
+                      // The expression that used to sit here read `verdict` first and by EXACT
+                      // name, so this gate and captureReview disagreed about the same bytes - and a
+                      // {"Decision":"approved"} review was classified rejected and never published,
+                      // while a review carrying both keys could be published as approved on the
+                      // alias after captureReview had rejected it on `decision` (B1).
+                      const stampedResolution = stampedReview ? resolveVerdict(stampedReview) : { verdict: '', source: '', stated: false };
+                      const stampedVerdict = stampedResolution.verdict;
+                      const claimedVerdict = resolveVerdict({ verdict: review.verdict }).verdict;
+
+                      // R6 (PR review, thread PRRT_kwDOJl700864SxNa). `resolveVerdict` reports
+                      // `stated: true, verdict: ''` for a verdict that WAS stated in a vocabulary
+                      // this workflow does not know - 'approved_with_comments' is the reviewer's
+                      // real word for it, and captureReview halts those bytes as
+                      // 'unrecognised_verdict'. The `|| 'rejected'` fallback below silently turned
+                      // that same answer into a REJECTION, and a rejection whose findings are all
+                      // non-blocking classifies rejected_non_blocking, i.e. PUBLISHABLE: the gate
+                      // published what capture had halted, on the very same bytes. A verdict this
+                      // workflow cannot read is not a verdict it may publish on, so the gate
+                      // refuses and names the value - using the resolver's own `source`, never a
+                      // re-parse of the file.
+                      const unrecognisedVerdict = (!stampedProblem && stampedResolution.stated && !stampedVerdict)
+                        ? stampedResolution.source
+                        : null;
+                      if (unrecognisedVerdict) {
+                        stampedProblem = 'the reviewer verdict "' + unrecognisedVerdict
+                          + '" is not recognised - refusing to publish (captureReview halted this run as an unrecognised verdict)';
+                      }
 
                       // The stamp is only meaningful when both artefacts describe the SAME
                       // review. A side-car that says something else was rewritten after
@@ -5105,7 +5917,6 @@ steps:
 
                       const attributable = !stampedProblem;
                       let verdict = attributable ? (stampedVerdict || 'rejected') : 'review_unavailable';
-                      const asArray = (value) => (Array.isArray(value) ? value : []);
 
                       // This step runs BEFORE the engineer's work is committed (commitChanges
                       // lives inside the publish branch, which this decision gates), so git
@@ -5124,19 +5935,32 @@ steps:
                       const findingsSource = stampedInner || {};
                       const isUsableFinding = (value) => value !== null && value !== undefined && (typeof value === 'object' || String(value).trim() !== '');
                       const entries = [];
-                      asArray(resolveKey(findingsSource, ['requiredChanges', 'required_changes', 'changes']))
+                      // schemaList reads EVERY spelling present through the ONE shared coercion.
+                      // This gate kept its own `Array.isArray(v) ? v : []`, which DROPPED a scalar
+                      // that captureReview had already accepted as one finding, so the two paths
+                      // disagreed about the same review (B4).
+                      schemaList(findingsSource, 'requiredActions')
                         .filter(isUsableFinding)
                         .forEach((finding) => entries.push({ finding: finding, list: 'requiredChanges' }));
-                      asArray(resolveKey(findingsSource, ['blockingFindings', 'blocking_findings']))
+                      schemaList(findingsSource, 'blocking')
                         .filter(isUsableFinding)
                         .forEach((finding) => entries.push({ finding: finding, list: 'blockingFindings' }));
-                      asArray(resolveKey(findingsSource, ['findings', 'observations']))
+                      // A rejection that carries only non_blocking_issues used to be invisible
+                      // here: the publish gate saw zero entries and classified the run as
+                      // "rejected with nothing actionable", so an all-non-blocking rejection could
+                      // never reach rejected_non_blocking. Same vocabulary, same fix.
+                      schemaList(findingsSource, 'nonBlocking')
+                        .filter(isUsableFinding)
+                        .forEach((finding) => entries.push({ finding: finding, list: 'nonBlockingFindings' }));
+                      schemaList(findingsSource, 'findings')
                         .filter(isUsableFinding)
                         .forEach((finding) => entries.push({ finding: finding, list: 'findings' }));
 
                       // captureReview's own rule: an approval needs no findings, a rejection
-                      // needs at least one actionable entry or a human decides.
+                      // needs at least one readable entry or a human decides.
                       const findingsResolved = verdict === 'approved' ? true : entries.length > 0;
+                      // Findings-shaped keys outside the shared schema. Reported, never guessed at.
+                      const unrecognisedFindingKeys = unknownFindingKeys(findingsSource);
 
                       // true / false / undefined, where undefined means the reviewer did not say.
                       const blockingFlag = (entry) => {
@@ -5157,6 +5981,11 @@ steps:
                       let nonBlocking = 0;
                       let unstated = 0;
                       entries.forEach((entry) => {
+                        // non_blocking_issues is the reviewer's own classification and can never be
+                        // blocking. This is what allows a rejection whose only findings are
+                        // explicitly non-blocking to publish, exactly as an explicit per-finding
+                        // "blocking: false" already did.
+                        if (entry.list === 'nonBlockingFindings') { nonBlocking += 1; return; }
                         // requiredChanges and an explicit blockingFindings entry are blocking by
                         // definition: the reviewer named them as work that must happen.
                         if (entry.list !== 'findings') { blocking += 1; return; }
@@ -5180,7 +6009,12 @@ steps:
                       } else if (verdict === 'rejected') {
                         if (!findingsResolved) {
                           outcome = 'rejected';
-                          basis = 'the reviewer rejected the work and no actionable finding could be resolved';
+                          // Same distinction captureReview makes. Without it the gate's own record
+                          // says the reviewer had nothing to say when the truth is that this
+                          // workflow could not read what it said.
+                          basis = unrecognisedFindingKeys.length
+                            ? 'the reviewer rejected the work and its findings sit under key(s) this workflow does not recognise (' + unrecognisedFindingKeys.join(', ') + ') - a parser fault, not a review without findings'
+                            : 'the reviewer rejected the work and no actionable finding could be resolved';
                         } else if (blocking === 0 && unstated === 0 && nonBlocking > 0) {
                           outcome = 'rejected_non_blocking';
                           publishable = true;
@@ -5191,6 +6025,21 @@ steps:
                         }
                       }
 
+                      // R6 (second half). A halt is a VETO, not a hint. `runHalt` is set by
+                      // findingsHaltGate, reviewUnavailableGate and the revision-integrity guard; the
+                      // loop stops on it and the confirmation pass is skipped on it, but this decision
+                      // never looked at it - so a human completing the halt task released the work into
+                      // publication. Whatever the verdict says, a halted run is not published: a human
+                      // resolves the halt first. Only a would-be PUBLICATION is relabelled, so every
+                      // existing non-publishable outcome keeps its own accurate reason instead of being
+                      // overwritten with 'halted'.
+                      if (publishable && halted) {
+                        const decisionBeforeHalt = outcome;
+                        publishable = false;
+                        outcome = 'halted';
+                        basis = 'a halt is in force for this run (runHalt): the review had decided '
+                          + decisionBeforeHalt + ', but a halted run must never publish - a human resolves the halt first.';
+                      }
                       // Attributability was established at the top of this script from the
                       // stamped bytes and the side-car cross-check, so there is no second
                       // provenance gate here - a decision recorded below is always one the
@@ -5203,6 +6052,15 @@ steps:
                         nonBlocking: nonBlocking,
                         unstated: unstated,
                         basis: basis,
+                        // true when the reviewer's findings exist but this workflow cannot read
+                        // them: a pipeline defect, never a reason to treat the work as unreviewed.
+                        parseFault: unrecognisedFindingKeys.length > 0,
+                        unrecognisedFindingKeys: unrecognisedFindingKeys,
+                        // R6. Whether a halt was in force, and the raw verdict text this gate could not
+                        // read (null when it read one). Written down so the ticket narrative and a human
+                        // can see WHY nothing was published.
+                        halted: halted,
+                        unrecognisedVerdict: unrecognisedVerdict,
                         attributable: attributable,
                         reviewer: provenance && provenance.reviewerId ? String(provenance.reviewerId) : null,
                         reviewAttempt: provenance && provenance.attempt !== undefined ? provenance.attempt : null,
@@ -5214,6 +6072,9 @@ steps:
                       process.stdout.write(publishable ? 'true' : 'false');
                   env:
                     WT: ${steps.readWorktreePath.outputs.stdout}
+                    # R6. The publish decision must be able to SEE a halt. Wired exactly as
+                    # readReviewOutcomeNarrative wires it: HALT <- variables.runHalt.
+                    HALT: ${variables.runHalt}
                   failOnError: false
                   output:
                     captureStdout: true

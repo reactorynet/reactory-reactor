@@ -787,7 +787,18 @@ describe('core.ProcessAITicket exit condition contracts (REACTORY-302016408)', (
     // Findings are classified from the stamped bytes too, so the non-blocking
     // publish path cannot be re-labelled through the side-car.
     expect(script).toContain('const findingsSource = stampedInner');
-    expect(script).toContain('resolveKey(findingsSource');
+    // Resolved through the shared REVIEW_SCHEMA, which is the one vocabulary both this gate
+    // and captureReview read (REACTORY-302016408/20261116/2437438300). The point of this
+    // assertion is unchanged: every list is read from findingsSource, never from the side-car.
+    expect(script).toContain('const REVIEW_SCHEMA = {');
+    expect(script).toContain("schemaList(findingsSource, 'blocking')");
+    expect(script).toContain("schemaList(findingsSource, 'requiredActions')");
+    expect(script).toContain("schemaList(findingsSource, 'nonBlocking')");
+    expect(script).toContain("schemaList(findingsSource, 'findings')");
+    expect(script).not.toContain('schemaList(review,');
+    // One coercion for both paths (PR review, B4): the gate's private
+    // `Array.isArray(v) ? v : []` dropped a scalar that captureReview accepted.
+    expect(script).not.toContain('const asArray =');
   });
 
   it('reports a capture failure as review_unavailable and never as rejected', () => {
