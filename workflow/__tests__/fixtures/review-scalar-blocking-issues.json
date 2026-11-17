@@ -1,0 +1,6 @@
+{
+  "decision": "changes_requested",
+  "headline": "The ACL bypass is a real security defect: the broker resolves the topic before it consults the ACL, so any publisher can reach a topic it should not.",
+  "blocking_issues": "B1: the broker ignores the topic ACL - check it before the topic lookup",
+  "required_actions_next_cycle": []
+}

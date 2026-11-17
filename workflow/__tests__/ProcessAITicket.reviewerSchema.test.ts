@@ -395,3 +395,292 @@ describe('ProcessAITicket reviewer schema — one table, both call sites, one pr
     expect(confirmation).not.toContain('blocking true or false');
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * PR review of the reviewer-schema parser: B1-B4, N1 and N3.
+ *
+ * The fixtures above are REAL artefacts and are pinned by sha256. The ones below
+ * are shapes the parser is supposed to understand but did not, so they are written
+ * by hand and named after the defect each one reproduces: a capitalised `Decision`,
+ * an empty alias shadowing a populated one, a verdict from another vocabulary, a
+ * scalar where a list belongs, an object where a sentence belongs, and a rejection
+ * that asks for no work at all.
+ * ------------------------------------------------------------------------- */
+
+const FIXTURE_CAPITAL_DECISION = 'review-capital-decision-approved.json';
+const FIXTURE_VERDICT_CONFLICT = 'review-decision-and-verdict-conflict.json';
+const FIXTURE_EMPTY_ALIAS = 'review-empty-alias-with-blockers.json';
+const FIXTURE_UNRECOGNISED_VERDICT = 'review-unrecognised-verdict.json';
+const FIXTURE_SCALAR_LIST = 'review-scalar-blocking-issues.json';
+const FIXTURE_OBJECT_HEADLINE = 'review-object-headline.json';
+const FIXTURE_NON_BLOCKING_ONLY = 'review-non-blocking-only-rejection.json';
+
+const publishDecisionOf = (dir: string): any =>
+  JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'publish-decision.json'), 'utf8'));
+
+describe('ProcessAITicket reviewer schema — B1 one verdict resolver, three call sites', () => {
+  const capture = scriptFor('captureReview');
+  const readVerdict = scriptFor('readVerdict');
+  const publishable = scriptFor('readPublishable');
+
+  it('reads {"Decision":"approved"} as an approval in all three scripts', () => {
+    const { review } = loadFixture(FIXTURE_CAPITAL_DECISION);
+    const dir = repoWithWork();
+    try {
+      installReview(dir, review);
+      expect(runJson(capture, { WT: dir }, dir).verdict).toBe('approved');
+
+      // captureReview always resolved this through normaliseKey. readVerdict read
+      // `rv.verdict || rv.decision` by EXACT name, so it resolved '' and defaulted
+      // to 'rejected'; the side-car (written from the SAME bytes) said approved, so
+      // it printed "... says approved but the stamped review.json says rejected -
+      // refusing both" and the run halted as review_unavailable.
+      expect(runScript(readVerdict, { WT: dir }, dir).trim()).toBe('approved');
+
+      // readPublishable read the same two keys the same wrong way, so a valid
+      // approval was reported as rejected and could never publish.
+      expect(runScript(publishable, { WT: dir }, dir).trim()).toBe('true');
+      expect(publishDecisionOf(dir).outcome).toBe('approved');
+      expect(publishDecisionOf(dir).verdict).toBe('approved');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('gives `decision` the same precedence everywhere when a review carries both keys', () => {
+    const { review } = loadFixture(FIXTURE_VERDICT_CONFLICT);
+    const dir = repoWithWork();
+    try {
+      installReview(dir, review);
+      // `decision` is the canonical key and it says changes_requested; `verdict` is
+      // its alias and it says approved. captureReview took `decision`; the two gates
+      // read `verdict` FIRST. Same file, opposite verdicts - and the gate published.
+      expect(runJson(capture, { WT: dir }, dir).verdict).toBe('rejected');
+      expect(runScript(readVerdict, { WT: dir }, dir).trim()).toBe('rejected');
+      expect(runScript(publishable, { WT: dir }, dir).trim()).toBe('false');
+      const decision = publishDecisionOf(dir);
+      expect(decision.outcome).toBe('rejected');
+      // TWO, not one: the gate counts the blocking issue AND the required action, since
+      // "requiredChanges are blocking by definition". The count is not what this test is
+      // about - the point is that all three readers now agree it is REJECTED.
+      expect(decision.blocking).toBe(2);
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
+
+describe('ProcessAITicket reviewer schema — B2 an empty alias must not shadow a populated one', () => {
+  const capture = scriptFor('captureReview');
+
+  it('reads `blockers` when `blocking_issues` is present but empty', () => {
+    const { review } = loadFixture(FIXTURE_EMPTY_ALIAS);
+    const dir = repoWithWork();
+    try {
+      installReview(dir, review);
+      const result = runJson(capture, { WT: dir }, dir);
+
+      // schemaValue returned the first alias PRESENT, so `blocking_issues: []` won
+      // and the real `blockers` entry was never read: a real blocker was reported as
+      // "the review names nothing". `blockers` is a KNOWN alias, so the parser-fault
+      // detector could not see it either.
+      expect(result.findingsResolved).toBe(true);
+      expect(result.findingsUnresolvedReason).toBe('');
+      expect(result.blockingFindings.length).toBe(1);
+      expect(result.blockingFindings[0].id).toBe('B1');
+
+      // Every spelling that is present is read, so nothing is dropped...
+      expect(result.requiredChanges.length).toBe(2);
+      expect(JSON.stringify(result.requiredChanges)).toContain('Check the ACL before the topic lookup');
+      expect(JSON.stringify(result.requiredChanges)).toContain('Add a regression test that fails without the ACL check');
+
+      // ...and answering one field twice is RECORDED as prompt drift, not resolved silently.
+      const problems = result.schemaProblems.join(' ');
+      expect(problems).toContain('more than one spelling');
+      expect(problems).toContain('blocking_issues');
+      expect(problems).toContain('blockers');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('skips a blank scalar so a populated spelling still decides the verdict', () => {
+    const dir = repoWithWork();
+    try {
+      installReview(dir, { decision: '', Decision: 'approved', headline: 'Approved.', blocking_issues: [], required_actions_next_cycle: [] });
+      const result = runJson(capture, { WT: dir }, dir);
+      // The blank `decision` was returned first, so the review was read as rejected.
+      expect(result.verdict).toBe('approved');
+      expect(result.verdictSource).toBe('approved');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
+
+describe('ProcessAITicket reviewer schema — B3 an unrecognised verdict is a pipeline defect', () => {
+  const capture = scriptFor('captureReview');
+
+  it('records the unrecognised verdict instead of starting a blind fix cycle', () => {
+    const { review } = loadFixture(FIXTURE_UNRECOGNISED_VERDICT);
+    const dir = repoWithWork();
+    try {
+      installReview(dir, review);
+      const result = runJson(capture, { WT: dir }, dir);
+
+      // The "not a recognised verdict" branch was UNREACHABLE: the fallback above it
+      // always set `verdict` first, so this probe recorded schemaProblems: [].
+      const problems = result.schemaProblems.join(' ');
+      expect(problems).toContain('approved_with_comments');
+      expect(problems).toContain('not a recognised verdict');
+
+      // The old fallback also pushed a synthetic sentence into the FINDINGS list, so
+      // it counted as readable and the engineer got a fix cycle whose only content
+      // was the pipeline's own note - the "revise blind" outcome the halt exists for.
+      expect(result.findingsResolved).toBe(false);
+      expect(result.findingsUnresolvedReason).toBe('unrecognised_verdict');
+      expect(JSON.stringify(result.findings)).not.toContain('not recognisable');
+
+      // It halts like a parser fault, naming the value it could not read.
+      const brief = runScript(scriptFor('findingsHaltBrief'), { WT: dir }, dir);
+      expect(brief).toContain('approved_with_comments');
+      expect(brief).toContain('UNRECOGNISED');
+      expect(brief).toContain('Human attention required');
+      expect(brief).not.toContain('names no blocking issue');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
+
+describe('ProcessAITicket reviewer schema — B4 one list coercion, both paths', () => {
+  const capture = scriptFor('captureReview');
+  const publishable = scriptFor('readPublishable');
+
+  it('treats a scalar findings list as one finding in capture AND at the publish gate', () => {
+    const { review } = loadFixture(FIXTURE_SCALAR_LIST);
+    const dir = repoWithWork();
+    try {
+      installReview(dir, review);
+      const result = runJson(capture, { WT: dir }, dir);
+
+      // captureReview wrapped the scalar, so it started a fix cycle...
+      expect(result.blockingFindings.length).toBe(1);
+      expect(String(result.blockingFindings[0])).toContain('the broker ignores the topic ACL');
+
+      // ...while the gate dropped it (its own `Array.isArray(v) ? v : []`) and
+      // reported "no actionable finding could be resolved". One coercion now.
+      expect(runScript(publishable, { WT: dir }, dir).trim()).toBe('false');
+      const decision = publishDecisionOf(dir);
+      expect(decision.outcome).toBe('rejected');
+      expect(decision.blocking).toBe(1);
+
+      // shapeCheck only flagged boolean/number, so a string where a list belongs was
+      // not even recorded as a schema problem.
+      expect(result.schemaProblems.join(' ')).toContain('should be a list, not string');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
+
+describe('ProcessAITicket reviewer schema — N1 the headline is text, never [object Object]', () => {
+  const capture = scriptFor('captureReview');
+
+  it('renders an object headline through asText instead of String()', () => {
+    const { review } = loadFixture(FIXTURE_OBJECT_HEADLINE);
+    const dir = repoWithWork();
+    try {
+      installReview(dir, review);
+      const result = runJson(capture, { WT: dir }, dir);
+
+      expect(String(result.headline)).not.toContain('[object Object]');
+      expect(String(result.headline)).toContain('The change does not address the ticket');
+      // The engineer's brief and the ticket comment both quote this field.
+      const brief = runScript(scriptFor('handBackBriefing'), { WT: dir }, dir);
+      expect(brief).not.toContain('[object Object]');
+      expect(brief).toContain('The change does not address the ticket');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
+
+describe('ProcessAITicket reviewer schema — N3 a rejection that asks for no work leaves the loop', () => {
+  const capture = scriptFor('captureReview');
+  const publishable = scriptFor('readPublishable');
+
+  it('reports whether the review asks for any required work at all', () => {
+    const gate = scriptFor('readRequiredWork');
+    const withBlocker = repoWithWork();
+    const nonBlockingOnly = repoWithWork();
+    try {
+      installReview(withBlocker, loadFixture(FIXTURE_A).review);
+      runJson(capture, { WT: withBlocker }, withBlocker);
+      expect(runScript(gate, { WT: withBlocker }, withBlocker).trim()).toBe('true');
+
+      installReview(nonBlockingOnly, loadFixture(FIXTURE_NON_BLOCKING_ONLY).review);
+      const captured = runJson(capture, { WT: nonBlockingOnly }, nonBlockingOnly);
+      // It RESOLVES (the reviewer did say something) but there is nothing to fix.
+      expect(captured.findingsResolved).toBe(true);
+      expect(runScript(gate, { WT: nonBlockingOnly }, nonBlockingOnly).trim()).toBe('false');
+    } finally {
+      removeDir(withBlocker);
+      removeDir(nonBlockingOnly);
+    }
+  });
+
+  it('routes that state to the publish gate instead of handing it back for another cycle', () => {
+    // Looping on it burned every permitted cycle telling the engineer to "address
+    // EVERY required change" when the review required none, while the publish gate
+    // would have published it as rejected_non_blocking immediately.
+    expect(String(stepById('verdictBranch').config!.condition)).toContain('reviewRequiredWork');
+    expect(String(stepById('reviewLoop').config!.condition)).toContain('reviewLoopSettled');
+
+    const dir = repoWithWork();
+    try {
+      installReview(dir, loadFixture(FIXTURE_NON_BLOCKING_ONLY).review);
+      runJson(capture, { WT: dir }, dir);
+      expect(runScript(publishable, { WT: dir }, dir).trim()).toBe('true');
+      expect(publishDecisionOf(dir).outcome).toBe('rejected_non_blocking');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
+
+describe('ProcessAITicket reviewer schema — the shared block is one block in THREE scripts', () => {
+  const SCHEMA_OPEN = '// >>> shared review schema';
+  const SCHEMA_CLOSE = '// <<< shared review schema';
+  const blockOf = (script: string): string => {
+    const start = script.indexOf(SCHEMA_OPEN);
+    expect(start).toBeGreaterThan(-1);
+    const end = script.indexOf(SCHEMA_CLOSE, start);
+    expect(end).toBeGreaterThan(start);
+    return script
+      .slice(start, end + SCHEMA_CLOSE.length)
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .join('\n');
+  };
+
+  it('carries the identical block in readVerdict, the third verdict reader', () => {
+    // readVerdict had no shared block at all: it re-derived the verdict with its own
+    // `rv.verdict || rv.decision` expression (B1). Three readers, one table.
+    const captureBlock = blockOf(scriptFor('captureReview'));
+    expect(blockOf(scriptFor('readVerdict'))).toBe(captureBlock);
+    expect(blockOf(scriptFor('readPublishable'))).toBe(captureBlock);
+  });
+
+  it('pins resolveVerdict and the one list coercion inside that block', () => {
+    const block = blockOf(scriptFor('captureReview'));
+    expect(block).toContain('const resolveVerdict = (raw) => {');
+    expect(block).toContain('const schemaList = (obj, name, problems, label) => {');
+    expect(block).toContain('const reviewList = (value) => {');
+    expect(block).toContain('review_unavailable');
+    // The unreachable-branch fix depends on the resolver reporting whether a verdict
+    // was STATED at all, so that is pinned with the resolver itself.
+    expect(block).toContain('stated');
+  });
+});

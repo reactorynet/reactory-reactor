@@ -791,11 +791,14 @@ describe('core.ProcessAITicket exit condition contracts (REACTORY-302016408)', (
     // and captureReview read (REACTORY-302016408/20261116/2437438300). The point of this
     // assertion is unchanged: every list is read from findingsSource, never from the side-car.
     expect(script).toContain('const REVIEW_SCHEMA = {');
-    expect(script).toContain("schemaValue(findingsSource, 'blocking')");
-    expect(script).toContain("schemaValue(findingsSource, 'requiredActions')");
-    expect(script).toContain("schemaValue(findingsSource, 'nonBlocking')");
-    expect(script).toContain("schemaValue(findingsSource, 'findings')");
-    expect(script).not.toContain('schemaValue(review,');
+    expect(script).toContain("schemaList(findingsSource, 'blocking')");
+    expect(script).toContain("schemaList(findingsSource, 'requiredActions')");
+    expect(script).toContain("schemaList(findingsSource, 'nonBlocking')");
+    expect(script).toContain("schemaList(findingsSource, 'findings')");
+    expect(script).not.toContain('schemaList(review,');
+    // One coercion for both paths (PR review, B4): the gate's private
+    // `Array.isArray(v) ? v : []` dropped a scalar that captureReview accepted.
+    expect(script).not.toContain('const asArray =');
   });
 
   it('reports a capture failure as review_unavailable and never as rejected', () => {
