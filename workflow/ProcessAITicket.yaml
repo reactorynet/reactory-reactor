@@ -5680,6 +5680,14 @@ steps:
                       const accepted = readJson('review-accepted.json');
                       const provenance = accepted && accepted.provenance;
 
+                      // R6 (PR review, thread PRRT_kwDOJl700864SxNa). `runHalt` is consulted by the
+                      // review loop and by the confirmation gate, but it was NEVER consulted here,
+                      // so finishing a halt task (the user_activity in findingsHaltGate or
+                      // reviewUnavailableGate) released the work straight into publication. A halt is
+                      // a veto, not a hint. Read exactly the way readReviewOutcomeNarrative reads it:
+                      // env HALT <- variables.runHalt.
+                      const halted = String(process.env.HALT || '').trim() === 'true';
+
                       // >>> shared review schema (byte-identical in captureReview, readVerdict and readPublishable,
                       // modulo indentation - pinned by a test; do not fork it)
                       //
@@ -5881,6 +5889,25 @@ steps:
                       const stampedVerdict = stampedResolution.verdict;
                       const claimedVerdict = resolveVerdict({ verdict: review.verdict }).verdict;
 
+                      // R6 (PR review, thread PRRT_kwDOJl700864SxNa). `resolveVerdict` reports
+                      // `stated: true, verdict: ''` for a verdict that WAS stated in a vocabulary
+                      // this workflow does not know - 'approved_with_comments' is the reviewer's
+                      // real word for it, and captureReview halts those bytes as
+                      // 'unrecognised_verdict'. The `|| 'rejected'` fallback below silently turned
+                      // that same answer into a REJECTION, and a rejection whose findings are all
+                      // non-blocking classifies rejected_non_blocking, i.e. PUBLISHABLE: the gate
+                      // published what capture had halted, on the very same bytes. A verdict this
+                      // workflow cannot read is not a verdict it may publish on, so the gate
+                      // refuses and names the value - using the resolver's own `source`, never a
+                      // re-parse of the file.
+                      const unrecognisedVerdict = (!stampedProblem && stampedResolution.stated && !stampedVerdict)
+                        ? stampedResolution.source
+                        : null;
+                      if (unrecognisedVerdict) {
+                        stampedProblem = 'the reviewer verdict "' + unrecognisedVerdict
+                          + '" is not recognised - refusing to publish (captureReview halted this run as an unrecognised verdict)';
+                      }
+
                       // The stamp is only meaningful when both artefacts describe the SAME
                       // review. A side-car that says something else was rewritten after
                       // capture (or captured against different bytes), so nothing publishes.
@@ -5998,6 +6025,21 @@ steps:
                         }
                       }
 
+                      // R6 (second half). A halt is a VETO, not a hint. `runHalt` is set by
+                      // findingsHaltGate, reviewUnavailableGate and the revision-integrity guard; the
+                      // loop stops on it and the confirmation pass is skipped on it, but this decision
+                      // never looked at it - so a human completing the halt task released the work into
+                      // publication. Whatever the verdict says, a halted run is not published: a human
+                      // resolves the halt first. Only a would-be PUBLICATION is relabelled, so every
+                      // existing non-publishable outcome keeps its own accurate reason instead of being
+                      // overwritten with 'halted'.
+                      if (publishable && halted) {
+                        const decisionBeforeHalt = outcome;
+                        publishable = false;
+                        outcome = 'halted';
+                        basis = 'a halt is in force for this run (runHalt): the review had decided '
+                          + decisionBeforeHalt + ', but a halted run must never publish - a human resolves the halt first.';
+                      }
                       // Attributability was established at the top of this script from the
                       // stamped bytes and the side-car cross-check, so there is no second
                       // provenance gate here - a decision recorded below is always one the
@@ -6014,6 +6056,11 @@ steps:
                         // them: a pipeline defect, never a reason to treat the work as unreviewed.
                         parseFault: unrecognisedFindingKeys.length > 0,
                         unrecognisedFindingKeys: unrecognisedFindingKeys,
+                        // R6. Whether a halt was in force, and the raw verdict text this gate could not
+                        // read (null when it read one). Written down so the ticket narrative and a human
+                        // can see WHY nothing was published.
+                        halted: halted,
+                        unrecognisedVerdict: unrecognisedVerdict,
                         attributable: attributable,
                         reviewer: provenance && provenance.reviewerId ? String(provenance.reviewerId) : null,
                         reviewAttempt: provenance && provenance.attempt !== undefined ? provenance.attempt : null,
@@ -6025,6 +6072,9 @@ steps:
                       process.stdout.write(publishable ? 'true' : 'false');
                   env:
                     WT: ${steps.readWorktreePath.outputs.stdout}
+                    # R6. The publish decision must be able to SEE a halt. Wired exactly as
+                    # readReviewOutcomeNarrative wires it: HALT <- variables.runHalt.
+                    HALT: ${variables.runHalt}
                   failOnError: false
                   output:
                     captureStdout: true

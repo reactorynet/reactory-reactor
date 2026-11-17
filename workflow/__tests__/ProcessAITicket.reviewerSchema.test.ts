@@ -684,3 +684,145 @@ describe('ProcessAITicket reviewer schema — the shared block is one block in T
     expect(block).toContain('stated');
   });
 });
+
+/* ---------------------------------------------------------------------------
+ * R6 (PR review, thread PRRT_kwDOJl700864SxNa): the publish gate must never
+ * publish what captureReview halted.
+ *
+ * `resolveVerdict` reports `{ stated: true, verdict: '' }` for a verdict that WAS
+ * stated in a vocabulary this workflow does not know - 'approved_with_comments' is
+ * the reviewer's real word for it. captureReview halts those bytes as
+ * 'unrecognised_verdict'; readPublishable turned the same bytes into
+ * `'rejected'` (its `|| 'rejected'` fallback) and, because the review carried only
+ * non-blocking issues, classified them `rejected_non_blocking` = PUBLISHABLE.
+ *
+ * The second half is the same class of hole from the other direction: `runHalt` is
+ * consulted by the loop and by the confirmation gate, but NOT by the publish
+ * decision, so completing a halt task released the work.
+ * ------------------------------------------------------------------------- */
+
+const FIXTURE_UNRECOGNISED_WITH_BLOCKERS = 'review-unrecognised-verdict-with-blockers.json';
+
+describe('ProcessAITicket reviewer schema — R6 the gate never publishes what capture halts', () => {
+  const capture = scriptFor('captureReview');
+  const publishable = scriptFor('readPublishable');
+
+  it('refuses to publish an unrecognised verdict that capture halted', () => {
+    // approved_with_comments + ONLY non-blocking issues. captureRead halts it; the gate
+    // used to publish it as rejected_non_blocking. The two MUST agree.
+    const { review } = loadFixture(FIXTURE_UNRECOGNISED_VERDICT);
+    const dir = repoWithWork();
+    try {
+      installReview(dir, review);
+      const captured = runJson(capture, { WT: dir }, dir);
+      expect(captured.verdict).toBe('rejected');
+      expect(captured.findingsUnresolvedReason).toBe('unrecognised_verdict');
+
+      expect(runScript(publishable, { WT: dir }, dir).trim()).toBe('false');
+      const decision = publishDecisionOf(dir);
+      expect(decision.publishable).toBe(false);
+      // Not a publishable rejection: the verdict was never READ, so it was never judged.
+      expect(decision.outcome).not.toBe('rejected_non_blocking');
+      expect(decision.outcome).toBe('review_unavailable');
+      expect(decision.attributable).toBe(false);
+      // The reason names the value the gate could not read.
+      expect(String(decision.basis)).toContain('approved_with_comments');
+      expect(String(decision.basis)).toContain('not recognised');
+      expect(decision.unrecognisedVerdict).toBe('approved_with_comments');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('still refuses an unrecognised verdict that carries blocking issues', () => {
+    const { review } = loadFixture(FIXTURE_UNRECOGNISED_WITH_BLOCKERS);
+    const dir = repoWithWork();
+    try {
+      installReview(dir, review);
+      const captured = runJson(capture, { WT: dir }, dir);
+      expect(captured.findingsUnresolvedReason).toBe('unrecognised_verdict');
+
+      // It refused before too - but by accident (it counted a blocking entry under a
+      // verdict it could not read). It must refuse for the RIGHT reason now.
+      expect(runScript(publishable, { WT: dir }, dir).trim()).toBe('false');
+      const decision = publishDecisionOf(dir);
+      expect(decision.publishable).toBe(false);
+      expect(decision.outcome).toBe('review_unavailable');
+      expect(String(decision.basis)).toContain('approved_with_comments');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('refuses to publish while a halt is in force', () => {
+    // The reviewer APPROVED, so the work is otherwise publishable - but runHalt is set
+    // (an unreadable-findings halt a human has since completed, an integrity veto, a
+    // capture failure). Nothing between findingsHaltGate and outcome used to look at it.
+    const { review } = loadFixture(FIXTURE_CAPITAL_DECISION);
+    const dir = repoWithWork();
+    try {
+      installReview(dir, review);
+      expect(runJson(capture, { WT: dir }, dir).verdict).toBe('approved');
+
+      // Sanity: without a halt in force this review publishes.
+      expect(runScript(publishable, { WT: dir }, dir).trim()).toBe('true');
+      expect(publishDecisionOf(dir).outcome).toBe('approved');
+
+      // With the halt in force it must not, whatever the verdict says.
+      expect(runScript(publishable, { WT: dir, HALT: 'true' }, dir).trim()).toBe('false');
+      const decision = publishDecisionOf(dir);
+      expect(decision.publishable).toBe(false);
+      expect(decision.outcome).toBe('halted');
+      expect(decision.halted).toBe(true);
+      expect(String(decision.basis)).toContain('halt');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('wires runHalt into the step that decides publication', () => {
+    // The refusal above is only reachable if the step is given the variable at all.
+    // readPublishable received only WT before this fix.
+    const env = ((stepById('readPublishable').config as any).env || {}) as Record<string, any>;
+    expect(String(env.HALT)).toContain('variables.runHalt');
+  });
+
+  it('still publishes a normal approval whose blocking list is empty', () => {
+    // Regression guard: the refusal must be for an UNREADABLE verdict, not for the
+    // empty blocking list an approval legitimately carries.
+    const { review } = loadFixture(FIXTURE_CAPITAL_DECISION);
+    const dir = repoWithWork();
+    try {
+      installReview(dir, review);
+      const captured = runJson(capture, { WT: dir }, dir);
+      expect(captured.verdict).toBe('approved');
+      expect(captured.blockingFindings).toEqual([]);
+      expect(runScript(publishable, { WT: dir }, dir).trim()).toBe('true');
+      expect(publishDecisionOf(dir).outcome).toBe('approved');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('still publishes a genuine rejected_non_blocking and still honours a halt there', () => {
+    // A RECOGNISED rejection whose findings are all non-blocking keeps its own
+    // publishable outcome - it is not an unreadable verdict.
+    const { review } = loadFixture(FIXTURE_NON_BLOCKING_ONLY);
+    const dir = repoWithWork();
+    try {
+      installReview(dir, review);
+      expect(runJson(capture, { WT: dir }, dir).verdict).toBe('rejected');
+      expect(runScript(publishable, { WT: dir }, dir).trim()).toBe('true');
+      expect(publishDecisionOf(dir).outcome).toBe('rejected_non_blocking');
+
+      // ...and the halt guard covers it too, without relabelling it as unreadable.
+      expect(runScript(publishable, { WT: dir, HALT: 'true' }, dir).trim()).toBe('false');
+      const decision = publishDecisionOf(dir);
+      expect(decision.publishable).toBe(false);
+      expect(decision.outcome).toBe('halted');
+      expect(decision.verdict).toBe('rejected');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
