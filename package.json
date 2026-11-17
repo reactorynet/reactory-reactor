@@ -30,7 +30,7 @@
     "neo-blessed": "^0.2.0",
     "ollama": "0.6.4",
     "openai": "7.57.0",
-    "playwright": "1.59.1"
+    "playwright": "1.65.1"
   },
   "engines": {
     "node": ">=22"
