@@ -557,7 +557,7 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
   const {
     Box,
     Typography,
-    Grid,
+    Grid2: Grid,
     Paper,
     Divider,
     Button,
@@ -952,7 +952,12 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
         </Box>
 
         <Grid container spacing={2}>
-          <Grid item xs={12} sm={6} md={2}>
+          <Grid
+            size={{
+              xs: 12,
+              sm: 6,
+              md: 2
+            }}>
             <TextField
               label="Start Date"
               type="date"
@@ -960,10 +965,17 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
               fullWidth
               value={draft.startDate}
               onChange={(e: any) => setDraftField('startDate', e.target.value)}
-              InputLabelProps={{ shrink: true }}
+              slotProps={{
+                inputLabel: { shrink: true }
+              }}
             />
           </Grid>
-          <Grid item xs={12} sm={6} md={2}>
+          <Grid
+            size={{
+              xs: 12,
+              sm: 6,
+              md: 2
+            }}>
             <TextField
               label="End Date"
               type="date"
@@ -971,10 +983,17 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
               fullWidth
               value={draft.endDate}
               onChange={(e: any) => setDraftField('endDate', e.target.value)}
-              InputLabelProps={{ shrink: true }}
+              slotProps={{
+                inputLabel: { shrink: true }
+              }}
             />
           </Grid>
-          <Grid item xs={12} sm={6} md={2}>
+          <Grid
+            size={{
+              xs: 12,
+              sm: 6,
+              md: 2
+            }}>
             <TextField
               select
               label="Provider"
@@ -1002,7 +1021,12 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
               ))}
             </TextField>
           </Grid>
-          <Grid item xs={12} sm={6} md={2}>
+          <Grid
+            size={{
+              xs: 12,
+              sm: 6,
+              md: 2
+            }}>
             <TextField
               select
               label="Use Case"
@@ -1018,7 +1042,12 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
               ))}
             </TextField>
           </Grid>
-          <Grid item xs={12} sm={6} md={2}>
+          <Grid
+            size={{
+              xs: 12,
+              sm: 6,
+              md: 2
+            }}>
             <Autocomplete
               size="small"
               options={modelOptions}
@@ -1032,7 +1061,12 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
               )}
             />
           </Grid>
-          <Grid item xs={12} sm={6} md={2}>
+          <Grid
+            size={{
+              xs: 12,
+              sm: 6,
+              md: 2
+            }}>
             <Autocomplete
               size="small"
               options={personaOptions}
@@ -1049,7 +1083,12 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
 
           {!scopedUserId ? (
             <>
-              <Grid item xs={12} sm={6} md={4}>
+              <Grid
+                size={{
+                  xs: 12,
+                  sm: 6,
+                  md: 4
+                }}>
                 <TextField
                   label="User (single)"
                   size="small"
@@ -1064,7 +1103,12 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
                   helperText={draft.userIds.length > 0 ? 'Ignored while a user selection is set' : undefined}
                 />
               </Grid>
-              <Grid item xs={12} sm={6} md={5}>
+              <Grid
+                size={{
+                  xs: 12,
+                  sm: 6,
+                  md: 5
+                }}>
                 <Autocomplete
                   multiple
                   freeSolo
@@ -1088,7 +1132,12 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
             </>
           ) : null}
 
-          <Grid item xs={12} md={3} sx={{ display: 'flex', alignItems: 'flex-start', gap: 1 }}>
+          <Grid
+            sx={{ display: 'flex', alignItems: 'flex-start', gap: 1 }}
+            size={{
+              xs: 12,
+              md: 3
+            }}>
             <Button variant="contained" onClick={applyFilters} startIcon={<Icon>filter_alt</Icon>} sx={{ fontWeight: 600 }}>
               Apply
             </Button>
@@ -1101,33 +1150,75 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
 
       {/* KPI cards */}
       <Grid container spacing={2} sx={{ mb: 3 }}>
-        <Grid item xs={12} sm={6} md={3} lg={2}>
+        <Grid
+          size={{
+            xs: 12,
+            sm: 6,
+            md: 3,
+            lg: 2
+          }}>
           <KpiCard R={React} M={MaterialCore} label="Total Tokens" icon="token" accent={ACCENTS.tokens}
             value={summary ? fmtInt(summary.totalTokens) : '—'} sub="Input + output" />
         </Grid>
-        <Grid item xs={12} sm={6} md={3} lg={2}>
+        <Grid
+          size={{
+            xs: 12,
+            sm: 6,
+            md: 3,
+            lg: 2
+          }}>
           <KpiCard R={React} M={MaterialCore} label="Input (Prompt)" icon="input" accent={ACCENTS.prompt}
             value={summary ? fmtInt(summary.totalPromptTokens) : '—'} sub="Context & prompts" />
         </Grid>
-        <Grid item xs={12} sm={6} md={3} lg={2}>
+        <Grid
+          size={{
+            xs: 12,
+            sm: 6,
+            md: 3,
+            lg: 2
+          }}>
           <KpiCard R={React} M={MaterialCore} label="Output (Completion)" icon="output" accent={ACCENTS.completion}
             value={summary ? fmtInt(summary.totalCompletionTokens) : '—'} sub="Generated content" />
         </Grid>
-        <Grid item xs={12} sm={6} md={3} lg={2}>
+        <Grid
+          size={{
+            xs: 12,
+            sm: 6,
+            md: 3,
+            lg: 2
+          }}>
           <KpiCard R={React} M={MaterialCore} label="Est. Cost (USD)" icon="attach_money" accent={ACCENTS.cost}
             value={summary ? fmtCostTotal(summary.totalCostUsd) : '—'}
             sub={coverage.unpricedTurns ? `${coverage.unpricedTurns} unpriced turn(s)` : 'Priced turns only'} />
         </Grid>
-        <Grid item xs={12} sm={6} md={3} lg={2}>
+        <Grid
+          size={{
+            xs: 12,
+            sm: 6,
+            md: 3,
+            lg: 2
+          }}>
           <KpiCard R={React} M={MaterialCore} label="AI Turns" icon="smart_toy" accent={ACCENTS.turns}
             value={summary ? fmtInt(summary.totalRequests) : '—'} sub="Executed turns" />
         </Grid>
-        <Grid item xs={12} sm={6} md={3} lg={2}>
+        <Grid
+          size={{
+            xs: 12,
+            sm: 6,
+            md: 3,
+            lg: 2
+          }}>
           <KpiCard R={React} M={MaterialCore} label="Avg Latency" icon="speed" accent={ACCENTS.latency}
             value={summary && summary.avgDurationMs !== null ? `${Math.round(toNumber(summary.avgDurationMs))} ms` : summary ? '—' : '—'}
             sub="Turn duration" />
         </Grid>
-        <Grid item xs={12} sm={6} md={3} lg={2}>
+        <Grid
+          size={{
+            xs: 12,
+            sm: 6,
+            md: 3,
+            lg: 2
+          }}>
           <KpiCard R={React} M={MaterialCore} label="Error Rate" icon="error_outline" accent={ACCENTS.errors}
             value={summary ? `${(toNumber(summary.errorRate) * 100).toFixed(1)}%` : '—'}
             sub={summary ? `${fmtInt(summary.errorCount)} failed turn(s)` : 'Failed turns share'} />
@@ -1148,7 +1239,11 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
             </Box>
           </Box>
           <Grid container spacing={2}>
-            <Grid item xs={12} md={6}>
+            <Grid
+              size={{
+                xs: 12,
+                md: 6
+              }}>
               <Typography variant="caption" color="text.secondary">
                 Month-to-date tokens
               </Typography>
@@ -1162,7 +1257,11 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
                 sx={{ height: 8, borderRadius: 4 }}
               />
             </Grid>
-            <Grid item xs={12} md={6}>
+            <Grid
+              size={{
+                xs: 12,
+                md: 6
+              }}>
               <Typography variant="caption" color="text.secondary">
                 Month-to-date cost
               </Typography>
@@ -1189,7 +1288,11 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
 
       {/* Charts */}
       <Grid container spacing={3} sx={{ mb: 3 }}>
-        <Grid item xs={12} lg={8}>
+        <Grid
+          size={{
+            xs: 12,
+            lg: 8
+          }}>
           <SectionCard R={React} M={MaterialCore} title="Daily Token Consumption"
             subtitle="Total, prompt and completion tokens over the selected window">
             {isRealComponent(LineChart) && trendData.length > 0 ? (
@@ -1222,7 +1325,11 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
           </SectionCard>
         </Grid>
 
-        <Grid item xs={12} lg={4}>
+        <Grid
+          size={{
+            xs: 12,
+            lg: 4
+          }}>
           <SectionCard R={React} M={MaterialCore} title="Turns & Failures"
             subtitle="Volume beside failures — a failing provider is often a degraded one">
             {isRealComponent(BarChart) && usageData.length > 0 ? (
@@ -1256,7 +1363,11 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
 
       {/* Model + provider breakdown */}
       <Grid container spacing={3} sx={{ mb: 3 }}>
-        <Grid item xs={12} md={6}>
+        <Grid
+          size={{
+            xs: 12,
+            md: 6
+          }}>
           <SectionCard R={React} M={MaterialCore} title="Token Usage by Model" subtitle="Usage, cost and turns per model">
             <UsageTable
               R={React}
@@ -1272,7 +1383,11 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
             />
           </SectionCard>
         </Grid>
-        <Grid item xs={12} md={6}>
+        <Grid
+          size={{
+            xs: 12,
+            md: 6
+          }}>
           <SectionCard R={React} M={MaterialCore} title="Usage by Provider" subtitle="Aggregate usage and spend per AI provider">
             <UsageTable
               R={React}
@@ -1292,7 +1407,10 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
       {/* Failures */}
       {failureRows.length > 0 ? (
         <Grid container spacing={3} sx={{ mb: 3 }}>
-          <Grid item xs={12}>
+          <Grid
+            size={{
+              xs: 12
+            }}>
             <SectionCard R={React} M={MaterialCore} title="Failures by Provider & Model"
               subtitle="Where to look, not just how many failed">
               <UsageTable
@@ -1316,7 +1434,10 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
 
       {/* Per-user breakdown */}
       <Grid container spacing={3} sx={{ mb: 3 }}>
-        <Grid item xs={12}>
+        <Grid
+          size={{
+            xs: 12
+          }}>
           <SectionCard R={React} M={MaterialCore} title="Token Usage by User"
             subtitle="Consumption per user for the selected window — also what a multi-user selection reports into">
             <UsageTable
@@ -1338,7 +1459,10 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
 
       {/* Coverage */}
       <Grid container spacing={3} sx={{ mb: 3 }}>
-        <Grid item xs={12}>
+        <Grid
+          size={{
+            xs: 12
+          }}>
           <SectionCard R={React} M={MaterialCore} title="Data Coverage"
             subtitle="How much of the requested window these figures actually cover — a total over 80% of turns is a different claim from all of them">
             <Grid container spacing={2}>
@@ -1348,7 +1472,13 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
                 { label: 'Estimated tokens', part: coverage.estimatedTurns },
                 { label: 'Unpriced (excluded from cost)', part: coverage.unpricedTurns },
               ].map((c) => (
-                <Grid item xs={12} sm={6} md={3} key={c.label}>
+                <Grid
+                  key={c.label}
+                  size={{
+                    xs: 12,
+                    sm: 6,
+                    md: 3
+                  }}>
                   <Typography variant="caption" color="text.secondary">
                     {c.label}
                   </Typography>

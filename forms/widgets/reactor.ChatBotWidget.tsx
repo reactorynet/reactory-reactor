@@ -36,7 +36,7 @@ export default ({ reactory, formData }: IProps) => {
     Button,
     IconButton,
     TextField,
-    Grid,
+    Grid2: Grid,
     Typography,
     Box,
     List,
@@ -133,14 +133,19 @@ export default ({ reactory, formData }: IProps) => {
     <Box sx={{ height: '600px', display: 'flex', flexDirection: 'column', maxWidth: 800, mx: 'auto', p: 2 }}>
       {/* Header with model selection */}
       <Paper elevation={2} sx={{ p: 2, mb: 2 }}>
-        <Grid container alignItems="center" spacing={2}>
-          <Grid item>
+        <Grid container spacing={2} sx={{
+          alignItems: "center"
+        }}>
+          <Grid>
             <SmartToy fontSize="large" color="primary" />
           </Grid>
-          <Grid item xs>
+          <Grid
+            size={{
+              xs: 'grow'
+            }}>
             <Typography variant="h6">AI Chat Assistant</Typography>
           </Grid>
-          <Grid item>
+          <Grid>
             <Button 
               variant="outlined" 
               onClick={handleModelMenuOpen}
@@ -166,7 +171,7 @@ export default ({ reactory, formData }: IProps) => {
           </Grid>
         </Grid>
       </Paper>
-      
+
       {/* Chat messages list */}
       <Paper 
         elevation={3} 
@@ -196,12 +201,15 @@ export default ({ reactory, formData }: IProps) => {
                 }}
               >
                 <Grid container spacing={1}>
-                  <Grid item>
+                  <Grid>
                     <Avatar sx={{ bgcolor: message.sender === 'user' ? 'primary.main' : 'secondary.main' }}>
                       {message.sender === 'user' ? <Person /> : <SmartToy />}
                     </Avatar>
                   </Grid>
-                  <Grid item xs>
+                  <Grid
+                    size={{
+                      xs: 'grow'
+                    }}>
                     <Typography variant="body1">
                       {message.text}
                     </Typography>
@@ -215,11 +223,14 @@ export default ({ reactory, formData }: IProps) => {
           ))}
         </List>
       </Paper>
-      
+
       {/* Input area */}
       <Paper elevation={3} sx={{ p: 2 }}>
         <Grid container spacing={2}>
-          <Grid item xs>
+          <Grid
+            size={{
+              xs: 'grow'
+            }}>
             <TextField
               fullWidth
               placeholder="Type your message here..."
@@ -231,7 +242,7 @@ export default ({ reactory, formData }: IProps) => {
               variant="outlined"
             />
           </Grid>
-          <Grid item>
+          <Grid>
             <Button
               variant="contained"
               color="primary"
