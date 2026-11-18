@@ -2,3 +2,7 @@ node_modules/
 ai/openai/chat/macro/develop/samples/review.md
 ai/persona/.DS_Store
 .DS_Store
+
+# Agent working directory: report.json, evidence logs, and the express-server patches that
+# belong in the express-server repo, not this one. Never part of a publishable change.
+.ai-agent/
