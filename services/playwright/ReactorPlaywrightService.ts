@@ -247,13 +247,15 @@ export default class ReactorPlaywrightService {
         el.evaluate((node) => node.outerHTML),
         el.innerText().catch(() => ''),
         el.evaluate((node) => node.tagName.toLowerCase()),
-        el.evaluate((node) => {
-          const attrs: Record<string, string> = {};
-          for (const attr of node.attributes) {
-            attrs[attr.name] = attr.value;
-          }
-          return attrs;
-        }),
+        // Deliberately NOT a for...of loop. This callback is serialised and executed in the
+        // PAGE, but bin/build.sh runs @babel/preset-env over this module, which lowers for...of
+        // into a call to the module-level helper _createForOfIteratorHelper — a function that
+        // exists in the Node module, not in the browser. The built image failed with
+        // "locator.evaluate: ReferenceError: _createForOfIteratorHelper is not defined".
+        // Array.from + map compiles to nothing and runs everywhere.
+        el.evaluate((node) => Object.fromEntries(
+          Array.from(node.attributes).map((attr) => [attr.name, attr.value]),
+        )),
         el.evaluate((node) => node.children.length),
         el.isVisible(),
         el.boundingBox(),
