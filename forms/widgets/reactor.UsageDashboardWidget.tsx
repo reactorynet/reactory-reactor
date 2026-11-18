@@ -557,7 +557,7 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
   const {
     Box,
     Typography,
-    Grid2: Grid,
+    Grid,
     Paper,
     Divider,
     Button,
@@ -1119,9 +1119,9 @@ const UsageDashboardWidget = (props: UsageDashboardProps) => {
                     const next = (value || []).map((v: any) => String(v).trim()).filter(Boolean);
                     setDraft((prev) => ({ ...prev, userIds: next }));
                   }}
-                  renderTags={(value: any[], getTagProps: any) =>
+                  renderValue={(value: any[], getItemProps: any) =>
                     value.map((option: any, index: number) => (
-                      <Chip variant="outlined" size="small" label={option} {...getTagProps({ index })} />
+                      <Chip variant="outlined" size="small" label={option} {...getItemProps({ index })} />
                     ))
                   }
                   renderInput={(params: any) => (

@@ -36,7 +36,7 @@ export default ({ reactory, formData }: IProps) => {
     Button,
     IconButton,
     TextField,
-    Grid2: Grid,
+    Grid,
     Typography,
     Box,
     List,
