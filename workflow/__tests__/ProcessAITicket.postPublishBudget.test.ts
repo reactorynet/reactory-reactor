@@ -224,6 +224,25 @@ const evaluate = (
   return fn({}, {}, variables, {}, steps, {}, undefined) === true;
 };
 
+/**
+ * Build the TEMPLATE TEXT a workflow step's `env` value has to contain.
+ *
+ * Several assertions below check that a step's env entry is the engine's
+ * interpolation placeholder - the literal characters `$`, `{`, the expression,
+ * `}` - because the engine resolves it at run time. Writing that as a
+ * single-quoted '$' + '{expr}' is correct, but CodeQL's
+ * js/template-syntax-in-string-literal query flags it (correctly, in general):
+ * that shape in a non-template literal is almost always a typo for a template
+ * literal, and the scan cannot tell an intentional literal from a mistake
+ * (alert #358 on PR #78).
+ *
+ * Assembling the placeholder here says what is meant - template TEXT, not a
+ * template LITERAL - and keeps the security scan clean without suppressing the
+ * query or weakening the assertion. The expected value is byte-identical to
+ * what it was before.
+ */
+const asTemplate = (expression: string): string => ['$', '{', expression, '}'].join('');
+
 const descendants = (id: string): string[] => {
   const out: string[] = [];
   const visit = (steps: IStep[]): void => {
@@ -407,7 +426,7 @@ describe('ProcessAITicket post-publication budget (REACTORY-302016408/20261118/1
       expect(valueOf('setPostPublishPushPollContinue')).toBe('false');
       // The fix-budget gate is untouched by the re-publish arm: only a
       // changes_required cycle may charge it.
-      expect(byId('bumpPostPublishCycle').config!.env.DECISION).toBe('${variables.postPublishDecision}');
+      expect(byId('bumpPostPublishCycle').config!.env.DECISION).toBe(asTemplate('variables.postPublishDecision'));
       expect(trailOf('bumpPostPublishCycle')).toContain('republishResultGate');
     });
   });
@@ -635,7 +654,9 @@ describe('ProcessAITicket post-publication budget (REACTORY-302016408/20261118/1
         expect(byId('describePostPublishPushPollReason').type).toBe('cli_command');
         expect((byId('setPostPublishPushPollReason') as any).dependsOn).toBe('describePostPublishPushPollReason');
         expect(String((byId('setPostPublishPushPollReason').config as any).source)).toBe('step_output');
-        expect(byId('describePostPublishPushPollReason').config!.env.DECISION).toBe('${variables.postPublishDecision}');
+        expect(byId('describePostPublishPushPollReason').config!.env.DECISION).toBe(
+          asTemplate('variables.postPublishDecision'),
+        );
         // Run it: an honest reason names the real decision, and a contradictory one
         // (a changes_required cycle that somehow reached the arm) says so loudly
         // rather than denying the judgement.
@@ -1192,9 +1213,9 @@ describe('ProcessAITicket post-publication budget (REACTORY-302016408/20261118/1
 
       // The wake path is recorded, then reported on the ticket - not silent.
       expect((byId('postPublishWakeProbe') as any).dependsOn).toBe('postPublishBlockedTask');
-      expect(byId('postPublishWakeProbe').config!.env.TASK_ID).toBe('${steps.postPublishBlockedTask.outputs.taskId}');
+      expect(byId('postPublishWakeProbe').config!.env.TASK_ID).toBe(asTemplate('steps.postPublishBlockedTask.outputs.taskId'));
       expect(byId('postPublishWakeProbe').config!.env.COMPLETED_BY_EMAIL).toBe(
-        '${steps.postPublishBlockedTask.outputs.completedByEmail}',
+        asTemplate('steps.postPublishBlockedTask.outputs.completedByEmail'),
       );
       expect(byId('postPublishWakeComment').type).toBe('service_invoke');
       expect((byId('postPublishWakeComment') as any).dependsOn).toBe('postPublishWakeProbe');
@@ -1400,7 +1421,7 @@ describe('ProcessAITicket post-publication budget (REACTORY-302016408/20261118/1
 
         // The task uses that message, and it carries a deadline.
         expect(String(byId('postPublishBlockedTask').config!.message)).toBe(
-          '${steps.postPublishTaskMessage.outputs.stdout}',
+          asTemplate('steps.postPublishTaskMessage.outputs.stdout'),
         );
         expect(Number(byId('postPublishBlockedTask').config!.timeout)).toBe(3600000);
       } finally {
