@@ -10948,7 +10948,17 @@ steps:
                                           # 'outstanding'; this gate goes false, and the chain below is
                                           # skipped in favour of the route's then-arm with the fix
                                           # budget intact.
-                                          condition: variables.postPublishAwaiting === 'true' && variables.postPublishExhaustionVerdict === 'awaiting'
+                                          # R1 (review): the gate must NOT be state-blind. It runs before
+                                          # the merged/pending/mergeable chain, so without a state test an
+                                          # awaiting-mode iteration held EVERY observation for the whole
+                                          # 40-poll window - including a MERGED pull request, and a 'clean'
+                                          # (BLOCKED + REVIEW_REQUIRED, i.e. mergeable) one that should
+                                          # report awaiting_human on the first iteration. Only 'fixable' is
+                                          # the case this gate exists for: findings exist, every one was
+                                          # dismissed with a justification, and nothing agent-actionable
+                                          # remains. Every other state falls through to the chain below,
+                                          # which is what handled it before this gate existed.
+                                          condition: variables.postPublishAwaiting === 'true' && variables.postPublishExhaustionVerdict === 'awaiting' && variables.postPublishState === 'fixable'
                                           thenSteps:
                                             - id: postPublishAwaitPurePollLog
                                               name: Log that this iteration only waited
@@ -11160,7 +11170,13 @@ steps:
                                                                   // kept only for a genuine 'outstanding' block, where naming the unaddressed
                                                                   // finding is exactly right.
                                                                   const verdictRecord = readJson('post-publish-exhaustion.json');
-                                                                  if (verdictRecord && verdictRecord.generatedAt && String(verdictRecord.verdict || '') === 'awaiting') {
+                                                                  // R2(a) (review): the override must be STATE-AWARE. A CLOSED, unreviewed pull
+                                                                  // request also classifies as 'awaiting' (no actionable findings + a review still
+                                                                  // REVIEW_REQUIRED), but its reason must stay master's "the pull request is
+                                                                  // CLOSED...", not an awaited-human action nobody can now take. Only the two
+                                                                  // states this run actually polls in get the verdict wording.
+                                                                  const awaitingState = state === 'fixable' || state === 'pending';
+                                                                  if (verdictRecord && verdictRecord.generatedAt && awaitingState && String(verdictRecord.verdict || '') === 'awaiting') {
                                                                     const verdictReason = String(verdictRecord.reason || '').trim();
                                                                     process.stdout.write(verdictReason || 'nothing agent-actionable remains; the only remaining blocker is an awaited human action');
                                                                     process.exit(0);
@@ -11763,7 +11779,15 @@ steps:
                                         const awaitingChecks = fresh ? verdictRecord.awaitingChecks === true : (Array.isArray(observation.pendingChecks) && observation.pendingChecks.length > 0);
                                         const actionable = fresh && Array.isArray(verdictRecord.actionable) ? verdictRecord.actionable : derivedActionable;
                                         const dismissedFindings = fresh && Array.isArray(verdictRecord.dismissed) ? verdictRecord.dismissed : derivedDismissed;
-                                        const onlyAwaiting = (verdict === 'awaiting' || (awaitingReview || awaitingChecks)) && actionable.length === 0;
+                                        // R2(b) (review): when a FRESH verdict record exists it is
+                                        // authoritative, so it alone decides. The old expression ALSO
+                                        // accepted awaitingReview || awaitingChecks, which overrode a
+                                        // fresh 'outstanding' - a CLOSED pull request then rendered
+                                        // heading AWAITING HUMAN while postPublishTaskMessage (which
+                                        // keys on the verdict) said "open but not mergeable". Two
+                                        // components disagreeing about the same block, again.
+                                        const onlyAwaiting = (fresh ? verdict === 'awaiting' : (awaitingReview || awaitingChecks))
+                                          && actionable.length === 0;
                                         const heading = outcome === 'awaiting_review' || onlyAwaiting ? 'AWAITING HUMAN' : 'BLOCKED';
 
                                         const lines = [];

@@ -1553,14 +1553,39 @@ describe('ProcessAITicket post-publication budget (REACTORY-302016408/20261118/1
       expect(reached).toContain('postPublishAwaitSpentGate');
     });
 
-    it('enters the pure-poll arm for every non-pending awaited state', () => {
-      ['fixable', 'clean', 'human_only'].forEach((state) => {
-        const { variables, exits, reached } = runLoopIteration({ postPublishState: state });
-        expect(reached).toContain('postPublishAwaitPurePollGate');
-        expect(exits).toBe(false);
-        expect(variables.postPublishContinue).toBe('true');
-        expect(variables.postPublishOutcome).toBe('observing');
-      });
+    it('enters the pure-poll arm ONLY for a fixable observation', () => {
+      // R1 (review): this used to assert the gate fired for clean and human_only too,
+      // which enshrined a regression. The gate runs BEFORE the merged/pending/mergeable
+      // chain, so a state-blind condition held EVERY observation for the whole 40-poll
+      // window - including a MERGED pull request. Only 'fixable' is the case the gate
+      // exists for: findings exist, every one was dismissed, nothing agent-actionable
+      // remains. Everything else must fall through to the chain that handled it before.
+      const { variables, exits, reached } = runLoopIteration({ postPublishState: 'fixable' });
+      expect(reached).toContain('postPublishAwaitPurePollGate');
+      expect(exits).toBe(false);
+      expect(variables.postPublishContinue).toBe('true');
+      expect(variables.postPublishOutcome).toBe('observing');
+    });
+
+    it('does NOT hold the loop for merged, clean or human_only (R1)', () => {
+      // A merged pull request must stop at once, not be polled for 120 minutes.
+      const merged = runLoopIteration({ postPublishState: 'merged' });
+      expect(merged.exits).toBe(true);
+      expect(merged.variables.postPublishOutcome).toBe('merged');
+      expect(merged.reached).not.toContain('postPublishAwaitPurePollLog');
+
+      // A mergeable, BLOCKED+REVIEW_REQUIRED pull request is awaiting_human on the
+      // FIRST iteration - it is published and correct, it just needs approval.
+      const clean = runLoopIteration({ postPublishState: 'clean' });
+      expect(clean.exits).toBe(true);
+      expect(clean.variables.postPublishOutcome).toBe('awaiting_human');
+      expect(clean.reached).not.toContain('postPublishAwaitPurePollLog');
+
+      // A block only a human can clear is blocked_human, immediately.
+      const humanOnly = runLoopIteration({ postPublishState: 'human_only' });
+      expect(humanOnly.exits).toBe(true);
+      expect(humanOnly.variables.postPublishOutcome).toBe('blocked_human');
+      expect(humanOnly.reached).not.toContain('postPublishAwaitPurePollLog');
     });
 
     it('does NOT descend into the merged / mergeable chain while awaiting', () => {
@@ -1573,16 +1598,27 @@ describe('ProcessAITicket post-publication budget (REACTORY-302016408/20261118/1
     });
 
     it('parks with awaiting_review once the window is spent', () => {
-      ['fixable', 'clean'].forEach((state) => {
-        const { variables, exits } = runLoopIteration({
-          postPublishState: state,
-          postPublishAwaitSpent: 'true',
-          postPublishAwaitCount: '40',
-        });
-        expect(exits).toBe(true);
-        expect(variables.postPublishOutcome).toBe('awaiting_review');
-        expect(variables.postPublishContinue).toBe('false');
+      const { variables, exits } = runLoopIteration({
+        postPublishState: 'fixable',
+        postPublishAwaitSpent: 'true',
+        postPublishAwaitCount: '40',
       });
+      expect(exits).toBe(true);
+      expect(variables.postPublishOutcome).toBe('awaiting_review');
+      expect(variables.postPublishContinue).toBe('false');
+    });
+
+    it('parks a spent window on a clean observation as awaiting_human, not awaiting_review (R1)', () => {
+      // A 'clean' observation never enters the poll arm, so the window being spent
+      // must not relabel it. Master reported awaiting_human on iteration 1; that is
+      // still the answer once the window is spent.
+      const { variables, exits } = runLoopIteration({
+        postPublishState: 'clean',
+        postPublishAwaitSpent: 'true',
+        postPublishAwaitCount: '40',
+      });
+      expect(exits).toBe(true);
+      expect(variables.postPublishOutcome).toBe('awaiting_human');
     });
 
     it('re-opens the fix route when a review lands (verdict flips to outstanding)', () => {
