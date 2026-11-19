@@ -581,6 +581,81 @@ steps:
       key: postPublishReobserveBound
       value: 3
 
+  # ── Post-publication AWAITING state (REACTORY-302016408/20261118/1057091601) ──
+  # When the only thing keeping a pull request unmergeable is an action a HUMAN
+  # still has to take (a review that has not been written yet, or required checks
+  # that are still running), the run POLLS for it instead of parking: a review is
+  # not a fix, and reporting a converged pull request as "unmergeable" because a
+  # fix budget ran out is the defect this state exists to prevent.
+  #
+  # `postPublishAwaiting` is the mode flag the loop reads at the top of every
+  # iteration; `postPublishAwaitCount/Bound` is its own bound, wall-clock in
+  # practice (40 x 180s = 120 minutes), entirely separate from
+  # maxPostPublishFixCycles and from the check-wait budget.
+  - id: seedPostPublishAwaitCount
+    name: Seed awaiting-action poll count
+    type: set_variable
+    dependsOn: seedPostPublishReobserveBound
+    config:
+      action: set
+      key: postPublishAwaitCount
+      value: 0
+
+  - id: seedPostPublishAwaitBound
+    name: Seed awaiting-action poll bound
+    type: set_variable
+    dependsOn: seedPostPublishAwaitCount
+    config:
+      action: set
+      key: postPublishAwaitBound
+      # 40 polls x the 180s observe interval = 120 minutes of automatic
+      # re-observation. That bound is sized from the incident, not from taste: the
+      # review on PR #74 landed 1h56m (11:24:14 -> 13:20:36) after publication, and
+      # a 60-minute window closed 56 minutes before it arrived, so the run parked
+      # and observed nothing. 120 minutes covers that latency with ~4 minutes to
+      # spare, and it is still a bound a human can reason about.
+      value: 40
+
+  - id: seedPostPublishAwaiting
+    name: Seed the awaiting-action mode
+    type: set_variable
+    dependsOn: seedPostPublishAwaitBound
+    config:
+      action: set
+      key: postPublishAwaiting
+      value: "false"
+
+  # The awaited-or-outstanding verdict, and the post-judgement re-read of it.
+  # Seeded so every condition and template that names them resolves on the paths
+  # that never compute them (a run that never reaches the observation).
+
+  - id: seedPostPublishAwaitSpent
+    name: Seed the awaiting-window-spent flag
+    type: set_variable
+    dependsOn: seedPostPublishAwaiting
+    config:
+      action: set
+      key: postPublishAwaitSpent
+      value: "false"
+  - id: seedPostPublishExhaustionVerdict
+    name: Seed the awaited-or-outstanding verdict
+    type: set_variable
+    dependsOn: seedPostPublishAwaiting
+    config:
+      action: set
+      key: postPublishExhaustionVerdict
+      value: unknown
+
+  - id: seedPostPublishJudgedVerdict
+    name: Seed the post-judgement verdict
+    type: set_variable
+    dependsOn: seedPostPublishExhaustionVerdict
+    config:
+      action: set
+      key: postPublishJudgedVerdict
+      value: unknown
+
+
   - id: seedPostPublishReason
     name: Seed post-publication block reason
     type: set_variable
@@ -8128,12 +8203,115 @@ steps:
                               # cycle until postPublishBudgetGate refuses. maxIterations
                               # is a hard backstop against a defect in that logic.
                               condition: variables.postPublishContinue === 'true'
-                              # Worst case with the seeded budgets: 1 initial observation + 6 check
-                              # waits + 2 fix cycles + 3 no-fix re-observes + 1 final observation = 13.
-                              # The old cap of 12 sat INSIDE that budget, so a legitimate run could hit
-                              # it and fall into the blocked arm with no reason recorded.
-                              maxIterations: 30
+                              # Worst case with the seeded budgets, counted in ITERATIONS:
+                              #    1 initial observation
+                              #  + 6 check waits          (postPublishWaitBound)
+                              #  + 2 fix cycles           (maxPostPublishFixCycles)
+                              #  + 3 no-fix re-observes   (postPublishReobserveBound)
+                              # + 40 awaiting-action polls (postPublishAwaitBound)
+                              #  + 1 final observation
+                              #  = 53.
+                              #
+                              # The awaiting window is sized from the incident that produced this fix: the
+                              # review on PR #74 arrived 1h56m after publication, so the poll is 40 x 180s
+                              # = 120 minutes of automatic re-observation (see seedPostPublishAwaitBound).
+                              # The cap must sit ABOVE that total or the window is not actually usable -
+                              # and the old cap of 12 sat INSIDE the OLD check-wait budget, so a legitimate
+                              # run could hit the cap and fall into the blocked arm with no reason recorded.
+                              maxIterations: 70
                               steps:
+                                # ── Bounded poll while only a HUMAN ACTION is awaited ──
+                                # A review that has not been written yet, or required checks that
+                                # are still running, is not a fix and not a block: it is a WAIT.
+                                # Parking for it is what made a converged pull request report
+                                # itself as unmergeable (REACTORY-302016408/20261118/1057091601).
+                                #
+                                # The delay lives HERE, once, at the top of the body: when the
+                                # route below decides the only blocker is an awaited human
+                                # action it sets postPublishAwaiting=true and lets the loop
+                                # iterate, and this gate performs the wait and the counting.
+                                # Its own bound is postPublishAwaitCount/postPublishAwaitBound
+                                # (40 x 180s = 120 minutes) - NOT the fix budget, which a poll
+                                # must never spend.
+                                # ── Bounded poll while only a HUMAN ACTION is awaited ──
+                                # A review that has not been written yet, or required checks that are still
+                                # running, is not a fix and not a block: it is a WAIT. Parking for it is what
+                                # made a converged pull request report itself as unmergeable.
+
+                                # The delay lives HERE, once, at the top of the body. The gate records that the
+                                # window is spent but does NOT decide the park: the terminal decision is taken
+                                # after this iteration's verdict is computed (postPublishAwaitSpentGate), so a
+                                # review that lands on the final poll is fixed AND re-observed.
+                                - id: postPublishAwaitPollGate
+                                  name: Are we only waiting for a human action
+                                  type: condition
+                                  dependsOn: setPrStateOpened
+                                  config:
+                                    condition: variables.postPublishAwaiting === 'true'
+                                    thenSteps:
+                                      - id: postPublishAwaitBudgetGate
+                                        name: Is there awaiting-action poll budget left
+                                        type: condition
+                                        config:
+                                          condition: Number(variables.postPublishAwaitCount) < Number(variables.postPublishAwaitBound)
+                                          thenSteps:
+                                            - id: postPublishAwaitWait
+                                              name: Wait before looking for the human action again
+                                              type: delay
+                                              config:
+                                                duration: 180000
+                                                message: >-
+                                                  The pull request is published and no agent-actionable finding remains - it is
+                                                  waiting for a human action (a review or a required check). Observing again in 3
+                                                  minutes.
+                                            - id: bumpPostPublishAwaitCount
+                                              name: Count the awaiting-action poll
+                                              type: cli_command
+                                              dependsOn: postPublishAwaitWait
+                                              config:
+                                                command: node
+                                                args:
+                                                  - "-e"
+                                                  - |-
+                                                    const n = Number(String(process.env.N || '0').trim());
+                                                    process.stdout.write(String((Number.isFinite(n) ? n : 0) + 1));
+                                                env:
+                                                  "N": ${variables.postPublishAwaitCount}
+                                                failOnError: true
+                                                output:
+                                                  captureStdout: true
+                                            - id: setPostPublishAwaitCount
+                                              name: Record the awaiting-action poll
+                                              type: set_variable
+                                              dependsOn: bumpPostPublishAwaitCount
+                                              config:
+                                                action: set
+                                                key: postPublishAwaitCount
+                                                source: step_output
+                                                sourcePath: bumpPostPublishAwaitCount.outputs.stdout
+                                            - id: postPublishAwaitLog
+                                              name: Log the awaiting-action poll
+                                              type: log
+                                              dependsOn: setPostPublishAwaitCount
+                                              config:
+                                                level: info
+                                                message: >-
+                                                  Post-publication poll
+                                                  ${variables.postPublishAwaitCount}/${variables.postPublishAwaitBound} for
+                                                  ${steps.loadTicket.result.reference} - nothing agent-actionable remains, so the
+                                                  run is waiting for a human action on ${steps.readPrUrl.outputs.stdout}. While the
+                                                  window is OPEN, a review or merge that lands is picked up by the next scheduled
+                                                  observation. Once the window closes the run makes ONE more observation and then
+                                                  stops: only a completed task resumes the instance, and it does not restart the
+                                                  loop.
+                                          elseSteps:
+                                            - id: setPostPublishAwaitSpent
+                                              name: Record that the awaiting window is spent
+                                              type: set_variable
+                                              config:
+                                                action: set
+                                                key: postPublishAwaitSpent
+                                                value: "true"
                                 # ── The published tip, re-resolved EVERY cycle ─────
                                 # Resolved once, this was a defect: after cycle 0
                                 # re-published T1, cycle 1 still measured against T0,
@@ -8154,6 +8332,7 @@ steps:
                                 - id: resolvePublishedTip
                                   name: Resolve the published branch tip
                                   type: cli_command
+                                  dependsOn: postPublishAwaitPollGate
                                   config:
                                     command: node
                                     args:
@@ -8729,12 +8908,151 @@ steps:
                                     source: step_output
                                     sourcePath: readPostPublishRepairNeed.outputs.stdout
 
+                                # ── The awaited-or-outstanding verdict, computed ONCE per iteration ──
+                                # This answers the only question the three exhaustion points ask: once a
+                                # finding the reviewer DISMISSED with a justification is removed, is anything
+                                # left that an AGENT could act on? If not, and a human action is still being
+                                # awaited, the block is a WAIT - polling for it is the whole point of this
+                                # loop. If something actionable remains, the run parks and says so.
+                                #
+                                # Computed HERE (before the route) so every exhaustion point below reads the
+                                # SAME decision. The three points are the fix budget, the repair-poll budget
+                                # and the re-observe budget; each used to answer this question for itself, and
+                                # the repair-poll point did not ask at all - which is why a pull request that
+                                # kept needing a commit repair still parked before its first review
+                                # (REACTORY-302016408/20261118/1057091601).
+                                - id: readPostPublishExhaustionVerdict
+                                  name: Is anything left that an agent could act on
+                                  type: cli_command
+                                  dependsOn: setPostPublishRepairNeeded
+                                  config:
+                                    command: node
+                                    args:
+                                      - -e
+                                      - |
+                                        const fs = require('fs');
+                                        const path = require('path');
+
+                                        const wt = String(process.env.WT || '').trim();
+                                        const dir = path.join(wt, '.ai-agent');
+                                        const readJson = (name, fallback) => {
+                                          try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch (e) { return fallback; }
+                                        };
+
+                                        const observation = readJson('post-publish-observation.json', null) || null;
+                                        const judgement = readJson('post-publish-review-normalised.json', null) || null;
+                                        const findings = observation && Array.isArray(observation.findings) ? observation.findings : [];
+                                        const dismissals = judgement && Array.isArray(judgement.dismissals) ? judgement.dismissals : [];
+
+                                        // A finding is cleared ONLY by a dismissal that carries a
+                                        // justification. capturePostPublishReview already refuses an
+                                        // unjustified one; this reader must not trust that, because a
+                                        // record that failed to capture must never make a finding look
+                                        // handled.
+                                        const clearedBy = new Map();
+                                        dismissals.forEach((entry) => {
+                                          if (!entry) return;
+                                          const id = String(entry.findingId || entry.id || '').trim();
+                                          const justification = String(entry.justification || entry.dismissedComment || '').trim();
+                                          if (id && justification) clearedBy.set(id, justification);
+                                        });
+
+                                        const actionable = findings.filter((finding) => {
+                                          if (!finding) return false;
+                                          if (finding.fixable === false) return false;
+                                          return !clearedBy.has(String(finding.id || ''));
+                                        });
+                                        const dismissed = findings.filter((finding) => finding && clearedBy.has(String(finding.id || '')));
+                                        const pendingChecks = observation && Array.isArray(observation.pendingChecks) ? observation.pendingChecks : [];
+                                        const reviewDecision = observation ? String(observation.reviewDecision || '') : '';
+                                        const judgedState = judgement ? String(judgement.state || '') : '';
+
+                                        // Two ways a block is a human WAIT rather than an agent fault:
+                                        // a review decision that is still REVIEW_REQUIRED, and
+                                        // required checks that have not finished.
+                                        const awaitingReview = !!observation
+                                          && (observation.awaitingReview === true || reviewDecision.toUpperCase() === 'REVIEW_REQUIRED');
+                                        const awaitingChecks = !!observation
+                                          && (observation.awaitingChecks === true || pendingChecks.length > 0);
+                                        const awaitingHuman = awaitingReview || awaitingChecks;
+
+                                        // Fail CLOSED: an unreadable observation, or an invalid
+                                        // judgement that cleared nothing, is 'outstanding' so the
+                                        // run parks and reports what a human must look at.
+                                        const verdict = (actionable.length === 0 && awaitingHuman && judgedState !== 'invalid')
+                                          ? 'awaiting'
+                                          : 'outstanding';
+
+                                        const record = {
+                                          verdict: verdict,
+                                          cycle: Number(String(process.env.CYCLE || '0').trim()) || 0,
+                                          outcome: String(process.env.OUTCOME || '').trim(),
+                                          bound: String(process.env.BOUND || '').trim(),
+                                          awaitPolls: Number(String(process.env.AWAITED || '0').trim()) || 0,
+                                          observedState: observation ? String(observation.state || '') : null,
+                                          mergeStateStatus: observation ? String(observation.mergeStateStatus || '') : null,
+                                          reviewDecision: reviewDecision,
+                                          awaitingReview: awaitingReview,
+                                          awaitingChecks: awaitingChecks,
+                                          judgedState: judgedState || null,
+                                          actionable: actionable.map((finding) => ({
+                                            id: String(finding.id || ''),
+                                            kind: String(finding.kind || ''),
+                                            body: String(finding.body || '').split(String.fromCharCode(10))[0].slice(0, 240),
+                                          })),
+                                          dismissed: dismissed.map((finding) => ({
+                                            id: String(finding.id || ''),
+                                            kind: String(finding.kind || ''),
+                                            justification: String(clearedBy.get(String(finding.id || '')) || '').slice(0, 400),
+                                          })),
+                                          reason: verdict === 'awaiting'
+                                            ? 'nothing agent-actionable remains; the only remaining blocker is an awaited human action (review decision ' + (reviewDecision || 'none') + ')'
+                                            : String(actionable.length) + ' agent-actionable finding(s) remain unaddressed',
+                                          generatedAt: new Date().toISOString(),
+                                        };
+                                        try {
+                                          fs.mkdirSync(dir, { recursive: true });
+                                          fs.writeFileSync(path.join(dir, 'post-publish-exhaustion.json'), JSON.stringify(record, null, 2), 'utf8');
+                                        } catch (e) { /* best effort */ }
+                                        process.stdout.write(verdict);
+                                    env:
+                                      WT: ${steps.readWorktreePath.outputs.stdout}
+                                      CYCLE: ${variables.postPublishCycle}
+                                      OUTCOME: ${variables.postPublishOutcome}
+                                      BOUND: ${variables.postPublishFixBound}
+                                      AWAITED: ${variables.postPublishAwaitCount}
+                                    failOnError: false
+                                    output:
+                                      captureStdout: true
+                                      captureStderr: true
+                                - id: setPostPublishExhaustionVerdict
+                                  name: Record the awaited-or-outstanding verdict
+                                  type: set_variable
+                                  dependsOn: readPostPublishExhaustionVerdict
+                                  config:
+                                    action: set
+                                    key: postPublishExhaustionVerdict
+                                    source: step_output
+                                    sourcePath: readPostPublishExhaustionVerdict.outputs.stdout
+
                                 - id: postPublishRoute
                                   name: Route the observed block
                                   type: condition
                                   dependsOn: setPostPublishRepairNeeded
                                   config:
-                                    condition: variables.postPublishState === 'fixable'
+                                    # `fixable` is the observation's verdict, not the run's: it is
+                                    # true whenever ANY finding carries fixable:true, and the
+                                    # false-positive unverifiable_commit does. Once the run is in
+                                    # awaiting-action mode and the per-iteration verdict says
+                                    # nothing agent-actionable remains, re-running the reviewer
+                                    # and re-writing GitHub dismissals every three minutes buys
+                                    # nothing and costs an LLM call per poll (up to 20 per run),
+                                    # so the route is skipped and the loop re-polls.
+                                    # A review that LANDS changes the verdict to 'outstanding',
+                                    # which re-opens this route on the next iteration with fix
+                                    # budget intact - that is how a review is picked up without
+                                    # any human action.
+                                    condition: variables.postPublishState === 'fixable' && !(variables.postPublishAwaiting === 'true' && variables.postPublishExhaustionVerdict === 'awaiting')
                                     thenSteps:
                                       - id: postPublishBudgetGate
                                         name: Is there post-publication fix budget left
@@ -9159,6 +9477,125 @@ steps:
                                                 key: postPublishDecision
                                                 source: step_output
                                                 sourcePath: readPostPublishDecision.outputs.stdout
+                                            # ── The same verdict, re-read ONCE after this cycle judgement ──
+                                            # The repair-poll arm and the re-observe arm both stop a loop that has
+                                            # produced no required change, and both must ask what remains BEFORE they
+                                            # stop. They share this one computation, so a repair-only loop whose only
+                                            # blocker is an awaited review enters the awaiting poll instead of parking.
+                                            - id: readPostPublishPushPollVerdict
+                                              name: Is anything left after this cycle judgement
+                                              type: cli_command
+                                              dependsOn: setPostPublishDecision
+                                              config:
+                                                command: node
+                                                args:
+                                                  - -e
+                                                  - |
+                                                    const fs = require('fs');
+                                                    const path = require('path');
+
+                                                    const wt = String(process.env.WT || '').trim();
+                                                    const dir = path.join(wt, '.ai-agent');
+                                                    const readJson = (name, fallback) => {
+                                                      try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch (e) { return fallback; }
+                                                    };
+
+                                                    const observation = readJson('post-publish-observation.json', null) || null;
+                                                    const judgement = readJson('post-publish-review-normalised.json', null) || null;
+                                                    const findings = observation && Array.isArray(observation.findings) ? observation.findings : [];
+                                                    const dismissals = judgement && Array.isArray(judgement.dismissals) ? judgement.dismissals : [];
+
+                                                    // A finding is cleared ONLY by a dismissal that carries a
+                                                    // justification. capturePostPublishReview already refuses an
+                                                    // unjustified one; this reader must not trust that, because a
+                                                    // record that failed to capture must never make a finding look
+                                                    // handled.
+                                                    const clearedBy = new Map();
+                                                    dismissals.forEach((entry) => {
+                                                      if (!entry) return;
+                                                      const id = String(entry.findingId || entry.id || '').trim();
+                                                      const justification = String(entry.justification || entry.dismissedComment || '').trim();
+                                                      if (id && justification) clearedBy.set(id, justification);
+                                                    });
+
+                                                    const actionable = findings.filter((finding) => {
+                                                      if (!finding) return false;
+                                                      if (finding.fixable === false) return false;
+                                                      return !clearedBy.has(String(finding.id || ''));
+                                                    });
+                                                    const dismissed = findings.filter((finding) => finding && clearedBy.has(String(finding.id || '')));
+                                                    const pendingChecks = observation && Array.isArray(observation.pendingChecks) ? observation.pendingChecks : [];
+                                                    const reviewDecision = observation ? String(observation.reviewDecision || '') : '';
+                                                    const judgedState = judgement ? String(judgement.state || '') : '';
+
+                                                    // Two ways a block is a human WAIT rather than an agent fault:
+                                                    // a review decision that is still REVIEW_REQUIRED, and
+                                                    // required checks that have not finished.
+                                                    const awaitingReview = !!observation
+                                                      && (observation.awaitingReview === true || reviewDecision.toUpperCase() === 'REVIEW_REQUIRED');
+                                                    const awaitingChecks = !!observation
+                                                      && (observation.awaitingChecks === true || pendingChecks.length > 0);
+                                                    const awaitingHuman = awaitingReview || awaitingChecks;
+
+                                                    // Fail CLOSED: an unreadable observation, or an invalid
+                                                    // judgement that cleared nothing, is 'outstanding' so the
+                                                    // run parks and reports what a human must look at.
+                                                    const verdict = (actionable.length === 0 && awaitingHuman && judgedState !== 'invalid')
+                                                      ? 'awaiting'
+                                                      : 'outstanding';
+
+                                                    const record = {
+                                                      verdict: verdict,
+                                                      cycle: Number(String(process.env.CYCLE || '0').trim()) || 0,
+                                                      outcome: String(process.env.OUTCOME || '').trim(),
+                                                      bound: String(process.env.BOUND || '').trim(),
+                                                      awaitPolls: Number(String(process.env.AWAITED || '0').trim()) || 0,
+                                                      observedState: observation ? String(observation.state || '') : null,
+                                                      mergeStateStatus: observation ? String(observation.mergeStateStatus || '') : null,
+                                                      reviewDecision: reviewDecision,
+                                                      awaitingReview: awaitingReview,
+                                                      awaitingChecks: awaitingChecks,
+                                                      judgedState: judgedState || null,
+                                                      actionable: actionable.map((finding) => ({
+                                                        id: String(finding.id || ''),
+                                                        kind: String(finding.kind || ''),
+                                                        body: String(finding.body || '').split(String.fromCharCode(10))[0].slice(0, 240),
+                                                      })),
+                                                      dismissed: dismissed.map((finding) => ({
+                                                        id: String(finding.id || ''),
+                                                        kind: String(finding.kind || ''),
+                                                        justification: String(clearedBy.get(String(finding.id || '')) || '').slice(0, 400),
+                                                      })),
+                                                      reason: verdict === 'awaiting'
+                                                        ? 'nothing agent-actionable remains; the only remaining blocker is an awaited human action (review decision ' + (reviewDecision || 'none') + ')'
+                                                        : String(actionable.length) + ' agent-actionable finding(s) remain unaddressed',
+                                                      generatedAt: new Date().toISOString(),
+                                                    };
+                                                    try {
+                                                      fs.mkdirSync(dir, { recursive: true });
+                                                      fs.writeFileSync(path.join(dir, 'post-publish-exhaustion.json'), JSON.stringify(record, null, 2), 'utf8');
+                                                    } catch (e) { /* best effort */ }
+                                                    process.stdout.write(verdict);
+                                                env:
+                                                  WT: ${steps.readWorktreePath.outputs.stdout}
+                                                  CYCLE: ${variables.postPublishCycle}
+                                                  OUTCOME: ${variables.postPublishOutcome}
+                                                  BOUND: ${variables.postPublishFixBound}
+                                                  AWAITED: ${variables.postPublishAwaitCount}
+                                                failOnError: false
+                                                output:
+                                                  captureStdout: true
+                                                  captureStderr: true
+                                            - id: setPostPublishJudgedVerdict
+                                              name: Record the post-judgement verdict
+                                              type: set_variable
+                                              dependsOn: readPostPublishPushPollVerdict
+                                              config:
+                                                action: set
+                                                key: postPublishJudgedVerdict
+                                                source: step_output
+                                                sourcePath: readPostPublishPushPollVerdict.outputs.stdout
+
 
                                             - id: applyPostPublishDecisions
                                               name: Apply the justified dismissals to GitHub
@@ -9879,17 +10316,29 @@ steps:
                                                                         condition: steps.readRepublishResult.stdout === 'pushed'
                                                                         thenSteps:
                                                                           - id: bumpPostPublishCycle
-                                                                            name: Increment the post-publication fix cycle
+                                                                            name: Charge the fix budget only for a cycle that owed the engineer work
                                                                             type: cli_command
                                                                             config:
                                                                               command: node
                                                                               args:
                                                                                 - -e
                                                                                 - |
+                                                                                  // A cycle is a FIX only when the quality reviewer handed the
+                                                                                  // engineer required changes and the re-publish carried them.
+                                                                                  // A no-action judgement (every finding dismissed with a
+                                                                                  // justification - the false-positive case) and a commit REPAIR
+                                                                                  // (postPublishRepairNeeded, no engineer work at all) both reach
+                                                                                  // this step too, because both re-publish. Charging them is the
+                                                                                  // defect: two no-op observations two minutes apart drained a
+                                                                                  // budget of 2 and the run declared a converged pull request
+                                                                                  // unmergeable (REACTORY-302016408/20261118/1057091601).
                                                                                   const n = Number(String(process.env.N || '0').trim());
-                                                                                  process.stdout.write(String((Number.isFinite(n) ? n : 0) + 1));
+                                                                                  const decision = String(process.env.DECISION || '').trim();
+                                                                                  const charged = decision === 'changes_required';
+                                                                                  process.stdout.write(String((Number.isFinite(n) ? n : 0) + (charged ? 1 : 0)));
                                                                               env:
                                                                                 N: ${variables.postPublishCycle}
+                                                                                DECISION: ${variables.postPublishDecision}
                                                                               failOnError: true
                                                                               output:
                                                                                 captureStdout: true
@@ -9903,9 +10352,214 @@ steps:
                                                                               source: step_output
                                                                               sourcePath: bumpPostPublishCycle.outputs.stdout
 
-                                                                          # The checks that were running belonged to the OLD head. The new head
-                                                                          # gets a fresh wait budget, or a cycle that already spent it escalates
-                                                                          # to awaiting_human while CI on the fix is still running.
+                                                                          # ── A re-publish that carried NO required change is a POLL ─────
+                                                                          # It spends the re-observe budget (the one that exists for "a
+                                                                          # cycle with nothing to fix"), never maxPostPublishFixCycles.
+                                                                          # Without this the repair path - which re-publishes a re-created
+                                                                          # commit with no engineer work at all - was charged as a fix, so a
+                                                                          # pull request that simply had nothing to fix burned its entire
+                                                                          # fix allowance in two observations.
+                                                                          - id: bumpPostPublishPollCycle
+                                                                            name: Count a re-publish that carried no required change
+                                                                            type: cli_command
+                                                                            dependsOn: setPostPublishCycleNext
+                                                                            config:
+                                                                              command: node
+                                                                              args:
+                                                                                - -e
+                                                                                - |
+                                                                                  // Mirror of bumpPostPublishCycle: a re-publish that carried
+                                                                                  // no required change is a poll, so it spends the poll budget.
+                                                                                  // A real fix is already charged to the fix budget and must
+                                                                                  // not also drain this one.
+                                                                                  const n = Number(String(process.env.N || '0').trim());
+                                                                                  const decision = String(process.env.DECISION || '').trim();
+                                                                                  const charged = decision !== 'changes_required';
+                                                                                  process.stdout.write(String((Number.isFinite(n) ? n : 0) + (charged ? 1 : 0)));
+                                                                              env:
+                                                                                N: ${variables.postPublishReobserveCount}
+                                                                                DECISION: ${variables.postPublishDecision}
+                                                                              failOnError: true
+                                                                              output:
+                                                                                captureStdout: true
+                                                                          - id: setPostPublishPollCount
+                                                                            name: Record the no-change re-publish count
+                                                                            type: set_variable
+                                                                            dependsOn: bumpPostPublishPollCycle
+                                                                            config:
+                                                                              action: set
+                                                                              key: postPublishReobserveCount
+                                                                              source: step_output
+                                                                              sourcePath: bumpPostPublishPollCycle.outputs.stdout
+                                                                          - id: postPublishFixChargedGate
+                                                                            name: Was the re-publish a real fix
+                                                                            type: condition
+                                                                            dependsOn: setPostPublishPollCount
+                                                                            config:
+                                                                              condition: variables.postPublishDecision === 'changes_required'
+                                                                              thenSteps:
+                                                                                - id: setPostPublishAwaitingOffOnFix
+                                                                                  name: Leave awaiting-action mode, a fix is in flight
+                                                                                  type: set_variable
+                                                                                  config:
+                                                                                    action: set
+                                                                                    key: postPublishAwaiting
+                                                                                    value: "false"
+                                                                          - id: postPublishPushPollGate
+                                                                            name: May the poll budget stop this re-publish
+                                                                            type: condition
+                                                                            dependsOn: setPostPublishPollCount
+                                                                            config:
+                                                                              # A REAL fix cycle always re-observes. postPublishCycle (bounded by
+                                                                              # maxPostPublishFixCycles) already limits how many fixes a run may make, so
+                                                                              # the poll budget must not be able to stop one: parking here reported a
+                                                                              # just-fixed finding as outstanding without ever re-observing whether the fix
+                                                                              # resolved it (REACTORY-302016408/20261118/1057091601, review B1).
+                                                                              # 
+                                                                              # The short-circuit below is also what makes the else arm reachable ONLY for a
+                                                                              # cycle that produced NO required change - which is what lets that arm describe
+                                                                              # the judgement truthfully instead of asserting it.
+                                                                              condition: variables.postPublishDecision === 'changes_required' || Number(variables.postPublishReobserveCount) < Number(variables.postPublishReobserveBound)
+                                                                              thenSteps:
+                                                                                - id: postPublishFixLandedGate
+                                                                                  name: Did this cycle publish a real fix
+                                                                                  type: condition
+                                                                                  dependsOn: setPostPublishPollCount
+                                                                                  config:
+                                                                                    condition: variables.postPublishDecision === 'changes_required'
+                                                                                    thenSteps:
+                                                                                      - id: postPublishFixLandedLog
+                                                                                        name: Log a published fix
+                                                                                        type: log
+                                                                                        config:
+                                                                                          level: info
+                                                                                          message: Post-publication cycle
+                                                                                            ${variables.postPublishCycle}/${variables.postPublishFixBound} for
+                                                                                            ${steps.loadTicket.result.reference} published the required fixes and carried
+                                                                                            them to origin, so the run re-observes the pull request to see whether they
+                                                                                            resolved the finding. A real fix is bounded by the FIX budget, never by the
+                                                                                            poll budget, so this cycle is not stopped here.
+                                                                                    elseSteps:
+                                                                                      - id: postPublishPushPollLog
+                                                                                        name: Log the no-change re-publish
+                                                                                        type: log
+                                                                                        config:
+                                                                                          level: info
+                                                                                          message: Post-publication re-publish for
+                                                                                            ${steps.loadTicket.result.reference} carried no required change (judgement
+                                                                                            ${variables.postPublishDecision}), so it was charged to the poll budget, not the
+                                                                                            fix budget - poll
+                                                                                            ${variables.postPublishReobserveCount}/${variables.postPublishReobserveBound},
+                                                                                            fix cycle ${variables.postPublishCycle}/${variables.postPublishFixBound}.
+                                                                              elseSteps:
+                                                                                # The poll budget is spent AND this cycle owed the engineer nothing (the gate
+                                                                                # above short-circuits changes_required). Ask the SAME question the other
+                                                                                # exhaustion points ask before stopping: is anything left that an agent could
+                                                                                # act on, or is the only remaining blocker a human action?
+                                                                                - id: postPublishPushPollVerdictGate
+                                                                                  name: Is the only remaining blocker an awaited human action
+                                                                                  type: condition
+                                                                                  dependsOn: setPostPublishJudgedVerdict
+                                                                                  config:
+                                                                                    condition: variables.postPublishJudgedVerdict === 'awaiting'
+                                                                                    thenSteps:
+                                                                                      - id: setPostPublishAwaitingOnPushPoll
+                                                                                        name: Switch the loop into awaiting-action polling
+                                                                                        type: set_variable
+                                                                                        config:
+                                                                                          action: set
+                                                                                          key: postPublishAwaiting
+                                                                                          value: "true"
+                                                                                      - id: logPostPublishAwaitingOnPushPoll
+                                                                                        name: Log that the wait is a human action, not a fix
+                                                                                        type: log
+                                                                                        dependsOn: setPostPublishAwaitingOnPushPoll
+                                                                                        config:
+                                                                                          level: info
+                                                                                          message: The poll budget is spent for
+                                                                                            ${steps.loadTicket.result.reference}, but no agent-actionable finding
+                                                                                            remains - the only blocker is an awaited human action, so the run keeps
+                                                                                            polling for it instead of reporting ${steps.readPrUrl.outputs.stdout}
+                                                                                            unmergeable.
+                                                                                    elseSteps:
+                                                                                      - id: setPostPublishPushPollBlocked
+                                                                                        name: Stop when no-change re-publishes never converge
+                                                                                        type: set_variable
+                                                                                        config:
+                                                                                          action: set
+                                                                                          key: postPublishOutcome
+                                                                                          value: blocked_human
+                                                                                # The reason is DERIVED from the judgement and the exhaustion record, not
+                                                                                # asserted: the old text claimed "the judgement was not changes_required",
+                                                                                # which was FALSE on the reachable B1 path (review required change 2).
+                                                                                      - id: describePostPublishPushPollReason
+                                                                                        name: Describe why the poll budget stopped the loop
+                                                                                        type: cli_command
+                                                                                        dependsOn: setPostPublishPushPollBlocked
+                                                                                        config:
+                                                                                          command: node
+                                                                                          args:
+                                                                                            - -e
+                                                                                            - |
+                                                                                              const fs = require('fs');
+                                                                                              const path = require('path');
+
+                                                                                              const dir = path.join(String(process.env.WT || '').trim(), '.ai-agent');
+                                                                                              const readJson = (name) => {
+                                                                                                try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch (e) { return null; }
+                                                                                              };
+
+                                                                                              const judgement = readJson('post-publish-review-normalised.json') || {};
+                                                                                              const verdict = readJson('post-publish-exhaustion.json') || {};
+                                                                                              const decision = String(process.env.DECISION || judgement.state || 'unknown').trim() || 'unknown';
+                                                                                              const required = Array.isArray(judgement.requiredChanges) ? judgement.requiredChanges : [];
+                                                                                              const dismissals = Array.isArray(judgement.dismissals) ? judgement.dismissals : [];
+                                                                                              const actionable = Array.isArray(verdict.actionable) ? verdict.actionable : [];
+                                                                                              const reobserve = String(process.env.REOBSERVE || '').trim();
+                                                                                              const bound = String(process.env.REOBSERVE_BOUND || '').trim();
+
+                                                                                              // This arm must never describe a cycle that OWED the engineer work. The gate
+                                                                                              // above short-circuits a changes_required cycle, so reaching here with that
+                                                                                              // judgement is a workflow defect - say so instead of misreporting it, which is
+                                                                                              // exactly what the previous hard-coded "the judgement was not changes_required"
+                                                                                              // text did (review B1, required change 2).
+                                                                                              const parts = [];
+                                                                                              if (decision === 'changes_required') {
+                                                                                                parts.push('INTERNAL CONTRADICTION: this cycle was judged changes_required (' + String(required.length) + ' required change(s)) and its fix was pushed, so it must be re-observed rather than parked on the poll budget - the gate above should have short-circuited. Treat this as a workflow defect, not as a pull-request block');
+                                                                                              } else {
+                                                                                                parts.push('the quality reviewer judged this cycle ' + decision + ', so the engineer owed no required change' + (dismissals.length > 0 ? ' (' + String(dismissals.length) + ' finding(s) dismissed with a recorded justification)' : '') + ', yet ' + String(actionable.length) + ' agent-actionable finding(s) remain');
+                                                                                              }
+                                                                                              parts.push('the poll budget is spent (' + (reobserve || '?') + '/' + (bound || '?') + ' no-change re-publishes), so a human must look at what is left');
+                                                                                              process.stdout.write(parts.join('; ') + '.');
+                                                                                          env:
+                                                                                            WT: ${steps.readWorktreePath.outputs.stdout}
+                                                                                            DECISION: ${variables.postPublishDecision}
+                                                                                            REOBSERVE: ${variables.postPublishReobserveCount}
+                                                                                            REOBSERVE_BOUND: ${variables.postPublishReobserveBound}
+                                                                                          failOnError: false
+                                                                                          output:
+                                                                                            captureStdout: true
+                                                                                            captureStderr: true
+
+                                                                                      - id: setPostPublishPushPollReason
+                                                                                        name: Record why the poll budget stopped the loop
+                                                                                        type: set_variable
+                                                                                        dependsOn: describePostPublishPushPollReason
+                                                                                        config:
+                                                                                          action: set
+                                                                                          key: postPublishReason
+                                                                                          source: step_output
+                                                                                          sourcePath: describePostPublishPushPollReason.outputs.stdout
+
+                                                                                      - id: setPostPublishPushPollContinue
+                                                                                        name: Stop the loop
+                                                                                        type: set_variable
+                                                                                        dependsOn: setPostPublishPushPollReason
+                                                                                        config:
+                                                                                          action: set
+                                                                                          key: postPublishContinue
+                                                                                          value: "false"
+
                                                                           - id: resetPostPublishWaitCount
                                                                             name: Give the new head a fresh check-wait budget
                                                                             type: set_variable
@@ -10132,31 +10786,51 @@ steps:
                                                                     ${steps.loadTicket.result.reference} required no code change -
                                                                     re-observing the pull request now that the dismissals are applied.
                                                             elseSteps:
-                                                              - id: setPostPublishReobserveBlocked
-                                                                name: Stop when re-observing never converges
-                                                                type: set_variable
+                                                              # The poll budget is spent. Before stopping, ask the
+                                                              # same question the fix-budget arm asks: is anything left
+                                                              # that an AGENT could act on? A no-op cycle that only
+                                                              # ran out of re-observes while all that remains is an
+                                                              # awaited review must poll, not park.
+                                                              - id: postPublishReobserveAwaitingGate
+                                                                name: Is the only remaining blocker an awaited human action
+                                                                type: condition
+                                                                dependsOn: setPostPublishJudgedVerdict
                                                                 config:
-                                                                  action: set
-                                                                  key: postPublishOutcome
-                                                                  value: blocked_human
-                                                              - id: setPostPublishReobserveBlockedReason
-                                                                name: Record why the re-observe stopped
-                                                                type: set_variable
-                                                                dependsOn: setPostPublishReobserveBlocked
-                                                                config:
-                                                                  action: set
-                                                                  key: postPublishReason
-                                                                  value: the pull request still reported agent-fixable findings after the
-                                                                    quality reviewer dismissed every finding it could and the pipeline
-                                                                    re-observed it; a human must look at what remains
-                                                              - id: setPostPublishReobserveContinue
-                                                                name: Stop the loop
-                                                                type: set_variable
-                                                                dependsOn: setPostPublishReobserveBlockedReason
-                                                                config:
-                                                                  action: set
-                                                                  key: postPublishContinue
-                                                                  value: "false"
+                                                                  condition: variables.postPublishJudgedVerdict === 'awaiting'
+                                                                  thenSteps:
+                                                                    - id: setPostPublishAwaitingOnReobserve
+                                                                      name: Switch the loop into awaiting-action polling
+                                                                      type: set_variable
+                                                                      config:
+                                                                        action: set
+                                                                        key: postPublishAwaiting
+                                                                        value: "true"
+                                                                  elseSteps:
+                                                                    - id: setPostPublishReobserveBlocked
+                                                                      name: Stop when re-observing never converges
+                                                                      type: set_variable
+                                                                      config:
+                                                                        action: set
+                                                                        key: postPublishOutcome
+                                                                        value: blocked_human
+                                                                    - id: setPostPublishReobserveBlockedReason
+                                                                      name: Record why the re-observe stopped
+                                                                      type: set_variable
+                                                                      dependsOn: setPostPublishReobserveBlocked
+                                                                      config:
+                                                                        action: set
+                                                                        key: postPublishReason
+                                                                        value: the pull request still reported agent-fixable findings after the
+                                                                          quality reviewer dismissed every finding it could and the pipeline
+                                                                          re-observed it; a human must look at what remains
+                                                                    - id: setPostPublishReobserveContinue
+                                                                      name: Stop the loop
+                                                                      type: set_variable
+                                                                      dependsOn: setPostPublishReobserveBlockedReason
+                                                                      config:
+                                                                        action: set
+                                                                        key: postPublishContinue
+                                                                        value: "false"
                                                 elseSteps:
                                                   - id: setPostPublishReviewInvalid
                                                     name: Stop the loop on an unusable judgement
@@ -10182,227 +10856,443 @@ steps:
                                                       key: postPublishContinue
                                                       value: "false"
                                           elseSteps:
-                                            - id: setPostPublishExhausted
-                                              name: Record an exhausted post-publication fix budget
-                                              type: set_variable
+                                            # ── D2: is anything left that an AGENT could act on? ──
+                                            # Asking "is the fix budget spent?" and parking on YES is what
+                                            # reported a converged pull request as unmergeable. The
+                                            # budget being spent says nothing about whether the REMAINING
+                                            # block is agent-actionable: on the recorded run the only
+                                            # "finding" was an unverifiable_commit that GitHub's
+                                            # asynchronous signature verification had not settled, and the
+                                            # quality reviewer had already dismissed it with evidence.
+                                            #
+                                            # The verdict is computed from the observation AND the last
+                                            # judgement (a finding is cleared only by a recorded
+                                            # DISMISSAL with a justification), so:
+                                            #   awaiting    -> nothing actionable remains; the blocker is a
+                                            #                  human action. POLL, do not park.
+                                            #   outstanding -> a real, unaddressed finding remains. Park,
+                                            #                  and say exactly that.
+                                            - id: postPublishAwaitingExhaustedGate
+                                              name: Is the only remaining blocker an awaited human action
+                                              type: condition
+                                              dependsOn: setPostPublishExhaustionVerdict
                                               config:
-                                                action: set
-                                                key: postPublishOutcome
-                                                value: exhausted
-                                            - id: setPostPublishExhaustedContinue
-                                              name: Stop the loop when the budget is exhausted
-                                              type: set_variable
-                                              dependsOn: setPostPublishExhausted
-                                              config:
-                                                action: set
-                                                key: postPublishContinue
-                                                value: "false"
+                                                condition: variables.postPublishExhaustionVerdict === 'awaiting'
+                                                thenSteps:
+                                                  # POLL, do not park. The wait itself and its bound live
+                                                  # ONCE, at the top of the loop body
+                                                  # (postPublishAwaitPollGate), so this arm only switches
+                                                  # the mode and lets the while iterate: the review or the
+                                                  # merge is then seen by the next observation.
+                                                  - id: setPostPublishAwaitingOnExhaustion
+                                                    name: Switch the loop into awaiting-action polling
+                                                    type: set_variable
+                                                    config:
+                                                      action: set
+                                                      key: postPublishAwaiting
+                                                      value: "true"
+                                                  - id: logPostPublishAwaitingOnExhaustion
+                                                    name: Log that the wait is a human action, not a fix
+                                                    type: log
+                                                    dependsOn: setPostPublishAwaitingOnExhaustion
+                                                    config:
+                                                      level: info
+                                                      message: The post-publication fix budget is spent for
+                                                        ${steps.loadTicket.result.reference}, but no
+                                                        agent-actionable finding remains - the only blocker is an
+                                                        awaited human action, so the run polls for it instead of
+                                                        reporting ${steps.readPrUrl.outputs.stdout} unmergeable.
+                                                elseSteps:
+                                                  - id: setPostPublishExhausted
+                                                    name: Record an exhausted post-publication fix budget
+                                                    type: set_variable
+                                                    config:
+                                                      action: set
+                                                      key: postPublishOutcome
+                                                      value: exhausted
+                                                  - id: setPostPublishExhaustedContinue
+                                                    name: Stop the loop when the budget is exhausted
+                                                    type: set_variable
+                                                    dependsOn: setPostPublishExhausted
+                                                    config:
+                                                      action: set
+                                                      key: postPublishContinue
+                                                      value: "false"
                                     elseSteps:
-                                      # POSITIVE test, deliberately. The previous shape asked
-                                      # "is this human_only?" and sent every OTHER value to
-                                      # awaiting_human - so an 'unavailable' observation (gh outage,
-                                      # auth failure, no PR number) set runStatus=completed for a
-                                      # pull request nobody had actually read. Only a POSITIVE
-                                      # 'clean' may be reported as success.
-                                      # ── Checks still running: WAIT, never a policy block ──────────────
-                                      # The first observation runs immediately after the pull request is
-                                      # opened, so a repository with required status checks would otherwise be
-                                      # judged BLOCKED-with-no-finding before CI had finished. Waiting is not a
-                                      # fix: it does not consume the fix budget, and running out of waits ends
-                                      # awaiting a human rather than claiming a policy verdict.
-                                      # MERGED while the loop was still observing (a human merged during a check
-                                      # wait). That is terminal success, not a block: it must reach the resolve
-                                      # path, or the ticket stays in_progress for ever.
-                                      - id: postPublishMergedGate
-                                        name: Was the pull request already merged
+                                      - id: postPublishAwaitPurePollGate
+                                        name: Is this iteration a pure poll for a human action
                                         type: condition
-                                        dependsOn: setPostPublishState
                                         config:
-                                          condition: variables.postPublishState === 'merged'
+                                          # B7: the awaiting window was DEAD CODE. postPublishRoute's
+                                          # condition is deliberately FALSE while the run awaits a
+                                          # human action, so control fell into this else arm - and
+                                          # every step in it terminates the loop: mergedGate stops on
+                                          # 'merged', mergeableGate stops on 'clean', and its else
+                                          # stops on everything else. An awaiting iteration therefore
+                                          # exited on its FIRST pass with postPublishContinue='false',
+                                          # so postPublishAwaitCount never advanced and the
+                                          # 40 x 180s window could run ZERO polls.
+                                          #   Measured, walking the shipped body sequentially:
+                                          #     state 'fixable'    -> continue=false, 0 polls
+                                          #     state 'clean'      -> continue=false, 0 polls
+                                          #     state 'human_only' -> continue=false, 0 polls
+                                          #
+                                          # An awaiting iteration is a POLL, not a decision. It leaves
+                                          # postPublishOutcome='observing' and postPublishContinue='true'
+                                          # so the while-loop re-enters, and the park decision is taken
+                                          # by postPublishAwaitSpentGate AFTER this iteration's
+                                          # observation - the only place that knows whether a review
+                                          # has landed.
+                                          #
+                                          # A review that lands flips postPublishExhaustionVerdict to
+                                          # 'outstanding'; this gate goes false, and the chain below is
+                                          # skipped in favour of the route's then-arm with the fix
+                                          # budget intact.
+                                          condition: variables.postPublishAwaiting === 'true' && variables.postPublishExhaustionVerdict === 'awaiting'
                                           thenSteps:
-                                            - id: setPostPublishMerged
-                                              name: Record that the pull request is merged
-                                              type: set_variable
+                                            - id: postPublishAwaitPurePollLog
+                                              name: Log that this iteration only waited
+                                              type: log
                                               config:
-                                                action: set
-                                                key: postPublishOutcome
-                                                value: merged
-                                            - id: setPostPublishMergedState
-                                              name: Record the merged pull request state
-                                              type: set_variable
-                                              dependsOn: setPostPublishMerged
-                                              config:
-                                                action: set
-                                                key: prState
-                                                value: MERGED
-                                            - id: setPostPublishMergedContinue
-                                              name: Stop observing a merged pull request
-                                              type: set_variable
-                                              dependsOn: setPostPublishMergedState
-                                              config:
-                                                action: set
-                                                key: postPublishContinue
-                                                value: "false"
+                                                level: info
+                                                message: >-
+                                                  Post-publication poll
+                                                  ${variables.postPublishAwaitCount}/${variables.postPublishAwaitBound}
+                                                  for ${steps.loadTicket.result.reference} - nothing
+                                                  agent-actionable remains and the review decision is
+                                                  still REVIEW_REQUIRED or required checks are still
+                                                  running, so this iteration only waited. The merged /
+                                                  pending / mergeable chain is skipped and the loop
+                                                  re-polls.
                                           elseSteps:
-                                          - id: postPublishPendingGate
-                                            name: Are required checks still running
+                                          # POSITIVE test, deliberately. The previous shape asked
+                                          # "is this human_only?" and sent every OTHER value to
+                                          # awaiting_human - so an 'unavailable' observation (gh outage,
+                                          # auth failure, no PR number) set runStatus=completed for a
+                                          # pull request nobody had actually read. Only a POSITIVE
+                                          # 'clean' may be reported as success.
+                                          # ── Checks still running: WAIT, never a policy block ──────────────
+                                          # The first observation runs immediately after the pull request is
+                                          # opened, so a repository with required status checks would otherwise be
+                                          # judged BLOCKED-with-no-finding before CI had finished. Waiting is not a
+                                          # fix: it does not consume the fix budget, and running out of waits ends
+                                          # awaiting a human rather than claiming a policy verdict.
+                                          # MERGED while the loop was still observing (a human merged during a check
+                                          # wait). That is terminal success, not a block: it must reach the resolve
+                                          # path, or the ticket stays in_progress for ever.
+                                          - id: postPublishMergedGate
+                                            name: Was the pull request already merged
                                             type: condition
                                             dependsOn: setPostPublishState
                                             config:
-                                              condition: variables.postPublishState === 'pending'
+                                              condition: variables.postPublishState === 'merged'
                                               thenSteps:
-                                                - id: postPublishWaitBudgetGate
-                                                  name: Is there check-wait budget left
-                                                  type: condition
+                                                - id: setPostPublishMerged
+                                                  name: Record that the pull request is merged
+                                                  type: set_variable
                                                   config:
-                                                    condition: Number(variables.postPublishWaitCount) < Number(variables.postPublishWaitBound)
-                                                    thenSteps:
-                                                      - id: postPublishWait
-                                                        name: Wait for the running checks
-                                                        type: delay
-                                                        config:
-                                                          duration: 60000
-                                                          message: Checks are still running on the pull request - waiting one
-                                                            minute before observing again.
-                                                      - id: bumpPostPublishWait
-                                                        name: Count the check wait
-                                                        type: cli_command
-                                                        dependsOn: postPublishWait
-                                                        config:
-                                                          command: node
-                                                          args:
-                                                            - -e
-                                                            - |
-                                                              const n = Number(String(process.env.N || '0').trim());
-                                                              process.stdout.write(String((Number.isFinite(n) ? n : 0) + 1));
-                                                          env:
-                                                            N: ${variables.postPublishWaitCount}
-                                                          failOnError: true
-                                                          output:
-                                                            captureStdout: true
-                                                      - id: setPostPublishWaitCount
-                                                        name: Record the check wait
-                                                        type: set_variable
-                                                        dependsOn: bumpPostPublishWait
-                                                        config:
-                                                          action: set
-                                                          key: postPublishWaitCount
-                                                          source: step_output
-                                                          sourcePath: bumpPostPublishWait.outputs.stdout
-                                                    elseSteps:
-                                                      - id: setPostPublishPendingExhausted
-                                                        name: Record that the checks never finished in budget
-                                                        type: set_variable
-                                                        config:
-                                                          action: set
-                                                          key: postPublishOutcome
-                                                          value: awaiting_human
-                                                      - id: setPostPublishPendingExhaustedReason
-                                                        name: Record why the run stopped waiting
-                                                        type: set_variable
-                                                        dependsOn: setPostPublishPendingExhausted
-                                                        config:
-                                                          action: set
-                                                          key: postPublishReason
-                                                          value: the pull request is published and no agent-fixable finding remains,
-                                                            but its required checks had still not finished after the wait budget - a
-                                                            human must let CI finish and re-check
-                                                      - id: setPostPublishPendingExhaustedContinue
-                                                        name: Stop waiting
-                                                        type: set_variable
-                                                        dependsOn: setPostPublishPendingExhaustedReason
-                                                        config:
-                                                          action: set
-                                                          key: postPublishContinue
-                                                          value: "false"
+                                                    action: set
+                                                    key: postPublishOutcome
+                                                    value: merged
+                                                - id: setPostPublishMergedState
+                                                  name: Record the merged pull request state
+                                                  type: set_variable
+                                                  dependsOn: setPostPublishMerged
+                                                  config:
+                                                    action: set
+                                                    key: prState
+                                                    value: MERGED
+                                                - id: setPostPublishMergedContinue
+                                                  name: Stop observing a merged pull request
+                                                  type: set_variable
+                                                  dependsOn: setPostPublishMergedState
+                                                  config:
+                                                    action: set
+                                                    key: postPublishContinue
+                                                    value: "false"
                                               elseSteps:
-                                                - id: postPublishMergeableGate
-                                                  name: Was the pull request observed mergeable
-                                                  type: condition
-                                                  dependsOn: setPostPublishState
-                                                  config:
-                                                    condition: variables.postPublishState === 'clean'
-                                                    thenSteps:
-                                                      - id: setPostPublishAwaitingHuman
-                                                        name: Record a published, mergeable pull request
-                                                        type: set_variable
-                                                        config:
-                                                          action: set
-                                                          key: postPublishOutcome
-                                                          value: awaiting_human
-                                                      - id: setPostPublishObservedClean
-                                                        name: Record that the observation succeeded
-                                                        type: set_variable
-                                                        dependsOn: setPostPublishAwaitingHuman
-                                                        config:
-                                                          action: set
-                                                          key: publishObservation
-                                                          value: clean
-                                                      - id: setPostPublishAwaitingContinue
-                                                        name: Stop observing and wait for the human
-                                                        type: set_variable
-                                                        dependsOn: setPostPublishObservedClean
-                                                        config:
-                                                          action: set
-                                                          key: postPublishContinue
-                                                          value: "false"
-                                                    elseSteps:
-                                                      # human_only AND unavailable both stop here. They
-                                                      # differ only in the reason, which the observation
-                                                      # already wrote and describePostPublishBlock reports.
-                                                      - id: setPostPublishHumanBlocked
-                                                        name: Record an unmergeable post-publication block
-                                                        type: set_variable
-                                                        config:
-                                                          action: set
-                                                          key: postPublishOutcome
-                                                          value: blocked_human
-                                                      - id: readPostPublishBlockReason
-                                                        name: Read the reason the loop stopped
-                                                        type: cli_command
-                                                        dependsOn: setPostPublishHumanBlocked
-                                                        config:
-                                                          command: node
-                                                          args:
-                                                            - -e
-                                                            - |
-                                                              const fs = require('fs');
-                                                              const path = require('path');
-                                                              const wt = String(process.env.WT || '').trim();
-                                                              const state = String(process.env.STATE || '').trim();
-                                                              let observation = {};
-                                                              try { observation = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'post-publish-observation.json'), 'utf8')); } catch (e) { observation = {}; }
-                                                              const reason = String(observation.reason || '').trim();
-                                                              if (state === 'unavailable') {
-                                                                // An unread pull request is a PIPELINE fault, never a
-                                                                // success and never an agent's fault. Say exactly that.
-                                                                process.stdout.write('the pull request could not be observed, so its mergeability is UNKNOWN and this run cannot claim success' + (reason ? ': ' + reason : ''));
-                                                                process.exit(0);
-                                                              }
-                                                              process.stdout.write(reason || 'the pull request is open but a block remains that only a human can clear');
-                                                          env:
-                                                            WT: ${steps.readWorktreePath.outputs.stdout}
-                                                            STATE: ${variables.postPublishState}
-                                                          failOnError: false
-                                                          output:
-                                                            captureStdout: true
-                                                      - id: setPostPublishBlockReason
-                                                        name: Record the block reason
-                                                        type: set_variable
-                                                        dependsOn: readPostPublishBlockReason
-                                                        config:
-                                                          action: set
-                                                          key: postPublishReason
-                                                          source: step_output
-                                                          sourcePath: readPostPublishBlockReason.outputs.stdout
-                                                      - id: setPostPublishHumanContinue
-                                                        name: Do not loop on an unmergeable block
-                                                        type: set_variable
-                                                        dependsOn: setPostPublishBlockReason
-                                                        config:
-                                                          action: set
-                                                          key: postPublishContinue
-                                                          value: "false"
+                                              - id: postPublishPendingGate
+                                                name: Are required checks still running
+                                                type: condition
+                                                dependsOn: setPostPublishState
+                                                config:
+                                                  condition: variables.postPublishState === 'pending'
+                                                  thenSteps:
+                                                    - id: postPublishWaitBudgetGate
+                                                      name: Is there check-wait budget left
+                                                      type: condition
+                                                      config:
+                                                        condition: Number(variables.postPublishWaitCount) < Number(variables.postPublishWaitBound)
+                                                        thenSteps:
+                                                          - id: postPublishWait
+                                                            name: Wait for the running checks
+                                                            type: delay
+                                                            config:
+                                                              duration: 60000
+                                                              message: Checks are still running on the pull request - waiting one
+                                                                minute before observing again.
+                                                          - id: bumpPostPublishWait
+                                                            name: Count the check wait
+                                                            type: cli_command
+                                                            dependsOn: postPublishWait
+                                                            config:
+                                                              command: node
+                                                              args:
+                                                                - -e
+                                                                - |
+                                                                  const n = Number(String(process.env.N || '0').trim());
+                                                                  process.stdout.write(String((Number.isFinite(n) ? n : 0) + 1));
+                                                              env:
+                                                                N: ${variables.postPublishWaitCount}
+                                                              failOnError: true
+                                                              output:
+                                                                captureStdout: true
+                                                          - id: setPostPublishWaitCount
+                                                            name: Record the check wait
+                                                            type: set_variable
+                                                            dependsOn: bumpPostPublishWait
+                                                            config:
+                                                              action: set
+                                                              key: postPublishWaitCount
+                                                              source: step_output
+                                                              sourcePath: bumpPostPublishWait.outputs.stdout
+                                                        elseSteps:
+                                                          - id: setPostPublishPendingExhausted
+                                                            name: Record that the checks never finished in budget
+                                                            type: set_variable
+                                                            config:
+                                                              action: set
+                                                              key: postPublishOutcome
+                                                              value: awaiting_human
+                                                          - id: setPostPublishPendingExhaustedReason
+                                                            name: Record why the run stopped waiting
+                                                            type: set_variable
+                                                            dependsOn: setPostPublishPendingExhausted
+                                                            config:
+                                                              action: set
+                                                              key: postPublishReason
+                                                              value: the pull request is published and no agent-fixable finding remains,
+                                                                but its required checks had still not finished after the wait budget - a
+                                                                human must let CI finish and re-check
+                                                          - id: setPostPublishPendingExhaustedContinue
+                                                            name: Stop waiting
+                                                            type: set_variable
+                                                            dependsOn: setPostPublishPendingExhaustedReason
+                                                            config:
+                                                              action: set
+                                                              key: postPublishContinue
+                                                              value: "false"
+                                                  elseSteps:
+                                                    - id: postPublishMergeableGate
+                                                      name: Was the pull request observed mergeable
+                                                      type: condition
+                                                      dependsOn: setPostPublishState
+                                                      config:
+                                                        condition: variables.postPublishState === 'clean'
+                                                        thenSteps:
+                                                          - id: setPostPublishAwaitingHuman
+                                                            name: Record a published, mergeable pull request
+                                                            type: set_variable
+                                                            config:
+                                                              action: set
+                                                              key: postPublishOutcome
+                                                              value: awaiting_human
+                                                          - id: setPostPublishObservedClean
+                                                            name: Record that the observation succeeded
+                                                            type: set_variable
+                                                            dependsOn: setPostPublishAwaitingHuman
+                                                            config:
+                                                              action: set
+                                                              key: publishObservation
+                                                              value: clean
+                                                          - id: setPostPublishAwaitingContinue
+                                                            name: Stop observing and wait for the human
+                                                            type: set_variable
+                                                            dependsOn: setPostPublishObservedClean
+                                                            config:
+                                                              action: set
+                                                              key: postPublishContinue
+                                                              value: "false"
+                                                        elseSteps:
+                                                          # human_only AND unavailable both stop here. They
+                                                          # differ only in the reason, which the observation
+                                                          # already wrote and describePostPublishBlock reports.
+                                                          - id: setPostPublishHumanBlocked
+                                                            name: Record an unmergeable post-publication block
+                                                            type: set_variable
+                                                            config:
+                                                              action: set
+                                                              key: postPublishOutcome
+                                                              value: blocked_human
+                                                          - id: readPostPublishBlockReason
+                                                            name: Read the reason the loop stopped
+                                                            type: cli_command
+                                                            dependsOn: setPostPublishHumanBlocked
+                                                            config:
+                                                              command: node
+                                                              args:
+                                                                - -e
+                                                                - |
+                                                                  const fs = require('fs');
+                                                                  const path = require('path');
+                                                                  const wt = String(process.env.WT || '').trim();
+                                                                  const state = String(process.env.STATE || '').trim();
+                                                                  const readJson = (name) => {
+                                                                    try { return JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', name), 'utf8')); } catch (e) { return null; }
+                                                                  };
+                                                                  let observation = {};
+                                                                  try { observation = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'post-publish-observation.json'), 'utf8')); } catch (e) { observation = {}; }
+                                                                  const reason = String(observation.reason || '').trim();
+                                                                  if (state === 'unavailable') {
+                                                                    // An unread pull request is a PIPELINE fault, never a
+                                                                    // success and never an agent's fault. Say exactly that.
+                                                                    process.stdout.write('the pull request could not be observed, so its mergeability is UNKNOWN and this run cannot claim success' + (reason ? ': ' + reason : ''));
+                                                                    process.exit(0);
+                                                                  }
+                                                                  // B9: observation.reason is the RAW pre-judgement reason, recorded before the
+                                                                  // reviewer dismissed anything. In the incident state it read
+                                                                  //   "1 agent-fixable finding(s): unverifiable_commit"
+                                                                  // while the block text said "no agent-actionable finding remains" - the message
+                                                                  // asserted an agent-actionable finding in the same breath as denying one. When
+                                                                  // the exhaustion verdict classifies the block as an AWAITED HUMAN ACTION, the
+                                                                  // reason must come from that verdict record: it is computed AFTER the judgement
+                                                                  // and is the one authoritative statement of it. The raw observation reason is
+                                                                  // kept only for a genuine 'outstanding' block, where naming the unaddressed
+                                                                  // finding is exactly right.
+                                                                  const verdictRecord = readJson('post-publish-exhaustion.json');
+                                                                  if (verdictRecord && verdictRecord.generatedAt && String(verdictRecord.verdict || '') === 'awaiting') {
+                                                                    const verdictReason = String(verdictRecord.reason || '').trim();
+                                                                    process.stdout.write(verdictReason || 'nothing agent-actionable remains; the only remaining blocker is an awaited human action');
+                                                                    process.exit(0);
+                                                                  }
+                                                                  process.stdout.write(reason || 'the pull request is open but a block remains that only a human can clear');
+                                                              env:
+                                                                WT: ${steps.readWorktreePath.outputs.stdout}
+                                                                STATE: ${variables.postPublishState}
+                                                              failOnError: false
+                                                              output:
+                                                                captureStdout: true
+                                                          - id: setPostPublishBlockReason
+                                                            name: Record the block reason
+                                                            type: set_variable
+                                                            dependsOn: readPostPublishBlockReason
+                                                            config:
+                                                              action: set
+                                                              key: postPublishReason
+                                                              source: step_output
+                                                              sourcePath: readPostPublishBlockReason.outputs.stdout
+                                                          - id: setPostPublishHumanContinue
+                                                            name: Do not loop on an unmergeable block
+                                                            type: set_variable
+                                                            dependsOn: setPostPublishBlockReason
+                                                            config:
+                                                              action: set
+                                                              key: postPublishContinue
+                                                              value: "false"
+
+                                    # ── A poll that only waits ──────────────────────
+                                    # The route above is skipped while the run is in
+                                    # awaiting-action mode and nothing agent-actionable
+                                    # remains, so this gate is the only place that records
+                                    # what such an iteration actually did: waited, then
+                                    # re-observed. It sets no outcome and stops nothing.
+                                    # ── The awaiting window closed: decide the park AFTER the evidence ──
+                                    # Deciding it in the poll gate (before this iteration's observation) abandoned a
+                                    # fix that a late review triggered: the fix was pushed and the loop stopped without
+                                    # re-observing it. Here the observation and the verdict are already known, so
+                                # "awaiting" is judged against the pull request as it is NOW.
+                                - id: postPublishAwaitSpentGate
+                                  name: Did the awaiting window close with nothing to act on
+                                  type: condition
+                                  dependsOn: postPublishRoute
+                                  config:
+                                    condition: >-
+                                      variables.postPublishAwaitSpent === 'true' && variables.postPublishOutcome === 'observing' &&
+                                      variables.postPublishExhaustionVerdict === 'awaiting'
+                                    thenSteps:
+                                      - id: setPostPublishAwaitExhausted
+                                        name: Record that the awaited action never came
+                                        type: set_variable
+                                        config:
+                                          action: set
+                                          key: postPublishOutcome
+                                          value: awaiting_review
+                                      - id: setPostPublishAwaitExhaustedReason
+                                        name: Record what the run was waiting for
+                                        type: set_variable
+                                        dependsOn: setPostPublishAwaitExhausted
+                                        config:
+                                          action: set
+                                          key: postPublishReason
+                                          # N1: this used to interpolate
+                                          # ${steps.readPostPublishObservation.outputs.stdout}, which is the
+                                          # FULL observation JSON, so an operator-facing reason read
+                                          #   "... waiting for a HUMAN action ({\"ok\":true,\"source\":\"live\",..."
+                                          # The detail lives in post-publish-exhaustion.json, which
+                                          # describePostPublishBlock reads. A human-facing sentence states
+                                          # the fact in words.
+                                          value: >-
+                                            the pull request is published and no agent-actionable finding remains, but it is still
+                                            waiting for a HUMAN action - the review had not left REVIEW_REQUIRED, or required
+                                            checks were still running - after
+                                            ${variables.postPublishAwaitBound} three-minute polls; only a human can clear that, so
+                                            the run stopped observing and raised the task
+                                      - id: setPostPublishAwaitExhaustedContinue
+                                        name: Stop polling for the human action
+                                        type: set_variable
+                                        dependsOn: setPostPublishAwaitExhaustedReason
+                                        config:
+                                          action: set
+                                          key: postPublishContinue
+                                          value: "false"
+                                    elseSteps:
+                                      - id: postPublishAwaitSpentResetGate
+                                        name: Was the window spent but action is still possible
+                                        type: condition
+                                        dependsOn: postPublishAwaitSpentGate
+                                        config:
+                                          condition: variables.postPublishAwaitSpent === 'true'
+                                          thenSteps:
+                                            - id: setPostPublishAwaitSpentReset
+                                              name: Clear the spent marker
+                                              type: set_variable
+                                              config:
+                                                action: set
+                                                key: postPublishAwaitSpent
+                                                value: "false"
+                                            - id: setPostPublishAwaitingOffSpent
+                                              name: Leave awaiting mode so the normal route owns this pull request
+                                              type: set_variable
+                                              dependsOn: setPostPublishAwaitSpentReset
+                                              config:
+                                                action: set
+                                                key: postPublishAwaiting
+                                                value: "false"
+                                - id: postPublishAwaitSkipGate
+                                  # N5: this sits AFTER the route, so it cannot skip anything - the
+                                  # skip itself is done by postPublishAwaitPurePollGate, which runs
+                                  # before the route for exactly this case. This gate's only job is
+                                  # to record that the reviewer was not re-run, so it is named for
+                                  # what it does rather than for a decision it does not make.
+                                  name: Record that this iteration only awaited a human action
+                                  type: condition
+                                  dependsOn: postPublishRoute
+                                  config:
+                                    condition: variables.postPublishState === 'fixable' && variables.postPublishAwaiting === 'true' && variables.postPublishExhaustionVerdict === 'awaiting'
+                                    thenSteps:
+                                      - id: postPublishAwaitSkipLog
+                                        name: Log that the reviewer was not re-run
+                                        type: log
+                                        config:
+                                          level: info
+                                          message: Post-publication poll
+                                            ${variables.postPublishAwaitCount}/${variables.postPublishAwaitBound}
+                                            for ${steps.loadTicket.result.reference} - the observation still
+                                            reports findings, but every one of them was dismissed with a
+                                            justification and nothing agent-actionable remains, so the quality
+                                            reviewer and the GitHub dismissal writes were SKIPPED and the pull
+                                            request was simply re-observed. A review that lands changes the
+                                            verdict to 'outstanding' and re-opens the full route.
 
                           # ── D. Honest terminal states ────────────────────────────
                           # 'completed' is only recorded for a pull request that was
@@ -10805,41 +11695,116 @@ steps:
                                       - |
                                         const fs = require('fs');
                                         const path = require('path');
+
                                         const wt = String(process.env.WT || '').trim();
                                         const NL = String.fromCharCode(10);
                                         const readJson = (name) => {
                                           try { return JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', name), 'utf8')); } catch (e) { return null; }
                                         };
+
                                         const observation = readJson('post-publish-observation.json') || {};
+                                        const judgement = readJson('post-publish-review-normalised.json') || {};
+                                        const verdictRecord = readJson('post-publish-exhaustion.json');
                                         const log = readJson('post-publish-log.json');
                                         const cycles = Array.isArray(log) ? log.length : 0;
+
                                         const outcome = String(process.env.OUTCOME || '').trim();
                                         const recorded = String(process.env.REASON || '').trim();
                                         const prUrl = String(process.env.PR_URL || '').trim();
                                         const bound = String(process.env.BOUND || '').trim();
+                                        const awaited = String(process.env.AWAITED || '').trim();
+
+                                        // ── ONE decision, ONE implementation ─────────────────────────────────────────
+                                        // The awaited-or-outstanding verdict is computed by readPostPublishExhaustionVerdict
+                                        // and persisted to post-publish-exhaustion.json. This step READS it rather than
+                                        // re-deriving the classification: two implementations of the same decision drifted
+                                        // once already, and the block comment ended up saying CANNOT BE MERGED while the
+                                        // verdict said the block was an awaited human action
+                                        // (REACTORY-302016408/20261118/1057091601, review N1).
+                                        //
+                                        // The record is only trusted when it was produced from the SAME observation this
+                                        // comment describes; otherwise the classification is re-derived with the SAME rule
+                                        // the verdict applies (a finding is cleared only by a justified dismissal, and a
+                                        // non-fixable finding is never actionable), so the two can never disagree.
+                                        // BOTH timestamps are REQUIRED: an artefact without
+                                        // generatedAt, or an observation without checkedAt, cannot be
+                                        // shown to describe the same read, so the classification is
+                                        // re-derived with the same rule below rather than trusted.
+                                        // Trusting an undated record left a stale "AWAITING HUMAN"
+                                        // comment reachable (review N1).
+                                        const fresh = !!verdictRecord
+                                          && !!verdictRecord.generatedAt
+                                          && !!observation.checkedAt
+                                          && String(verdictRecord.generatedAt) >= String(observation.checkedAt);
+
+                                        const dismissals = Array.isArray(judgement.dismissals) ? judgement.dismissals : [];
+                                        const clearedBy = new Map();
+                                        dismissals.forEach((entry) => {
+                                          if (!entry) return;
+                                          const id = String(entry.findingId || entry.id || '').trim();
+                                          const justification = String(entry.justification || entry.dismissedComment || '').trim();
+                                          if (!id || !justification) return;
+                                          clearedBy.set(id, String(entry.dismissedReason || 'dismissed') + ' - ' + justification);
+                                        });
+
+                                        const findings = Array.isArray(observation.findings) ? observation.findings : [];
+                                        const derivedActionable = findings
+                                          .filter((finding) => finding && finding.fixable !== false && !clearedBy.has(String(finding.id || '')))
+                                          .map((finding) => ({ id: String(finding.id || ''), kind: String(finding.kind || ''), path: finding.path, line: finding.line, checkName: finding.checkName, body: String(finding.body || '') }));
+                                        const derivedDismissed = findings
+                                          .filter((finding) => finding && clearedBy.has(String(finding.id || '')))
+                                          .map((finding) => ({ id: String(finding.id || ''), kind: String(finding.kind || ''), justification: String(clearedBy.get(String(finding.id || '')) || '') }));
+
+                                        const verdict = fresh ? String(verdictRecord.verdict || '') : '';
+                                        const reviewDecision = String(
+                                          (fresh ? verdictRecord.reviewDecision : '') || observation.reviewDecision || 'none',
+                                        );
+                                        const awaitingReview = fresh ? verdictRecord.awaitingReview === true : observation.awaitingReview === true || reviewDecision.toUpperCase() === 'REVIEW_REQUIRED';
+                                        const awaitingChecks = fresh ? verdictRecord.awaitingChecks === true : (Array.isArray(observation.pendingChecks) && observation.pendingChecks.length > 0);
+                                        const actionable = fresh && Array.isArray(verdictRecord.actionable) ? verdictRecord.actionable : derivedActionable;
+                                        const dismissedFindings = fresh && Array.isArray(verdictRecord.dismissed) ? verdictRecord.dismissed : derivedDismissed;
+                                        const onlyAwaiting = (verdict === 'awaiting' || (awaitingReview || awaitingChecks)) && actionable.length === 0;
+                                        const heading = outcome === 'awaiting_review' || onlyAwaiting ? 'AWAITING HUMAN' : 'BLOCKED';
 
                                         const lines = [];
-                                        lines.push('BLOCKED - pull request ' + (prUrl || '(unknown)') + ' is OPEN but CANNOT BE MERGED, so this run is NOT complete.');
+                                        if (heading === 'AWAITING HUMAN') {
+                                          lines.push('AWAITING HUMAN - pull request ' + (prUrl || '(unknown)') + ' is published and no agent-actionable finding remains, but it cannot merge until a human acts, so this run is NOT complete.');
+                                        } else {
+                                          lines.push('BLOCKED - pull request ' + (prUrl || '(unknown)') + ' is OPEN but CANNOT BE MERGED, so this run is NOT complete.');
+                                        }
                                         if (recorded) {
                                           lines.push('Reason: ' + recorded + '.');
+                                        } else if (heading === 'AWAITING HUMAN') {
+                                          lines.push('Reason: the block is an awaited HUMAN action (review decision ' + reviewDecision + ') - not a code change. Only a human can supply it, so the run polled for it' + (awaited ? ' ' + awaited + ' time(s)' : '') + ' and then stopped observing rather than reporting the pull request as unmergeable.');
                                         } else if (outcome === 'exhausted') {
                                           lines.push('Reason: the post-publication fix budget was exhausted after ' + String(cycles) + ' observation(s) and ' + bound + ' permitted fix cycle(s); the pull request is still blocked.');
                                         } else {
                                           lines.push('Reason: ' + String(observation.reason || 'the pull request did not become mergeable'));
                                         }
                                         lines.push('');
-                                        lines.push('Last observed merge state: ' + String(observation.mergeStateStatus || 'unknown') + ' (review decision ' + String(observation.reviewDecision || 'none') + ').');
-                                        const findings = Array.isArray(observation.findings) ? observation.findings : [];
-                                        if (findings.length > 0) {
-                                          lines.push('');
+                                        lines.push('Last observed merge state: ' + String(observation.mergeStateStatus || 'unknown') + ' (review decision ' + reviewDecision + ').');
+                                        lines.push('');
+                                        if (actionable.length > 0) {
                                           lines.push('Outstanding findings:');
-                                          findings.slice(0, 12).forEach((finding) => {
+                                          actionable.slice(0, 12).forEach((finding) => {
                                             const where = finding.path ? ' at ' + finding.path + (finding.line == null ? '' : ':' + finding.line) : (finding.checkName ? ' (' + finding.checkName + ')' : '');
                                             lines.push('- ' + String(finding.kind || 'finding') + where + ': ' + String(finding.body || '').split(NL)[0].slice(0, 240));
+                                          });
+                                        } else {
+                                          lines.push('Outstanding findings: none - no agent-actionable finding remains.');
+                                        }
+                                        if (dismissedFindings.length > 0) {
+                                          lines.push('');
+                                          lines.push('Dismissed this run (NOT outstanding - each carries a recorded justification):');
+                                          dismissedFindings.slice(0, 12).forEach((finding) => {
+                                            lines.push('- ' + String(finding.id || finding.kind || 'finding') + ' (' + String(finding.kind || 'finding') + '): ' + String(finding.justification || clearedBy.get(String(finding.id || '')) || '').split(NL)[0].slice(0, 240));
                                           });
                                         }
                                         lines.push('');
                                         lines.push('The ticket stays in_progress. A human must clear the block above; the run does not loop on it.');
+                                        if (heading === 'AWAITING HUMAN') {
+                                          lines.push('Note: this run does NOT restart observing by itself after it stops. The bounded poll above is the only automatic re-observation; after it, only a human completing the raised task resumes the instance.');
+                                        }
                                         process.stdout.write(lines.join(NL));
                                     env:
                                       WT: ${steps.readWorktreePath.outputs.stdout}
@@ -10847,6 +11812,7 @@ steps:
                                       REASON: ${variables.postPublishReason}
                                       PR_URL: ${steps.readPrUrl.outputs.stdout}
                                       BOUND: ${variables.postPublishFixBound}
+                                      AWAITED: ${variables.postPublishAwaitCount}
                                     failOnError: false
                                     output:
                                       captureStdout: true
@@ -10900,15 +11866,103 @@ steps:
                                     action: set
                                     key: runStatus
                                     value: blocked
+                                - id: postPublishParkRecord
+                                  name: Record the park before the human task is raised
+                                  type: cli_command
+                                  dependsOn: setRunStatusUnmergeable
+                                  config:
+                                    command: node
+                                    args:
+                                      - -e
+                                      - |
+                                        const fs = require('fs');
+                                        const path = require('path');
+                                        const wt = String(process.env.WT || '').trim();
+                                        const dir = path.join(wt, '.ai-agent');
+                                        // A park used to be a dead end with no recorded wake path: the
+                                        // instance resumed 19h44m later and NOTHING said who or what
+                                        // published the event (REACTORY-302016408/20261118/1057091601).
+                                        // This record is written BEFORE the task exists, so the resume can
+                                        // be attributed from the task id the step returns.
+                                        const record = {
+                                          parkedAt: new Date().toISOString(),
+                                          outcome: String(process.env.OUTCOME || '').trim(),
+                                          reason: String(process.env.REASON || '').trim(),
+                                          fixCycles: Number(String(process.env.CYCLE || '0').trim()) || 0,
+                                          fixBound: String(process.env.BOUND || '').trim(),
+                                          awaitPolls: Number(String(process.env.AWAIT_POLLS || '0').trim()) || 0,
+                                          awaitBound: Number(String(process.env.AWAIT_BOUND || '0').trim()) || 0,
+                                          observedIntervalMs: 180000,
+                                          wakeEvent: 'workflow.task.completed',
+                                          wakeEventKey: 'the task id returned by postPublishBlockedTask.outputs.taskId',
+                                          wakePublisher: 'completeWorkflowTask (TaskResolver) - the only publisher of this event in the codebase',
+                                          wakeIsAutomatic: false,
+                                          wakeNote: 'There is no sweeper for an overdue task: a dueDate does not resume a run. The run resumes only when a human completes the task, and readPostPublishWake records who did it and when.',
+                                        };
+                                        try {
+                                          fs.mkdirSync(dir, { recursive: true });
+                                          fs.writeFileSync(path.join(dir, 'post-publish-park.json'), JSON.stringify(record, null, 2), 'utf8');
+                                        } catch (e) { /* best effort */ }
+                                        process.stdout.write('parked');
+                                    env:
+                                      WT: ${steps.readWorktreePath.outputs.stdout}
+                                      OUTCOME: ${variables.postPublishOutcome}
+                                      REASON: ${variables.postPublishReason}
+                                      CYCLE: ${variables.postPublishCycle}
+                                      BOUND: ${variables.postPublishFixBound}
+                                      AWAIT_POLLS: ${variables.postPublishAwaitCount}
+                                      AWAIT_BOUND: ${variables.postPublishAwaitBound}
+                                    failOnError: false
+                                    output:
+                                      captureStdout: true
+                                - id: postPublishTaskMessage
+                                  name: Word the human task for the block that was observed
+                                  type: cli_command
+                                  dependsOn: postPublishParkRecord
+                                  config:
+                                    command: node
+                                    args:
+                                      - -e
+                                      - |
+                                        const readJson = (name) => {
+                                          try { return JSON.parse(require('fs').readFileSync(require('path').join(String(process.env.WT || '').trim(), '.ai-agent', name), 'utf8')); } catch (e) { return null; }
+                                        };
+                                        const park = readJson('post-publish-park.json') || {};
+                                        const verdict = readJson('post-publish-exhaustion.json') || {};
+                                        const outcome = String(process.env.OUTCOME || '').trim();
+                                        const pr = String(process.env.PR_URL || '').trim() || 'the pull request';
+                                        const awaited = String(verdict.reviewDecision || 'none');
+                                        // The task must not say "not mergeable" about a pull request the
+                                        // long comment on the ticket calls AWAITING HUMAN. Two wordings,
+                                        // one decision: the same verdict the loop consulted.
+                                        if (outcome === 'awaiting_review' || verdict.verdict === 'awaiting') {
+                                          process.stdout.write('Pull request ' + pr + ' is published and everything an agent can act on is done - it is awaiting a HUMAN action (review decision ' + awaited + '). The run observed it ' + String(park.awaitPolls == null ? 0 : park.awaitPolls) + ' time(s) at 3-minute intervals and then stopped observing. Complete this task to resume the run.');
+                                        } else {
+                                          process.stdout.write('Pull request ' + pr + ' is open but not mergeable - human action required. The run stopped observing after ' + String(park.awaitPolls == null ? 0 : park.awaitPolls) + ' awaiting-action poll(s) and ' + String(park.fixCycles == null ? 0 : park.fixCycles) + ' fix cycle(s); the outstanding findings are on the ticket. Complete this task to resume the run.');
+                                        }
+                                    env:
+                                      WT: ${steps.readWorktreePath.outputs.stdout}
+                                      OUTCOME: ${variables.postPublishOutcome}
+                                      PR_URL: ${steps.readPrUrl.outputs.stdout}
+                                    failOnError: false
+                                    output:
+                                      captureStdout: true
                                 - id: postPublishBlockedTask
                                   name: Raise the human task for the unmergeable pull request
                                   type: user_activity
-                                  dependsOn: setRunStatusUnmergeable
+                                  dependsOn: postPublishTaskMessage
                                   config:
                                     activityType: approval
                                     assignee: ${steps.loadTicket.result.assignedToEmail}
-                                    message: Pull request ${steps.readPrUrl.outputs.stdout} is open but
-                                      not mergeable - human action required
+                                    # The park is bounded in the queue as well as in the loop: the task
+                                    # carries a due date an hour out, so an unattended task shows as
+                                    # overdue instead of sitting in a queue with no deadline. There is
+                                    # no engine-level expiry (a wait cannot time itself out), which is
+                                    # why the observation loop above does the bounded waiting and this
+                                    # task is the hand-over, not the wait. Its wording follows the
+                                    # verdict, so an awaited review is not called unmergeable.
+                                    timeout: 3600000
+                                    message: ${steps.postPublishTaskMessage.outputs.stdout}
                                     props:
                                       ticketReference: ${steps.loadTicket.result.reference}
                                       ticketId: ${steps.loadTicket.result.id}
@@ -10919,7 +11973,84 @@ steps:
                                       publishState: blocked_needs_human
                                       postPublishOutcome: ${variables.postPublishOutcome}
                                       postPublishCycles: ${variables.postPublishCycle}
+                                      awaitingActionPolls: ${variables.postPublishAwaitCount}
+                                      parkDeadlineMs: 3600000
+                                      wakeEvent: workflow.task.completed
                                       reason: ${steps.describePostPublishBlock.outputs.stdout}
+                                # ── The wake path, recorded instead of guessed ────────────
+                                # The instance above resumed and NOTHING said why. The user_activity
+                                # step suspends on workflow.task.completed correlated by TASK ID and
+                                # hands its outputs back on resume, so the identity is available here:
+                                # write it down and say it on the ticket.
+                                - id: postPublishWakeProbe
+                                  name: Record who and what woke the parked run
+                                  type: cli_command
+                                  dependsOn: postPublishBlockedTask
+                                  config:
+                                    command: node
+                                    args:
+                                      - -e
+                                      - |
+                                        const fs = require('fs');
+                                        const path = require('path');
+                                        const wt = String(process.env.WT || '').trim();
+                                        const dir = path.join(wt, '.ai-agent');
+                                        const readJson = (name) => {
+                                          try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch (e) { return null; }
+                                        };
+                                        const park = readJson('post-publish-park.json') || {};
+                                        const taskId = String(process.env.TASK_ID || '').trim();
+                                        const record = {
+                                          woken: true,
+                                          wokeAt: new Date().toISOString(),
+                                          parkedAt: park.parkedAt || null,
+                                          parkedOutcome: park.outcome || null,
+                                          parkedReason: park.reason || null,
+                                          eventName: 'workflow.task.completed',
+                                          eventKey: taskId,
+                                          taskId: taskId,
+                                          completedBy: String(process.env.COMPLETED_BY || '').trim() || null,
+                                          completedByEmail: String(process.env.COMPLETED_BY_EMAIL || '').trim() || null,
+                                          completedAt: String(process.env.COMPLETED_AT || '').trim() || null,
+                                          approved: String(process.env.APPROVED || '').trim() || null,
+                                          awaitingActionPolls: park.awaitPolls == null ? null : park.awaitPolls,
+                                          attribution: 'the user_activity step resumed because the task was completed through completeWorkflowTask, the only publisher of this event; the identity is stamped server-side from the authenticated context',
+                                        };
+                                        try {
+                                          fs.mkdirSync(dir, { recursive: true });
+                                          fs.writeFileSync(path.join(dir, 'post-publish-wake.json'), JSON.stringify(record, null, 2), 'utf8');
+                                        } catch (e) { /* best effort */ }
+                                        process.stdout.write(JSON.stringify(record));
+                                    env:
+                                      WT: ${steps.readWorktreePath.outputs.stdout}
+                                      TASK_ID: ${steps.postPublishBlockedTask.outputs.taskId}
+                                      COMPLETED_BY: ${steps.postPublishBlockedTask.outputs.completedBy}
+                                      COMPLETED_BY_EMAIL: ${steps.postPublishBlockedTask.outputs.completedByEmail}
+                                      COMPLETED_AT: ${steps.postPublishBlockedTask.outputs.completedAt}
+                                      APPROVED: ${steps.postPublishBlockedTask.outputs.approved}
+                                    failOnError: false
+                                    output:
+                                      captureStdout: true
+                                      captureStderr: true
+                                - id: postPublishWakeComment
+                                  name: Report the wake path on the ticket
+                                  type: service_invoke
+                                  dependsOn: postPublishWakeProbe
+                                  config:
+                                    service: core.ReactorySupportWorkflowService@1.0.0
+                                    method: addComment
+                                    params:
+                                      ticketId: ${steps.loadTicket.result.id}
+                                      comment: The parked run for ${steps.loadTicket.result.reference}
+                                        resumed at ${steps.postPublishBlockedTask.outputs.completedAt} after
+                                        the workflow.task.completed event for task
+                                        ${steps.postPublishBlockedTask.outputs.taskId} was published by
+                                        ${steps.postPublishBlockedTask.outputs.completedByEmail}. The park
+                                        began when the observation loop stopped observing (see the comment
+                                        above) and the wake provenance is recorded in
+                                        .ai-agent/post-publish-wake.json. This run does not restart the
+                                        observation loop after a wake; re-dispatch the ticket to act on a
+                                        review or a merge that arrived while it was parked.
                           # ── Approval + merge polling: MERGEABLE ONLY ─────────
                           # dependsOn is ORDERING-ONLY in this engine, not a skip:
                           # the blocked arm of postPublishOutcomeGate used to fall

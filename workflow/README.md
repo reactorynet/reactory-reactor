@@ -406,7 +406,6 @@ commit" contract; loosening the terminal gate's condition fails the "cannot reac
 contract.
 
 ### PR #53 review — twelve comments
-
 Two were CodeQL duplicate alerts (`354`, `355`) on one line of a test fixture whose inner single
 quotes closed the string literal; `tsc` reports it as TS1005. The other ten were real defects in
 the post-publication loop.
@@ -423,3 +422,223 @@ the post-publication loop.
 | 10 | The check-wait budget was global (a fix's CI starved), and `maxIterations: 12` sat inside the worst-case budget, exiting as `observing` with no reason. | `resetPostPublishWaitCount` on the pushed arm; `maxIterations: 30` (worst case 13); `postPublishObservingReasonGate` names an iteration-cap exit. |
 | 11 | `check-runs`, `pulls/{n}/commits` and `pulls/{n}/reviews` used the REST default of 30 per page; `reviewThreads(first:100)` had no paging. A failed check or unverifiable commit beyond page 1 was invisible. | `gh api --paginate` + `per_page=100`, and cursor paging for `reviewThreads`; a truncated read is a `readProblems` failure. |
 | 12 | The ref-scoped code-scanning query ran twice, so the flag could disagree with the data used. | One `scopedAlerts` read; `alertsRefScoped` is derived from it. |
+
+## PROCESS-003 — the post-publication budget (REACTORY-302016408/20261118/1057091601)
+
+Observed on instance `6afc1e1d7f79240adc312634` (ticket `REACTORY-302016408/20261117/4204285766`,
+PR reactorynet/reactory-reactor#74) with `maxPostPublishFixCycles=2`:
+
+```
+11:23:59  reviewer APPROVED (pre-publication) -> publish
+11:24:14  review requested on the PR             (reviewDecision becomes REVIEW_REQUIRED)
+11:24:28  observation 0: BLOCKED / REVIEW_REQUIRED, findings=[unverifiable_commit],
+          judged=no_action, requiredChanges=0, dismissals=1
+11:26:37  observation 1: IDENTICAL
+11:27:48  step 350 'Stop the loop when the budget is exhausted'
+11:27:50  step 460 'Raise the human task for the unmergeable pull request' -> Waiting for Event
+13:20:36  a real CHANGES_REQUESTED with a blocking finding arrives (never observed)
+07:12:03  (+19h44m) the instance resumed and completed 327/327
+```
+
+Four defects, all in this body. The root cause of the first two is the same mistake: the loop
+charged and parked on the wrong question.
+
+1. **A no-op observation consumed a FIX cycle (blocking).** `bumpPostPublishCycle` sat on the
+   "the re-publish reached origin" arm, which the commit-**repair** path also enters
+   (`postPublishHandBackGate` runs for `postPublishRepairNeeded === 'true'` as well as
+   `changes_required`). So a cycle the reviewer judged `no_action` — every finding dismissed with
+   evidence, nothing for the engineer to do — still re-published a repaired commit and incremented
+   the *fix* budget. The counter was per-PUSH, not per required change: two observations 2m09s
+   apart drained a budget of 2.
+   *Fix:* the counter is charged **only** when the cycle yielded required changes
+   (`postPublishDecision === 'changes_required'` — the judgement the engineer had to act on and a
+   commit that carried it). Any other re-publish (repair-only, no-op) is a **poll** and is charged
+   to the re-observe budget (`postPublishReobserveCount` / `postPublishReobserveBound`), which
+   already existed for exactly "a cycle with nothing to fix". A poll never spends
+   `maxPostPublishFixCycles`.
+2. **`REVIEW_REQUIRED` was treated as a terminal block (blocking).** Two causes, both fixed:
+   * the observation classifies a PR with *any* fixable finding as `fixable`, and the exhaustion
+     arm then wrote `postPublishOutcome=exhausted` without ever asking what the remaining findings
+     were or whether a human action was still awaited. The `awaitingReview` flag existed but no
+     exhaustion path read it;
+   * nothing compared the observation against the **judgement**: the `unverifiable_commit` had been
+     DISMISSED with evidence (`verification.verified=true, reason=valid`), yet it still counted as
+     an outstanding blocker.
+   *Fix:* a new `readPostPublishExhaustionVerdict` step asks the positive question — *is anything
+   left that an agent could act on, once findings dismissed with a justification are removed?* It
+   is consulted by all three exhaustion points (fix budget, repair-poll budget and re-observe
+   budget) and yields `awaiting` → poll, or `outstanding` → park. `awaiting` switches the loop into
+   awaiting mode instead of stopping it, and it never writes `blocked_human`.
+   **What the machine state still does:** when the awaiting window finally closes with nothing
+   actionable, the run parks exactly like a blocked pull request — `runStatus=blocked`,
+   `publishState=blocked_needs_human` — and raises the same human task. Only the WORDS differ
+   (`AWAITING HUMAN` and an awaited-review reason, instead of `CANNOT BE MERGED` and an outstanding
+   finding). That is deliberate: a `BLOCKED` / `REVIEW_REQUIRED` pull request genuinely cannot be
+   merged, so operator dashboards counting it as unmergeable is correct; the defect was the run
+   reporting it as a code block while accusing itself of an iteration cap.
+3. **The park was unbounded and its wake path was unrecorded (blocking).** `postPublishBlockedTask`
+   waits on `workflow.task.completed` correlated by task id, with no deadline, and nothing wrote
+   down what published that event. `readPostPublishWake` fills that gap: on resume the step
+   records the task id, the event name/key, and the server-stamped `completedByEmail` /
+   `completedAt`, in `.ai-agent/post-publish-wake.json` and on the ticket.
+   *Fix:* (a) the automatic wait is bounded in the loop — `postPublishAwaitBound` = **40 polls at
+   180s, i.e. 120 minutes** — after which the run parks with an accurate "still awaiting a human
+   action" reason. That bound is sized from THIS incident, not from taste: the review on PR #74
+   arrived 1h56m (11:24:14 → 13:20:36) after publication, and the first version of this fix used a
+   60-minute window that closed 56 minutes before it, so the recorded run would still have parked
+   and still never seen it. 120 minutes covers the observed latency with minutes to spare, and the
+   loop's `maxIterations` is 70 (worst case 53 iterations) so the window is actually usable;
+   (b) the task carries a `timeout` (1h) so an unattended park shows as overdue;
+   (c) the wake is recorded and reported (`postPublishWakeProbe` → `postPublishWakeComment`).
+   **What the wake path actually is:** `workflow.task.completed` is published in exactly one place
+   — `completeWorkflowTask` in `reactory-core/resolvers/Task/TaskResolver.ts` — when a human marks
+   the task complete; the identity is stamped server-side from the authenticated context. There is
+   **no sweeper**: `dueDate` alone resumes nothing, so an overdue task does not wake a run. The
+   run observed on this ticket therefore woke because the task was completed, 19h44m after it was
+   raised. **A bounded poll does not make that latency irrelevant** - it only reduces the chance of
+   needing it. What this body now guarantees is: a review that arrives within **120 minutes** of
+   publication is observed automatically, with no human action at all; a review that arrives after
+   the window closes is NOT observed by that instance, and only a human completing the raised task
+   resumes it (and that resume does not restart the loop). This step now records the attribution
+   instead of leaving it to be inferred from a timestamp.
+4. **A dismissed finding was listed as outstanding (blocking).** `describePostPublishBlock` printed
+   every observation finding and never read `post-publish-review-normalised.json`, so the block
+   comment listed the very finding the run had dismissed with evidence. It now removes dismissed
+   findings from *Outstanding findings* (saying "none - no agent-actionable finding remains" when
+   that empties the list), lists them under *Dismissed this run* with their justification, and
+   names an awaited review as an awaited review rather than as an unmergeable pull request.
+
+5. **The repair-poll budget parked without asking (blocking, found in review).** The first version of
+   this fix charged a repair-only re-publish to the poll budget (correct) but left that budget's
+   exhaustion arm as three unconditional writes - `blocked_human`, a reason, `continue=false`. It
+   asked nothing. Since the recorded run took the repair path on EVERY cycle (the only finding was
+   the dismissed false positive), the run still parked, now at the third repair instead of the
+   second, and still never saw the review. Fixed by consulting the same verdict at all three
+   exhaustion points (see the budget table below), and by skipping the reviewer entirely while the
+   verdict is `awaiting` so the 40-poll window is one `gh` read every 3 minutes rather than 40 more
+   Quality Quinn invocations.
+6. **The comment and the verdict could disagree (found in review).** `describePostPublishBlock`
+   re-derived the classification and did not apply the verdict's `fixable === false` filter, so an
+   observation with a non-fixable finding plus `REVIEW_REQUIRED` produced a verdict of `awaiting`
+   and a comment that said `CANNOT BE MERGED`. It now READS `post-publish-exhaustion.json`
+   (`verdict`, `actionable`, `dismissed`) and falls back to the same rule only when the record is
+   missing or predates the observation it describes.
+
+7. **The poll budget still parked a real fix (blocking, found in review 2).** Charging a repair-only
+   re-publish to the poll budget was right, but the arm that `postPublishPushPollGate` guarded ran
+   after EVERY re-publish, including a `changes_required` one. So the reachable sequence was: three
+   repair re-publishes spend the poll budget → a human submits `CHANGES_REQUESTED` → the reviewer
+   returns `changes_required` → the engineer fixes it and the push succeeds → `Number(3) < Number(3)`
+   is false → the verdict (`outstanding`, computed from the PRE-FIX observation) routes to the
+   parking arm → `blocked_human` **before the fix was ever re-observed**, with a reason that denied
+   the judgement had been `changes_required`.
+   *Fix:* the gate now short-circuits on the judgement —
+   `variables.postPublishDecision === 'changes_required' || Number(postPublishReobserveCount) < Number(postPublishReobserveBound)`.
+   The fix budget (`postPublishCycle` vs `maxPostPublishFixCycles`) already bounds real fixes, so the
+   poll budget can only stop a cycle that produced NO required change — which is also what lets the
+   parking arm's reason describe the judgement truthfully. That reason is now **derived** by
+   `describePostPublishPushPollReason` from the judgement and the exhaustion record, and it says
+   `INTERNAL CONTRADICTION` if a `changes_required` cycle ever reaches it, instead of asserting a
+   claim that can be false.
+8. **The acceptance window did not cover the incident's own latency (blocking, found in review 2).**
+   The first version polled 20 × 180s = 60 minutes and the README claimed that made the observed
+   19h44m latency irrelevant. The review on PR #74 arrived 1h56m after publication — 56 minutes
+   after that window closed — so the recorded run would still have parked and still never seen it.
+   *Fix:* `postPublishAwaitBound` is 40 (120 minutes), `postPublishLoop.maxIterations` is 70
+   (worst case 53 iterations), and the README states the residual plainly: a review that arrives
+   inside 120 minutes is observed automatically; one that arrives later is not, and only a completed
+   task resumes the instance. There is no waiver in this body because the window now covers the
+   latency that produced the ticket.
+9. **The test file did not compile (blocking, found in review 2).** It shipped an unmatched `});`
+   and an outer `describe` closed at the first group boundary, so B1/D2/D3/D4 ran as top-level
+   groups. Jest passed only because the server config transpiles with `isolatedModules` and
+   recovers from syntax errors; `tsc` rejected the file. *Fix:* one closing brace removed (which
+   repaired the nesting too), and the suite now asserts its own integrity:
+   `ts.createSourceFile(...).parseDiagnostics` must be empty and the outer `describe` must be the
+   only top-level group.
+
+10. **The awaiting hand-off was undone by its own siblings (blocking, found in review 3).** In the
+    previous revision the three terminal steps sat BESIDE `postPublishPushPollVerdictGate` inside
+    `postPublishPushPollGate.elseSteps`, so entering awaiting mode was immediately followed by
+    `setPostPublishPushPollContinue` (`postPublishContinue='false'`). `postPublishContinue` is not a
+    skip, so the rest of the iteration ran and the loop then exited: on the repair path — the
+    ticket's OWN path, where the dismissed `unverifiable_commit` re-publishes every cycle — the run
+    performed **zero** awaiting polls, parked with `postPublishOutcome` still `observing`, and
+    reported *"the observation loop stopped without reaching a terminal state (its iteration cap was
+    hit)"*. The suite was green throughout, because it asserted the verdict gate's own arms were
+    clean and never asserted the terminal steps were nested INSIDE its else arm.
+    *Fix:* `postPublishPushPollGate.elseSteps` is now exactly `[postPublishPushPollVerdictGate]`, the
+    three terminal steps live in that gate's else arm, and two structural tests pin both facts — plus
+    a third that walks the whole poll arm and asserts `postPublishContinue` is written nowhere
+    outside the verdict gate's else arm.
+11. **The park was decided before the evidence (blocking, found in review 3).** `postPublishAwaitBudgetGate`
+    wrote `awaiting_review` + `continue=false` at the TOP of the iteration, and `continue` is not a
+    skip. If a review landed during the final poll the route re-opened, the reviewer returned
+    `changes_required`, the engineer pushed the fix — and the loop then exited on the already-set
+    `continue=false`, abandoning the fix unobserved.
+    *Fix:* the budget gate now only records `postPublishAwaitSpent='true'`. The terminal decision is
+    taken at the END of the same iteration, after the observation and the verdict
+    (`postPublishAwaitSpentGate`): spent + `awaiting` → park as `awaiting_review`; spent but
+    something actionable → clear the marker, leave awaiting mode, and let the normal route re-observe
+    the fix. The false "iteration cap" reason is now unreachable, because the outcome is no longer
+    `observing` when the run parks.
+
+### The four budgets around a published pull request
+
+| Variable | Bound | Charged by | Exhaustion |
+| --- | --- | --- | --- |
+| `postPublishCycle` | `maxPostPublishFixCycles` (2) | ONLY a cycle whose judgement was `changes_required` that then pushed a commit | verdict `outstanding` → `exhausted`, parked with the findings named; verdict `awaiting` → enters the awaiting poll |
+| `postPublishReobserveCount` | `postPublishReobserveBound` (3) | every other re-publish and every dismiss-all cycle: a **poll**, including the repair-only path (the dismissed `unverifiable_commit` false positive) | verdict `outstanding` → parked; verdict `awaiting` → enters the awaiting poll |
+| `postPublishWaitCount` | `postPublishWaitBound` (6) | required checks still running (one minute each) | `awaiting_human` |
+| `postPublishAwaitCount` | `postPublishAwaitBound` (40) | a poll where nothing agent-actionable remains and a human action is awaited (3 minutes each = **120 minutes**, sized from the 1h56m latency on PR #74) | `awaiting_review` → parked, honestly labelled as an awaited human action |
+
+All three loop-stopping budgets (fix, repair-poll, re-observe) consult ONE decision before they
+stop: `readPostPublishExhaustionVerdict` (top of each iteration) / `readPostPublishPushPollVerdict`
+(after each judgement) publish `awaiting` or `outstanding` into `postPublishExhaustionVerdict` /
+`postPublishJudgedVerdict`, and the three gates read those variables. The scripts are byte-identical
+modulo indentation and pinned by a test, the way the shared review-schema block is pinned. This is
+the fix for reviewer B1: before it, the repair-poll arm stopped the run as `blocked_human` without
+asking anything, so the recorded run - which took the repair path on every cycle - still parked
+before its first review.
+
+The awaiting poll is also **cheap**: while `postPublishAwaiting === 'true'` and the verdict is
+`awaiting`, `postPublishRoute` is skipped, so the iteration is one 3-minute delay and one `gh` read -
+no Quality Quinn invocation (`agent_conversation`, maxAttempts 4) and no GitHub dismissal writes.
+At most 40 polls would otherwise have meant 40 extra reviewer calls per run. A review that lands
+flips the verdict to `outstanding`, which re-opens the full route with the fix budget intact.
+
+The await budget is per **run**, not per awaited episode, and the loop's `maxIterations` is 60
+(53 iterations of the worst case: 1 + 6 + 2 + 3 + 40 + 1; the cap is 70).
+
+### Verification
+
+```bash
+env -u OPENAI_API_KEY node scripts/ai/run-worktree-tests.js \
+  workflow/__tests__/ProcessAITicket.postPublishBudget.test.ts \
+  workflow/__tests__/ProcessAITicket.contract.test.ts \
+  workflow/__tests__/ProcessAITicket.reviewerSchema.test.ts \
+  workflow/__tests__/WorkflowRegistry.test.ts \
+  workflow/__tests__/ProcessAITicket.behaviour.test.ts
+```
+
+`ProcessAITicket.postPublishBudget.test.ts` is 20 tests. Each one either fails against the
+pre-change body for the *actual* defect or is a wiring pin that cannot pass vacuously. The red
+outputs name the defects: `Expected "0", Received "1"` for a `no_action` cycle (D1); the
+repair-poll arm being exactly `[setPostPublishPushPollBlocked, setPostPublishPushPollReason,
+setPostPublishPushPollContinue]` (B1); `Expected "awaiting", Received "outstanding"` when the
+verdict consult is mutated out (D2); `Expected: > 0, Received: NaN` for the park deadline (D3);
+and `AWAITING HUMAN` vs `BLOCKED ... CANNOT BE MERGED` for the comment/verdict agreement (D4/N1).
+The two copies of the exhaustion verdict script are pinned to be identical
+(whitespace-normalised), the same way the shared review-schema block is pinned, and the awaiting
+poll's bound is pinned at exactly 40 x 180000 ms = 120 minutes, with the incident's 116-minute
+latency asserted to be inside it, so the window can neither silently shrink nor grow past
+`maxIterations`.
+
+### Delivery note (required)
+
+`1.4.8` still ships **in place**. After this merges, the catalog copy at
+`reactory-data/workflows/catalog/core/ProcessAITicket/1.4.8/ProcessAITicket.yaml` **must be
+re-synced**, and the "inventory the in-flight runs" pre-step above **must be performed first**:
+re-provisioning changes the definition fingerprint and dead-letters every `running`/`suspended`
+`core.ProcessAITicket@1.4.8` instance with `reason: "definition-changed"`. That includes instance
+`6afc1e1d7f79240adc312634`, which is deliberately left parked.
