@@ -1880,6 +1880,86 @@ describe('ProcessAITicket post-publication budget (REACTORY-302016408/20261118/1
     });
   });
 
+
+  describe('R4 — the exhaustion verdict decides by STATE', () => {
+    /** A closed, unreviewed pull request: no findings, review never given. */
+    const closedObservation = (state: string): Record<string, any> =>
+      reviewRequiredObservation({
+        state,
+        mergeStateStatus: 'UNKNOWN',
+        pr: { number: 74, url: 'https://x/pull/74', state: 'CLOSED' },
+        reason: 'the pull request is CLOSED, so there is nothing left to fix or merge',
+        findings: [],
+        counts: { total: 0, fixable: 0, humanOnly: 0, staleReviews: 0, pendingChecks: 0 },
+        // describePostPublishBlock only trusts a verdict record it can prove
+        // describes the SAME observation: `generatedAt >= checkedAt`. Without a
+        // checkedAt the record looks stale, the freshness check fails, and the
+        // heading falls back to the raw awaitingReview flag - which is precisely
+        // the path R2(a) removed for a closed pull request. The verdict scripts
+        // stamp generatedAt at run time, so an observation from a moment earlier
+        // is the realistic shape.
+        checkedAt: new Date(Date.now() - 1000).toISOString(),
+      });
+
+    /** Both copies of the verdict must agree, so both are exercised. */
+    const VERDICT_SCRIPTS = ['readPostPublishExhaustionVerdict', 'readPostPublishPushPollVerdict'];
+
+    it.each(VERDICT_SCRIPTS)('%s calls a CLOSED observation outstanding, not awaiting', (scriptId) => {
+      const dir = tempDir('pw-r4-closed-');
+      try {
+        writeObservation(dir, closedObservation('human_only'));
+        writeJudgement(dir, { cycle: 0, state: 'no_action', requiredChanges: [], dismissals: [] });
+
+        const verdict = runToken(scriptOf(scriptId), { WT: dir }, dir);
+
+        expect(verdict).toBe('outstanding');
+        // ... and the record explains itself rather than claiming 0 findings remain.
+        const record = JSON.parse(
+          fs.readFileSync(path.join(dir, '.ai-agent', 'post-publish-exhaustion.json'), 'utf8'),
+        );
+        expect(record.reason).toMatch(/not an awaited human action/i);
+        expect(record.reason).not.toMatch(/^0 agent-actionable/);
+      } finally {
+        removeDir(dir);
+      }
+    });
+
+    it.each(VERDICT_SCRIPTS)('%s calls the SAME observation awaiting when state is fixable', (scriptId) => {
+      // Everything else identical: no findings, review still REVIEW_REQUIRED.
+      // Only the state differs, so the state is the deciding factor.
+      const dir = tempDir('pw-r4-fixable-');
+      try {
+        writeObservation(dir, closedObservation('fixable'));
+        writeJudgement(dir, { cycle: 0, state: 'no_action', requiredChanges: [], dismissals: [] });
+
+        expect(runToken(scriptOf(scriptId), { WT: dir }, dir)).toBe('awaiting');
+      } finally {
+        removeDir(dir);
+      }
+    });
+
+    it('renders a CLOSED pull request as BLOCKED, not AWAITING HUMAN', () => {
+      // The heading follows the verdict, so a state-blind verdict told a human to
+      // wait for a review on a pull request nobody can review.
+      const dir = tempDir('pw-r4-heading-');
+      try {
+        writeObservation(dir, closedObservation('human_only'));
+        writeJudgement(dir, { cycle: 0, state: 'no_action', requiredChanges: [], dismissals: [] });
+        runToken(scriptOf('readPostPublishExhaustionVerdict'), { WT: dir }, dir);
+
+        const block = runToken(
+          scriptOf('describePostPublishBlock'),
+          { WT: dir, STATE: 'human_only', OUTCOME: 'blocked_human', PR_URL: 'https://x/pull/74' },
+          dir,
+        );
+        expect(block).toContain('BLOCKED');
+        expect(block).not.toContain('AWAITING HUMAN');
+        expect(block).toContain('CLOSED');
+      } finally {
+        removeDir(dir);
+      }
+    });
+  });
 });
 
 // ── helpers that walk the parsed definition ────────────────────────────────────
@@ -1906,6 +1986,25 @@ function trailOf(stepId: string): string[] {
     deps.forEach((dep) => {
       trail.push(dep);
       walkUp(dep);
+
+  /**
+   * R4 — the verdict's STATE guard must be pinned.
+   *
+   * R1 and R2(a) both turned on one expression:
+   *
+   *   const awaitingState = observationState === 'fixable' || observationState === 'pending';
+   *   const verdict = (actionable.length === 0 && awaitingHuman && awaitingState && ...)
+   *
+   * R1's loop outcomes are protected by the pure-poll gate's own
+   * `state === 'fixable'` term, which the B7 tests pin. The TEXT consistency that
+   * R2(a) restored is not: the heading and the task for a CLOSED pull request
+   * follow this verdict alone. Deleting `&& awaitingState` from both copies left
+   * this whole suite green, so nothing was guarding it.
+   *
+   * These tests run the SHIPPED verdict scripts rather than synthesising the
+   * record, so the guard is exercised where it actually lives.
+   */
+
     });
   };
   walkUp(stepId);
