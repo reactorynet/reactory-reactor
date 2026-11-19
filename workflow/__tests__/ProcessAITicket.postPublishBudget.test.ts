@@ -1475,18 +1475,34 @@ describe('ProcessAITicket post-publication budget (REACTORY-302016408/20261118/1
    * 'observing'.
    */
   describe('B7 — an awaiting iteration is a pure POLL, not a decision', () => {
-    /** The observation is modelled by the variables; its steps are not re-run. */
-    const OBSERVATION_STEPS = new Set([
-      'resolvePublishedTip',
-      'observePullRequest',
-      'readPostPublishObservation',
-      'setPostPublishState',
-      'readPostPublishRepairNeed',
-      'setPostPublishRepairNeeded',
-      'readPostPublishExhaustionVerdict',
-      'setPostPublishExhaustionVerdict',
-    ]);
 
+
+    /**
+     * Walk the loop body the way YamlFlowBuilder actually emits it.
+     *
+     * The naive version of this helper evaluated each condition ONCE and took
+     * one arm. That is not what the engine does, and the difference hid a real
+     * bug (review R3 on PR #78): R1 shipped with a state-blind gate and this
+     * walker not only passed, it defended the bug.
+     *
+     * The engine emits `.if(cond) { then }` followed by `.if(!cond) { else }`,
+     * so `cond` is RE-EVALUATED after the then-arm has run. When the then-arm
+     * flips the very variable the condition reads, BOTH arms execute in one
+     * iteration. This body does that deliberately:
+     *   - postPublishAwaitBudgetGate's else-arm sets postPublishAwaitSpent, and
+     *   - postPublishAwaitSpentGate then reads postPublishAwaitSpent.
+     * Simulating one arm per condition cannot represent the final poll.
+     *
+     * Also faithful:
+     *   - each scope is topoSort-ed by dependsOn (the authored order happens to
+     *     be valid, but the helper must not depend on that);
+     *   - `set_variable` with `source: step_output` reads the captured stdout of
+     *     the step named in `sourcePath`, so the counters below feed the
+     *     variables they are supposed to feed;
+     *   - the budget counter scripts are EXECUTED rather than assumed, so the
+     *     window is driven to its bound by the real
+     *     bumpPostPublishAwaitCount instead of by injecting "spent".
+     */
     const baseVariables = (overrides: Record<string, any> = {}): Record<string, any> =>
       Object.assign(
         {
@@ -1511,39 +1527,123 @@ describe('ProcessAITicket post-publication budget (REACTORY-302016408/20261118/1
         overrides,
       );
 
-    /**
-     * Walk the loop body once, exactly as the engine does: conditions select an
-     * arm, set_variables are applied, everything else is inert. Returns the
-     * variables AFTER the iteration and which steps were reached.
-     */
-    const runLoopIteration = (overrides: Record<string, any> = {}): {
+    /** Scripts whose RESULT matters for the awaiting path, executed for real. */
+    const COUNTER_SCRIPTS = new Set([
+      'bumpPostPublishAwaitCount',
+      'bumpPostPublishCycle',
+      'bumpPostPublishPollCycle',
+    ]);
+
+    /** The observation is modelled by the variables; its steps are not re-run. */
+    const OBSERVATION_STEPS = new Set([
+      'resolvePublishedTip',
+      'observePullRequest',
+      'readPostPublishObservation',
+      'setPostPublishState',
+      'readPostPublishRepairNeed',
+      'setPostPublishRepairNeeded',
+      'readPostPublishExhaustionVerdict',
+      'setPostPublishExhaustionVerdict',
+    ]);
+
+    /** Topological sort of one scope by dependsOn, falling back to authored order. */
+    const topoSort = (steps: IStep[]): IStep[] => {
+      const byIdMap = new Map(steps.map((s) => [s.id, s]));
+      const visited = new Set<string>();
+      const out: IStep[] = [];
+      const visit = (step: IStep): void => {
+        if (visited.has(step.id)) return;
+        visited.add(step.id);
+        // dependsOn may be a single id or a list, depending on the parser.
+        const raw = (step as any).dependsOn;
+        const deps: string[] = Array.isArray(raw) ? raw : raw ? [String(raw)] : [];
+        deps.forEach((d) => {
+          const dep = byIdMap.get(d);
+          if (dep) visit(dep);
+        });
+        out.push(step);
+      };
+      steps.forEach(visit);
+      return out;
+    };
+
+    interface Walk {
       variables: Record<string, any>;
-      exits: boolean;
       reached: string[];
-    } => {
+      outputs: Record<string, string>;
+    }
+
+    /**
+     * Execute one iteration of postPublishLoop. `dir` is a scratch worktree the
+     * counter scripts can run against.
+     */
+    const runLoopIteration = (overrides: Record<string, any> = {}, dir?: string): Walk & { exits: boolean } => {
       const variables = baseVariables(overrides);
       const reached: string[] = [];
+      const outputs: Record<string, string> = {};
 
-      const runSteps = (steps: IStep[] | undefined): void => {
-        (steps || []).forEach((step) => {
+      const interpolate = (value: string): string =>
+        String(value).replace(/\$\{variables\.([A-Za-z0-9_]+)\}/g, (_m, name) => String(variables[name] ?? ''));
+
+      const execScope = (steps: IStep[] | undefined): void => {
+        topoSort(steps || []).forEach((step) => {
           if (OBSERVATION_STEPS.has(step.id)) return;
           const config = (step.config || {}) as any;
+
           if (step.type === 'condition') {
-            const result = evaluate(step.id, variables);
             reached.push(step.id);
-            runSteps(result ? (config.thenSteps as IStep[]) : (config.elseSteps as IStep[]));
+            // .if(cond) { then }
+            if (evaluate(step.id, variables)) execScope(config.thenSteps as IStep[]);
+            // .if(!cond) { else } - RE-EVALUATED, so both arms can run
+            if (!evaluate(step.id, variables)) execScope(config.elseSteps as IStep[]);
             return;
           }
-          if (step.type === 'set_variable' && config.value !== undefined) {
-            variables[config.key] = config.value;
+
+          if (step.type === 'set_variable') {
+            if (config.source === 'step_output' && config.sourcePath) {
+              variables[config.key] = outputs[String(config.sourcePath)] ?? '';
+            } else if (config.value !== undefined) {
+              variables[config.key] = config.value;
+            }
+            reached.push(step.id);
+            return;
+          }
+
+          if (step.type === 'cli_command' && COUNTER_SCRIPTS.has(step.id) && dir) {
+            const env: Record<string, string> = {};
+            Object.entries(config.env || {}).forEach(([k, v]) => {
+              env[k] = interpolate(String(v));
+            });
+            outputs[`${step.id}.outputs.stdout`] = runToken(scriptOf(step.id), env, dir);
             reached.push(step.id);
           }
         });
       };
 
-      runSteps(byId('postPublishLoop').config!.steps as IStep[]);
-      return { variables, exits: variables.postPublishContinue !== 'true', reached };
+      execScope(byId('postPublishLoop').config!.steps as IStep[]);
+      return { variables, reached, outputs, exits: variables.postPublishContinue !== 'true' };
     };
+
+    /** Drive the loop until it exits or `max` iterations pass, using the real counters. */
+    const runToSettle = (
+      overrides: Record<string, any> = {},
+      max = 60,
+    ): { variables: Record<string, any>; iterations: number; dir: string } => {
+      const dir = tempDir('pw-loop-');
+      let state = baseVariables(overrides);
+      let iterations = 0;
+      try {
+        while (state.postPublishContinue === 'true' && iterations < max) {
+          iterations += 1;
+          const walk = runLoopIteration(state, dir);
+          state = walk.variables as any;
+        }
+        return { variables: state, iterations, dir };
+      } finally {
+        removeDir(dir);
+      }
+    };
+
 
     it('walks the shipped loop body (the walk itself cannot pass vacuously)', () => {
       const { reached } = runLoopIteration();
@@ -1645,6 +1745,56 @@ describe('ProcessAITicket post-publication budget (REACTORY-302016408/20261118/1
       const merged = runLoopIteration({ postPublishAwaiting: 'false', postPublishState: 'merged' });
       expect(merged.exits).toBe(true);
       expect(merged.variables.postPublishOutcome).toBe('merged');
+    });
+
+    it('drives the window to its bound with the REAL counter, no injection (R3)', () => {
+      // The previous version of this suite injected `postPublishAwaitSpent='true'`
+      // to reach the spent case, which assumed the answer it was testing. Driving
+      // the loop with the shipped bumpPostPublishAwaitCount makes "spent" a
+      // measured consequence of the bound instead.
+      //
+      // Both-arms matters here: on the iteration where the count reaches the
+      // bound, postPublishAwaitBudgetGate's then-arm runs (count 39 -> 40) and the
+      // re-evaluated condition is then false, so its else-arm sets
+      // postPublishAwaitSpent in the SAME iteration. A one-arm walker cannot
+      // represent that.
+      const settled = runToSettle({ postPublishState: 'fixable' });
+
+      expect(settled.variables.postPublishAwaitCount).toBe('40');
+      expect(settled.iterations).toBe(40);
+      expect(settled.variables.postPublishContinue).toBe('false');
+      expect(settled.variables.postPublishOutcome).toBe('awaiting_review');
+
+      // Both-arms visible: postPublishAwaitSpentGate's THEN-arm parks the run, and
+      // because the engine then re-evaluates the condition it goes false on the
+      // re-read (outcome is no longer 'observing'), so the ELSE-arm runs too and
+      // clears the marker. The terminal state is correct either way; recording it
+      // here so the interaction is not a surprise to the next reader.
+      expect(settled.variables.postPublishAwaitSpent).toBe('false');
+    });
+
+    it('a review landing mid-window stops the polling and re-opens the route (R3)', () => {
+      // Drive 5 polls, then hand the loop an 'outstanding' verdict - what a real
+      // review arriving would produce - and assert the loop leaves awaiting mode
+      // instead of running out the window.
+      const dir = tempDir('pw-loop-mid-');
+      try {
+        let state: Record<string, any> = baseVariables({ postPublishState: 'fixable' });
+        for (let i = 0; i < 5; i += 1) state = runLoopIteration(state, dir).variables as any;
+        expect(state.postPublishAwaitCount).toBe('5');
+        expect(state.postPublishContinue).toBe('true');
+
+        // The review lands: verdict flips, findings become actionable.
+        const after = runLoopIteration(
+          Object.assign({}, state, { postPublishExhaustionVerdict: 'outstanding' }),
+          dir,
+        );
+        expect(after.reached).toContain('postPublishRoute');
+        // The pure-poll arm must NOT swallow it once something is actionable.
+        expect(after.variables.postPublishOutcome).not.toBe('awaiting_review');
+      } finally {
+        removeDir(dir);
+      }
     });
 
     it('pins the awaiting window the README depends on', () => {

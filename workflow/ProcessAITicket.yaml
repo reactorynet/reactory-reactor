@@ -8979,7 +8979,15 @@ steps:
                                         // Fail CLOSED: an unreadable observation, or an invalid
                                         // judgement that cleared nothing, is 'outstanding' so the
                                         // run parks and reports what a human must look at.
-                                        const verdict = (actionable.length === 0 && awaitingHuman && judgedState !== 'invalid')
+                                        // R2(a) (review, round 2): a CLOSED pull request also has no actionable
+                                        // findings and a review still REVIEW_REQUIRED, so it classified as 'awaiting'.
+                                        // The heading and the task BOTH follow this verdict, so they told a human to
+                                        // wait for a review on a pull request nobody can review. Only the two states
+                                        // this workflow actually polls in may be 'awaiting'. Guarding the verdict is the
+                                        // single rule; guarding the reason as well would be a second copy of it.
+                                        const observationState = observation ? String(observation.state || '') : '';
+                                        const awaitingState = observationState === 'fixable' || observationState === 'pending';
+                                        const verdict = (actionable.length === 0 && awaitingHuman && awaitingState && judgedState !== 'invalid')
                                           ? 'awaiting'
                                           : 'outstanding';
 
@@ -9007,7 +9015,13 @@ steps:
                                           })),
                                           reason: verdict === 'awaiting'
                                             ? 'nothing agent-actionable remains; the only remaining blocker is an awaited human action (review decision ' + (reviewDecision || 'none') + ')'
-                                            : String(actionable.length) + ' agent-actionable finding(s) remain unaddressed',
+                                            // 'outstanding' covers two situations: a real unaddressed finding, and
+                                            // nothing-actionable-but-nothing-awaited (a CLOSED pull request, or an
+                                            // approval with a dismissed still-unverified commit). "0 agent-actionable
+                                            // finding(s) remain unaddressed" reads as nonsense for the second.
+                                            : (actionable.length === 0
+                                                ? 'nothing agent-actionable remains, and the block is not an awaited human action (review decision ' + (reviewDecision || 'none') + ', state ' + (observationState || 'unknown') + ')'
+                                                : String(actionable.length) + ' agent-actionable finding(s) remain unaddressed'),
                                           generatedAt: new Date().toISOString(),
                                         };
                                         try {
@@ -9540,7 +9554,15 @@ steps:
                                                     // Fail CLOSED: an unreadable observation, or an invalid
                                                     // judgement that cleared nothing, is 'outstanding' so the
                                                     // run parks and reports what a human must look at.
-                                                    const verdict = (actionable.length === 0 && awaitingHuman && judgedState !== 'invalid')
+                                                    // R2(a) (review, round 2): a CLOSED pull request also has no actionable
+                                                    // findings and a review still REVIEW_REQUIRED, so it classified as 'awaiting'.
+                                                    // The heading and the task BOTH follow this verdict, so they told a human to
+                                                    // wait for a review on a pull request nobody can review. Only the two states
+                                                    // this workflow actually polls in may be 'awaiting'. Guarding the verdict is the
+                                                    // single rule; guarding the reason as well would be a second copy of it.
+                                                    const observationState = observation ? String(observation.state || '') : '';
+                                                    const awaitingState = observationState === 'fixable' || observationState === 'pending';
+                                                    const verdict = (actionable.length === 0 && awaitingHuman && awaitingState && judgedState !== 'invalid')
                                                       ? 'awaiting'
                                                       : 'outstanding';
 
@@ -9568,7 +9590,13 @@ steps:
                                                       })),
                                                       reason: verdict === 'awaiting'
                                                         ? 'nothing agent-actionable remains; the only remaining blocker is an awaited human action (review decision ' + (reviewDecision || 'none') + ')'
-                                                        : String(actionable.length) + ' agent-actionable finding(s) remain unaddressed',
+                                                        // 'outstanding' covers two situations: a real unaddressed finding, and
+                                                        // nothing-actionable-but-nothing-awaited (a CLOSED pull request, or an
+                                                        // approval with a dismissed still-unverified commit). "0 agent-actionable
+                                                        // finding(s) remain unaddressed" reads as nonsense for the second.
+                                                        : (actionable.length === 0
+                                                            ? 'nothing agent-actionable remains, and the block is not an awaited human action (review decision ' + (reviewDecision || 'none') + ', state ' + (observationState || 'unknown') + ')'
+                                                            : String(actionable.length) + ' agent-actionable finding(s) remain unaddressed'),
                                                       generatedAt: new Date().toISOString(),
                                                     };
                                                     try {
@@ -11170,17 +11198,18 @@ steps:
                                                                   // kept only for a genuine 'outstanding' block, where naming the unaddressed
                                                                   // finding is exactly right.
                                                                   const verdictRecord = readJson('post-publish-exhaustion.json');
-                                                                  // R2(a) (review): the override must be STATE-AWARE. A CLOSED, unreviewed pull
-                                                                  // request also classifies as 'awaiting' (no actionable findings + a review still
-                                                                  // REVIEW_REQUIRED), but its reason must stay master's "the pull request is
-                                                                  // CLOSED...", not an awaited-human action nobody can now take. Only the two
-                                                                  // states this run actually polls in get the verdict wording.
-                                                                  const awaitingState = state === 'fixable' || state === 'pending';
-                                                                  if (verdictRecord && verdictRecord.generatedAt && awaitingState && String(verdictRecord.verdict || '') === 'awaiting') {
+                                                                  const verdictOf = verdictRecord && verdictRecord.generatedAt ? String(verdictRecord.verdict || '') : '';
+                                                                  if (verdictOf === 'awaiting') {
+                                                                    // The verdict is computed AFTER the judgement and already accounts for the
+                                                                    // pull request's STATE (only fixable/pending may be 'awaiting'), so it is the
+                                                                    // one authoritative statement of what is blocking. The raw observation reason
+                                                                    // is pre-judgement and would name findings the reviewer has since dismissed.
                                                                     const verdictReason = String(verdictRecord.reason || '').trim();
                                                                     process.stdout.write(verdictReason || 'nothing agent-actionable remains; the only remaining blocker is an awaited human action');
                                                                     process.exit(0);
                                                                   }
+                                                                  // verdict 'outstanding', or no trustworthy record: the raw observation reason
+                                                                  // is the right thing to show, and it is what master reported.
                                                                   process.stdout.write(reason || 'the pull request is open but a block remains that only a human can clear');
                                                               env:
                                                                 WT: ${steps.readWorktreePath.outputs.stdout}
