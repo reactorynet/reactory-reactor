@@ -767,7 +767,7 @@ const UserBudgetAdminWidget = (props: BudgetWidgetProps) => {
             { container: true, spacing: 2 },
             React.createElement(
               Grid,
-              { item: true, xs: 12, sm: 6, md: 3 },
+              { size: { xs: 12, sm: 6, md: 3 } },
               React.createElement(Kpi, {
                 R: React, M: MaterialCore, label: 'Quota Status',
                 value: String(status?.status || '—'), icon: 'verified_user',
@@ -777,7 +777,7 @@ const UserBudgetAdminWidget = (props: BudgetWidgetProps) => {
             ),
             React.createElement(
               Grid,
-              { item: true, xs: 12, sm: 6, md: 3 },
+              { size: { xs: 12, sm: 6, md: 3 } },
               React.createElement(Kpi, {
                 R: React, M: MaterialCore, label: 'Used',
                 value: `${toNumber(status?.percentageUsed)}%`, icon: 'speed',
@@ -786,7 +786,7 @@ const UserBudgetAdminWidget = (props: BudgetWidgetProps) => {
             ),
             React.createElement(
               Grid,
-              { item: true, xs: 12, sm: 6, md: 3 },
+              { size: { xs: 12, sm: 6, md: 3 } },
               React.createElement(Kpi, {
                 R: React, M: MaterialCore, label: 'Hard Stop',
                 value: budget.hardStop ? 'On' : 'Off', icon: 'gpp_maybe',
@@ -796,7 +796,7 @@ const UserBudgetAdminWidget = (props: BudgetWidgetProps) => {
             ),
             React.createElement(
               Grid,
-              { item: true, xs: 12, sm: 6, md: 3 },
+              { size: { xs: 12, sm: 6, md: 3 } },
               React.createElement(Kpi, {
                 R: React, M: MaterialCore, label: 'Warn Threshold',
                 value: `${toNumber(budget.alertThresholdPercent) || 80}%`, icon: 'notifications_active',
@@ -805,7 +805,7 @@ const UserBudgetAdminWidget = (props: BudgetWidgetProps) => {
             ),
             React.createElement(
               Grid,
-              { item: true, xs: 12, md: 6 },
+              { size: { xs: 12, md: 6 } },
               React.createElement(
                 Paper,
                 { variant: 'outlined', sx: { p: 2.5, borderRadius: '14px', height: '100%' } },
@@ -828,7 +828,7 @@ const UserBudgetAdminWidget = (props: BudgetWidgetProps) => {
             ),
             React.createElement(
               Grid,
-              { item: true, xs: 12, md: 6 },
+              { size: { xs: 12, md: 6 } },
               React.createElement(
                 Paper,
                 { variant: 'outlined', sx: { p: 2.5, borderRadius: '14px', height: '100%' } },
@@ -936,11 +936,11 @@ const UserBudgetAdminWidget = (props: BudgetWidgetProps) => {
     React.createElement(
       Grid,
       { container: true, spacing: 2, sx: { mb: 3 } },
-      React.createElement(Grid, { item: true, xs: 12, sm: 6, md: 3, lg: 2 }, React.createElement(Kpi, { R: React, M: MaterialCore, label: 'Users', value: fmtInt(kpis.total), icon: 'group', accent: '#38bdf8' })),
-      React.createElement(Grid, { item: true, xs: 12, sm: 6, md: 3, lg: 2 }, React.createElement(Kpi, { R: React, M: MaterialCore, label: 'Budgeted', value: fmtInt(kpis.budgeted), icon: 'account_balance_wallet', accent: '#22c55e' })),
-      React.createElement(Grid, { item: true, xs: 12, sm: 6, md: 3, lg: 2 }, React.createElement(Kpi, { R: React, M: MaterialCore, label: 'Unbudgeted', value: fmtInt(kpis.unbudgeted), icon: 'money_off', accent: '#94a3b8' })),
-      React.createElement(Grid, { item: true, xs: 12, sm: 6, md: 3, lg: 3 }, React.createElement(Kpi, { R: React, M: MaterialCore, label: 'At / Over Threshold', value: fmtInt(kpis.overThreshold), icon: 'warning_amber', accent: '#fbbf24' })),
-      React.createElement(Grid, { item: true, xs: 12, sm: 6, md: 3, lg: 3 }, React.createElement(Kpi, { R: React, M: MaterialCore, label: 'Hard Stop On', value: fmtInt(kpis.hardStop), icon: 'gpp_maybe', accent: '#f97316' })),
+      React.createElement(Grid, { size: { xs: 12, sm: 6, md: 3, lg: 2 } }, React.createElement(Kpi, { R: React, M: MaterialCore, label: 'Users', value: fmtInt(kpis.total), icon: 'group', accent: '#38bdf8' })),
+      React.createElement(Grid, { size: { xs: 12, sm: 6, md: 3, lg: 2 } }, React.createElement(Kpi, { R: React, M: MaterialCore, label: 'Budgeted', value: fmtInt(kpis.budgeted), icon: 'account_balance_wallet', accent: '#22c55e' })),
+      React.createElement(Grid, { size: { xs: 12, sm: 6, md: 3, lg: 2 } }, React.createElement(Kpi, { R: React, M: MaterialCore, label: 'Unbudgeted', value: fmtInt(kpis.unbudgeted), icon: 'money_off', accent: '#94a3b8' })),
+      React.createElement(Grid, { size: { xs: 12, sm: 6, md: 3, lg: 3 } }, React.createElement(Kpi, { R: React, M: MaterialCore, label: 'At / Over Threshold', value: fmtInt(kpis.overThreshold), icon: 'warning_amber', accent: '#fbbf24' })),
+      React.createElement(Grid, { size: { xs: 12, sm: 6, md: 3, lg: 3 } }, React.createElement(Kpi, { R: React, M: MaterialCore, label: 'Hard Stop On', value: fmtInt(kpis.hardStop), icon: 'gpp_maybe', accent: '#f97316' })),
     ),
 
     // Toolbar
@@ -1175,7 +1175,7 @@ function R_createEditor(
   const selectedOption = userOptions.find((o) => o.value === form.userId) || null;
 
   const numberField = (key: keyof BudgetForm, label: string, placeholder: string, xs: number) =>
-    React.createElement(Grid, { item: true, xs: 12, sm: xs },
+    React.createElement(Grid, { size: { xs: 12, sm: xs } },
       React.createElement(TextField, {
         size: 'small', fullWidth: true, label, placeholder,
         value: form[key] as string,
@@ -1196,7 +1196,7 @@ function R_createEditor(
       React.createElement(
         Grid,
         { container: true, spacing: 2, sx: { pt: 0.5 } },
-        React.createElement(Grid, { item: true, xs: 12, sm: 6 },
+        React.createElement(Grid, { size: { xs: 12, sm: 6 } },
           React.createElement(Autocomplete, {
             size: 'small',
             disabled: mode === 'bulk' || Boolean(form.userId),
@@ -1207,12 +1207,12 @@ function R_createEditor(
             isOptionEqualToValue: (a: any, b: any) => a.value === b.value,
             renderInput: (params: any) => React.createElement(TextField, { ...params, label: 'User', placeholder: 'Search name or email' }),
           })),
-        React.createElement(Grid, { item: true, xs: 12, sm: 3 },
+        React.createElement(Grid, { size: { xs: 12, sm: 3 } },
           React.createElement(TextField, {
             size: 'small', fullWidth: true, label: 'Warn threshold (%)', placeholder: '80',
             value: form.alertThresholdPercent, onChange: (e: any) => onField('alertThresholdPercent', e.target.value),
           })),
-        React.createElement(Grid, { item: true, xs: 12, sm: 3 },
+        React.createElement(Grid, { size: { xs: 12, sm: 3 } },
           React.createElement(FormControlLabel, {
             control: React.createElement(Switch, {
               checked: form.hardStop, onChange: (e: any) => onField('hardStop', e.target.checked),
@@ -1223,12 +1223,12 @@ function R_createEditor(
         numberField('dailyTokenLimit', 'Daily token limit', 'e.g. 500000 (blank = unlimited)', 6),
         numberField('monthlyCostLimitUsd', 'Monthly cost limit (USD)', 'e.g. 50.00 (blank = unlimited)', 6),
         numberField('dailyCostLimitUsd', 'Daily cost limit (USD)', 'e.g. 10.00 (blank = unlimited)', 6),
-        React.createElement(Grid, { item: true, xs: 12 },
+        React.createElement(Grid, { size: { xs: 12 } },
           React.createElement(TextField, {
             size: 'small', fullWidth: true, label: 'Notes', multiline: true, minRows: 2,
             value: form.notes, onChange: (e: any) => onField('notes', e.target.value),
           })),
-        React.createElement(Grid, { item: true, xs: 12 },
+        React.createElement(Grid, { size: { xs: 12 } },
           React.createElement(Typography, { variant: 'caption', color: 'text.secondary' },
             'Empty = unlimited. Set to 0 to block entirely when Hard Stop is on.')),
       ),
