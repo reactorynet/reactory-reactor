@@ -1515,7 +1515,17 @@ describe('ProcessAITicket exit condition after the last permitted review (REACTO
 
   const writeRunStatus = (dir: string, status: string): void => {
     fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
-    fs.writeFileSync(path.join(dir, '.ai-agent', 'run-status.json'), JSON.stringify({ status }), 'utf8');
+    // The pipeline's own record carries this run's identity (PROCESS-003 B.1) and a reader
+    // refuses an unattributed status, so a fixture that plays the pipeline's part must write
+    // what the pipeline writes: run-status.json stamped with the window's runId.
+    let identity: any = null;
+    try { identity = JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'run-identity.json'), 'utf8')); } catch (e) { identity = null; }
+    const record = Object.assign(
+      {},
+      identity && identity.runId ? { runId: String(identity.runId), ticketReference: String(identity.ticketReference || '') } : {},
+      { status },
+    );
+    fs.writeFileSync(path.join(dir, '.ai-agent', 'run-status.json'), JSON.stringify(record), 'utf8');
   };
 
   const decisionOf = (dir: string): any =>
@@ -6060,5 +6070,243 @@ describe('ProcessAITicket PR #53 review findings', () => {
     expect(scopedCalls).toBe(1);
     expect(observe).toContain('const scopedAlerts = tryJson');
     expect(observe).toContain('let alertsRefScoped = scopedAlerts !== null');
+  });
+});
+
+/**
+ * PROCESS-003 — REACTORY-302016408/20261113/2279880544.
+ *
+ * `.ai-agent/` is the pipeline's own scratch directory, and a REPOSITORY CAN TRACK IT.
+ * SPEECH-005's pull request #21 committed 11 files of it, so the SPEECH-006 worktree created
+ * from that merge contained SPEECH-005's `review-normalised.json` with
+ * `"verdict": "approved"` - a fresh run presenting another ticket's approval, and a publish
+ * gate that reads it would skip the reviewer entirely.
+ *
+ * Three defences are pinned here, and each of them fails on the pre-fix workflow:
+ *   1. a fresh worktree starts with an EMPTY .ai-agent, even when the base tracks it;
+ *   2. the published commit carries NO .ai-agent path;
+ *   3. run scratch state staged for publication is refused, and a verdict captured for a
+ *      DIFFERENT run is treated as absent rather than as this run's answer.
+ */
+describe('ProcessAITicket never inherits or publishes .ai-agent (PROCESS-003)', () => {
+  const prepareScript = scriptOf('prepareWorktree');
+  const commitScript = scriptOf('commitChanges');
+  const publishableScript = scriptOf('readPublishable');
+  const verdictScript = scriptOf('readVerdict');
+  const captureScript = scriptOf('captureReview');
+
+  const scratchDir = (dir: string): string => path.join(dir, '.ai-agent');
+  const readJsonFile = (file: string): any => JSON.parse(fs.readFileSync(file, 'utf8'));
+
+  const prepare = (cwd: string, ref: string): any =>
+    runJson(prepareScript, { CWD: cwd, REF: ref, REQUEST_TYPE: 'bug', TASK_TYPE: 'feature' }, cwd);
+
+  /**
+   * The contaminated shape: a repository whose default branch TRACKS `.ai-agent`, which is
+   * how reactory-speech-service looked after e84201a.
+   */
+  const repoWithTrackedScratch = (): { root: string; repo: string } => {
+    const root = tempDir('pa-scratch-');
+    const remote = path.join(root, 'origin.git');
+    sh('git init -q --bare -b master "' + remote + '"', root);
+
+    const seed = path.join(root, 'seed');
+    fs.mkdirSync(seed, { recursive: true });
+    initRepo(seed);
+    fs.mkdirSync(path.join(seed, '.ai-agent'), { recursive: true });
+    fs.writeFileSync(
+      path.join(seed, '.ai-agent', 'review-normalised.json'),
+      JSON.stringify({ verdict: 'approved', findingsResolved: true, runId: 'a-different-run' }),
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(seed, '.ai-agent', 'run-status.json'),
+      JSON.stringify({ status: 'completed', runId: 'a-different-run' }),
+      'utf8',
+    );
+    sh('git add -A && git commit -qm "previous run committed its own scratch state"', seed);
+    sh('git remote add origin "' + remote + '"', seed);
+    sh('git push -q origin master', seed);
+
+    const repo = path.join(root, 'repo');
+    sh('git clone -q "' + remote + '" "' + repo + '"', root);
+    sh('git config user.email test@example.com', repo);
+    sh('git config user.name Test', repo);
+    sh('git config commit.gpgsign false', repo);
+    return { root, repo };
+  };
+
+  it('starts a fresh worktree with an EMPTY .ai-agent even when the base branch tracks it', () => {
+    const ctx = repoWithTrackedScratch();
+    try {
+      // The base really does track the directory: this is the defect's precondition.
+      expect(sh('git ls-files .ai-agent', ctx.repo).split('\n').filter(Boolean).length).toBe(2);
+
+      const out = prepare(ctx.repo, 'REACTORY-1/20260101/1');
+
+      // A.1: nothing inherited survives - only this run's own identity is present.
+      expect(fs.readdirSync(scratchDir(out.worktreePath))).toEqual(['run-identity.json']);
+      expect(fs.existsSync(path.join(scratchDir(out.worktreePath), 'review-normalised.json'))).toBe(false);
+      expect(out.scratch.inheritedFiles).toBe(2);
+      expect(out.scratch.inheritedTracked).toBe(2);
+      // B.1: the identity is minted once, recorded on the run, and written into the worktree.
+      const identity = readJsonFile(path.join(scratchDir(out.worktreePath), 'run-identity.json'));
+      expect(identity.runId).toBe(out.runId);
+      expect(identity.runId).toMatch(/^[0-9a-f]{32}$/);
+      // The inheritance is reported rather than silently cleaned.
+      expect(out.warnings.join(' ')).toMatch(/inherited \.ai-agent/);
+    } finally {
+      removeDir(ctx.root);
+    }
+  });
+
+  it('publishes NO .ai-agent change for work committed in that worktree', () => {
+    const ctx = repoWithTrackedScratch();
+    try {
+      const out = prepare(ctx.repo, 'REACTORY-1/20260101/2');
+      const wt = out.worktreePath;
+      fs.writeFileSync(path.join(wt, 'work.txt'), 'the actual change\n', 'utf8');
+
+      const result = runJson(commitScript, { WT: wt, REF: 'REACTORY-1/20260101/2' }, wt);
+
+      expect(result.committed).toBe(true);
+      const files = sh('git show --name-only --pretty=format: HEAD', wt).split('\n').filter(Boolean);
+      expect(files).toContain('work.txt');
+      // Neither this run's artefacts nor a deletion of the inherited ones reach the branch.
+      expect(files.join(' ')).not.toContain('.ai-agent');
+    } finally {
+      removeDir(ctx.root);
+    }
+  });
+
+  it('refuses run scratch state staged for publication, and says what to do about it', () => {
+    const ctx = repoWithTrackedScratch();
+    try {
+      const out = prepare(ctx.repo, 'REACTORY-1/20260101/3');
+      const wt = out.worktreePath;
+      // A.2: nothing on this branch explains a NEW .ai-agent file, so it is fatal.
+      fs.writeFileSync(path.join(wt, '.ai-agent', 'report.json'), '{"status":"completed"}\n', 'utf8');
+      fs.writeFileSync(path.join(wt, 'work.txt'), 'real work\n', 'utf8');
+      sh('git add -f .ai-agent/report.json', wt);
+
+      let failure: any = null;
+      try {
+        runScript(commitScript, { WT: wt, REF: 'REACTORY-1/20260101/3' }, wt);
+      } catch (e) {
+        failure = e;
+      }
+
+      expect(failure).not.toBeNull();
+      expect(failure.status).toBe(1);
+      const reported = JSON.parse(String(failure.stdout));
+      expect(reported.committed).toBe(false);
+      expect(reported.reason).toBe('run scratch state staged');
+      // Actionable: it names the path and the remedy.
+      expect(String(reported.error)).toContain('.ai-agent/report.json');
+      expect(String(reported.error)).toMatch(/git restore --staged|gitignore/);
+      // Nothing was committed, so the scratch state cannot have been published.
+      expect(sh('git rev-list --count origin/master..HEAD', wt)).toBe('0');
+    } finally {
+      removeDir(ctx.root);
+    }
+  });
+
+  it('does not honour an APPROVED verdict captured for a different run', () => {
+    const own = repoWithWork();
+    const other = repoWithWork();
+    try {
+      // A complete, pipeline-accepted approval in its own run.
+      writeReport(own, { status: 'completed', summary: 'done', changes: [{ file: 'a.ts', description: 'd' }] });
+      writeReview(own, { verdict: 'approved', summary: 'looks good' });
+      // captureReview writes the review-normalised.json side-car, exactly as a real run does.
+      expect(runJson(captureScript, { WT: own }, own).verdict).toBe('approved');
+      expect(runScript(verdictScript, { WT: own }, own)).toBe('approved');
+      expect(runScript(publishableScript, { WT: own }, own)).toBe('true');
+
+      // The same four artefacts in a run that never reviewed anything - exactly what a
+      // worktree created from a branch that tracks .ai-agent inherits.
+      openReviewWindow(other);
+      const otherIdentity = readJsonFile(path.join(scratchDir(other), 'run-identity.json'));
+      ['review.json', 'review-window.json', 'review-accepted.json', 'review-normalised.json'].forEach((name) => {
+        fs.copyFileSync(path.join(scratchDir(own), name), path.join(scratchDir(other), name));
+      });
+
+      const copied = readJsonFile(path.join(scratchDir(other), 'review-normalised.json'));
+      expect(copied.verdict).toBe('approved');
+      expect(copied.runId).not.toBe(otherIdentity.runId);
+
+      // B.2: a foreign runId is ABSENT, so the run falls through to "never reviewed" and the
+      // reviewer runs again. A mismatch is never read as an approval.
+      expect(runScript(verdictScript, { WT: other }, other)).toBe('review_unavailable');
+      expect(runScript(publishableScript, { WT: other }, other)).toBe('false');
+      const decision = readJsonFile(path.join(scratchDir(other), 'publish-decision.json'));
+      expect(decision.outcome).toBe('review_unavailable');
+      expect(decision.publishable).toBe(false);
+    } finally {
+      removeDir(own);
+      removeDir(other);
+    }
+  });
+
+  it('keeps one run-provenance guard, byte-identical, in every step that touches .ai-agent', () => {
+    const open = '// >>> shared run identity';
+    const close = '// <<< shared run identity';
+    const holders = all.filter((step) => String(((step.config || {}).args || [])[1] || '').includes(open));
+
+    // prepareWorktree, prepareReview, stampReview, captureReview, readVerdict, readPublishable,
+    // the two loop gates, the hand-back brief, the two narratives, readReportStatus, the
+    // confirmation gate and the workspace note.
+    expect(holders.length).toBeGreaterThanOrEqual(14);
+
+    const blocks = holders.map((step) => {
+      const script = String(step.config.args[1]);
+      const start = script.indexOf(open);
+      const end = script.indexOf(close, start);
+      expect(end).toBeGreaterThan(start);
+      return script.slice(start, end + close.length)
+        .split('\n')
+        .map((line) => line.trim())
+        .join('\n');
+    });
+    blocks.forEach((block) => expect(block).toBe(blocks[0]));
+
+    // And the decision-bearing readers actually go through it.
+    ['readVerdict', 'readPublishable', 'readFindingsGate', 'readRequiredWork', 'readReportStatus'].forEach((id) => {
+      expect(String(byId(id).config.args[1])).toContain('readRunArtefact');
+    });
+  });
+
+  it('never lets a re-dispatched ticket in a REUSED worktree inherit the previous approval', () => {
+    const ctx = repoWithTrackedScratch();
+    try {
+      const ref = 'REACTORY-1/20260101/4';
+      const first = prepare(ctx.repo, ref);
+      const wt = first.worktreePath;
+      const previous = readJsonFile(path.join(scratchDir(wt), 'run-identity.json')).runId;
+
+      // The first dispatch reviewed and approved its own work.
+      writeReport(wt, { status: 'completed', summary: 'done', changes: [{ file: 'work.txt', description: 'd' }] });
+      writeReview(wt, { verdict: 'approved', summary: 'looks good' });
+      expect(runJson(captureScript, { WT: wt }, wt).verdict).toBe('approved');
+      expect(runScript(verdictScript, { WT: wt }, wt)).toBe('approved');
+
+      // The SAME ticket is dispatched again - the worktree path is keyed on the ticket, so
+      // the second run lands in it with the first run's approval on disk. Its own report
+      // must survive (nothing is deleted), but the approval must not answer for it.
+      const second = prepare(ctx.repo, ref);
+      expect(second.worktreePath).toBe(wt);
+      expect(fs.existsSync(path.join(scratchDir(wt), 'review-normalised.json'))).toBe(true);
+      expect(second.runId).not.toBe(previous);
+      expect(second.scratch.rotatedFrom).toBe(previous);
+      expect(second.scratch.cleared).toBe(false);
+      expect(second.warnings.join(' ')).toMatch(/carried run identity/);
+
+      // B.2: the previous dispatch's approval is now a foreign artefact, so the run has to
+      // review again instead of publishing on it.
+      expect(runScript(verdictScript, { WT: wt }, wt)).toBe('review_unavailable');
+      expect(runScript(publishableScript, { WT: wt }, wt)).toBe('false');
+    } finally {
+      removeDir(ctx.root);
+    }
   });
 });

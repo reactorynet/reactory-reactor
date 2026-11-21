@@ -824,6 +824,143 @@ steps:
                 const tryRunIn = (cmd, dir) => { try { return runIn(cmd, dir); } catch (e) { return ''; } };
                 const isAncestor = (dir, sha, of) => !!sha && !!of && tryRunIn('git merge-base --is-ancestor ' + sha + ' ' + of + ' && echo yes', dir) === 'yes';
 
+                // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                // the directory is checked out of the base branch, so a file inside it may describe a
+                // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                // identity. Anything else - including a record written before this guard existed and
+                // therefore carrying no runId at all - is ABSENT, never a verdict.
+                const readRunIdentity = (dir) => {
+                  try {
+                    const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                    return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                  } catch (e) { return null; }
+                };
+                // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                // previous dispatch's identity - its approval would then be this run's answer.
+                const mintRunIdentity = (dir, reference) => {
+                  const identity = {
+                    runId: require('crypto').randomBytes(16).toString('hex'),
+                    ticketReference: String(reference || '').trim(),
+                    pipeline: 'core.ProcessAITicket',
+                    createdAt: new Date().toISOString(),
+                  };
+                  try {
+                    fs.mkdirSync(dir, { recursive: true });
+                    fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                  } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                  return identity;
+                };
+                // INHERIT this run's identity, minting one only when the worktree has none (a
+                // resumed instance, or a step whose prepare step did not run).
+                const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                // The run identity an artefact carries. A pipeline artefact states it at the top
+                // level (`runId`); the stamped acceptance states it inside the `provenance`
+                // envelope it exists to prove. NEITHER means the record belongs to no run this
+                // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                const recordRunId = (record) => {
+                  if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                  if (record.runId) return String(record.runId);
+                  const provenance = record.provenance;
+                  if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                  return '';
+                };
+                const readRunArtefact = (dir, name) => {
+                  const identity = readRunIdentity(dir);
+                  if (!identity) return null;
+                  try {
+                    const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                    if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                    if (recordRunId(record) !== String(identity.runId)) return null;
+                    return record;
+                  } catch (e) { return null; }
+                };
+                // <<< shared run identity
+
+                // ── PROCESS-003 A.1/A.3: a worktree starts with NO inherited run state ────────
+                // `.ai-agent/` is where the pipeline keeps its own bookkeeping (report, review
+                // window, accepted verdict, publish decision). SPEECH-005 committed 11 files of it
+                // (reactory-speech-service e84201a, PR #21), so every later worktree checked that
+                // state out of the base branch and inherited the previous ticket's APPROVAL.
+                //
+                // A FRESH worktree therefore starts by deleting the directory - before the engineer
+                // starts, never mid-run - and a REUSED worktree never has it deleted: that worktree
+                // is this same run, and its in-progress report must survive.
+                const prepareScratchArea = (target, reference, clearInherited) => {
+                  const dir = path.join(target, '.ai-agent');
+                  const scratch = {
+                    path: dir,
+                    cleared: false,
+                    inheritedFiles: 0,
+                    inheritedTracked: 0,
+                    identityPath: path.join(dir, 'run-identity.json'),
+                    runId: '',
+                    gitignorePath: '',
+                    gitignoreIgnores: false,
+                    gitignoreAppended: false,
+                    rotatedFrom: '',
+                    rotatedTicketReference: '',
+                  };
+
+                  if (clearInherited) {
+                    // A.1. The primary fix: it works even for a repository that still TRACKS the
+                    // directory, which is why it does not depend on .gitignore being right. The
+                    // run identity is excluded from the count because it is written below.
+                    try {
+                      scratch.inheritedFiles = fs.readdirSync(dir).filter((name) => name !== 'run-identity.json').length;
+                    } catch (e) { scratch.inheritedFiles = 0; }
+                    try {
+                      scratch.inheritedTracked = (tryRunIn('git ls-files -- .ai-agent', target) || '').split('\n').filter(Boolean).length;
+                    } catch (e) { scratch.inheritedTracked = 0; }
+                    try {
+                      fs.rmSync(dir, { recursive: true, force: true });
+                      scratch.cleared = true;
+                    } catch (e) {
+                      // Fail loudly rather than inherit: the rest of the run assumes emptiness.
+                      process.stderr.write('could not clear the inherited .ai-agent directory: ' + String((e && e.message) || e) + '\n');
+                      process.exit(1);
+                    }
+                  }
+
+                  fs.mkdirSync(dir, { recursive: true });
+
+                  // A.3 belt and braces. `git add -A` in a repository that does NOT ignore
+                  // `.ai-agent/` stages this run's own bookkeeping, and an agent that then commits
+                  // puts it in the branch (that is how SPEECH-005 seeded the directory onto master).
+                  // The rule is appended to the worktree's TRACKED .gitignore - never to the shared
+                  // per-clone exclude file, which every worktree of this clone would inherit - and the
+                  // edit is RECORDED (scratch.gitignoreAppended + a warning), so it is a deliberate,
+                  // single-line hygiene change in the ticket that first needed it, not a silent
+                  // rewrite. A repository with no .gitignore at all is reported, never given a file.
+                  try {
+                    const gitignore = path.join(target, '.gitignore');
+                    scratch.gitignorePath = gitignore;
+                    const text = fs.existsSync(gitignore) ? fs.readFileSync(gitignore, 'utf8') : null;
+                    scratch.gitignoreIgnores = text !== null && /^\s*\/?\.ai-agent\/?\s*$/m.test(text);
+                    if (text !== null && !scratch.gitignoreIgnores) {
+                      fs.appendFileSync(gitignore, (text && !text.endsWith('\n') ? '\n' : '') + '.ai-agent/\n', 'utf8');
+                      scratch.gitignoreAppended = true;
+                    }
+                  } catch (e) { scratch.gitignoreAppended = false; }
+
+                  // B.1/A.1. The identity is minted for THIS dispatch, never inherited.
+                  // A reused worktree may still hold the previous dispatch's identity (a
+                  // re-dispatched ticket lands on the same path) and, with it, that
+                  // dispatch's ACCEPTED verdict. Its files are left alone - a run must never
+                  // lose its own in-progress report - but they stop being attributable to
+                  // this run, so no consumer can read them as this run's answer.
+                  const inheritedIdentity = readRunIdentity(dir);
+                  const identity = mintRunIdentity(dir, reference);
+                  scratch.runId = identity.runId;
+                  scratch.rotatedFrom = inheritedIdentity ? String(inheritedIdentity.runId) : '';
+                  scratch.rotatedTicketReference = inheritedIdentity ? String(inheritedIdentity.ticketReference || '') : '';
+                  return scratch;
+                };
+
                 // origin/HEAD is authoritative; fall back to origin/main then origin/master.
                 const resolveRemoteDefault = () => {
                   const symbolic = tryRunIn('git symbolic-ref --quiet refs/remotes/origin/HEAD');
@@ -893,7 +1030,18 @@ steps:
                 };
 
                 if (fs.existsSync(worktreePath)) {
-                  fs.mkdirSync(path.join(worktreePath, '.ai-agent'), { recursive: true });
+                  // A reused worktree is THIS run already in progress: clearInherited is false so
+                  // its own report/review artefacts survive. Only the exclude rule and (when it is
+                  // somehow missing) the run identity are ensured.
+                  const scratch = prepareScratchArea(worktreePath, ref, false);
+                  if (scratch.rotatedFrom && scratch.rotatedFrom !== scratch.runId) {
+                    warnings.push('this worktree carried run identity ' + scratch.rotatedFrom + (scratch.rotatedTicketReference ? ' from ' + scratch.rotatedTicketReference : '') + '; this run has its own identity ' + scratch.runId + ', so the earlier dispatch\'s verdict cannot be read as this run\'s.');
+                  }
+                  if (scratch.gitignoreAppended) {
+                    warnings.push('.gitignore did not ignore .ai-agent/, so this run appended ".ai-agent/" to it (PROCESS-003): run state must never be publishable. It is a one-line hygiene change published with this ticket.');
+                  } else if (!scratch.gitignoreIgnores) {
+                    warnings.push('this repository has no .gitignore, so .ai-agent/ is not ignored. Add ".ai-agent/" to one deliberately: the pipeline refuses to commit it either way, but a stray `git add -A` in an agent session is what put run state on master before.');
+                  }
                   // A reused worktree reports the branch it is ACTUALLY on. Reporting the
                   // freshly computed name would aim the push and the pull request at a ref
                   // that does not exist.
@@ -913,6 +1061,8 @@ steps:
                     branchMismatch: !!(existing && existing !== branch),
                     worktreeHead: worktreeHead,
                     derivedFromBase: derivedFromBase,
+                    runId: scratch.runId,
+                    scratch: scratch,
                     warnings: warnings,
                   })));
                   process.exit(0);
@@ -955,7 +1105,18 @@ steps:
                   }
                 }
 
-                fs.mkdirSync(path.join(worktreePath, '.ai-agent'), { recursive: true });
+                // PROCESS-003 A.1. The worktree has just been checked out of the base branch, so
+                // any `.ai-agent` in it came from the base: delete it and start empty. The run's
+                // own identity is minted immediately afterwards (B.1).
+                const scratch = prepareScratchArea(worktreePath, ref, true);
+                if (scratch.inheritedFiles > 0 || scratch.inheritedTracked > 0) {
+                  warnings.push('this run inherited .ai-agent from ' + baseRef + ' (' + scratch.inheritedFiles + ' file(s) on disk, ' + scratch.inheritedTracked + ' tracked) and started with an EMPTY .ai-agent. Inherited run state is never read as this run\'s: every artefact carries runId ' + scratch.runId + '.');
+                }
+                if (scratch.gitignoreAppended) {
+                  warnings.push('.gitignore did not ignore .ai-agent/, so this run appended ".ai-agent/" to it (PROCESS-003): run state must never be publishable. It is a one-line hygiene change published with this ticket.');
+                } else if (!scratch.gitignoreIgnores) {
+                  warnings.push('this repository has no .gitignore, so .ai-agent/ is not ignored. Add ".ai-agent/" to one deliberately: the pipeline refuses to commit it either way, but a stray `git add -A` in an agent session is what put run state on master before.');
+                }
                 const createdHead = tryRunIn('git rev-parse HEAD', worktreePath);
                 if (createdHead && createdHead !== baseSha && !isAncestor(cwd, baseSha, createdHead)) {
                   warnings.push('the new worktree HEAD ' + String(createdHead).slice(0, 12) + ' does not contain ' + baseRef + '; investigate before relying on the diff');
@@ -972,6 +1133,8 @@ steps:
                   branchMismatch: false,
                   worktreeHead: createdHead,
                   derivedFromBase: createdHead ? isAncestor(cwd, createdHead, baseSha) : null,
+                  runId: scratch.runId,
+                  scratch: scratch,
                   warnings: warnings,
                 })));
             env:
@@ -1406,8 +1569,67 @@ steps:
                   const reportPath = path.join(wt, '.ai-agent', 'report.json');
                   try { return JSON.parse(fs.readFileSync(reportPath, 'utf8')); } catch (e) { return {}; }
                 };
-                const runStatusPath = path.join(wt, '.ai-agent', 'run-status.json');
-                const runStatus = (() => { try { return JSON.parse(fs.readFileSync(runStatusPath, 'utf8')); } catch (e) { return {}; } })();
+                const scratchDir = path.join(wt, '.ai-agent');
+                // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                // the directory is checked out of the base branch, so a file inside it may describe a
+                // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                // identity. Anything else - including a record written before this guard existed and
+                // therefore carrying no runId at all - is ABSENT, never a verdict.
+                const readRunIdentity = (dir) => {
+                  try {
+                    const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                    return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                  } catch (e) { return null; }
+                };
+                // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                // previous dispatch's identity - its approval would then be this run's answer.
+                const mintRunIdentity = (dir, reference) => {
+                  const identity = {
+                    runId: require('crypto').randomBytes(16).toString('hex'),
+                    ticketReference: String(reference || '').trim(),
+                    pipeline: 'core.ProcessAITicket',
+                    createdAt: new Date().toISOString(),
+                  };
+                  try {
+                    fs.mkdirSync(dir, { recursive: true });
+                    fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                  } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                  return identity;
+                };
+                // INHERIT this run's identity, minting one only when the worktree has none (a
+                // resumed instance, or a step whose prepare step did not run).
+                const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                // The run identity an artefact carries. A pipeline artefact states it at the top
+                // level (`runId`); the stamped acceptance states it inside the `provenance`
+                // envelope it exists to prove. NEITHER means the record belongs to no run this
+                // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                const recordRunId = (record) => {
+                  if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                  if (record.runId) return String(record.runId);
+                  const provenance = record.provenance;
+                  if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                  return '';
+                };
+                const readRunArtefact = (dir, name) => {
+                  const identity = readRunIdentity(dir);
+                  if (!identity) return null;
+                  try {
+                    const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                    if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                    if (recordRunId(record) !== String(identity.runId)) return null;
+                    return record;
+                  } catch (e) { return null; }
+                };
+                // <<< shared run identity
+
+                // B.2 (PROCESS-003). The note describes THIS run. A run-status inherited from
+                // the base branch would put another ticket's outcome in the operator's log.
+                const runStatus = readRunArtefact(scratchDir, 'run-status.json') || {};
                 const report = reportValue();
 
                 const keyOf = (obj, names) => {
@@ -2710,6 +2932,19 @@ steps:
                   resetError = 'the soft reset did not move HEAD to ' + base.ref + ' (' + String(baseSha).slice(0, 12) + '); HEAD is ' + String(headAfter).slice(0, 12);
                 }
 
+                // PROCESS-003. `git reset --soft` re-stages whatever the engineer committed, and a
+                // commit titled "chore(speech-005): record the CI installability fix in the report" is
+                // exactly how run state reached master. The artefacts are dropped from the index HERE,
+                // where the violation is already being recorded, so commitChanges' own fail-closed
+                // guard keeps its meaning: .ai-agent content staged AT THAT POINT is unexplained and
+                // fatal, while this is a known, attributable recovery.
+                let scratchUnstaged = [];
+                try {
+                  const listed = git('git diff --cached --name-only -- .ai-agent').trim();
+                  scratchUnstaged = listed ? listed.split('\n').map((line) => line.trim()).filter(Boolean) : [];
+                  if (scratchUnstaged.length) git('git rm -r --cached --quiet --ignore-unmatch -- .ai-agent');
+                } catch (e) { scratchUnstaged = []; }
+
                 emit({
                   recovered: recovered,
                   state: recovered ? 'recovered' : 'blocked',
@@ -2720,6 +2955,7 @@ steps:
                   headBefore: headBefore,
                   headAfter: headAfter,
                   offendingLog: offendingLog,
+                scratchUnstaged: scratchUnstaged,
                   resetError: resetError,
                   checkedAt: new Date().toISOString(),
                 });
@@ -3005,9 +3241,79 @@ steps:
                 const commitRange = git('git log --oneline -8 ' + base + '..HEAD');
                 const dirty = git('git status --porcelain -- . ":(exclude).ai-agent"');
 
+                // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                // the directory is checked out of the base branch, so a file inside it may describe a
+                // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                // identity. Anything else - including a record written before this guard existed and
+                // therefore carrying no runId at all - is ABSENT, never a verdict.
+                const readRunIdentity = (dir) => {
+                  try {
+                    const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                    return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                  } catch (e) { return null; }
+                };
+                // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                // previous dispatch's identity - its approval would then be this run's answer.
+                const mintRunIdentity = (dir, reference) => {
+                  const identity = {
+                    runId: require('crypto').randomBytes(16).toString('hex'),
+                    ticketReference: String(reference || '').trim(),
+                    pipeline: 'core.ProcessAITicket',
+                    createdAt: new Date().toISOString(),
+                  };
+                  try {
+                    fs.mkdirSync(dir, { recursive: true });
+                    fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                  } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                  return identity;
+                };
+                // INHERIT this run's identity, minting one only when the worktree has none (a
+                // resumed instance, or a step whose prepare step did not run).
+                const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                // The run identity an artefact carries. A pipeline artefact states it at the top
+                // level (`runId`); the stamped acceptance states it inside the `provenance`
+                // envelope it exists to prove. NEITHER means the record belongs to no run this
+                // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                const recordRunId = (record) => {
+                  if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                  if (record.runId) return String(record.runId);
+                  const provenance = record.provenance;
+                  if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                  return '';
+                };
+                const readRunArtefact = (dir, name) => {
+                  const identity = readRunIdentity(dir);
+                  if (!identity) return null;
+                  try {
+                    const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                    if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                    if (recordRunId(record) !== String(identity.runId)) return null;
+                    return record;
+                  } catch (e) { return null; }
+                };
+                // <<< shared run identity
+
+                // B.1 (PROCESS-003). Every run-status record carries this run's identity, so
+                // a reader can never mistake a status inherited from the base branch - or
+                // written by a previous ticket - for this run's outcome. prepareWorktree mints
+                // it; ensureRunIdentity is idempotent and covers a resumed instance whose
+                // worktree predates the identity.
+                const scratchDir = path.join(wt, '.ai-agent');
+                const runIdentity = ensureRunIdentity(scratchDir, process.env.REF);
+                const identityFields = {
+                  runId: String(runIdentity.runId),
+                  ticketReference: String(runIdentity.ticketReference || process.env.REF || '').trim(),
+                };
                 const writeStatus = (payload) => {
+                  // An explicit field in payload wins; the identity is the default.
+                  const record = Object.assign({}, identityFields, payload);
                   try { fs.mkdirSync(path.dirname(statusPath), { recursive: true }); } catch (e) { /* best effort */ }
-                  try { fs.writeFileSync(statusPath, JSON.stringify(payload), 'utf8'); } catch (e) { /* best effort */ }
+                  try { fs.writeFileSync(statusPath, JSON.stringify(record), 'utf8'); } catch (e) { /* best effort */ }
                 };
 
                 const evidence = {
@@ -3151,14 +3457,70 @@ steps:
                 // the previous four copies of the allow-list drifted, so a "complete" report was
                 // silently treated as blocked at one site but not at another.
                 const wt = String(process.env.WT || '').trim();
-                const statusPath = path.join(wt, '.ai-agent', 'run-status.json');
+                const dir = path.join(wt, '.ai-agent');
+                const statusPath = path.join(dir, 'run-status.json');
+                // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                // the directory is checked out of the base branch, so a file inside it may describe a
+                // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                // identity. Anything else - including a record written before this guard existed and
+                // therefore carrying no runId at all - is ABSENT, never a verdict.
+                const readRunIdentity = (dir) => {
+                  try {
+                    const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                    return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                  } catch (e) { return null; }
+                };
+                // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                // previous dispatch's identity - its approval would then be this run's answer.
+                const mintRunIdentity = (dir, reference) => {
+                  const identity = {
+                    runId: require('crypto').randomBytes(16).toString('hex'),
+                    ticketReference: String(reference || '').trim(),
+                    pipeline: 'core.ProcessAITicket',
+                    createdAt: new Date().toISOString(),
+                  };
+                  try {
+                    fs.mkdirSync(dir, { recursive: true });
+                    fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                  } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                  return identity;
+                };
+                // INHERIT this run's identity, minting one only when the worktree has none (a
+                // resumed instance, or a step whose prepare step did not run).
+                const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                // The run identity an artefact carries. A pipeline artefact states it at the top
+                // level (`runId`); the stamped acceptance states it inside the `provenance`
+                // envelope it exists to prove. NEITHER means the record belongs to no run this
+                // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                const recordRunId = (record) => {
+                  if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                  if (record.runId) return String(record.runId);
+                  const provenance = record.provenance;
+                  if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                  return '';
+                };
+                const readRunArtefact = (dir, name) => {
+                  const identity = readRunIdentity(dir);
+                  if (!identity) return null;
+                  try {
+                    const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                    if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                    if (recordRunId(record) !== String(identity.runId)) return null;
+                    return record;
+                  } catch (e) { return null; }
+                };
+                // <<< shared run identity
 
-                try {
-                  const record = JSON.parse(fs.readFileSync(statusPath, 'utf8'));
-                  process.stdout.write(String(record.status || ''));
-                } catch (e) {
-                  process.stdout.write('');
-                }
+                // B.2 (PROCESS-003). Only THIS run's status is an outcome. An inherited record
+                // reports nothing, which routes the run down the "no status recorded" path
+                // instead of letting another ticket's "completed" settle this one.
+                const record = readRunArtefact(dir, 'run-status.json');
+                process.stdout.write(record ? String(record.status || '') : '');
             env:
               WT: ${steps.readWorktreePath.outputs.stdout}
             failOnError: false
@@ -3427,6 +3789,69 @@ steps:
                             const dir = path.join(wt, '.ai-agent');
                             fs.mkdirSync(dir, { recursive: true });
 
+                            // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                            // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                            // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                            // the directory is checked out of the base branch, so a file inside it may describe a
+                            // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                            // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                            // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                            // identity. Anything else - including a record written before this guard existed and
+                            // therefore carrying no runId at all - is ABSENT, never a verdict.
+                            const readRunIdentity = (dir) => {
+                              try {
+                                const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                                return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                              } catch (e) { return null; }
+                            };
+                            // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                            // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                            // previous dispatch's identity - its approval would then be this run's answer.
+                            const mintRunIdentity = (dir, reference) => {
+                              const identity = {
+                                runId: require('crypto').randomBytes(16).toString('hex'),
+                                ticketReference: String(reference || '').trim(),
+                                pipeline: 'core.ProcessAITicket',
+                                createdAt: new Date().toISOString(),
+                              };
+                              try {
+                                fs.mkdirSync(dir, { recursive: true });
+                                fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                              } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                              return identity;
+                            };
+                            // INHERIT this run's identity, minting one only when the worktree has none (a
+                            // resumed instance, or a step whose prepare step did not run).
+                            const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                            // The run identity an artefact carries. A pipeline artefact states it at the top
+                            // level (`runId`); the stamped acceptance states it inside the `provenance`
+                            // envelope it exists to prove. NEITHER means the record belongs to no run this
+                            // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                            const recordRunId = (record) => {
+                              if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                              if (record.runId) return String(record.runId);
+                              const provenance = record.provenance;
+                              if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                              return '';
+                            };
+                            const readRunArtefact = (dir, name) => {
+                              const identity = readRunIdentity(dir);
+                              if (!identity) return null;
+                              try {
+                                const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                                if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                                if (recordRunId(record) !== String(identity.runId)) return null;
+                                return record;
+                              } catch (e) { return null; }
+                            };
+                            // <<< shared run identity
+
+                            // B.1. A run that reaches its first reviewer without an identity has
+                            // none because prepareWorktree was not the one that created this
+                            // worktree (a resumed instance, or a direct step invocation). Minting
+                            // it here is idempotent and never overwrites an existing one.
+                            const identity = ensureRunIdentity(dir, process.env.REF);
+
                             // Anything already here predates this reviewer run. The engineer
                             // can write this directory, so it must not survive into the window:
                             // clearing it makes "the reviewer wrote no verdict" observable
@@ -3449,6 +3874,11 @@ steps:
                               reviewerId: String(process.env.REVIEWER || '').trim(),
                               reviewCycle: String(process.env.CYCLE || '').trim(),
                               nonce: crypto.randomBytes(16).toString('hex'),
+                              // B.1. The window is the root of the run's provenance chain:
+                              // stampReview copies this identity into the accepted stamp, and
+                              // every consumer refuses an artefact whose runId is not this one.
+                              runId: identity.runId,
+                              ticketReference: identity.ticketReference || String(process.env.REF || '').trim(),
                             };
                             try {
                               fs.writeFileSync(path.join(dir, 'review-window.json'), JSON.stringify(window), 'utf8');
@@ -3462,6 +3892,7 @@ steps:
                               startedAt: window.startedAt,
                               reviewerId: window.reviewerId,
                               reviewCycle: window.reviewCycle,
+                              runId: window.runId,
                               cleared: cleared,
                             }));
                         env:
@@ -3690,6 +4121,63 @@ steps:
                             const windowPath = path.join(dir, 'review-window.json');
                             const acceptedPath = path.join(dir, 'review-accepted.json');
 
+                            // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                            // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                            // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                            // the directory is checked out of the base branch, so a file inside it may describe a
+                            // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                            // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                            // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                            // identity. Anything else - including a record written before this guard existed and
+                            // therefore carrying no runId at all - is ABSENT, never a verdict.
+                            const readRunIdentity = (dir) => {
+                              try {
+                                const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                                return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                              } catch (e) { return null; }
+                            };
+                            // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                            // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                            // previous dispatch's identity - its approval would then be this run's answer.
+                            const mintRunIdentity = (dir, reference) => {
+                              const identity = {
+                                runId: require('crypto').randomBytes(16).toString('hex'),
+                                ticketReference: String(reference || '').trim(),
+                                pipeline: 'core.ProcessAITicket',
+                                createdAt: new Date().toISOString(),
+                              };
+                              try {
+                                fs.mkdirSync(dir, { recursive: true });
+                                fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                              } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                              return identity;
+                            };
+                            // INHERIT this run's identity, minting one only when the worktree has none (a
+                            // resumed instance, or a step whose prepare step did not run).
+                            const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                            // The run identity an artefact carries. A pipeline artefact states it at the top
+                            // level (`runId`); the stamped acceptance states it inside the `provenance`
+                            // envelope it exists to prove. NEITHER means the record belongs to no run this
+                            // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                            const recordRunId = (record) => {
+                              if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                              if (record.runId) return String(record.runId);
+                              const provenance = record.provenance;
+                              if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                              return '';
+                            };
+                            const readRunArtefact = (dir, name) => {
+                              const identity = readRunIdentity(dir);
+                              if (!identity) return null;
+                              try {
+                                const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                                if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                                if (recordRunId(record) !== String(identity.runId)) return null;
+                                return record;
+                              } catch (e) { return null; }
+                            };
+                            // <<< shared run identity
+
                             const report = (payload) => {
                               payload.accepted = payload.accepted === true;
                               payload.recordedAt = new Date().toISOString();
@@ -3707,6 +4195,21 @@ steps:
                             const window = readJson(windowPath);
                             if (!window || typeof window.startedAt !== 'string') {
                               reject('no review window was recorded for this reviewer run');
+                            }
+
+                            // B.2. A window that belongs to a DIFFERENT run is not this reviewer's
+                            // window: a stale file inherited from the base branch would otherwise
+                            // lend its nonce to review.json written by anything that can reach the
+                            // worktree. Treat it as absent rather than as an answer.
+                            const identity = readRunIdentity(dir);
+                            if (!identity) {
+                              reject('this run has no run identity (.ai-agent/run-identity.json), so no artefact can be attributed to it');
+                            }
+                            if (String(window.runId || '') !== String(identity.runId)) {
+                              reject(
+                                'the review window belongs to a different run (window runId "' + String(window.runId || 'none') + '", this run "' + identity.runId + '")',
+                                { staleWindow: { runId: window.runId || null, reference: window.reference || null, startedAt: window.startedAt || null } }
+                              );
                             }
 
                             if (!fs.existsSync(reviewPath)) {
@@ -3745,6 +4248,10 @@ steps:
                               source: 'pipeline',
                               producer: 'core.ProcessAITicket',
                               step: 'stampReview',
+                              // B.1. The run identity travels with the verdict, so a consumer can
+                              // tell THIS reviewer's artefact from one another ticket published.
+                              runId: identity.runId,
+                              ticketReference: String(identity.ticketReference || window.reference || process.env.REF || '').trim(),
                               reference: String(window.reference || process.env.REF || '').trim(),
                               reviewerId: String(window.reviewerId || process.env.REVIEWER || '').trim(),
                               reviewCycle: reviewCycle,
@@ -3766,7 +4273,7 @@ steps:
                             };
 
                             try {
-                              fs.writeFileSync(acceptedPath, JSON.stringify({ provenance: provenance }, null, 2), 'utf8');
+                              fs.writeFileSync(acceptedPath, JSON.stringify({ runId: String((provenance && provenance.runId) || ''), ticketReference: String((provenance && provenance.ticketReference) || ''), provenance: provenance }, null, 2), 'utf8');
                             } catch (e) {
                               reject('the pipeline could not record the verdict provenance: ' + String((e && e.message) || e));
                             }
@@ -3807,6 +4314,63 @@ steps:
                             const normalisedPath = path.join(wt, '.ai-agent', 'review-normalised.json');
                             const windowPath = path.join(wt, '.ai-agent', 'review-window.json');
                             const acceptedPath = path.join(wt, '.ai-agent', 'review-accepted.json');
+
+                            // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                            // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                            // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                            // the directory is checked out of the base branch, so a file inside it may describe a
+                            // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                            // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                            // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                            // identity. Anything else - including a record written before this guard existed and
+                            // therefore carrying no runId at all - is ABSENT, never a verdict.
+                            const readRunIdentity = (dir) => {
+                              try {
+                                const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                                return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                              } catch (e) { return null; }
+                            };
+                            // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                            // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                            // previous dispatch's identity - its approval would then be this run's answer.
+                            const mintRunIdentity = (dir, reference) => {
+                              const identity = {
+                                runId: require('crypto').randomBytes(16).toString('hex'),
+                                ticketReference: String(reference || '').trim(),
+                                pipeline: 'core.ProcessAITicket',
+                                createdAt: new Date().toISOString(),
+                              };
+                              try {
+                                fs.mkdirSync(dir, { recursive: true });
+                                fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                              } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                              return identity;
+                            };
+                            // INHERIT this run's identity, minting one only when the worktree has none (a
+                            // resumed instance, or a step whose prepare step did not run).
+                            const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                            // The run identity an artefact carries. A pipeline artefact states it at the top
+                            // level (`runId`); the stamped acceptance states it inside the `provenance`
+                            // envelope it exists to prove. NEITHER means the record belongs to no run this
+                            // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                            const recordRunId = (record) => {
+                              if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                              if (record.runId) return String(record.runId);
+                              const provenance = record.provenance;
+                              if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                              return '';
+                            };
+                            const readRunArtefact = (dir, name) => {
+                              const identity = readRunIdentity(dir);
+                              if (!identity) return null;
+                              try {
+                                const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                                if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                                if (recordRunId(record) !== String(identity.runId)) return null;
+                                return record;
+                              } catch (e) { return null; }
+                            };
+                            // <<< shared run identity
 
                             // ---------------------------------------------------------------------------
                             // The reviewer writes its verdict in whichever key convention it prefers.
@@ -4046,6 +4610,13 @@ steps:
                             // verdict 'review_unavailable' so the loop can halt loudly and the
                             // ticket is never told the work was "rejected" when it was never
                             // reviewed at all (REACTORY-302016408).
+                            // B.1. Both payloads below carry this run's identity. A reader that
+                            // finds a normalised record without this run's runId treats it as
+                            // absent, so even a capture failure cannot be mistaken for - or
+                            // shadow - another ticket's artefact.
+                            const runIdentity = ensureRunIdentity(path.join(wt, '.ai-agent'), process.env.REF);
+                            const RUN_ID = runIdentity ? String(runIdentity.runId) : '';
+                            const TICKET_REFERENCE = String((runIdentity && runIdentity.ticketReference) || process.env.REF || '').trim();
                             const fail = (verdict, reason, extra) => {
                               const payload = Object.assign({
                                 verdict: verdict,
@@ -4070,6 +4641,11 @@ steps:
                                 keysSeen: [],
                                 parseError: reason,
                                 reviewPath: reviewPath,
+                                // B.1. This run's identity, so a reader can tell this capture
+                                // failure from another ticket's artefact (and refuse both when
+                                // neither belongs to it).
+                                runId: RUN_ID,
+                                ticketReference: TICKET_REFERENCE,
                               }, extra || {});
                               try { fs.writeFileSync(normalisedPath, JSON.stringify(payload), 'utf8'); } catch (e) { /* best effort */ }
                               process.stdout.write(JSON.stringify(payload));
@@ -4095,6 +4671,20 @@ steps:
                               const window = readJsonFile(windowPath);
                               if (!window || typeof window.startedAt !== 'string' || !window.startedAt) {
                                 return 'no review window was recorded for this reviewer run, so a verdict cannot be attributed to the reviewer';
+                              }
+
+                              // B.2 (PROCESS-003). The window, the accepted stamp and this request
+                              // must all belong to THIS run. A repository that tracks .ai-agent hands
+                              // a fresh worktree a complete, internally consistent approval from a
+                              // previous ticket (SPEECH-005 -> SPEECH-006): every cross-check below
+                              // passes, because that run's files agree with each other. Only the run
+                              // identity can tell them apart, so a mismatch is ABSENT, never an answer.
+                              const identity = readRunIdentity(path.join(wt, '.ai-agent'));
+                              if (!identity) {
+                                return 'this run has no run identity (.ai-agent/run-identity.json), so no verdict can be attributed to it';
+                              }
+                              if (String(window.runId || '') !== String(identity.runId)) {
+                                return 'the review window belongs to a different run (window runId "' + String(window.runId || 'none') + '", this run "' + identity.runId + '"): inherited .ai-agent state is not this reviewer\'s work';
                               }
 
                               const startedAtMs = Number.isFinite(Number(window.startedAtMs))
@@ -4124,8 +4714,9 @@ steps:
                                 return 'review.json was not accepted by the pipeline (provenance source/stage is not the reviewer step)';
                               }
                               if (String(provenance.windowNonce || '') !== String(window.nonce || '')
-                                || String(provenance.windowStartedAt || '') !== String(window.startedAt || '')) {
-                                return 'review.json provenance belongs to a different review window than the current reviewer run';
+                                || String(provenance.windowStartedAt || '') !== String(window.startedAt || '')
+                                || String(provenance.runId || '') !== String(identity.runId)) {
+                                return 'review.json provenance belongs to a different review window or run than the current reviewer run';
                               }
 
                               let content;
@@ -4321,6 +4912,11 @@ steps:
                               schemaProblems: schemaProblems,
                               keysSeen: (rv && typeof rv === 'object' && !Array.isArray(rv) ? Object.keys(rv) : (raw && typeof raw === 'object' ? Object.keys(raw) : [])),
                               reviewPath: reviewPath,
+                              // B.1. The run identity is written into the side-car itself:
+                              // every consumer compares it with run-identity.json before it
+                              // treats a field here as an answer.
+                              runId: RUN_ID,
+                              ticketReference: TICKET_REFERENCE,
                             };
 
                             if (verdict === 'rejected' && !findingsResolved) {
@@ -4360,11 +4956,69 @@ steps:
                             const fs = require('fs');
                             const path = require('path');
                             const wt = String(process.env.WT || '').trim();
+                            const dir = path.join(wt, '.ai-agent');
+                            // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                            // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                            // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                            // the directory is checked out of the base branch, so a file inside it may describe a
+                            // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                            // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                            // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                            // identity. Anything else - including a record written before this guard existed and
+                            // therefore carrying no runId at all - is ABSENT, never a verdict.
+                            const readRunIdentity = (dir) => {
+                              try {
+                                const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                                return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                              } catch (e) { return null; }
+                            };
+                            // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                            // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                            // previous dispatch's identity - its approval would then be this run's answer.
+                            const mintRunIdentity = (dir, reference) => {
+                              const identity = {
+                                runId: require('crypto').randomBytes(16).toString('hex'),
+                                ticketReference: String(reference || '').trim(),
+                                pipeline: 'core.ProcessAITicket',
+                                createdAt: new Date().toISOString(),
+                              };
+                              try {
+                                fs.mkdirSync(dir, { recursive: true });
+                                fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                              } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                              return identity;
+                            };
+                            // INHERIT this run's identity, minting one only when the worktree has none (a
+                            // resumed instance, or a step whose prepare step did not run).
+                            const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                            // The run identity an artefact carries. A pipeline artefact states it at the top
+                            // level (`runId`); the stamped acceptance states it inside the `provenance`
+                            // envelope it exists to prove. NEITHER means the record belongs to no run this
+                            // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                            const recordRunId = (record) => {
+                              if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                              if (record.runId) return String(record.runId);
+                              const provenance = record.provenance;
+                              if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                              return '';
+                            };
+                            const readRunArtefact = (dir, name) => {
+                              const identity = readRunIdentity(dir);
+                              if (!identity) return null;
+                              try {
+                                const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                                if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                                if (recordRunId(record) !== String(identity.runId)) return null;
+                                return record;
+                              } catch (e) { return null; }
+                            };
+                            // <<< shared run identity
+
+                            // B.2 (PROCESS-003). An artefact that does not belong to THIS run is
+                            // absent, so the loop cannot be steered by a previous ticket's review.
                             let resolved = false;
-                            try {
-                              const record = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'review-normalised.json'), 'utf8'));
-                              resolved = record.findingsResolved === true;
-                            } catch (e) { resolved = false; }
+                            const record = readRunArtefact(dir, 'review-normalised.json');
+                            if (record) resolved = record.findingsResolved === true;
                             process.stdout.write(resolved ? 'true' : 'false');
                         env:
                           WT: ${steps.readWorktreePath.outputs.stdout}
@@ -4402,15 +5056,73 @@ steps:
                             const path = require('path');
                             const wt = String(process.env.WT || '').trim();
                             const count = (value) => (Array.isArray(value) ? value.length : 0);
+                            const dir = path.join(wt, '.ai-agent');
+                            // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                            // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                            // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                            // the directory is checked out of the base branch, so a file inside it may describe a
+                            // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                            // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                            // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                            // identity. Anything else - including a record written before this guard existed and
+                            // therefore carrying no runId at all - is ABSENT, never a verdict.
+                            const readRunIdentity = (dir) => {
+                              try {
+                                const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                                return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                              } catch (e) { return null; }
+                            };
+                            // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                            // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                            // previous dispatch's identity - its approval would then be this run's answer.
+                            const mintRunIdentity = (dir, reference) => {
+                              const identity = {
+                                runId: require('crypto').randomBytes(16).toString('hex'),
+                                ticketReference: String(reference || '').trim(),
+                                pipeline: 'core.ProcessAITicket',
+                                createdAt: new Date().toISOString(),
+                              };
+                              try {
+                                fs.mkdirSync(dir, { recursive: true });
+                                fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                              } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                              return identity;
+                            };
+                            // INHERIT this run's identity, minting one only when the worktree has none (a
+                            // resumed instance, or a step whose prepare step did not run).
+                            const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                            // The run identity an artefact carries. A pipeline artefact states it at the top
+                            // level (`runId`); the stamped acceptance states it inside the `provenance`
+                            // envelope it exists to prove. NEITHER means the record belongs to no run this
+                            // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                            const recordRunId = (record) => {
+                              if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                              if (record.runId) return String(record.runId);
+                              const provenance = record.provenance;
+                              if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                              return '';
+                            };
+                            const readRunArtefact = (dir, name) => {
+                              const identity = readRunIdentity(dir);
+                              if (!identity) return null;
+                              try {
+                                const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                                if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                                if (recordRunId(record) !== String(identity.runId)) return null;
+                                return record;
+                              } catch (e) { return null; }
+                            };
+                            // <<< shared run identity
+
                             let required = 'unknown';
-                            try {
-                              const record = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'review-normalised.json'), 'utf8'));
+                            const record = readRunArtefact(dir, 'review-normalised.json');
+                            if (record) {
                               const total = count(record.requiredChanges) + count(record.blockingFindings) + count(record.findings);
                               required = total > 0 ? 'true' : 'false';
-                            } catch (e) {
-                              // An unreadable record is NOT evidence that there is nothing to
-                              // fix: 'unknown' keeps the hand-back and lets the halt gate
-                              // decide, rather than silently settling the loop on a guess.
+                            } else {
+                              // A record written by ANOTHER run is no better than an unreadable
+                              // one: it is NOT evidence that there is nothing to fix, so 'unknown'
+                              // keeps the hand-back and lets the halt gate decide.
                               required = 'unknown';
                             }
                             process.stdout.write(required);
@@ -4452,8 +5164,66 @@ steps:
                             const wt = String(process.env.WT || '').trim();
                             const p = path.join(wt, '.ai-agent', 'review-normalised.json');
 
-                            let review = {};
-                            try { review = JSON.parse(fs.readFileSync(p, 'utf8')); } catch (e) { review = {}; }
+                            // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                            // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                            // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                            // the directory is checked out of the base branch, so a file inside it may describe a
+                            // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                            // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                            // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                            // identity. Anything else - including a record written before this guard existed and
+                            // therefore carrying no runId at all - is ABSENT, never a verdict.
+                            const readRunIdentity = (dir) => {
+                              try {
+                                const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                                return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                              } catch (e) { return null; }
+                            };
+                            // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                            // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                            // previous dispatch's identity - its approval would then be this run's answer.
+                            const mintRunIdentity = (dir, reference) => {
+                              const identity = {
+                                runId: require('crypto').randomBytes(16).toString('hex'),
+                                ticketReference: String(reference || '').trim(),
+                                pipeline: 'core.ProcessAITicket',
+                                createdAt: new Date().toISOString(),
+                              };
+                              try {
+                                fs.mkdirSync(dir, { recursive: true });
+                                fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                              } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                              return identity;
+                            };
+                            // INHERIT this run's identity, minting one only when the worktree has none (a
+                            // resumed instance, or a step whose prepare step did not run).
+                            const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                            // The run identity an artefact carries. A pipeline artefact states it at the top
+                            // level (`runId`); the stamped acceptance states it inside the `provenance`
+                            // envelope it exists to prove. NEITHER means the record belongs to no run this
+                            // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                            const recordRunId = (record) => {
+                              if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                              if (record.runId) return String(record.runId);
+                              const provenance = record.provenance;
+                              if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                              return '';
+                            };
+                            const readRunArtefact = (dir, name) => {
+                              const identity = readRunIdentity(dir);
+                              if (!identity) return null;
+                              try {
+                                const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                                if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                                if (recordRunId(record) !== String(identity.runId)) return null;
+                                return record;
+                              } catch (e) { return null; }
+                            };
+                            // <<< shared run identity
+
+                            // B.2 (PROCESS-003). The brief is built from the side-car, so it must
+                            // be THIS run's side-car: an inherited one would describe another ticket.
+                            const review = readRunArtefact(path.dirname(p), 'review-normalised.json') || {};
 
                             // >>> shared findings rendering (byte-identical in captureReview,
                             // handBackBriefing and createPullRequest — pinned by a test; do not fork it.
@@ -4613,9 +5383,69 @@ steps:
                             const dir = path.join(wt, '.ai-agent');
                             const reviewPath = path.join(dir, 'review.json');
 
-                            const readJson = (name) => {
-                              try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch (e) { return null; }
+                            // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                            // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                            // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                            // the directory is checked out of the base branch, so a file inside it may describe a
+                            // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                            // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                            // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                            // identity. Anything else - including a record written before this guard existed and
+                            // therefore carrying no runId at all - is ABSENT, never a verdict.
+                            const readRunIdentity = (dir) => {
+                              try {
+                                const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                                return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                              } catch (e) { return null; }
                             };
+                            // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                            // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                            // previous dispatch's identity - its approval would then be this run's answer.
+                            const mintRunIdentity = (dir, reference) => {
+                              const identity = {
+                                runId: require('crypto').randomBytes(16).toString('hex'),
+                                ticketReference: String(reference || '').trim(),
+                                pipeline: 'core.ProcessAITicket',
+                                createdAt: new Date().toISOString(),
+                              };
+                              try {
+                                fs.mkdirSync(dir, { recursive: true });
+                                fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                              } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                              return identity;
+                            };
+                            // INHERIT this run's identity, minting one only when the worktree has none (a
+                            // resumed instance, or a step whose prepare step did not run).
+                            const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                            // The run identity an artefact carries. A pipeline artefact states it at the top
+                            // level (`runId`); the stamped acceptance states it inside the `provenance`
+                            // envelope it exists to prove. NEITHER means the record belongs to no run this
+                            // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                            const recordRunId = (record) => {
+                              if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                              if (record.runId) return String(record.runId);
+                              const provenance = record.provenance;
+                              if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                              return '';
+                            };
+                            const readRunArtefact = (dir, name) => {
+                              const identity = readRunIdentity(dir);
+                              if (!identity) return null;
+                              try {
+                                const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                                if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                                if (recordRunId(record) !== String(identity.runId)) return null;
+                                return record;
+                              } catch (e) { return null; }
+                            };
+                            // <<< shared run identity
+
+                            // B.2 (PROCESS-003). Every artefact read below is written by the pipeline
+                            // into a directory the base branch can hand over whole. Reading through the
+                            // provenance-aware reader makes a foreign (previously approved) set of
+                            // artefacts read as ABSENT instead of as this run's verdict, so the run
+                            // falls through to review_unavailable and is reviewed again.
+                            const readJson = (name) => readRunArtefact(dir, name);
                             // >>> shared review schema (byte-identical in captureReview, readVerdict and readPublishable,
                             // modulo indentation - pinned by a test; do not fork it)
                             //
@@ -5426,6 +6256,63 @@ steps:
                             const normalisedPath = path.join(dir, 'review-normalised.json');
                             const statusPath = path.join(dir, 'run-status.json');
 
+                            // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                            // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                            // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                            // the directory is checked out of the base branch, so a file inside it may describe a
+                            // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                            // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                            // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                            // identity. Anything else - including a record written before this guard existed and
+                            // therefore carrying no runId at all - is ABSENT, never a verdict.
+                            const readRunIdentity = (dir) => {
+                              try {
+                                const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                                return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                              } catch (e) { return null; }
+                            };
+                            // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                            // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                            // previous dispatch's identity - its approval would then be this run's answer.
+                            const mintRunIdentity = (dir, reference) => {
+                              const identity = {
+                                runId: require('crypto').randomBytes(16).toString('hex'),
+                                ticketReference: String(reference || '').trim(),
+                                pipeline: 'core.ProcessAITicket',
+                                createdAt: new Date().toISOString(),
+                              };
+                              try {
+                                fs.mkdirSync(dir, { recursive: true });
+                                fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                              } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                              return identity;
+                            };
+                            // INHERIT this run's identity, minting one only when the worktree has none (a
+                            // resumed instance, or a step whose prepare step did not run).
+                            const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                            // The run identity an artefact carries. A pipeline artefact states it at the top
+                            // level (`runId`); the stamped acceptance states it inside the `provenance`
+                            // envelope it exists to prove. NEITHER means the record belongs to no run this
+                            // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                            const recordRunId = (record) => {
+                              if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                              if (record.runId) return String(record.runId);
+                              const provenance = record.provenance;
+                              if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                              return '';
+                            };
+                            const readRunArtefact = (dir, name) => {
+                              const identity = readRunIdentity(dir);
+                              if (!identity) return null;
+                              try {
+                                const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                                if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                                if (recordRunId(record) !== String(identity.runId)) return null;
+                                return record;
+                              } catch (e) { return null; }
+                            };
+                            // <<< shared run identity
+
                             const mtimeOf = (file) => {
                               try { return fs.statSync(file).mtimeMs; } catch (e) { return null; }
                             };
@@ -5436,10 +6323,14 @@ steps:
                               process.exit(0);
                             };
 
-                            // No verdict artefact at all is a capture failure, handled as
-                            // review_unavailable. It is never a reason to review again.
-                            if (!fs.existsSync(reviewPath) && !fs.existsSync(normalisedPath)) {
-                              skip('no review artefacts exist');
+                            // B.2 (PROCESS-003). "No review artefacts" must mean none from THIS
+                            // run: a repository that tracks .ai-agent hands the worktree a
+                            // previous ticket's review, and counting that as this run's would
+                            // let the confirmation pass skip a review that never happened.
+                            const thisRunReview = readRunArtefact(dir, 'review-normalised.json')
+                              || readRunArtefact(dir, 'review-accepted.json');
+                            if (!thisRunReview) {
+                              skip('no review artefacts exist for this run');
                             }
 
                             const reportMtime = mtimeOf(reportPath);
@@ -5488,8 +6379,8 @@ steps:
                               process.stderr.write(String.fromCharCode(10));
                             }
 
-                            let status = '';
-                            try { status = String(JSON.parse(fs.readFileSync(statusPath, 'utf8')).status || ''); } catch (e) { status = ''; }
+                            const statusRecord = readRunArtefact(dir, 'run-status.json');
+                            const status = statusRecord ? String(statusRecord.status || '') : '';
                             if (status && status !== 'completed') {
                               skip('the last revision did not complete (status ' + status + ')');
                             }
@@ -5732,9 +6623,75 @@ steps:
 
                       const wt = String(process.env.WT || '').trim();
                       const dir = path.join(wt, '.ai-agent');
-                      const readJson = (name) => {
-                        try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch (e) { return null; }
+
+                      // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                      // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                      // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                      // the directory is checked out of the base branch, so a file inside it may describe a
+                      // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                      // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                      // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                      // identity. Anything else - including a record written before this guard existed and
+                      // therefore carrying no runId at all - is ABSENT, never a verdict.
+                      const readRunIdentity = (dir) => {
+                        try {
+                          const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                          return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                        } catch (e) { return null; }
                       };
+                      // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                      // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                      // previous dispatch's identity - its approval would then be this run's answer.
+                      const mintRunIdentity = (dir, reference) => {
+                        const identity = {
+                          runId: require('crypto').randomBytes(16).toString('hex'),
+                          ticketReference: String(reference || '').trim(),
+                          pipeline: 'core.ProcessAITicket',
+                          createdAt: new Date().toISOString(),
+                        };
+                        try {
+                          fs.mkdirSync(dir, { recursive: true });
+                          fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                        } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                        return identity;
+                      };
+                      // INHERIT this run's identity, minting one only when the worktree has none (a
+                      // resumed instance, or a step whose prepare step did not run).
+                      const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                      // The run identity an artefact carries. A pipeline artefact states it at the top
+                      // level (`runId`); the stamped acceptance states it inside the `provenance`
+                      // envelope it exists to prove. NEITHER means the record belongs to no run this
+                      // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                      const recordRunId = (record) => {
+                        if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                        if (record.runId) return String(record.runId);
+                        const provenance = record.provenance;
+                        if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                        return '';
+                      };
+                      const readRunArtefact = (dir, name) => {
+                        const identity = readRunIdentity(dir);
+                        if (!identity) return null;
+                        try {
+                          const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                          if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                          if (recordRunId(record) !== String(identity.runId)) return null;
+                          return record;
+                        } catch (e) { return null; }
+                      };
+                      // <<< shared run identity
+
+                      // B.2 (PROCESS-003). The verdict below is re-derived from the stamped
+                      // review.json, but the WINDOW and the ACCEPTED stamp that prove it was this
+                      // reviewer's work are pipeline artefacts from a directory the base branch can
+                      // hand over whole. Read through the provenance-aware reader: a foreign window
+                      // is absent, which turns the whole decision into review_unavailable.
+                      const readJson = (name) => readRunArtefact(dir, name);
+
+                      // B.1. This run's identity, read once: every artefact written below carries it.
+                      const runIdentity = ensureRunIdentity(dir, process.env.REF);
+                      const runIdentityId = runIdentity ? String(runIdentity.runId) : '';
+                      const ticketReference = String((runIdentity && runIdentity.ticketReference) || process.env.REF || '').trim();
 
                       // ── The decision comes from the STAMPED bytes ──────────────────
                       // REACTORY-302016408 (revision 2). review-normalised.json is a
@@ -5935,6 +6892,12 @@ steps:
                         stampedProblem = 'the recorded provenance is not a reviewer stamp';
                       } else if (String(provenance.windowNonce || '') !== String(window.nonce || '')) {
                         stampedProblem = 'the provenance belongs to a different review window';
+                      } else if (String(provenance.runId || '') !== String(window.runId || '')) {
+                        // B.2 (PROCESS-003). Same run test as captureReview and readVerdict: a
+                        // coherent approval inherited from a previous ticket passes every other
+                        // cross-check, and only the run identity can tell it apart.
+                        stampedProblem = 'the recorded provenance belongs to a different run (runId "'
+                          + String(provenance.runId || 'none') + '", this run "' + String(window.runId || 'none') + '")';
                       } else if (!reviewDigest) {
                         stampedProblem = 'review.json is missing, so the accepted bytes cannot be re-read';
                       } else if (String(provenance.reviewSha256 || '') !== reviewDigest) {
@@ -6141,6 +7104,12 @@ steps:
                         reviewAttempt: provenance && provenance.attempt !== undefined ? provenance.attempt : null,
                         reviewAcceptedAt: provenance && provenance.acceptedAt ? String(provenance.acceptedAt) : null,
                         decidedAt: new Date().toISOString(),
+                        // B.1. The decision travels with the run identity it was made for.
+                        // readAcceptanceNarrative reads it back through the same guard, so a
+                        // decision inherited from the base branch can never be reported as
+                        // this run's outcome.
+                        runId: runIdentityId,
+                        ticketReference: ticketReference,
                       };
                       try { fs.writeFileSync(path.join(dir, 'publish-decision.json'), JSON.stringify(decision, null, 2), 'utf8'); } catch (e) { /* best effort */ }
 
@@ -6201,8 +7170,67 @@ steps:
                       const fs = require('fs');
                       const path = require('path');
                       const wt = String(process.env.WT || '').trim();
-                      let decision = {};
-                      try { decision = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'publish-decision.json'), 'utf8')); } catch (e) { decision = {}; }
+                      const dir = path.join(wt, '.ai-agent');
+                      // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                      // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                      // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                      // the directory is checked out of the base branch, so a file inside it may describe a
+                      // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                      // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                      // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                      // identity. Anything else - including a record written before this guard existed and
+                      // therefore carrying no runId at all - is ABSENT, never a verdict.
+                      const readRunIdentity = (dir) => {
+                        try {
+                          const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                          return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                        } catch (e) { return null; }
+                      };
+                      // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                      // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                      // previous dispatch's identity - its approval would then be this run's answer.
+                      const mintRunIdentity = (dir, reference) => {
+                        const identity = {
+                          runId: require('crypto').randomBytes(16).toString('hex'),
+                          ticketReference: String(reference || '').trim(),
+                          pipeline: 'core.ProcessAITicket',
+                          createdAt: new Date().toISOString(),
+                        };
+                        try {
+                          fs.mkdirSync(dir, { recursive: true });
+                          fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                        } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                        return identity;
+                      };
+                      // INHERIT this run's identity, minting one only when the worktree has none (a
+                      // resumed instance, or a step whose prepare step did not run).
+                      const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                      // The run identity an artefact carries. A pipeline artefact states it at the top
+                      // level (`runId`); the stamped acceptance states it inside the `provenance`
+                      // envelope it exists to prove. NEITHER means the record belongs to no run this
+                      // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                      const recordRunId = (record) => {
+                        if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                        if (record.runId) return String(record.runId);
+                        const provenance = record.provenance;
+                        if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                        return '';
+                      };
+                      const readRunArtefact = (dir, name) => {
+                        const identity = readRunIdentity(dir);
+                        if (!identity) return null;
+                        try {
+                          const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                          if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                          if (recordRunId(record) !== String(identity.runId)) return null;
+                          return record;
+                        } catch (e) { return null; }
+                      };
+                      // <<< shared run identity
+
+                      // B.2 (PROCESS-003). The narrative must describe THIS run's decision; a
+                      // decision inherited from the base branch would be reported as this run's.
+                      const decision = readRunArtefact(dir, 'publish-decision.json') || {};
                       const outcome = String(decision.outcome || 'not_reviewed');
                       const basis = String(decision.basis || 'no publish decision was recorded');
                       const parts = [];
@@ -6272,8 +7300,67 @@ steps:
                                   const fs = require('fs');
                                   const path = require('path');
                                   const wt = String(process.env.WT || '').trim();
-                                  let review = {};
-                                  try { review = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'review-normalised.json'), 'utf8')); } catch (e) { review = {}; }
+                                  const dir = path.join(wt, '.ai-agent');
+                                  // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
+                                  // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
+                                  // test; do not fork it. `.ai-agent/` is INHERITED state: when a repository tracks it,
+                                  // the directory is checked out of the base branch, so a file inside it may describe a
+                                  // DIFFERENT run. SPEECH-006's worktree was handed SPEECH-005's `review-normalised.json`
+                                  // with `"verdict": "approved"` and a publish gate that read it would have skipped the
+                                  // reviewer. A record is an answer for THIS run only when its `runId` is this run's
+                                  // identity. Anything else - including a record written before this guard existed and
+                                  // therefore carrying no runId at all - is ABSENT, never a verdict.
+                                  const readRunIdentity = (dir) => {
+                                    try {
+                                      const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                                      return identity && typeof identity.runId === 'string' && identity.runId ? identity : null;
+                                    } catch (e) { return null; }
+                                  };
+                                  // MINT a new identity. Only prepareWorktree calls this: the identity names ONE
+                                  // pipeline run, so a worktree that a fresh dispatch starts in must not keep the
+                                  // previous dispatch's identity - its approval would then be this run's answer.
+                                  const mintRunIdentity = (dir, reference) => {
+                                    const identity = {
+                                      runId: require('crypto').randomBytes(16).toString('hex'),
+                                      ticketReference: String(reference || '').trim(),
+                                      pipeline: 'core.ProcessAITicket',
+                                      createdAt: new Date().toISOString(),
+                                    };
+                                    try {
+                                      fs.mkdirSync(dir, { recursive: true });
+                                      fs.writeFileSync(path.join(dir, 'run-identity.json'), JSON.stringify(identity, null, 2), 'utf8');
+                                    } catch (e) { /* consumers treat a missing identity as "nothing is attributable" */ }
+                                    return identity;
+                                  };
+                                  // INHERIT this run's identity, minting one only when the worktree has none (a
+                                  // resumed instance, or a step whose prepare step did not run).
+                                  const ensureRunIdentity = (dir, reference) => readRunIdentity(dir) || mintRunIdentity(dir, reference);
+                                  // The run identity an artefact carries. A pipeline artefact states it at the top
+                                  // level (`runId`); the stamped acceptance states it inside the `provenance`
+                                  // envelope it exists to prove. NEITHER means the record belongs to no run this
+                                  // pipeline can name, and an unnamed record is ABSENT - never an answer.
+                                  const recordRunId = (record) => {
+                                    if (!record || typeof record !== 'object' || Array.isArray(record)) return '';
+                                    if (record.runId) return String(record.runId);
+                                    const provenance = record.provenance;
+                                    if (provenance && typeof provenance === 'object' && !Array.isArray(provenance) && provenance.runId) return String(provenance.runId);
+                                    return '';
+                                  };
+                                  const readRunArtefact = (dir, name) => {
+                                    const identity = readRunIdentity(dir);
+                                    if (!identity) return null;
+                                    try {
+                                      const record = JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8'));
+                                      if (!record || typeof record !== 'object' || Array.isArray(record)) return null;
+                                      if (recordRunId(record) !== String(identity.runId)) return null;
+                                      return record;
+                                    } catch (e) { return null; }
+                                  };
+                                  // <<< shared run identity
+
+                                  // B.2 (PROCESS-003). Only this run's findings may be told to a
+                                  // human as the reason the work was published.
+                                  const review = readRunArtefact(dir, 'review-normalised.json') || {};
                                   const text = (value) => {
                                     if (value === null || value === undefined) return '';
                                     if (typeof value === 'string') return value.trim();
@@ -6449,16 +7536,97 @@ steps:
                               }
                             }
 
-                            let dirty = '';
-                            // The agent is told never to commit, but it sometimes does. If so, the run
-                            // artifacts are already in the branch and pushBranch would publish them.
-                            // Untrack them here; the tip then carries no .ai-agent content and the PR
-                            // diff collapses to the real work.
-                            let internal = '';
-                            try { internal = run('git ls-files .ai-agent').trim(); } catch (e) { internal = ''; }
-                            if (internal) {
-                              try { run('git rm -r --cached --quiet .ai-agent'); } catch (e) { /* best effort */ }
+                            // ── PROCESS-003 A.2: run scratch state is NEVER committed ────────────
+                            // `.ai-agent/` is the pipeline's own scratch directory: report, review window,
+                            // accepted verdict, publish decision. SPEECH-005 committed 11 files of it, so every
+                            // later worktree checked them out of the base branch and inherited the previous
+                            // ticket's APPROVED verdict (SPEECH-006). This used to be a silent
+                            // `git rm -r --cached`, which kept the content out of the commit but also hid that
+                            // anything had staged it. Two cases are now told apart, because they are not the same
+                            // defect:
+                            //
+                            //   * the ENGINEER committed .ai-agent and guardEngineerCommits reset the commit, so its
+                            //     files are staged again. That is the recoverable PROCESS-001 violation: the files
+                            //     are dropped below (git rm -r --cached) and the run continues.
+                            //   * something staged .ai-agent CONTENT that is NOT already in a commit on this branch.
+                            //     Run state is being prepared for publication and no history explains it: FAIL
+                            //     CLOSED with an actionable message.
+                            //
+                            // A staged DELETION is neither: it is how a branch stops tracking a directory the base
+                            // branch tracks, and refusing it would make every run against a contaminated repository
+                            // fail.
+                            const commitBase = (() => {
+                              try {
+                                const symbolic = run('git symbolic-ref --quiet refs/remotes/origin/HEAD');
+                                if (symbolic) {
+                                  const name = symbolic.split('refs/remotes/origin/').pop();
+                                  if (name && run('git rev-parse --verify --quiet origin/' + name)) return 'origin/' + name;
+                                }
+                              } catch (e) { /* no origin/HEAD */ }
+                              const candidates = ['origin/main', 'origin/master', 'main', 'master'];
+                              for (let i = 0; i < candidates.length; i += 1) {
+                                try {
+                                  if (run('git rev-parse --verify --quiet ' + candidates[i])) return candidates[i];
+                                } catch (e) { /* next */ }
+                              }
+                              return '';
+                            })();
+
+                            // `.ai-agent` paths this BRANCH added. Inherited ones - tracked by the base branch and
+                            // never touched by this run - are NOT "internal": they must not force a commit.
+                            const branchScratch = (() => {
+                              let out = '';
+                              try { out = commitBase ? run('git diff --name-only ' + commitBase + '..HEAD -- .ai-agent') : ''; } catch (e) { out = ''; }
+                              return out.split('\n').map((line) => line.trim()).filter(Boolean);
+                            })();
+                            let internal = branchScratch.join('\n');
+
+                            // Staged scratch CONTENT (additions/modifications/renames). Deletions are excluded:
+                            // they are the remedy, not the defect.
+                            const scratchStaged = (() => {
+                              let out = '';
+                              try { out = run('git diff --cached --name-status -- .ai-agent'); } catch (e) { out = ''; }
+                              return out.split('\n')
+                                .map((line) => line.trim())
+                                .filter(Boolean)
+                                .map((line) => {
+                                  const parts = line.split('\t');
+                                  return { status: String(parts[0] || '').trim(), path: String(parts[1] || '').trim() };
+                                })
+                                .filter((entry) => entry.status && entry.status.charAt(0) !== 'D');
+                            })();
+                            const unexplainedScratch = scratchStaged.filter((entry) => branchScratch.indexOf(entry.path) === -1);
+                            if (unexplainedScratch.length) {
+                              const listed = unexplainedScratch.map((entry) => entry.status + ' ' + entry.path).join(', ');
+                              const message = [
+                                'refusing to commit run scratch state staged under .ai-agent/: ' + listed + '.',
+                                "That directory holds this pipeline's own bookkeeping (report, review window, accepted verdict, publish decision); publishing it is how a later worktree inherited a previous ticket's approved verdict (PROCESS-003).",
+                                "Nothing was committed. Unstage it (git restore --staged .ai-agent) and let the pipeline write it, or add '.ai-agent/' to .gitignore."
+                              ].join(' ');
+                              process.stderr.write(message + '\n');
+                              try {
+                                const dir = path.join(wt, '.ai-agent');
+                                fs.mkdirSync(dir, { recursive: true });
+                                fs.writeFileSync(path.join(dir, 'commit-refused.json'), JSON.stringify({
+                                  reason: 'run scratch state staged',
+                                  staged: unexplainedScratch,
+                                  message: message,
+                                  refusedAt: new Date().toISOString(),
+                                }, null, 2), 'utf8');
+                              } catch (e) { /* the refusal itself is already on stdout+stderr */ }
+                              process.stdout.write(JSON.stringify({
+                                committed: false,
+                                reason: 'run scratch state staged',
+                                staged: unexplainedScratch,
+                                error: message,
+                              }));
+                              process.exit(1);
                             }
+
+                            let dirty = '';
+                            // Excludes .ai-agent: this run's own artefacts are never "work", and inherited
+                            // deletions under it are not either.
+
                             try {
                               dirty = run('git status --porcelain -- . ":(exclude).ai-agent"');
                             } catch (e) {
@@ -6598,7 +7766,20 @@ steps:
                               process.stdout.write(JSON.stringify({ committed: false, reason: 'git add failed', error: detail.slice(0, 1500) }));
                               process.exit(1);
                             }
-                            try { run('git rm -r --cached --quiet --ignore-unmatch -- .ai-agent'); } catch (e) { /* nothing staged under .ai-agent */ }
+                            // ── Keep .ai-agent out of the published tree (PROCESS-003) ───────────
+                            // Two different situations, two different answers:
+                            //   * the branch ADDED .ai-agent (an agent committed its scratch state):
+                            //     record the removal, so the tip carries no scratch content at all;
+                            //   * the BASE tracks .ai-agent and this run merely checked it out:
+                            //     restore the index from HEAD, so the commit is byte-identical to the
+                            //     base for that path and publishes NO .ai-agent change. The directory
+                            //     was already emptied at prepare time (A.1), so what is on disk is
+                            //     this run's own artefacts and nothing else.
+                            if (internal) {
+                              try { run('git rm -r --cached --quiet --ignore-unmatch -- .ai-agent'); } catch (e) { /* nothing staged under .ai-agent */ }
+                            } else {
+                              try { run('git reset -q -- .ai-agent'); } catch (e) { /* path absent from HEAD and index: nothing to reset */ }
+                            }
 
                             try {
                               // env carries the author/committer identities: `git commit -c user.*`
