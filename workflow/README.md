@@ -139,11 +139,18 @@ The run on instance `6af7508c4f0cf9fef5efe44a` (WS-1 / PR #133) misdiagnosed a b
 and burned its whole post-publication fix budget on a phantom. Two defects, both in the observation,
 neither in whether the loop loops.
 
-**A — GitHub verifies commit signatures asynchronously.** For a window after a push the commits API
-returns `verified: false` with `reason: "unknown"`, meaning *not checked yet*. The observation read
-that as a terminal failure, emitted a fixable `unverifiable_commit`, and `repairNeeded` drove a
-`--force-with-lease` rewrite of published history once per cycle — for a commit GitHub went on to
-report `verified: true, reason: valid`.
+**A — the signature verdict was read from a field that does not exist, and every unrecognised
+reason was treated as a failure.** Two distinct faults, and the first caused the phantom:
+
+1. **The wrong JSON path.** The observation read `commit.verification`, which
+   `pulls/{n}/commits` never returns. Every commit therefore looked `verified: false` with no
+   reason, which the code defaulted to the literal string `'unknown'`. GitHub had in fact reported
+   `verified: true, reason: valid` all along.
+2. **A settle model built on that fabricated value.** Because the only "not settled" state was the
+   `'unknown'` default, every *real* reason was treated as a settled failure — including GitHub's
+   genuinely transient ones (`gpgverify_unavailable`, `gpgverify_error`) and the unresolved
+   `ocsp_pending`. A GitHub verification **outage** therefore drove a `--force-with-lease` rewrite
+   of published history, which is the opposite of this ticket's invariant.
 
 **The read path was the other half of that root cause.** `/repos/{repo}/pulls/{n}/commits` returns
 REST commit objects, so the verdict is nested at `commit.commit.verification`; there is **no**
@@ -156,39 +163,82 @@ The read is now `((commit.commit || {}).verification) || {}`, and every commit f
 mirrors that shape — including one built from a recorded live `verified:true / reason:"valid"`
 response, so the wrong shape cannot pass again.
 
+GitHub's documented `verification.reason` values are `expired_key`, `not_signing_key`,
+`gpgverify_error`, `gpgverify_unavailable`, `unsigned`, `unknown_signature_type`, `no_user`,
+`unverified_email`, `bad_email`, `unknown_key`, `malformed_signature`, `invalid`, `valid` — plus
+`ocsp_pending` in the schema enum. **`unknown` is not one of them**; it was this workflow's own
+default for the field it could not read.
+
+`SETTLED_FAILURE_REASONS` is therefore an explicit **allow-list**. Anything else — no reason, a
+transient reason, or a reason this workflow has never heard of — is a WAIT. Waiting is recoverable;
+rewriting published history is not.
+
 | `verification` | Meaning | Finding | `repairNeeded` |
 | --- | --- | --- | --- |
 | `verified: true` | signature valid | none | no |
-| `verified: false`, `reason: "unknown"` or absent | **not checked yet** | `commit_verification_pending`, `fixable: false`, `settled: false` | **never** |
-| `verified: false`, settled reason (`no_user`, `unverified_email`, `bad_email`, …) | checked and failed | `unverifiable_commit`, `settled: true`, fixable only with a signing identity | yes, when fixable |
+| `verified: false`, reason in the settled-failure allow-list (`unsigned`, `no_user`, `unverified_email`, `bad_email`, `unknown_key`, `expired_key`, `not_signing_key`, `invalid`, `malformed_signature`, `unknown_signature_type`) | checked and failed | `unverifiable_commit`, `settled: true`, fixable only with a signing identity | yes, when fixable |
+| `verified: false`, transient (`gpgverify_unavailable`, `gpgverify_error`, `ocsp_pending`) | GitHub could not decide — **not a verdict** | `commit_verification_pending`, `transient: true`, `fixable: false` | **never** |
+| `verified: false`, no reason / `unknown` / any unrecognised reason | no verdict observed | `commit_verification_pending`, `fixable: false`, `settled: false` | **never** |
 
 `repairNeeded` (and both readers of it: `readPostPublishRepairNeed`, `resolveRepairBase`) require
-`settled !== false`. A not-yet-settled commit is a WAIT: `postPublishWaitCause = 'verification'` and
-the loop re-observes. Two settle delays (20 s) run after the initial publish and after any
-re-publish, before signatures are judged.
+`settled === true`, i.e. the reason is on the allow-list. A pending commit is a WAIT:
+`postPublishWaitCause = 'verification'` and the loop re-observes. Two settle delays (20 s) run after
+the initial publish and after any re-publish, before signatures are judged. If the verdict is still
+unsettled when the wait budget expires the run ends **`blocked_human`** with that reason — not
+`awaiting_human`, because a signature GitHub never settled cannot be approved past on a
+signature-protected branch.
 
 **B — CI was observed before it produced a conclusion.** PR #133 was observed 16 seconds BEFORE its
 CI run started: `pendingChecks = 7`, zero conclusions, and the run reported "the post-publication fix
-budget was exhausted" while five required checks were failing at `yarn install`. The observation now
-distinguishes three states (`checks.state`):
+budget was exhausted" while five checks were failing at `yarn install`.
 
-| State | Meaning | Loop behaviour |
+**"Is CI expected?" does not come from required checks.** Classic branch protection declares
+`required_status_checks: null` on every reactorynet repository (they require reviews and signatures
+only), so gating on required checks made "not scheduled yet" undetectable in production: a pre-CI
+observation classified **clean** and the run reached the success arm having read zero conclusions.
+Expectation is now derived from evidence these repositories actually have, in
+`checks.expectedEvidence`:
+
+1. classic protection `required_status_checks` (contexts and checks);
+2. **ruleset**-required checks — `repos/{r}/rules/branches/{b}`, which never appear in protection;
+3. check runs on the **base tip** — the only concrete source of the check *names* a pull request is
+   expected to produce;
+4. a `.github/workflows/*.{yml,yaml}` in the worktree declaring a `pull_request` trigger;
+5. check runs already present on this head.
+
+| `checks.state` | Meaning | Loop behaviour |
 | --- | --- | --- |
-| `not_scheduled` + `checks.expected` | required checks exist, none scheduled yet | wait 15 s, bound `postPublishSchedulingWaitBound` = 20 (5 min) |
-| `running` | checks exist, none terminal | wait 60 s, bound `postPublishWaitBound` = 6 (unchanged) |
-| `finished` | at least one conclusion exists | judge it; failures are fixable `check_run` findings |
+| `not_scheduled` | CI is expected but **nothing** has been created for this head | wait 15 s, bound `postPublishSchedulingWaitBound` = 20 (5 min) |
+| `running` | a check is unfinished, **or** expected names are missing and no Actions check has concluded (`checks.settling`) | wait 60 s, bound `postPublishWaitBound` = 6 (unchanged) |
+| `finished` | no check unfinished and no expected name missing | judge it; failures are fixable `check_run` findings |
 
-`recordPostPublishCoverage` accumulates `post-publish-ci-coverage.json` over every observation. Any
-terminal point reached with **zero** conclusions evaluated reports `checks_unobserved` (or the
-never-observed reason in `describePostPublishBlock`) — *"ended without observing any CI conclusion;
-failing checks may exist and were never read"* — and never attributes the block to an exhausted fix
-budget. When a conclusion WAS observed, `exhausted` keeps its original wording. The pre-publish
+The `settling` state is what closes the fast-app gap the review found: GitGuardian and the CodeQL
+summary run finish in 1–2 s, so a head can look `finished` before the Actions jobs exist. A missing
+expected name keeps the state `running` **until an `github-actions` conclusion lands** — after that a
+name that only ever runs on the default branch (Dependabot, a master-only `analysis` job) can no
+longer hold the loop open.
+
+`recordPostPublishCoverage` accumulates `post-publish-ci-coverage.json`, **keyed by head SHA** so a
+re-published head cannot inherit the previous head's coverage, and persisting `expected`. It emits:
+
+| output | Meaning |
+| --- | --- |
+| `some` | at least one check conclusion has been evaluated for this head |
+| `none` | CI is **expected** and no conclusion was ever read |
+| `not_expected` | no CI evidence at all — a CI-less repository is never told CI failures may be hiding |
+
+Any terminal point reached with `none` reports `checks_unobserved` (or the never-observed reason in
+`describePostPublishBlock`) — *"ended without observing any CI conclusion; failing checks may exist
+and were never read"* — and names the expectation evidence. A CI-less repository keeps the
+`exhausted`/budget wording, because there the budget really is the cause. The pre-publish
 `reviewCycleBound` is untouched; Defect B is confined to the post-publication loop.
 
-Verification: `workflow/__tests__/ProcessAITicket.signatureAndCiObservation.test.ts` (17 tests,
-executes the shipped scripts against recorded payloads and throwaway git repositories) plus the
-budget/contract/behaviour suites. `no_user` remains the positive control — the SPEECH-010 invariant
-is unchanged.
+Verification: `workflow/__tests__/ProcessAITicket.signatureAndCiObservation.test.ts` executes the
+shipped scripts against recorded payloads and throwaway git repositories, and additionally guards its
+own file integrity (0 TypeScript parse diagnostics; no `it` outside a `describe`) because ts-jest's
+`isolatedModules` transpile let a syntactically invalid version of that file pass as a green suite on
+PR #85. `no_user` remains the positive control — the SPEECH-010 invariant is unchanged — and
+`gpgverify_unavailable` is the transient control.
 
 ### Coordinated version-bump procedure (do this instead of editing `version:` alone)
 

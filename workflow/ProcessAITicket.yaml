@@ -9462,14 +9462,22 @@ steps:
                               # is a hard backstop against a defect in that logic.
                               condition: variables.postPublishContinue === 'true'
                               # Worst case with the seeded budgets, counted in ITERATIONS:
+                              #  BOTH wait counts (postPublishSchedulingWaitCount and
+                              #  postPublishWaitCount) are reset for EVERY re-published head, so
+                              #  the worst case is not one scheduling window but one per cycle:
                               #    1 initial observation
-                              #  + 20 CI-scheduling waits  (postPublishSchedulingWaitBound)
-                              #  + 6 check waits          (postPublishWaitBound)
-                              #  + 2 fix cycles           (maxPostPublishFixCycles)
-                              #  + 3 no-fix re-observes   (postPublishReobserveBound)
+                              #  + 3 x (20 CI-scheduling waits + 6 check waits)   = 78
+                              #      (the initial head plus maxPostPublishFixCycles = 2 re-publishes)
+                              #  + 2 fix cycles            (maxPostPublishFixCycles)
+                              #  + 3 no-fix re-observes    (postPublishReobserveBound)
                               # + 40 awaiting-action polls (postPublishAwaitBound)
                               #  + 1 final observation
-                              #  = 73.
+                              #  = 125.
+                              #
+                              # NOTE: YamlFlowBuilder's `.while` does NOT enforce maxIterations
+                              # (found on #78), so the cap below is documentation of the intended
+                              # bound, not a runtime gate. The real bounds are the counters above,
+                              # each of which every terminal path decrements or exhausts.
                               #
                               # The awaiting window is sized from the incident that produced this fix: the
                               # review on PR #74 arrived 1h56m after publication, so the poll is 40 x 180s
@@ -9756,6 +9764,21 @@ steps:
                                           const commits = apiGet('repos/' + repo + '/pulls/' + prNumber + '/commits', 'the pull request commits');
                                           // check-runs legitimately answers {total_count: 0}; NULL means the call failed.
                                           const checkPayload = head ? apiGet('repos/' + repo + '/commits/' + head + '/check-runs', 'the check runs') : { check_runs: [] };
+                                          // ── CI-expectation evidence (REACTORY-302016408/20261114/787370442 R1) ──
+                                          // Classic branch protection lists required_status_checks on NONE of the
+                                          // reactorynet repositories (they require reviews and signatures only),
+                                          // so "required checks" alone can never tell this workflow that a
+                                          // repository has CI. express-server's five failing checks - the very
+                                          // incident this ticket is about - are not required in GitHub's sense.
+                                          // The BASE TIP's check runs are the evidence that does exist: they are
+                                          // the check NAMES a pull request is expected to produce. Rulesets are
+                                          // read too, because ruleset-required checks do not appear in classic
+                                          // protection. Both are OPTIONAL reads: a 404/null means 'no evidence',
+                                          // never a failed observation.
+                                          const baseCheckPayload = base
+                                            ? tryJson('gh api --paginate "repos/' + repo + '/commits/' + base + '/check-runs?per_page=100"')
+                                            : null;
+                                          const rules = base ? tryJson('gh api "repos/' + repo + '/rules/branches/' + base + '"') : null;
 
                                           // Branch protection and code scanning 404 on a repository that does not
                                           // configure them, so they stay OPTIONAL. Code scanning is read ONCE - used to
@@ -9775,6 +9798,8 @@ steps:
                                             reviews: reviews || [],
                                             reviewThreads: { nodes: threadNodes },
                                             checkRuns: checkPayload,
+                                            baseTipCheckRuns: baseCheckPayload,
+                                            rules: rules,
                                             commits: commits || [],
                                             protection: protection,
                                             codeScanning: alerts,
@@ -9918,7 +9943,11 @@ steps:
                                             pendingChecks.push({ name: String(check.name || ''), status: status || 'unknown' });
                                             return;
                                           }
-                                          terminalConclusions.push({ name: String(check.name || ''), conclusion: conclusion });
+                                          terminalConclusions.push({
+                                            name: String(check.name || ''),
+                                            conclusion: conclusion,
+                                            app: String(((check.app || {}).slug) || ''),
+                                          });
                                           if (['failure', 'timed_out', 'cancelled', 'action_required'].indexOf(conclusion) === -1) return;
                                           findings.push({
                                             id: 'check:' + String(check.name || check.id || 'check'),
@@ -9930,26 +9959,100 @@ steps:
                                             fixable: true,
                                           });
                                         });
-                                        // The contexts branch protection REQUIRES. Present means CI is
-                                        // expected for this pull request, so an empty check-run list is
-                                        // "not scheduled yet" rather than "this repository has no CI".
-                                        const requiredCheckNames = (() => {
-                                          const required = (protection && protection.required_status_checks) || null;
-                                          if (!required) return [];
+                                        // ── "Is CI expected?" (REACTORY-302016408/20261114/787370442 R1) ──
+                                        // Classic branch protection lists required_status_checks on NONE of
+                                        // the reactorynet repositories, so gating on required checks alone
+                                        // made "CI not scheduled yet" undetectable in production: a
+                                        // pre-CI observation classified CLEAN and the run ended on the
+                                        // success arm having read zero check conclusions.
+                                        //
+                                        // Expected names therefore come from every source that exists:
+                                        //   1. classic protection required_status_checks (contexts + checks)
+                                        //   2. RULESET-required checks (repos/{r}/rules/branches/{b}) - these
+                                        //      never appear in classic protection
+                                        //   3. the BASE TIP's own check runs - concrete evidence that this
+                                        //      repository runs CI per commit, and the only real source of
+                                        //      the check NAMES a pull request is expected to produce
+                                        //   4. a .github/workflows/* declaring a pull_request trigger
+                                        //   5. check runs already present on this head
+                                        const dedupe = (names) => names.filter((name, index) => name && names.indexOf(name) === index);
+                                        const requiredCheckNames = dedupe((() => {
                                           const names = [];
-                                          if (Array.isArray(required.contexts)) {
-                                            required.contexts.forEach((context) => names.push(String(context)));
+                                          const required = (protection && protection.required_status_checks) || null;
+                                          if (required) {
+                                            if (Array.isArray(required.contexts)) required.contexts.forEach((context) => names.push(String(context)));
+                                            if (Array.isArray(required.checks)) required.checks.forEach((entry) => { if (entry && entry.context) names.push(String(entry.context)); });
                                           }
-                                          if (Array.isArray(required.checks)) {
-                                            required.checks.forEach((entry) => { if (entry && entry.context) names.push(String(entry.context)); });
-                                          }
-                                          return names.filter((name, index) => name && names.indexOf(name) === index);
+                                          // Ruleset-required checks. `rules/branches/{b}` returns an array of
+                                          // rules; only a required_status_checks rule names contexts.
+                                          (Array.isArray(raw.rules) ? raw.rules : []).forEach((rule) => {
+                                            if (!rule || String(rule.type || '') !== 'required_status_checks') return;
+                                            const params = rule.parameters || {};
+                                            (Array.isArray(params.required_status_checks) ? params.required_status_checks : []).forEach((entry) => {
+                                              if (entry && entry.context) names.push(String(entry.context));
+                                            });
+                                          });
+                                          return names;
+                                        })());
+                                        // Names seen on the base tip (or supplied by a fixture). This is the
+                                        // evidence these repositories actually have.
+                                        const baseTipCheckRuns = (() => {
+                                          const payload = raw.baseTipCheckRuns;
+                                          if (!payload) return [];
+                                          if (Array.isArray(payload)) return payload;
+                                          return Array.isArray(payload.check_runs) ? payload.check_runs : [];
                                         })();
-                                        const checksExpected = requiredCheckNames.length > 0 || checkRuns.length > 0;
+                                        const baseTipCheckNames = dedupe(baseTipCheckRuns.map((check) => String((check && check.name) || '')));
+                                        // A pull_request-triggered workflow in THIS worktree. Cheap, local, and
+                                        // true even when the base tip predates the workflow.
+                                        const workflowTriggersOnPullRequest = (() => {
+                                          try {
+                                            const dir = path.join(wt, '.github', 'workflows');
+                                            if (!fs.existsSync(dir)) return false;
+                                            return fs.readdirSync(dir).filter((name) => /\.ya?ml$/i.test(name)).some((name) => {
+                                              try {
+                                                const text = fs.readFileSync(path.join(dir, name), 'utf8');
+                                                return /^\s*pull_request(_target)?\s*:/m.test(text)
+                                                  || /^\s*on\s*:\s*\[?[^\n]*pull_request/m.test(text);
+                                              } catch (e) { return false; }
+                                            });
+                                          } catch (e) { return false; }
+                                        })();
+                                        const scheduledCheckNames = dedupe(checkRuns.map((check) => String((check && check.name) || '')));
+                                        const expectedCheckNames = dedupe(requiredCheckNames.concat(baseTipCheckNames));
+                                        const missingExpectedNames = expectedCheckNames.filter((name) => scheduledCheckNames.indexOf(name) === -1);
+                                        const missingRequiredNames = requiredCheckNames.filter((name) => scheduledCheckNames.indexOf(name) === -1);
+                                        const ciExpectedEvidence = [];
+                                        if (requiredCheckNames.length > 0) ciExpectedEvidence.push('required status check(s): ' + requiredCheckNames.slice(0, 8).join(', '));
+                                        if (baseTipCheckNames.length > 0) ciExpectedEvidence.push('base tip ' + (base || '(unknown)') + ' has check run(s): ' + baseTipCheckNames.slice(0, 8).join(', '));
+                                        if (workflowTriggersOnPullRequest) ciExpectedEvidence.push('.github/workflows declares a pull_request trigger');
+                                        if (checkRuns.length > 0) ciExpectedEvidence.push('this head already has ' + checkRuns.length + ' check run(s)');
+                                        const checksExpected = ciExpectedEvidence.length > 0;
+                                        // An Actions conclusion is what proves the REAL CI ran. GitGuardian and
+                                        // the CodeQL summary run finish in 1-2 s, so a head can look "finished"
+                                        // before the Actions jobs have even been created.
+                                        const actionsConclusions = terminalConclusions.filter((entry) => entry.app === 'github-actions');
+                                        // NOT READ, deliberately: the legacy commit-STATUSES API
+                                        // (repos/{r}/commits/{sha}/status). A required context reported as
+                                        // a status rather than a check run would look "never scheduled".
+                                        // No reactorynet repository uses statuses (commits/{sha}/status is
+                                        // empty on the heads this was verified against), and reading it
+                                        // here would add a request per observation for no signal. If a
+                                        // status-only CI is ever adopted, this is the place to add it.
+                                        // Nothing has been created yet for this head.
+                                        const checksNotScheduled = checksExpected && checkRuns.length === 0;
+                                        // Something exists, but expected NAMES are missing and no Actions
+                                        // workflow has concluded: the Actions jobs have not been created.
+                                        // (A name that only ever runs on the default branch - Dependabot,
+                                        // a master-only `analysis` job - cannot keep this true once an
+                                        // Actions conclusion has landed, which is what stops it blocking.)
+                                        const ciSettling = checksExpected
+                                          && !checksNotScheduled
+                                          && missingExpectedNames.length > 0
+                                          && actionsConclusions.length === 0;
                                         const checksState = checkRuns.length === 0
                                           ? 'not_scheduled'
-                                          : (pendingChecks.length === 0 ? 'finished' : 'running');
-                                        const checksNotScheduled = requiredCheckNames.length > 0 && checkRuns.length === 0;
+                                          : ((pendingChecks.length === 0 && !ciSettling) ? 'finished' : 'running');
 
                                         // Code-scanning alerts. The alert NUMBER is what the dismiss
                                         // API needs, and a review thread does not carry one, so the
@@ -10019,21 +10122,53 @@ steps:
                                         if (protection && protection.required_signatures) {
                                           requiredSignatures = protection.required_signatures.enabled === true;
                                         }
-                                        // ── Commit-signature verification (REACTORY-302016408/20261114/787370442 A) ──
-                                        // GitHub verifies signatures ASYNCHRONOUSLY. For a window after a
-                                        // push `verification.verified` is false with `reason: "unknown"`,
-                                        // which means NOT YET CHECKED - it is not a verdict. Only a
-                                        // SETTLED reason may classify a commit as unverifiable:
-                                        //   reason unknown / empty  -> never checked yet -> WAIT
-                                        //   reason no_user, unverified_email, bad_email, expired_key, ...
-                                        //                           -> checked and failed -> finding
-                                        // The two MUST NOT share a code path or a message: sharing them
-                                        // read a not-yet-settled commit as a genuine failure and drove a
-                                        // destructive force-rewrite of published history once per cycle
-                                        // (instance 6af7508c4f0cf9fef5efe44a / PR #133).
-                                        const isSettledVerificationReason = (reason) => {
+                                        // ── Which signature verdicts may drive a rewrite (R2) ────────────
+                                        // `unknown` is NOT a reason GitHub returns: it was this pipeline's
+                                        // own default for the field it failed to read (the wrong-JSON-path
+                                        // defect above). GitHub's documented `verification.reason` values
+                                        // are expired_key, not_signing_key, gpgverify_error,
+                                        // gpgverify_unavailable, unsigned, unknown_signature_type, no_user,
+                                        // unverified_email, bad_email, unknown_key, malformed_signature,
+                                        // invalid, valid - plus ocsp_pending in the schema enum.
+                                        //
+                                        // Two of those are TRANSIENT, not verdicts: gpgverify_unavailable
+                                        // ("the signature verification service is currently unavailable")
+                                        // and gpgverify_error ("an error communicating with the signature
+                                        // verification service") - and ocsp_pending is "not resolved yet".
+                                        // Treating every unrecognised non-empty reason as settled meant a
+                                        // GitHub verification OUTAGE drove a force-rewrite of published
+                                        // history, defeating this ticket's own invariant.
+                                        //
+                                        // So SETTLED FAILURE is an explicit allow-list. Anything else -
+                                        // empty, unknown, a transient reason, or a reason we have never
+                                        // heard of - WAITS, because waiting is recoverable and rewriting
+                                        // published history is not.
+                                        const SETTLED_FAILURE_REASONS = [
+                                          'unsigned',
+                                          'no_user',
+                                          'unverified_email',
+                                          'bad_email',
+                                          'unknown_key',
+                                          'expired_key',
+                                          'not_signing_key',
+                                          'invalid',
+                                          'malformed_signature',
+                                          'unknown_signature_type',
+                                        ];
+                                        const TRANSIENT_VERIFICATION_REASONS = [
+                                          '',
+                                          'unknown',
+                                          'gpgverify_unavailable',
+                                          'gpgverify_error',
+                                          'ocsp_pending',
+                                        ];
+                                        const isSettledFailureReason = (reason) => {
                                           const normalised = String(reason || '').trim().toLowerCase();
-                                          return normalised !== '' && normalised !== 'unknown';
+                                          return SETTLED_FAILURE_REASONS.indexOf(normalised) !== -1;
+                                        };
+                                        const isTransientVerificationReason = (reason) => {
+                                          const normalised = String(reason || '').trim().toLowerCase();
+                                          return TRANSIENT_VERIFICATION_REASONS.indexOf(normalised) !== -1;
                                         };
                                         const unverifiableCommits = [];
                                         const pendingVerifications = [];
@@ -10044,18 +10179,31 @@ steps:
                                           const shortSha = sha.slice(0, 12);
                                           const reason = String(verification.reason || '').trim().toLowerCase();
                                           const committerEmail = String(((commit.commit || {}).committer || {}).email || 'unknown');
-                                          if (!isSettledVerificationReason(reason)) {
-                                            // NEVER CHECKED YET. A distinct kind, never fixable, and never
-                                            // part of repairNeeded: the only correct action is to observe
-                                            // again after a short settle delay.
-                                            pendingVerifications.push({ sha: sha, reason: reason || 'unknown', status: 'not_yet_verified' });
+                                          if (!isSettledFailureReason(reason)) {
+                                            // NOT A VERDICT. Either nothing was read (empty), a transient
+                                            // GitHub failure (gpgverify_*), a not-yet-resolved OCSP check,
+                                            // or a reason this workflow does not recognise. A distinct
+                                            // kind, never fixable, and never part of repairNeeded: the
+                                            // only correct action is to observe again after a settle delay.
+                                            const transient = isTransientVerificationReason(reason);
+                                            pendingVerifications.push({
+                                              sha: sha,
+                                              reason: reason || 'none-reported',
+                                              status: transient ? 'transient' : 'not_yet_verified',
+                                            });
                                             findings.push({
                                               id: 'commit-pending:' + shortSha,
                                               kind: 'commit_verification_pending',
                                               sha: sha,
                                               settled: false,
-                                              verificationReason: reason || 'unknown',
-                                              body: 'GitHub has NOT YET settled its signature verdict for commit ' + shortSha + ' (verification.reason "' + (reason || 'unknown') + '" means not checked yet, NOT a failed signature). This is not an unverifiable commit, nothing is rewritten; the pull request is re-observed after a settle delay.',
+                                              transient: transient,
+                                              verificationReason: reason || 'none-reported',
+                                              body: 'GitHub has not returned a SETTLED signature verdict for commit ' + shortSha
+                                                + ' (verification.reason "' + (reason || 'none-reported') + '"; '
+                                                + (transient
+                                                  ? 'a transient verification state, not a failed signature'
+                                                  : 'no verdict yet, or a reason this workflow does not treat as final')
+                                                + '). Nothing is rewritten; the pull request is re-observed after a settle delay.',
                                               fixable: false,
                                             });
                                             return;
@@ -10105,12 +10253,15 @@ steps:
                                         // human review. They must never be read as a policy a human has to
                                         // change, or every PR against a repository with required status
                                         // checks ends blocked before CI completes.
-                                        // Checks that have not finished, OR required checks that have not
-                                        // been SCHEDULED yet, are both a WAIT. The second state is the one
-                                        // the recorded run fell into: the observation ran 16 seconds
-                                        // before CI started, so zero conclusions existed and the run
-                                        // judged a pull request nobody had CI evidence for.
-                                        const awaitingChecks = pendingChecks.length > 0 || checksNotScheduled;
+                                        // Checks that have not finished, required checks that have not been
+                                        // SCHEDULED yet, and a head whose Actions jobs have not been
+                                        // CREATED yet are all a WAIT. The recorded run fell into the
+                                        // second and third: it observed 16 seconds before CI started, so
+                                        // zero conclusions existed and it judged a pull request nobody
+                                        // had CI evidence for. R1: because no reactorynet repository
+                                        // declares required checks, `checksNotScheduled` alone was always
+                                        // false there and the run reached the success arm with no CI read.
+                                        const awaitingChecks = pendingChecks.length > 0 || checksNotScheduled || ciSettling;
                                         // A not-yet-settled signature is also a WAIT: it is not a verdict
                                         // and must never be a finding or a block on its own.
                                         const awaitingVerification = pendingVerifications.length > 0;
@@ -10153,7 +10304,10 @@ steps:
                                             waitParts.push(String(pendingChecks.length) + ' check(s) still running (' + pendingChecks.map((check) => check.name + ':' + check.status).join(', ') + ')');
                                           }
                                           if (checksNotScheduled) {
-                                            waitParts.push('0 of ' + String(requiredCheckNames.length) + ' required check(s) have been scheduled yet (' + requiredCheckNames.slice(0, 8).join(', ') + ')');
+                                            waitParts.push('0 check(s) have been scheduled yet, but CI is expected here (' + ciExpectedEvidence.join('; ') + ')');
+                                          }
+                                          if (ciSettling) {
+                                            waitParts.push('the Actions jobs have not been created yet: ' + String(missingExpectedNames.length) + ' expected check(s) missing (' + missingExpectedNames.slice(0, 8).join(', ') + '), and no Actions check has concluded');
                                           }
                                           if (awaitingVerification) {
                                             waitParts.push(String(pendingVerifications.length) + ' commit signature verdict(s) not yet settled by GitHub (' + pendingVerifications.map((entry) => String(entry.sha || '').slice(0, 12) + ':' + entry.reason).join(', ') + ')');
@@ -10194,9 +10348,17 @@ steps:
                                           checks: {
                                             state: checksState,
                                             expected: checksExpected,
+                                            expectedEvidence: ciExpectedEvidence,
+                                            expectedNames: expectedCheckNames,
+                                            missingExpectedNames: missingExpectedNames,
+                                            notScheduled: checksNotScheduled,
+                                            settling: ciSettling,
+                                            actionsConclusions: actionsConclusions.length,
                                             scheduled: checkRuns.length,
+                                            scheduledNames: scheduledCheckNames,
                                             required: requiredCheckNames.length,
                                             requiredNames: requiredCheckNames,
+                                            missingRequiredNames: missingRequiredNames,
                                             pending: pendingChecks.length,
                                             conclusionsEvaluated: terminalConclusions.length,
                                             conclusions: terminalConclusions,
@@ -10286,10 +10448,17 @@ steps:
                                         const scheduled = Number(checks.scheduled == null ? 0 : checks.scheduled) || 0;
                                         const expected = checks.expected === true;
                                         const pendingVerifications = Number(counts.pendingVerifications == null ? 0 : counts.pendingVerifications) || 0;
+                                        const pendingChecks = Number(counts.pendingChecks == null ? 0 : counts.pendingChecks) || 0;
                                         let cause = '';
                                         if (state === 'pending') {
+                                          // ORDER MATTERS. A head with nothing scheduled yet is a
+                                          // SCHEDULING wait (CI has not been created), even if a
+                                          // signature is also unsettled. Once anything is scheduled, an
+                                          // unsettled signature with NO pending check is a SIGNATURE wait -
+                                          // not "checks still running", which is what the old rule said
+                                          // once the checks had in fact finished (R3(b)).
                                           if (scheduled === 0 && expected) cause = 'not_scheduled';
-                                          else if (scheduled === 0 && pendingVerifications > 0) cause = 'verification';
+                                          else if (pendingVerifications > 0 && pendingChecks === 0) cause = 'verification';
                                           else cause = 'running';
                                         }
                                         process.stdout.write(cause);
@@ -10331,23 +10500,42 @@ steps:
                                           try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch (e) { return null; }
                                         };
                                         const observation = readJson('post-publish-observation.json');
-                                        const previous = readJson('post-publish-ci-coverage.json') || {};
                                         const checks = (observation && observation.checks) || {};
                                         const counts = (observation && observation.counts) || {};
                                         const number = (value) => { const n = Number(value == null ? 0 : value); return Number.isFinite(n) ? n : 0; };
                                         const scheduled = number(checks.scheduled);
                                         const required = number(checks.required);
                                         const conclusions = number(checks.conclusionsEvaluated == null ? counts.conclusionsEvaluated : checks.conclusionsEvaluated);
+                                        // CI is EXPECTED on this pull request (R1/R3(a)). Persisted, so the
+                                        // terminal reporting can tell "we never read the CI that exists"
+                                        // from "this repository has no CI at all" - the second must name
+                                        // the fix budget, not a phantom CI failure.
+                                        const ciExpected = checks.expected === true;
+                                        // NB2: the record is keyed by the HEAD it describes. Both wait
+                                        // counters reset per re-published head, so coverage must too: a
+                                        // conclusion seen on the PREVIOUS head must not make a fixed head
+                                        // look covered. A reused worktree inherits a record for a
+                                        // different head, which this also discards.
+                                        const headSha = String((observation && observation.headSha) || '');
+                                        const stored = readJson('post-publish-ci-coverage.json') || {};
+                                        const sameHead = !!headSha && String(stored.headSha || '') === headSha;
+                                        const previous = sameHead ? stored : {};
                                         const record = {
+                                          headSha: headSha || null,
                                           observations: number(previous.observations) + (observation ? 1 : 0),
                                           anyConclusionEvaluated: previous.anyConclusionEvaluated === true || conclusions > 0,
                                           conclusionsEvaluated: Math.max(number(previous.conclusionsEvaluated), conclusions),
                                           anyChecksScheduled: previous.anyChecksScheduled === true || scheduled > 0,
                                           requiredChecks: Math.max(number(previous.requiredChecks), required),
+                                          // `expected` is OR-ed across observations for THIS head: once we
+                                          // have evidence that CI is expected, a later observation cannot
+                                          // un-expect it.
+                                          expected: previous.expected === true || ciExpected,
                                           lastChecksState: String(checks.state || 'unknown'),
                                           lastScheduledChecks: scheduled,
                                           lastPendingChecks: number(counts.pendingChecks),
                                           lastPendingVerifications: number(counts.pendingVerifications),
+                                          lastCiExpectedEvidence: Array.isArray(checks.expectedEvidence) ? checks.expectedEvidence : [],
                                           lastObservedAt: observation && observation.checkedAt ? String(observation.checkedAt) : null,
                                           generatedAt: new Date().toISOString(),
                                         };
@@ -10355,7 +10543,10 @@ steps:
                                           fs.mkdirSync(dir, { recursive: true });
                                           fs.writeFileSync(path.join(dir, 'post-publish-ci-coverage.json'), JSON.stringify(record, null, 2), 'utf8');
                                         } catch (e) { /* best effort */ }
-                                        process.stdout.write(record.anyConclusionEvaluated ? 'some' : 'none');
+                                        // R3(a): `none` means "CI was expected and no conclusion was ever
+                                        // read". A repository with no CI reports `not_expected`, so the
+                                        // never-observed wording can never be produced for it.
+                                        process.stdout.write(record.anyConclusionEvaluated ? 'some' : (record.expected ? 'none' : 'not_expected'));
                                     env:
                                       WT: ${steps.readWorktreePath.outputs.stdout}
                                     failOnError: false
@@ -12763,7 +12954,10 @@ steps:
                                                                         config:
                                                                           action: set
                                                                           key: postPublishOutcome
-                                                                          value: awaiting_human
+                                                                          # BLOCKED, not awaiting_human: a signature GitHub never settled
+                                                                          # cannot be approved past on a signature-protected branch, so
+                                                                          # raising an "approve and merge" task would be wrong (R3(b)).
+                                                                          value: blocked_human
                                                                       - id: setPostPublishVerificationUnsettledReason
                                                                         name: Record that the signature verdict never settled
                                                                         type: set_variable
@@ -13471,7 +13665,13 @@ steps:
                                         const conclusionsEvaluated = numberOr0(coverage.conclusionsEvaluated);
                                         const requiredChecks = numberOr0(coverage.requiredChecks);
                                         const scheduledChecks = numberOr0(coverage.lastScheduledChecks);
-                                        const ciExpected = requiredChecks > 0 || coverage.anyChecksScheduled === true;
+                                        // R3(a): `expected` is persisted by recordPostPublishCoverage, which
+                                        // derives it from base-tip check runs, rulesets, required contexts and
+                                        // .github/workflows. Re-deriving it here from requiredChecks alone
+                                        // was false on every reactorynet repository (none declares required
+                                        // checks), so a CI-less repository was told CI failures might hide.
+                                        const ciExpected = coverage.expected === true;
+                                        const expectedEvidence = Array.isArray(coverage.lastCiExpectedEvidence) ? coverage.lastCiExpectedEvidence : [];
 
                                         const outcome = String(process.env.OUTCOME || '').trim();
                                         const recorded = String(process.env.REASON || '').trim();
@@ -13554,7 +13754,7 @@ steps:
                                           // Distinct cause, distinct wording. The recorded run told a
                                           // human "fix budget exhausted" when five checks were failing at
                                           // yarn install and NOT ONE conclusion had been read.
-                                          lines.push('Reason: the run ended WITHOUT OBSERVING ANY CI CONCLUSION after ' + String(numberOr0(coverage.observations)) + ' observation(s) and ' + String(conclusionsEvaluated) + ' check conclusion(s) evaluated' + (requiredChecks > 0 ? ' (' + String(requiredChecks) + ' required check(s), ' + String(scheduledChecks) + ' scheduled at the last observation)' : '') + ', so failing checks may exist and were never read. This is NOT an exhausted fix budget - CI never produced a verdict to act on.');
+                                          lines.push('Reason: the run ended WITHOUT OBSERVING ANY CI CONCLUSION after ' + String(numberOr0(coverage.observations)) + ' observation(s) and ' + String(conclusionsEvaluated) + ' check conclusion(s) evaluated (' + String(scheduledChecks) + ' scheduled at the last observation; CI expected because ' + (expectedEvidence.join('; ') || 'this repository reports CI for its base branch') + '), so failing checks may exist and were never read. This is NOT an exhausted fix budget - CI never produced a verdict to act on.');
                                         } else if (heading === 'AWAITING HUMAN') {
                                           lines.push('Reason: the block is an awaited HUMAN action (review decision ' + reviewDecision + ') - not a code change. Only a human can supply it, so the run polled for it' + (awaited ? ' ' + awaited + ' time(s)' : '') + ' and then stopped observing rather than reporting the pull request as unmergeable.');
                                         } else if (outcome === 'exhausted') {

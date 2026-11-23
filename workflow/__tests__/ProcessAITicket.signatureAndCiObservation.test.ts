@@ -327,16 +327,18 @@ describe('ProcessAITicket — Defect A: a not-yet-settled signature is not a fai
       expect(observation.state).toBe('pending');
       expect(observation.awaitingVerification).toBe(true);
       expect(observation.pendingVerifications).toHaveLength(1);
-      expect(observation.pendingVerifications[0].status).toBe('not_yet_verified');
+      // 'unknown' is a transient/no-verdict state, never a settled failure.
+      expect(observation.pendingVerifications[0].status).toBe('transient');
       expect(observation.pendingVerifications[0].reason).toBe('unknown');
 
-      // The informational finding EXISTS but is non-fixable and says "never checked".
+      // The informational finding EXISTS but is non-fixable and says "no verdict".
       const pendingFinding = observation.findings.filter((f: any) => f.kind === 'commit_verification_pending');
       expect(pendingFinding).toHaveLength(1);
       expect(pendingFinding[0].fixable).toBe(false);
       expect(pendingFinding[0].settled).toBe(false);
-      expect(String(pendingFinding[0].body)).toContain('NOT YET settled');
-      expect(String(pendingFinding[0].body)).toContain('not checked yet');
+      expect(pendingFinding[0].transient).toBe(true);
+      expect(String(pendingFinding[0].body)).toContain('SETTLED');
+      expect(String(pendingFinding[0].body)).toContain('not a failed signature');
       expect(String(observation.reason)).toContain('not yet settled');
     } finally {
       removeDir(dir);
@@ -419,6 +421,77 @@ describe('ProcessAITicket — Defect A: a not-yet-settled signature is not a fai
       expect(String(finding[0].body)).toContain('SETTLED reason');
       expect(String(finding[0].body)).toContain('no_user');
       expect(observation.findings.filter((f: any) => f.kind === 'commit_verification_pending')).toEqual([]);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('treats every TRANSIENT GitHub verification reason as pending, never as a failure (R2)', () => {
+    // GitHub's verification service can be down (gpgverify_unavailable) or fail
+    // to communicate (gpgverify_error), and OCSP can be unresolved (ocsp_pending).
+    // Before this fix every non-empty reason was a settled failure, so a GitHub
+    // verification OUTAGE forced a --force-with-lease rewrite of published history.
+    const transientReasons = ['gpgverify_unavailable', 'gpgverify_error', 'ocsp_pending'];
+    transientReasons.forEach((reason) => {
+      const dir = publishedRepo();
+      try {
+        withSigningKey(dir);
+        const observation = observe(
+          dir,
+          payload({
+            commits: [{
+              sha: SHA_PENDING,
+              commit: {
+                committer: { email: 'werner.weber@gmail.com' },
+                verification: { verified: false, reason: reason },
+              },
+            }],
+          }),
+          { BASE: 'master' },
+        );
+        const label = 'reason ' + reason;
+
+        // NEVER fixable, NEVER a rewrite.
+        expect(observation.repairNeeded).toBe(false);
+        expect(observation.counts.fixable).toBe(0);
+        expect(observation.findings.filter((f: any) => f.kind === 'unverifiable_commit')).toEqual([]);
+        expect(label && observation.state).toBe('pending');
+        expect(observation.awaitingVerification).toBe(true);
+        expect(observation.pendingVerifications).toHaveLength(1);
+        expect(observation.pendingVerifications[0].status).toBe('transient');
+        expect(observation.pendingVerifications[0].reason).toBe(reason);
+
+        const pendingFinding = observation.findings.filter((f: any) => f.kind === 'commit_verification_pending');
+        expect(pendingFinding).toHaveLength(1);
+        expect(pendingFinding[0].fixable).toBe(false);
+        expect(pendingFinding[0].transient).toBe(true);
+        expect(String(pendingFinding[0].body)).toContain('transient verification state');
+      } finally {
+        removeDir(dir);
+      }
+    });
+  });
+
+  it('treats an UNRECOGNISED verification reason as pending, so a new GitHub value cannot rewrite history (R2)', () => {
+    const dir = publishedRepo();
+    try {
+      withSigningKey(dir);
+      const observation = observe(
+        dir,
+        payload({
+          commits: [{
+            sha: SHA_PENDING,
+            commit: {
+              committer: { email: 'werner.weber@gmail.com' },
+              verification: { verified: false, reason: 'a_reason_github_has_not_invented_yet' },
+            },
+          }],
+        }),
+        { BASE: 'master' },
+      );
+      expect(observation.repairNeeded).toBe(false);
+      expect(observation.findings.filter((f: any) => f.kind === 'unverifiable_commit')).toEqual([]);
+      expect(observation.pendingVerifications[0].status).toBe('not_yet_verified');
     } finally {
       removeDir(dir);
     }
@@ -536,7 +609,10 @@ describe('ProcessAITicket — Defect B: never end a run without observing CI', (
       expect(notScheduled.checks.expected).toBe(true);
       expect(notScheduled.checks.scheduled).toBe(0);
       expect(notScheduled.checks.conclusionsEvaluated).toBe(0);
-      expect(String(notScheduled.reason)).toContain('required check(s) have been scheduled yet');
+      expect(String(notScheduled.reason)).toContain('have been scheduled yet');
+      expect(String(notScheduled.reason)).toContain('CI is expected here');
+      expect(String(notScheduled.reason)).toContain('required status check(s): build, test');
+      expect(notScheduled.checks.expectedEvidence.join(' ')).toContain('required status check(s)');
 
       // 2. Checks scheduled and running: a WAIT, no conclusion yet.
       const running = observe(
@@ -553,7 +629,9 @@ describe('ProcessAITicket — Defect B: never end a run without observing CI', (
         dir,
         payload({
           protection: requiredProtection,
-          checkRuns: { check_runs: [{ name: 'build', status: 'completed', conclusion: 'success' }] },
+          checkRuns: {
+            check_runs: [{ name: 'build', status: 'completed', conclusion: 'success', app: { slug: 'github-actions' } }],
+          },
         }),
       );
       expect(finished.checks.state).toBe('finished');
@@ -564,7 +642,102 @@ describe('ProcessAITicket — Defect B: never end a run without observing CI', (
     }
   });
 
-  it('purges the false block: a repository with no required checks is still clean', () => {
+  it('WAITS when CI is expected from the base tip but nothing is scheduled yet (R1)', () => {
+    // THE PRODUCTION GAP. No reactorynet repository declares required checks, so
+    // before this fix checksExpected was always false, this observation was
+    // 'clean', and the run took the success arm with zero conclusions read.
+    // The base tip's check runs are the evidence that does exist.
+    const dir = publishedRepo();
+    try {
+      const observation = observe(
+        dir,
+        payload({
+          pr: { number: 133, state: 'OPEN', mergeStateStatus: 'BLOCKED', reviewDecision: 'REVIEW_REQUIRED', url: 'https://x/pull/133' },
+          protection: {},
+          baseTipCheckRuns: {
+            check_runs: [
+              { name: 'build', conclusion: 'success', app: { slug: 'github-actions' } },
+              { name: 'test', conclusion: 'success', app: { slug: 'github-actions' } },
+            ],
+          },
+        }),
+      );
+      // NOT clean, NOT a human_only policy block: a bounded WAIT.
+      expect(observation.state).toBe('pending');
+      expect(observation.checks.expected).toBe(true);
+      expect(observation.checks.state).toBe('not_scheduled');
+      expect(observation.checks.scheduled).toBe(0);
+      expect(observation.checks.conclusionsEvaluated).toBe(0);
+      expect(observation.awaitingChecks).toBe(true);
+      expect(observation.checks.expectedNames).toEqual(expect.arrayContaining(['build', 'test']));
+      expect(observation.checks.expectedEvidence.join(' ')).toContain('base tip');
+      expect(String(observation.reason)).toContain('CI is expected');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('settles while only fast third-party checks have finished (R1 partial case)', () => {
+    // GitGuardian finishes in ~1 s, so the head can look 'finished' before the
+    // Actions jobs exist. A missing expected name must keep it a WAIT until an
+    // ACTIONS conclusion lands - otherwise the PR is judged on GitGuardian alone.
+    const dir = publishedRepo();
+    try {
+      const observation = observe(
+        dir,
+        payload({
+          pr: { number: 133, state: 'OPEN', mergeStateStatus: 'BLOCKED', reviewDecision: 'REVIEW_REQUIRED', url: 'https://x/pull/133' },
+          protection: {},
+          baseTipCheckRuns: { check_runs: [{ name: 'build', app: { slug: 'github-actions' } }] },
+          checkRuns: {
+            check_runs: [
+              { name: 'GitGuardian Security Checks', status: 'completed', conclusion: 'success', app: { slug: 'gitguardian' } },
+            ],
+          },
+        }),
+      );
+      expect(observation.checks.state).toBe('running');
+      expect(observation.checks.settling).toBe(true);
+      expect(observation.checks.actionsConclusions).toBe(0);
+      expect(observation.checks.missingExpectedNames).toEqual(['build']);
+      expect(observation.awaitingChecks).toBe(true);
+      expect(observation.state).toBe('pending');
+      expect(String(observation.reason)).toContain('Actions jobs have not been created yet');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('stops settling once an Actions conclusion lands, even if a base-tip name never reappears (R1)', () => {
+    // Without this, a name that only ever runs on the default branch (Dependabot,
+    // a master-only `analysis` job) would hold every run open for 5 minutes.
+    const dir = publishedRepo();
+    try {
+      const observation = observe(
+        dir,
+        payload({
+          pr: { number: 133, state: 'OPEN', mergeStateStatus: 'BLOCKED', reviewDecision: 'REVIEW_REQUIRED', url: 'https://x/pull/133' },
+          protection: {},
+          baseTipCheckRuns: { check_runs: [{ name: 'Dependabot', app: { slug: 'github-actions' } }] },
+          checkRuns: {
+            check_runs: [
+              { name: 'Analyze (javascript-typescript)', status: 'completed', conclusion: 'success', app: { slug: 'github-actions' } },
+            ],
+          },
+        }),
+      );
+      expect(observation.checks.settling).toBe(false);
+      expect(observation.checks.state).toBe('finished');
+      expect(observation.checks.actionsConclusions).toBe(1);
+      expect(observation.awaitingChecks).toBe(false);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('is clean when the repository has NO CI evidence at all', () => {
+    // The other half of R1: a genuinely CI-less repository must not be parked,
+    // and (R3(a)) must not later be told that CI failures may be hiding.
     const dir = publishedRepo();
     try {
       const observation = observe(
@@ -574,6 +747,7 @@ describe('ProcessAITicket — Defect B: never end a run without observing CI', (
       expect(observation.state).toBe('clean');
       expect(observation.checks.state).toBe('not_scheduled');
       expect(observation.checks.expected).toBe(false);
+      expect(observation.checks.expectedEvidence).toEqual([]);
       expect(observation.awaitingChecks).toBe(false);
     } finally {
       removeDir(dir);
@@ -607,6 +781,35 @@ describe('ProcessAITicket — Defect B: never end a run without observing CI', (
     }
   });
 
+  it('names an unsettled signature as the wait cause once the checks have finished (R3b)', () => {
+    const dir = publishedRepo();
+    try {
+      withSigningKey(dir);
+      // CI has FINISHED (a completed success) and a signature verdict is pending.
+      // The old rule returned 'running' because something was scheduled, so the
+      // terminal reason became "its required checks had still not finished".
+      const observation = observe(
+        dir,
+        payload({
+          pr: { number: 133, state: 'OPEN', mergeStateStatus: 'BLOCKED', reviewDecision: 'REVIEW_REQUIRED', url: 'https://x/pull/133' },
+          protection: {},
+          checkRuns: {
+            check_runs: [{ name: 'build', status: 'completed', conclusion: 'success', app: { slug: 'github-actions' } }],
+          },
+          commits: [unsettledCommit()],
+        }),
+        { BASE: 'master' },
+      );
+      expect(observation.checks.conclusionsEvaluated).toBe(1);
+      expect(observation.checks.pending).toBe(0);
+      expect(observation.pendingVerifications).toHaveLength(1);
+      expect(observation.state).toBe('pending');
+      expect(runToken(scriptOf('readPostPublishWaitCause'), { WT: dir }, dir)).toBe('verification');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
   it('records the wait cause so the loop picks the right window', () => {
     const dir = publishedRepo();
     try {
@@ -627,6 +830,91 @@ describe('ProcessAITicket — Defect B: never end a run without observing CI', (
     }
   });
 
+  it('reports not_expected for a CI-less repository instead of none (R3a)', () => {
+    const dir = publishedRepo();
+    try {
+      const writeObservation = (body: Record<string, any>): void => {
+        fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+        fs.writeFileSync(path.join(dir, '.ai-agent', 'post-publish-observation.json'), JSON.stringify(body), 'utf8');
+      };
+      writeObservation({
+        state: 'fixable',
+        headSha: 'a'.repeat(40),
+        checkedAt: '2026-11-23T21:00:00.000Z',
+        checks: { state: 'not_scheduled', expected: false, expectedEvidence: [], scheduled: 0, required: 0, conclusionsEvaluated: 0 },
+        counts: { pendingChecks: 0, pendingVerifications: 0 },
+      });
+      // `none` would make the terminal reporting blame a CI failure that cannot
+      // exist; the budget is the real cause on this repository.
+      expect(runToken(scriptOf('recordPostPublishCoverage'), { WT: dir }, dir)).toBe('not_expected');
+      const record = JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'post-publish-ci-coverage.json'), 'utf8'));
+      expect(record.expected).toBe(false);
+      expect(record.anyConclusionEvaluated).toBe(false);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('reports none when CI is expected and no conclusion was ever read (R3a)', () => {
+    const dir = publishedRepo();
+    try {
+      fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, '.ai-agent', 'post-publish-observation.json'),
+        JSON.stringify({
+          state: 'pending',
+          headSha: 'b'.repeat(40),
+          checkedAt: '2026-11-23T21:01:00.000Z',
+          checks: { state: 'running', expected: true, expectedEvidence: ['base tip master has check run(s): build'], scheduled: 2, required: 0, conclusionsEvaluated: 0 },
+          counts: { pendingChecks: 2, pendingVerifications: 0 },
+        }),
+        'utf8',
+      );
+      expect(runToken(scriptOf('recordPostPublishCoverage'), { WT: dir }, dir)).toBe('none');
+      const record = JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'post-publish-ci-coverage.json'), 'utf8'));
+      expect(record.expected).toBe(true);
+      expect(record.lastCiExpectedEvidence.join(' ')).toContain('base tip');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('discards coverage accumulated for a DIFFERENT head (NB2)', () => {
+    const dir = publishedRepo();
+    try {
+      const dirAi = path.join(dir, '.ai-agent');
+      fs.mkdirSync(dirAi, { recursive: true });
+      // A previous head's record says a conclusion WAS seen.
+      fs.writeFileSync(
+        path.join(dirAi, 'post-publish-ci-coverage.json'),
+        JSON.stringify({ headSha: 'c'.repeat(40), observations: 6, anyConclusionEvaluated: true, conclusionsEvaluated: 3, expected: true }),
+        'utf8',
+      );
+      const newHead = 'd'.repeat(40);
+      fs.writeFileSync(
+        path.join(dirAi, 'post-publish-observation.json'),
+        JSON.stringify({
+          state: 'pending',
+          headSha: newHead,
+          checkedAt: '2026-11-23T21:02:00.000Z',
+          checks: { state: 'not_scheduled', expected: true, expectedEvidence: ['base tip'], scheduled: 0, required: 0, conclusionsEvaluated: 0 },
+          counts: { pendingChecks: 0, pendingVerifications: 0 },
+        }),
+        'utf8',
+      );
+      // The fixed head inherits NOTHING: a conclusion read on the old head must not
+      // make this one look covered.
+      expect(runToken(scriptOf('recordPostPublishCoverage'), { WT: dir }, dir)).toBe('none');
+      const record = JSON.parse(fs.readFileSync(path.join(dirAi, 'post-publish-ci-coverage.json'), 'utf8'));
+      expect(record.headSha).toBe(newHead);
+      expect(record.observations).toBe(1);
+      expect(record.anyConclusionEvaluated).toBe(false);
+      expect(record.conclusionsEvaluated).toBe(0);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
   it('accumulates CI coverage across observations instead of overwriting it', () => {
     const dir = publishedRepo();
     try {
@@ -634,14 +922,17 @@ describe('ProcessAITicket — Defect B: never end a run without observing CI', (
         fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
         fs.writeFileSync(path.join(dir, '.ai-agent', 'post-publish-observation.json'), JSON.stringify(body), 'utf8');
       };
+      const HEAD = 'e'.repeat(40);
       const noConclusion = {
         state: 'pending',
+        headSha: HEAD,
         checkedAt: '2026-11-13T21:26:44.000Z',
         checks: { state: 'running', expected: true, scheduled: 7, required: 5, conclusionsEvaluated: 0 },
         counts: { pendingChecks: 7, pendingVerifications: 0 },
       };
       const oneConclusion = {
         state: 'fixable',
+        headSha: HEAD,
         checkedAt: '2026-11-13T21:30:00.000Z',
         checks: { state: 'finished', expected: true, scheduled: 7, required: 5, conclusionsEvaluated: 2 },
         counts: { pendingChecks: 0, pendingVerifications: 0 },
@@ -705,6 +996,8 @@ describe('ProcessAITicket — Defect B: never end a run without observing CI', (
         conclusionsEvaluated: 0,
         anyChecksScheduled: true,
         requiredChecks: 5,
+        expected: true,
+        lastCiExpectedEvidence: ['base tip master has check run(s): build, test'],
         lastChecksState: 'running',
         lastScheduledChecks: 7,
       });
@@ -715,7 +1008,9 @@ describe('ProcessAITicket — Defect B: never end a run without observing CI', (
       );
       expect(comment).toContain('WITHOUT OBSERVING ANY CI CONCLUSION');
       expect(comment).toContain('failing checks may exist and were never read');
-      expect(comment).toContain('5 required check(s), 7 scheduled');
+      expect(comment).toContain('7 scheduled at the last observation');
+      expect(comment).toContain('CI expected because base tip master has check run(s): build, test');
+      expect(comment).toContain('5 required check(s)');
       // The misdiagnosis must be gone.
       expect(comment).not.toContain('budget was exhausted');
       // The coverage line makes the absence visible, not implied.
@@ -728,7 +1023,15 @@ describe('ProcessAITicket — Defect B: never end a run without observing CI', (
   it('says the same when the loop records the distinct checks_unobserved outcome', () => {
     const dir = publishedRepo();
     try {
-      writeArtefacts(dir, { observations: 1, anyConclusionEvaluated: false, conclusionsEvaluated: 0, anyChecksScheduled: false, requiredChecks: 4 });
+      writeArtefacts(dir, {
+        observations: 1,
+        anyConclusionEvaluated: false,
+        conclusionsEvaluated: 0,
+        anyChecksScheduled: false,
+        requiredChecks: 4,
+        expected: true,
+        lastCiExpectedEvidence: ['.github/workflows declares a pull_request trigger'],
+      });
       const comment = runScript(
         scriptOf('describePostPublishBlock'),
         { WT: dir, OUTCOME: 'checks_unobserved', REASON: '', PR_URL: 'https://x/pull/133', BOUND: '2' },
@@ -736,6 +1039,33 @@ describe('ProcessAITicket — Defect B: never end a run without observing CI', (
       );
       expect(comment).toContain('WITHOUT OBSERVING ANY CI CONCLUSION');
       expect(comment).not.toContain('budget was exhausted');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('keeps the exhausted-budget wording for a repository with NO CI (R3a)', () => {
+    const dir = publishedRepo();
+    try {
+      writeArtefacts(dir, {
+        observations: 3,
+        anyConclusionEvaluated: false,
+        conclusionsEvaluated: 0,
+        anyChecksScheduled: false,
+        requiredChecks: 0,
+        expected: false,
+        lastChecksState: 'not_scheduled',
+        lastScheduledChecks: 0,
+      }, { pendingChecks: [], awaitingChecks: false, awaitingReview: false, reviewDecision: '' });
+      const comment = runScript(
+        scriptOf('describePostPublishBlock'),
+        { WT: dir, OUTCOME: 'exhausted', REASON: '', PR_URL: 'https://x/pull/133', BOUND: '2' },
+        dir,
+      );
+      // Before R3(a) this said "WITHOUT OBSERVING ANY CI CONCLUSION ... failing
+      // checks may exist", which is impossible on a repository with no CI.
+      expect(comment).toContain('budget was exhausted');
+      expect(comment).not.toContain('WITHOUT OBSERVING ANY CI CONCLUSION');
     } finally {
       removeDir(dir);
     }
@@ -750,6 +1080,7 @@ describe('ProcessAITicket — Defect B: never end a run without observing CI', (
         conclusionsEvaluated: 2,
         anyChecksScheduled: true,
         requiredChecks: 5,
+        expected: true,
         lastChecksState: 'finished',
         lastScheduledChecks: 7,
       }, { pendingChecks: [], awaitingChecks: false });
@@ -769,7 +1100,15 @@ describe('ProcessAITicket — Defect B: never end a run without observing CI', (
   it('words the human task with the never-observed cause, not fix cycles', () => {
     const dir = publishedRepo();
     try {
-      writeArtefacts(dir, { observations: 2, anyConclusionEvaluated: false, conclusionsEvaluated: 0, requiredChecks: 5, lastScheduledChecks: 7 });
+      writeArtefacts(dir, {
+        observations: 2,
+        anyConclusionEvaluated: false,
+        conclusionsEvaluated: 0,
+        requiredChecks: 5,
+        expected: true,
+        lastCiExpectedEvidence: ['base tip master has check run(s): build'],
+        lastScheduledChecks: 7,
+      });
       fs.writeFileSync(
         path.join(dir, '.ai-agent', 'post-publish-park.json'),
         JSON.stringify({ awaitPolls: 3, fixCycles: 0, fixBound: '2' }),
