@@ -299,9 +299,17 @@ describe('core.ProcessAITicket commit hygiene', () => {
     // review.json were already in the branch and reached the pull request. An
     // agent that only wrote a report would also look dirty and yield an empty
     // commit. The step must untrack them and still commit.
+    //
+    // PROCESS-003 changed HOW the step decides: "the branch added .ai-agent"
+    // (`git diff <base>..HEAD -- .ai-agent`) is now distinguished from "the BASE
+    // tracks .ai-agent and this run merely checked it out". The first is repaired
+    // by recording the removal; the second is reset out of the index so the commit
+    // publishes NO .ai-agent change at all. Both are asserted here.
     const script = String(byId('commitChanges').config.args[1]);
-    expect(script).toContain('git ls-files .ai-agent');
+    expect(script).toContain('git diff --name-only ');
+    expect(script).toContain('..HEAD -- .ai-agent');
     expect(script).toContain('git rm -r --cached');
+    expect(script).toContain("git reset -q -- .ai-agent");
     expect(script).toContain('!dirty.trim() && !internal');
   });
 
