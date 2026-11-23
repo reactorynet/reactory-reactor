@@ -6085,8 +6085,12 @@ describe('ProcessAITicket PR #53 review findings', () => {
  * Three defences are pinned here, and each of them fails on the pre-fix workflow:
  *   1. a fresh worktree starts with an EMPTY .ai-agent, even when the base tracks it;
  *   2. the published commit carries NO .ai-agent path;
- *   3. run scratch state staged for publication is refused, and a verdict captured for a
- *      DIFFERENT run is treated as absent rather than as this run's answer.
+ *   3. run scratch state staged for publication is UNSTAGED (never committed), and a verdict
+ *      captured for a DIFFERENT run is treated as absent rather than as this run's answer.
+ *
+ * PR #80 review, R1 and R2, added two guards on the guards: the pipeline must not manufacture
+ * the work it publishes (.gitignore), and recovering from staged scratch must not be reported as
+ * a publication outcome. Both are pinned below, and both failed before the review fixes.
  */
 describe('ProcessAITicket never inherits or publishes .ai-agent (PROCESS-003)', () => {
   const prepareScript = scriptOf('prepareWorktree');
@@ -6094,6 +6098,11 @@ describe('ProcessAITicket never inherits or publishes .ai-agent (PROCESS-003)', 
   const publishableScript = scriptOf('readPublishable');
   const verdictScript = scriptOf('readVerdict');
   const captureScript = scriptOf('captureReview');
+  const readinessScript = scriptOf('readPublishReadiness');
+
+  /** readPublishReadiness consumes the commit step's stdout plus the branch name. */
+  const readiness = (wt: string, commit: any): string =>
+    runScript(readinessScript, { WT: wt, BRANCH: sh('git branch --show-current', wt), COMMIT: JSON.stringify(commit) }, wt);
 
   const scratchDir = (dir: string): string => path.join(dir, '.ai-agent');
   const readJsonFile = (file: string): any => JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -6105,7 +6114,7 @@ describe('ProcessAITicket never inherits or publishes .ai-agent (PROCESS-003)', 
    * The contaminated shape: a repository whose default branch TRACKS `.ai-agent`, which is
    * how reactory-speech-service looked after e84201a.
    */
-  const repoWithTrackedScratch = (): { root: string; repo: string } => {
+  const repoWithTrackedScratch = (options: { gitignore?: string } = {}): { root: string; repo: string } => {
     const root = tempDir('pa-scratch-');
     const remote = path.join(root, 'origin.git');
     sh('git init -q --bare -b master "' + remote + '"', root);
@@ -6113,6 +6122,11 @@ describe('ProcessAITicket never inherits or publishes .ai-agent (PROCESS-003)', 
     const seed = path.join(root, 'seed');
     fs.mkdirSync(seed, { recursive: true });
     initRepo(seed);
+    // R1's precondition: a tracked .gitignore that does NOT ignore .ai-agent/. Most
+    // repositories look like this, and the pipeline used to append the rule to it.
+    if (options.gitignore !== undefined) {
+      fs.writeFileSync(path.join(seed, '.gitignore'), options.gitignore, 'utf8');
+    }
     fs.mkdirSync(path.join(seed, '.ai-agent'), { recursive: true });
     fs.writeFileSync(
       path.join(seed, '.ai-agent', 'review-normalised.json'),
@@ -6179,33 +6193,104 @@ describe('ProcessAITicket never inherits or publishes .ai-agent (PROCESS-003)', 
     }
   });
 
-  it('refuses run scratch state staged for publication, and says what to do about it', () => {
+  it('never manufactures the work it publishes: no engineer change means no commit (R1)', () => {
+    // PR #80 review, R1. prepareWorktree used to APPEND ".ai-agent/" to a tracked .gitignore
+    // before the engineer started. commitChanges decides "worktree clean" from
+    // `git status --porcelain -- . ":(exclude).ai-agent"`, which then showed ` M .gitignore`,
+    // so a run whose engineer produced nothing committed a .gitignore-only change and
+    // published it - instead of stopping at "worktree clean" the way master does.
+    const ctx = repoWithTrackedScratch({ gitignore: 'node_modules/\n' });
+    try {
+      const out = prepare(ctx.repo, 'REACTORY-1/20260101/5');
+      const wt = out.worktreePath;
+
+      // The rule was REPORTED, not written: the file is byte-identical to the base.
+      expect(sh('cat .gitignore', wt)).toBe('node_modules/');
+      expect(out.scratch.gitignoreIgnores).toBe(false);
+      expect(out.warnings.join(' ')).toMatch(/does not ignore \.ai-agent/);
+      // And the worktree is clean, so nothing of the pipeline's own doing is 'work'.
+      expect(sh('git status --porcelain -- . ":(exclude).ai-agent"', wt)).toBe('');
+
+      const result = runJson(commitScript, { WT: wt, REF: 'REACTORY-1/20260101/5' }, wt);
+
+      expect(result.committed).toBe(false);
+      expect(result.reason).toBe('worktree clean');
+      expect(sh('git rev-list --count origin/master..HEAD', wt)).toBe('0');
+      // And the publication gate agrees there is nothing to publish.
+      expect(readiness(wt, result)).toBe('blocked');
+    } finally {
+      removeDir(ctx.root);
+    }
+  });
+
+  it('treats the ignore rule as a recommendation, not a rewrite', () => {
+    const ctx = repoWithTrackedScratch({ gitignore: 'node_modules/\n' });
+    try {
+      const out = prepare(ctx.repo, 'REACTORY-1/20260101/6');
+      // git check-ignore is authoritative: an equivalent spelling is recognised rather than
+      // duplicated, and a per-clone exclude counts too (PR #80 review, nit 4).
+      sh('printf "**/.ai-agent/\\n" >> .gitignore && git add -A && git commit -qm ignore', out.worktreePath);
+      const again = prepare(ctx.repo, 'REACTORY-1/20260101/6');
+      expect(again.scratch.gitignoreIgnores).toBe(true);
+      expect(again.warnings.join(' ')).not.toMatch(/does not ignore \.ai-agent/);
+      expect(sh('grep -c "ai-agent" .gitignore', out.worktreePath)).toBe('1');
+    } finally {
+      removeDir(ctx.root);
+    }
+  });
+
+  it('unstages run scratch state instead of failing the publication, and never commits it (R2)', () => {
+    // PR #80 review, R2. This used to exit 1 with reason "run scratch state staged". That
+    // refused a state the code below already neutralises, and it broke publication twice over:
+    // readPublishReadiness classifies a failed commit with /fail/i.test(reason), which that
+    // reason does not match, so with 0 commits ahead the operator was told "there was nothing
+    // to publish" while the work sat uncommitted - and on the re-publish path (1+ ahead) the
+    // cycle was cleared to push an unchanged tip and accounted as a published fix.
+    // A repository with NO .gitignore is the trigger: the engineer's `git add -A` stages the
+    // pipeline's own directory.
     const ctx = repoWithTrackedScratch();
     try {
       const out = prepare(ctx.repo, 'REACTORY-1/20260101/3');
       const wt = out.worktreePath;
-      // A.2: nothing on this branch explains a NEW .ai-agent file, so it is fatal.
       fs.writeFileSync(path.join(wt, '.ai-agent', 'report.json'), '{"status":"completed"}\n', 'utf8');
-      fs.writeFileSync(path.join(wt, 'work.txt'), 'real work\n', 'utf8');
-      sh('git add -f .ai-agent/report.json', wt);
+      fs.writeFileSync(path.join(wt, 'fix.txt'), 'the actual fix\n', 'utf8');
+      sh('git add -A', wt);
+      expect(sh('git diff --cached --name-only', wt)).toContain('.ai-agent/report.json');
 
-      let failure: any = null;
-      try {
-        runScript(commitScript, { WT: wt, REF: 'REACTORY-1/20260101/3' }, wt);
-      } catch (e) {
-        failure = e;
-      }
+      // First publication: 0 commits ahead.
+      const first = runJson(commitScript, { WT: wt, REF: 'REACTORY-1/20260101/3' }, wt);
 
-      expect(failure).not.toBeNull();
-      expect(failure.status).toBe(1);
-      const reported = JSON.parse(String(failure.stdout));
-      expect(reported.committed).toBe(false);
-      expect(reported.reason).toBe('run scratch state staged');
-      // Actionable: it names the path and the remedy.
-      expect(String(reported.error)).toContain('.ai-agent/report.json');
-      expect(String(reported.error)).toMatch(/git restore --staged|gitignore/);
-      // Nothing was committed, so the scratch state cannot have been published.
-      expect(sh('git rev-list --count origin/master..HEAD', wt)).toBe('0');
+      expect(first.committed).toBe(true);
+      // The scratch is REPORTED (evidence + warning) rather than silently dropped...
+      expect(String(first.scratchUnstaged || []).toString()).toContain('.ai-agent/report.json');
+      const evidence = readJsonFile(path.join(scratchDir(wt), 'scratch-unstaged.json'));
+      expect(evidence.reason).toBe('run scratch state staged');
+      expect(evidence.unstaged.join(' ')).toContain('.ai-agent/report.json');
+      expect(String(evidence.message)).toMatch(/gitignore/);
+      // ...and the real work is COMMITTED, without any scratch alongside it.
+      const firstFiles = sh('git show --name-only --pretty=format: HEAD', wt).split('\n').filter(Boolean);
+      expect(firstFiles).toContain('fix.txt');
+      expect(firstFiles.join(' ')).not.toContain('.ai-agent');
+      expect(sh('git rev-list --count origin/master..HEAD', wt)).toBe('1');
+
+      // The gate the old refusal lied to: a commit exists, and it carries the work.
+      expect(readiness(wt, first)).toBe('ok');
+      expect(readJsonFile(path.join(scratchDir(wt), 'publish-readiness.json')).commitsAhead).toBe(1);
+
+      // Re-publish path: already 1 ahead, another fix plus staged scratch again.
+      fs.writeFileSync(path.join(wt, 'fix2.txt'), 'the second fix\n', 'utf8');
+      fs.writeFileSync(path.join(wt, '.ai-agent', 'post-publish-findings.json'), '{"cycle":1}\n', 'utf8');
+      sh('git add -A', wt);
+      const second = runJson(commitScript, { WT: wt, REF: 'REACTORY-1/20260101/3' }, wt);
+
+      expect(second.committed).toBe(true);
+      expect(sh('git show --name-only --pretty=format: HEAD', wt)).toContain('fix2.txt');
+      expect(sh('git rev-list --count origin/master..HEAD', wt)).toBe('2');
+      // The decisive assertion: the branch diff carries NO .ai-agent path at all, in either
+      // commit, so 'ok' can never mean "pushed a tip whose fix was never committed".
+      expect(sh('git diff --name-only origin/master..HEAD', wt)).not.toContain('.ai-agent');
+      expect(readiness(wt, second)).toBe('ok');
+      expect(readJsonFile(path.join(scratchDir(wt), 'publish-readiness.json')).commitsAhead).toBe(2);
     } finally {
       removeDir(ctx.root);
     }

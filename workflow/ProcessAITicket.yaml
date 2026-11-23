@@ -901,7 +901,6 @@ steps:
                     runId: '',
                     gitignorePath: '',
                     gitignoreIgnores: false,
-                    gitignoreAppended: false,
                     rotatedFrom: '',
                     rotatedTicketReference: '',
                   };
@@ -928,24 +927,29 @@ steps:
 
                   fs.mkdirSync(dir, { recursive: true });
 
-                  // A.3 belt and braces. `git add -A` in a repository that does NOT ignore
-                  // `.ai-agent/` stages this run's own bookkeeping, and an agent that then commits
-                  // puts it in the branch (that is how SPEECH-005 seeded the directory onto master).
-                  // The rule is appended to the worktree's TRACKED .gitignore - never to the shared
-                  // per-clone exclude file, which every worktree of this clone would inherit - and the
-                  // edit is RECORDED (scratch.gitignoreAppended + a warning), so it is a deliberate,
-                  // single-line hygiene change in the ticket that first needed it, not a silent
-                  // rewrite. A repository with no .gitignore at all is reported, never given a file.
+                  // A.3. REPORT whether this repository ignores .ai-agent/; never write the rule.
+                  //
+                  // The rule was originally APPENDED to the worktree's tracked .gitignore. That
+                  // broke the pipeline's own clean check: `commitChanges` decides "the worktree is
+                  // clean" from `git status --porcelain -- . ":(exclude).ai-agent"`, which then
+                  // showed ` M .gitignore`. A run whose engineer produced nothing committed a
+                  // .gitignore-only change and published it, instead of stopping at "worktree
+                  // clean" (PR #80 review, R1). The pipeline must not manufacture the work it then
+                  // publishes.
+                  //
+                  // The safety property never depended on the rule: A.1 empties the directory at
+                  // prepare time and commitChanges excludes .ai-agent from every commit. So the
+                  // rule is a repository-hygiene recommendation, reported here and left to a human.
+                  //
+                  // `git check-ignore` is authoritative and covers every equivalent spelling
+                  // (`.ai-agent/`, `**/.ai-agent/`, `.ai-agent/*`) and honours a per-clone
+                  // exclude file, which a text match cannot (PR #80 review, nit 4). That shared
+                  // per-clone file is only ever CONSULTED here, never written - it is shared with
+                  // the main checkout, and the contract test pins that it stays untouched.
                   try {
-                    const gitignore = path.join(target, '.gitignore');
-                    scratch.gitignorePath = gitignore;
-                    const text = fs.existsSync(gitignore) ? fs.readFileSync(gitignore, 'utf8') : null;
-                    scratch.gitignoreIgnores = text !== null && /^\s*\/?\.ai-agent\/?\s*$/m.test(text);
-                    if (text !== null && !scratch.gitignoreIgnores) {
-                      fs.appendFileSync(gitignore, (text && !text.endsWith('\n') ? '\n' : '') + '.ai-agent/\n', 'utf8');
-                      scratch.gitignoreAppended = true;
-                    }
-                  } catch (e) { scratch.gitignoreAppended = false; }
+                    scratch.gitignorePath = path.join(target, '.gitignore');
+                    scratch.gitignoreIgnores = tryRunIn('git check-ignore -q -- .ai-agent/ && echo yes', target) === 'yes';
+                  } catch (e) { scratch.gitignoreIgnores = false; }
 
                   // B.1/A.1. The identity is minted for THIS dispatch, never inherited.
                   // A reused worktree may still hold the previous dispatch's identity (a
@@ -1031,16 +1035,15 @@ steps:
 
                 if (fs.existsSync(worktreePath)) {
                   // A reused worktree is THIS run already in progress: clearInherited is false so
-                  // its own report/review artefacts survive. Only the exclude rule and (when it is
-                  // somehow missing) the run identity are ensured.
+                  // its own report/review artefacts survive. The run identity is still ROTATED -
+                  // prepareScratchArea always mints - so a re-dispatched ticket cannot inherit the
+                  // previous dispatch's verdict; rotatedFrom reports what it replaced.
                   const scratch = prepareScratchArea(worktreePath, ref, false);
                   if (scratch.rotatedFrom && scratch.rotatedFrom !== scratch.runId) {
                     warnings.push('this worktree carried run identity ' + scratch.rotatedFrom + (scratch.rotatedTicketReference ? ' from ' + scratch.rotatedTicketReference : '') + '; this run has its own identity ' + scratch.runId + ', so the earlier dispatch\'s verdict cannot be read as this run\'s.');
                   }
-                  if (scratch.gitignoreAppended) {
-                    warnings.push('.gitignore did not ignore .ai-agent/, so this run appended ".ai-agent/" to it (PROCESS-003): run state must never be publishable. It is a one-line hygiene change published with this ticket.');
-                  } else if (!scratch.gitignoreIgnores) {
-                    warnings.push('this repository has no .gitignore, so .ai-agent/ is not ignored. Add ".ai-agent/" to one deliberately: the pipeline refuses to commit it either way, but a stray `git add -A` in an agent session is what put run state on master before.');
+                  if (!scratch.gitignoreIgnores) {
+                    warnings.push('this repository does not ignore .ai-agent/. The pipeline never commits run state - prepare deletes an inherited .ai-agent and commitChanges excludes it from every commit - but a human adding ".ai-agent/" to .gitignore stops an agent session staging it in the first place. Nothing was written for you (PROCESS-003).');
                   }
                   // A reused worktree reports the branch it is ACTUALLY on. Reporting the
                   // freshly computed name would aim the push and the pull request at a ref
@@ -1112,10 +1115,8 @@ steps:
                 if (scratch.inheritedFiles > 0 || scratch.inheritedTracked > 0) {
                   warnings.push('this run inherited .ai-agent from ' + baseRef + ' (' + scratch.inheritedFiles + ' file(s) on disk, ' + scratch.inheritedTracked + ' tracked) and started with an EMPTY .ai-agent. Inherited run state is never read as this run\'s: every artefact carries runId ' + scratch.runId + '.');
                 }
-                if (scratch.gitignoreAppended) {
-                  warnings.push('.gitignore did not ignore .ai-agent/, so this run appended ".ai-agent/" to it (PROCESS-003): run state must never be publishable. It is a one-line hygiene change published with this ticket.');
-                } else if (!scratch.gitignoreIgnores) {
-                  warnings.push('this repository has no .gitignore, so .ai-agent/ is not ignored. Add ".ai-agent/" to one deliberately: the pipeline refuses to commit it either way, but a stray `git add -A` in an agent session is what put run state on master before.');
+                if (!scratch.gitignoreIgnores) {
+                  warnings.push('this repository does not ignore .ai-agent/. The pipeline never commits run state - prepare deletes an inherited .ai-agent and commitChanges excludes it from every commit - but a human adding ".ai-agent/" to .gitignore stops an agent session staging it in the first place. Nothing was written for you (PROCESS-003).');
                 }
                 const createdHead = tryRunIn('git rev-parse HEAD', worktreePath);
                 if (createdHead && createdHead !== baseSha && !isAncestor(cwd, baseSha, createdHead)) {
@@ -7596,31 +7597,47 @@ steps:
                                 .filter((entry) => entry.status && entry.status.charAt(0) !== 'D');
                             })();
                             const unexplainedScratch = scratchStaged.filter((entry) => branchScratch.indexOf(entry.path) === -1);
+
+                            // A.2 (PROCESS-003). Run scratch state is NEVER committed. An engineer who
+                            // ran `git add -A` is not a publication failure, though: this step does its
+                            // own `git add -A` below and then takes every .ai-agent path back out of the
+                            // index. So staged scratch is UNSTAGED here, recorded as evidence and warned
+                            // about, and the run continues with the real work.
+                            //
+                            // This used to exit 1. That refused a state the code below already
+                            // neutralises, and it broke publication in two ways (PR #80 review, R2):
+                            //   * readPublishReadiness classifies a failed commit with
+                            //     /fail/i.test(reason), and "run scratch state staged" does not match.
+                            //     With 0 commits ahead the operator was told "There was nothing to
+                            //     publish" while the work sat uncommitted in the worktree - and the
+                            //     remedy this step wrote never reached them.
+                            //   * on the re-publish path (1+ commits ahead) the same mismatch cleared
+                            //     the cycle to push, so the old tip was re-pushed and the cycle was
+                            //     accounted as a published fix that was never committed.
+                            // The invariant is unchanged and is still enforced where it can be enforced
+                            // honestly: no .ai-agent path can reach a commit.
+                            let scratchUnstaged = [];
                             if (unexplainedScratch.length) {
-                              const listed = unexplainedScratch.map((entry) => entry.status + ' ' + entry.path).join(', ');
+                              scratchUnstaged = unexplainedScratch.map((entry) => entry.status + ' ' + entry.path);
+                              // `git reset` restores base-tracked paths to HEAD (no staged deletion)
+                              // and drops staged additions, which is exactly "unstage".
+                              try { run('git reset -q -- .ai-agent'); } catch (e) { /* nothing to reset */ }
                               const message = [
-                                'refusing to commit run scratch state staged under .ai-agent/: ' + listed + '.',
+                                'unstaged run scratch state that something staged for publication: ' + scratchUnstaged.join(', ') + '.',
                                 "That directory holds this pipeline's own bookkeeping (report, review window, accepted verdict, publish decision); publishing it is how a later worktree inherited a previous ticket's approved verdict (PROCESS-003).",
-                                "Nothing was committed. Unstage it (git restore --staged .ai-agent) and let the pipeline write it, or add '.ai-agent/' to .gitignore."
+                                "The run continued with the real work, and the commit carries no .ai-agent path. Add '.ai-agent/' to .gitignore to stop it being staged at all."
                               ].join(' ');
                               process.stderr.write(message + '\n');
                               try {
                                 const dir = path.join(wt, '.ai-agent');
                                 fs.mkdirSync(dir, { recursive: true });
-                                fs.writeFileSync(path.join(dir, 'commit-refused.json'), JSON.stringify({
+                                fs.writeFileSync(path.join(dir, 'scratch-unstaged.json'), JSON.stringify({
                                   reason: 'run scratch state staged',
-                                  staged: unexplainedScratch,
+                                  unstaged: scratchUnstaged,
                                   message: message,
-                                  refusedAt: new Date().toISOString(),
+                                  unstagedAt: new Date().toISOString(),
                                 }, null, 2), 'utf8');
-                              } catch (e) { /* the refusal itself is already on stdout+stderr */ }
-                              process.stdout.write(JSON.stringify({
-                                committed: false,
-                                reason: 'run scratch state staged',
-                                staged: unexplainedScratch,
-                                error: message,
-                              }));
-                              process.exit(1);
+                              } catch (e) { /* the stderr warning above is the remaining record */ }
                             }
 
                             let dirty = '';
@@ -7796,6 +7813,9 @@ steps:
                               committed: true,
                               sha: run('git rev-parse HEAD').trim(),
                               repaired: repaired,
+                              // Scratch that something staged is reported, not fatal: the commit is
+                              // byte-identical either way (PROCESS-003 A.2).
+                              scratchUnstaged: scratchUnstaged,
                               identity: identity,
                               committer: {
                                 name: run('git log -1 --format=%cn').trim(),
