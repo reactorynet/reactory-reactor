@@ -4041,7 +4041,7 @@ describe('ProcessAITicket post-publication observation loop (PROCESS-002 B/C)', 
       },
     },
     checkRuns: { check_runs: [] },
-    commits: [{ sha: 'abc123def4567890', verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+    commits: [{ sha: 'abc123def4567890', commit: { committer: { email: 'owner@example.com' }, verification: { verified: true, reason: 'valid' } } }],
     protection: { required_signatures: { enabled: false } },
   });
 
@@ -4193,7 +4193,7 @@ describe('ProcessAITicket post-publication observation loop (PROCESS-002 B/C)', 
             data: { repository: { pullRequest: { reviewThreads: { nodes: [{ id: 'THREAD_1', isResolved: true, path: 'src/work.ts', line: 12, comments: { nodes: [] } }] } } } },
           },
           checkRuns: { check_runs: [] },
-          commits: [{ sha: commit.sha, verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+          commits: [{ sha: commit.sha, commit: { committer: { email: 'owner@example.com' }, verification: { verified: true, reason: 'valid' } } }],
           protection: null,
         }),
         'utf8',
@@ -4220,8 +4220,7 @@ describe('ProcessAITicket post-publication observation loop (PROCESS-002 B/C)', 
       payload.commits = [
         {
           sha: 'b46bcd6f00d',
-          verification: { verified: false, reason: 'no_user' },
-          commit: { committer: { email: 'reactor@reactory.net' } },
+          commit: { committer: { email: 'reactor@reactory.net' }, verification: { verified: false, reason: 'no_user' } },
         },
       ];
       // No signing identity in this worktree (initRepo sets commit.gpgsign false).
@@ -4251,8 +4250,7 @@ describe('ProcessAITicket post-publication observation loop (PROCESS-002 B/C)', 
       payload.commits = [
         {
           sha: 'b46bcd6f00d',
-          verification: { verified: false, reason: 'no_user' },
-          commit: { committer: { email: 'reactor@reactory.net' } },
+          commit: { committer: { email: 'reactor@reactory.net' }, verification: { verified: false, reason: 'no_user' } },
         },
       ];
       const observation = observe(dir, writeObservationFixture(dir, payload));
@@ -4304,7 +4302,7 @@ describe('ProcessAITicket post-publication observation loop (PROCESS-002 B/C)', 
           },
         },
         checkRuns: { check_runs: [{ name: 'codeql', conclusion: 'failure', output: { summary: 'analysis failed' } }] },
-        commits: [{ sha: 'abc123def4567890', verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+        commits: [{ sha: 'abc123def4567890', commit: { committer: { email: 'owner@example.com' }, verification: { verified: true, reason: 'valid' } } }],
         protection: null,
       });
       observe(dir, fixture);
@@ -4627,8 +4625,8 @@ describe('ProcessAITicket post-publication loop convergence (PROCESS-002 round 2
           reviewThreads: { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } },
           checkRuns: { check_runs: [] },
           commits: [
-            { sha: sh('git rev-parse HEAD~1', dir), verification: { verified: false, reason: 'no_user' }, commit: { committer: { email: 'reactor@reactory.net' } } },
-            { sha: observed, verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } },
+            { sha: sh('git rev-parse HEAD~1', dir), commit: { committer: { email: 'reactor@reactory.net' }, verification: { verified: false, reason: 'no_user' } } },
+            { sha: observed, commit: { committer: { email: 'owner@example.com' }, verification: { verified: true, reason: 'valid' } } },
           ],
           protection: { required_signatures: { enabled: true } },
         }),
@@ -5569,7 +5567,7 @@ describe('ProcessAITicket post-publication convergence (PROCESS-002 round 4)', (
           data: { repository: { pullRequest: { reviewThreads: { nodes: [Object.assign({}, thread, { isResolved: true })] } } } },
         },
         checkRuns: { check_runs: [] },
-        commits: [{ sha: commit.sha, verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+        commits: [{ sha: commit.sha, commit: { committer: { email: 'owner@example.com' }, verification: { verified: true, reason: 'valid' } } }],
         protection: null,
         repo: 'reactorynet/demo',
       });
@@ -5692,7 +5690,7 @@ describe('ProcessAITicket post-publication convergence (PROCESS-002 round 4)', (
           data: { repository: { pullRequest: { reviewThreads: { nodes: [Object.assign({}, thread, { isResolved: true })] } } } },
         },
         checkRuns: { check_runs: [] },
-        commits: [{ sha: head, verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+        commits: [{ sha: head, commit: { committer: { email: 'owner@example.com' }, verification: { verified: true, reason: 'valid' } } }],
         protection: null,
         repo: 'reactorynet/demo',
       });

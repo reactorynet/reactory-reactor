@@ -133,6 +133,63 @@ identity cannot move until `PROCESS_AI_TICKET_WORKFLOW_ID` and the catalog copy 
 A 1.4.9 bump is filed as a coordinated-release follow-up and must go through the procedure below as
 one unit.
 
+### Observation correctness — REACTORY-302016408/20261114/787370442 (shipped in place at 1.4.8)
+
+The run on instance `6af7508c4f0cf9fef5efe44a` (WS-1 / PR #133) misdiagnosed a blocked pull request
+and burned its whole post-publication fix budget on a phantom. Two defects, both in the observation,
+neither in whether the loop loops.
+
+**A — GitHub verifies commit signatures asynchronously.** For a window after a push the commits API
+returns `verified: false` with `reason: "unknown"`, meaning *not checked yet*. The observation read
+that as a terminal failure, emitted a fixable `unverifiable_commit`, and `repairNeeded` drove a
+`--force-with-lease` rewrite of published history once per cycle — for a commit GitHub went on to
+report `verified: true, reason: valid`.
+
+**The read path was the other half of that root cause.** `/repos/{repo}/pulls/{n}/commits` returns
+REST commit objects, so the verdict is nested at `commit.commit.verification`; there is **no**
+top-level `commit.verification` (verified live on PR #85: item keys are `[author, comments_url,
+commit, committer, html_url, node_id, parents, sha, url]`, `has("verification")` is false). The body
+read the top-level path, so it got `{}` for **every** commit, never saw `verified === true`, and
+defaulted the reason to `'unknown'`. That is why the phantom always said "reason unknown", and with
+only the settle-gate fixed it would have reported a genuinely verified commit as `pending` for ever.
+The read is now `((commit.commit || {}).verification) || {}`, and every commit fixture in the suites
+mirrors that shape — including one built from a recorded live `verified:true / reason:"valid"`
+response, so the wrong shape cannot pass again.
+
+| `verification` | Meaning | Finding | `repairNeeded` |
+| --- | --- | --- | --- |
+| `verified: true` | signature valid | none | no |
+| `verified: false`, `reason: "unknown"` or absent | **not checked yet** | `commit_verification_pending`, `fixable: false`, `settled: false` | **never** |
+| `verified: false`, settled reason (`no_user`, `unverified_email`, `bad_email`, …) | checked and failed | `unverifiable_commit`, `settled: true`, fixable only with a signing identity | yes, when fixable |
+
+`repairNeeded` (and both readers of it: `readPostPublishRepairNeed`, `resolveRepairBase`) require
+`settled !== false`. A not-yet-settled commit is a WAIT: `postPublishWaitCause = 'verification'` and
+the loop re-observes. Two settle delays (20 s) run after the initial publish and after any
+re-publish, before signatures are judged.
+
+**B — CI was observed before it produced a conclusion.** PR #133 was observed 16 seconds BEFORE its
+CI run started: `pendingChecks = 7`, zero conclusions, and the run reported "the post-publication fix
+budget was exhausted" while five required checks were failing at `yarn install`. The observation now
+distinguishes three states (`checks.state`):
+
+| State | Meaning | Loop behaviour |
+| --- | --- | --- |
+| `not_scheduled` + `checks.expected` | required checks exist, none scheduled yet | wait 15 s, bound `postPublishSchedulingWaitBound` = 20 (5 min) |
+| `running` | checks exist, none terminal | wait 60 s, bound `postPublishWaitBound` = 6 (unchanged) |
+| `finished` | at least one conclusion exists | judge it; failures are fixable `check_run` findings |
+
+`recordPostPublishCoverage` accumulates `post-publish-ci-coverage.json` over every observation. Any
+terminal point reached with **zero** conclusions evaluated reports `checks_unobserved` (or the
+never-observed reason in `describePostPublishBlock`) — *"ended without observing any CI conclusion;
+failing checks may exist and were never read"* — and never attributes the block to an exhausted fix
+budget. When a conclusion WAS observed, `exhausted` keeps its original wording. The pre-publish
+`reviewCycleBound` is untouched; Defect B is confined to the post-publication loop.
+
+Verification: `workflow/__tests__/ProcessAITicket.signatureAndCiObservation.test.ts` (17 tests,
+executes the shipped scripts against recorded payloads and throwaway git repositories) plus the
+budget/contract/behaviour suites. `no_user` remains the positive control — the SPEECH-010 invariant
+is unchanged.
+
 ### Coordinated version-bump procedure (do this instead of editing `version:` alone)
 
 1. Edit `workflow/ProcessAITicket.yaml` (`nameSpace: core`, `name: ProcessAITicket`).
