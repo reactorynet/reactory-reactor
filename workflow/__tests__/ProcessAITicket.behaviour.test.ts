@@ -3069,7 +3069,12 @@ describe('ProcessAITicket gates publication on the commit it actually made (D1c)
     // commit. It therefore must not consult commitCount at all.
     expect(scriptOf('readPublishable')).not.toContain('commitCount');
     expect(scriptOf('readPublishable')).not.toContain('rev-list');
-    expect(String(byId('outcome').config?.condition)).toBe("variables.publishable === 'true'");
+    // The publish decision is the gate, AND the run must not have ended before the review
+    // cycle (B1, REACTORY-302016408/20261108/378847235): a merged/closed pre-review run
+    // must not re-enter the commit/push/create chain.
+    expect(String(byId('outcome').config?.condition)).toBe(
+      "variables.publishable === 'true' && variables.reviewEntryTerminal === ''",
+    );
   });
 
   it('blocks the publish path on a genuine commit failure, naming the worktree', () => {
@@ -5977,8 +5982,9 @@ describe('ProcessAITicket PR #53 review findings', () => {
       expect(String(byId('postPublishMergedGate').config!.condition)).toBe("variables.postPublishState === 'merged'");
       expect(String(byId('setPostPublishMerged').config!.value)).toBe('merged');
       expect(String(byId('setPostPublishMergedState').config!.value)).toBe('MERGED');
-      // ...and the approval/merge-poll path is skipped for it.
-      expect(String(byId('prMergePathGate').config!.condition)).toBe("variables.prState !== 'MERGED'");
+      // ...and the approval/merge-poll path is skipped for it. The gate now arms on
+      // OPEN only, so MERGED takes its own terminal arm (REACTORY-302016408/20261108/378847235).
+      expect(String(byId('prMergePathGate').config!.condition)).toBe("variables.prState === 'OPEN'");
     } finally {
       removeDir(dir);
     }

@@ -22,6 +22,20 @@ name: ProcessAITicket
 # 1.4.8 on purpose: the number is the workflow's identity, PROCESS_AI_TICKET_WORKFLOW_ID
 # is pinned to core.ProcessAITicket@1.4.8 in a repository this worktree cannot update,
 # and a body-only bump would make checkWorkflowRegistered refuse the next dispatch.
+#
+# This body ALSO carries the merged-pull-request fix for
+# REACTORY-302016408/20261108/378847235 (instance 6af004863542e9a7f9bada9f: the
+# pull request was merged, the publish tail re-ran, `gh pr create` failed because
+# the squash-merge deleted the branch, that failure carried no state, the state
+# reader defaulted it to OPEN, and a NEW approval task was raised for a merge that
+# had already happened). In place at 1.4.8, for the same reason: the version is
+# the workflow's identity and PROCESS_AI_TICKET_WORKFLOW_ID is pinned to it.
+# What changed: the approval gate and the review entry consume a LIVE
+# `gh pr view` state (never a cached parse, never a fail-open default); MERGED
+# resolves and completes, CLOSED and an unreadable state terminate with their own
+# reasons and raise NO task; pushBranch/createPullRequest refuse to re-publish
+# behind a terminal pull request; and one approval gate per run is claimed in run
+# state so a re-entry cannot mint a second task.
 version: 1.4.8
 description: Autonomous AI engineering run for a SINGLE support ticket. Loads the ticket,
   moves it to in_progress, prepares an isolated git worktree on a ticket-keyed
@@ -430,21 +444,64 @@ steps:
       key: prApproved
       value: "false"
 
+  # A re-entry through the publish tail must not mint a SECOND approval task for the
+  # same run (REACTORY-302016408/20261108/378847235). `prApprovalTaskClaimed` records
+  # that this run has already opened the gate. `prApprovalClaim` is the decision taken
+  # on THIS pass ('new' | 'reuse'), and `prApprovalOpen` lets a reuse pass keep
+  # OBSERVING the pull request without pretending an approval nobody gave.
+  - id: seedPrApprovalTaskClaimed
+    name: Seed approval-gate claim flag
+    type: set_variable
+    dependsOn: seedPrApproved
+    config:
+      action: set
+      key: prApprovalTaskClaimed
+      value: ""
+  - id: seedPrApprovalClaim
+    name: Seed approval-gate claim decision
+    type: set_variable
+    dependsOn: seedPrApprovalTaskClaimed
+    config:
+      action: set
+      key: prApprovalClaim
+      value: ""
+  - id: seedPrApprovalOpen
+    name: Seed approval-gate reuse flag
+    type: set_variable
+    dependsOn: seedPrApprovalClaim
+    config:
+      action: set
+      key: prApprovalOpen
+      value: ""
+
   # Run status is a value, not an inference at the end of the run: a completed
   # report used to fall through the allow-list and end as verdict=pending.
   - id: seedRunStatus
     name: Seed run status
     type: set_variable
-    dependsOn: seedPrApproved
+    dependsOn: seedPrApprovalOpen
     config:
       action: set
       key: runStatus
       value: pending
 
+  # '' while the run is doing its normal work. Set to 'merged' or 'closed' ONLY when
+  # a live read shows the pull request reached a terminal state before the review
+  # loop started; every terminal writer downstream reads it so a finished run never
+  # records itself as 'blocked'.
+  - id: seedReviewEntryTerminal
+    name: Seed the review-entry terminal reason
+    type: set_variable
+    dependsOn: seedRunStatus
+    config:
+      action: set
+      key: reviewEntryTerminal
+      value: ""
+
   - id: seedRunHalt
     name: Seed run halt flag
     type: set_variable
-    dependsOn: seedRunStatus
+    dependsOn: seedReviewEntryTerminal
     config:
       action: set
       key: runHalt
@@ -3785,14 +3842,249 @@ steps:
                             re-pushes only after the review passes; this comment records that
                             the earlier push was NOT a pipeline publication."
 
+              # ── A pull request that already merged or closed ends the run ─────────
+              # REACTORY-302016408/20261108/378847235. After a post-publish fix cycle
+              # `reviewCycle` is > 1, so BOTH the review loop and the publish tail run
+              # again. If a human merged (or closed) the pull request in the meantime,
+              # there is nothing left to review, re-publish or gate: re-publishing a
+              # merged pull request is wasted compute and can push to a branch that is
+              # behind a merge. Every cached value in the run predates the merge, so
+              # only a LIVE read can decide this. A branch with no pull request is a
+              # normal first publication ('NONE') and proceeds; an UNREADABLE state also
+              # proceeds here, because the approval gate fails CLOSED on it later.
+              - id: readPrStateBeforeReview
+                name: Read the pull request state live before reviewing
+                type: cli_command
+                dependsOn: prematurePublishGate
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - &livePrStateScript |
+                                            const { execSync } = require('child_process');
+                                            const TOK = '$' + '{';
+                                            const done = (o) => { process.stdout.write(JSON.stringify(o)); process.exit(0); };
+                                            // A template the engine could not resolve is NOT a value. Every input is
+                                            // read through this so an unrun step's output can never look like data.
+                                            const clean = (value) => {
+                                              const text = String(value == null ? '' : value).trim();
+                                              if (!text || text === 'undefined' || text === 'null' || text.indexOf(TOK) !== -1) return '';
+                                              return text;
+                                            };
+                                            const wt = clean(process.env.WT) || process.cwd();
+                                            const branch = clean(process.env.BRANCH);
+                                            const url = clean(process.env.PR_URL);
+                                            const number = clean(process.env.PR_NUMBER);
+                                            const repo = clean(process.env.PR_REPO);
+                                            const run = (cmd) => execSync(cmd, { cwd: wt, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim();
+                                            const quote = (value) => '"' + String(value).replace(/["`$\\]/g, '') + '"';
+
+                                            // Resolve the pull request the SAME way every caller can: a recorded number
+                                            // or url is authoritative (a squash-merge may have DELETED the branch, and
+                                            // `gh pr view <branch>` then has nothing to resolve), the branch is the
+                                            // fallback for a first publication.
+                                            let target = '';
+                                            let kind = '';
+                                            if (/^[0-9]+$/.test(number)) { target = number; kind = 'number'; }
+                                            else if (/^https?:\/\/\S+/.test(url)) { target = url; kind = 'url'; }
+                                            else if (branch) { target = branch; kind = 'branch'; }
+                                            if (!target) {
+                                              done({ ok: false, state: 'UNKNOWN', exists: false, reason: 'no pull request number, url or branch was available to read' });
+                                            }
+
+                                            const repoArg = repo ? ' --repo ' + quote(repo) : '';
+                                            try {
+                                              const raw = run('gh pr view ' + quote(target) + repoArg + ' --json state,mergedAt,url,number');
+                                              const d = JSON.parse(raw);
+                                              const state = String(d.state || '').trim().toUpperCase();
+                                              if (['OPEN', 'MERGED', 'CLOSED'].indexOf(state) === -1) {
+                                                done({ ok: false, state: 'UNKNOWN', exists: false, target: target, readBy: kind, reason: 'gh reported an unrecognised pull request state: ' + String(raw).slice(0, 200) });
+                                              }
+                                              done({ ok: true, state: state, exists: true, mergedAt: d.mergedAt || null, url: d.url || '', number: d.number == null ? null : d.number, target: target, readBy: kind });
+                                            } catch (e) {
+                                              const detail = [e && e.stderr ? String(e.stderr).trim() : '', e && e.message ? e.message : String(e)].filter(Boolean).join(' | ');
+                                              // A branch with no pull request is a legitimate answer on a first
+                                              // publication - it is NOT an unreadable state.
+                                              if (kind === 'branch' && /no pull requests? found|no open pull requests|could not find pull request/i.test(detail)) {
+                                                done({ ok: true, state: 'NONE', exists: false, target: target, readBy: kind });
+                                              }
+                                              // Never fail open. An absent/unreadable state is UNKNOWN, and the
+                                              // approval gate refuses to arm a human task on it.
+                                              done({ ok: false, state: 'UNKNOWN', exists: false, target: target, readBy: kind, reason: 'the pull request state could not be read: ' + detail.slice(0, 500) });
+                                            }
+                  env:
+                    WT: ${steps.readWorktreePath.outputs.stdout}
+                    BRANCH: ${steps.readBranch.outputs.stdout}
+                    PR_URL: ${steps.readPrUrl.outputs.stdout}
+                    PR_NUMBER: ${steps.readPrNumber.outputs.stdout}
+                  failOnError: false
+                  output:
+                    captureStdout: true
+
+              - id: readPrStateBeforeReviewValue
+                name: Read the live pull request state token
+                type: cli_command
+                dependsOn: readPrStateBeforeReview
+                config:
+                  command: node
+                  args:
+                    - -e
+                    - |
+                                            const TOK = '$' + '{';
+                                            let record = {};
+                                            try { record = JSON.parse(process.env.RAW || '{}'); } catch (e) { record = {}; }
+                                            const state = String(record.state || '').trim().toUpperCase();
+                                            // The reader never invents a state: anything that is not an explicit
+                                            // gh answer is UNKNOWN, never OPEN.
+                                            process.stdout.write(['OPEN', 'MERGED', 'CLOSED', 'NONE', 'UNKNOWN'].indexOf(state) === -1 ? 'UNKNOWN' : state);
+                  env:
+                    RAW: ${steps.readPrStateBeforeReview.outputs.stdout}
+                  failOnError: false
+                  output:
+                    captureStdout: true
+
+              - id: setPrStateBeforeReview
+                name: Record the live pull request state observed before review
+                type: set_variable
+                dependsOn: readPrStateBeforeReviewValue
+                config:
+                  action: set
+                  key: prState
+                  source: step_output
+                  sourcePath: readPrStateBeforeReviewValue.outputs.stdout
+
+              - id: prMergedBeforeReviewGate
+                name: Was the pull request already merged before this review cycle
+                type: condition
+                dependsOn: setPrStateBeforeReview
+                config:
+                  condition: variables.prState === 'MERGED'
+                  thenSteps:
+                    # Nothing left to do. Resolve the ticket and finish Complete: no
+                    # review cycle, no re-publication, no approval task.
+                    - id: resolveTicketMergedBeforeReview
+                      name: Move ticket to resolved (pull request already merged)
+                      type: service_invoke
+                      config:
+                        service: core.ReactorySupportWorkflowService@1.0.0
+                        method: updateStatus
+                        params:
+                          ticketId: ${steps.loadTicket.result.id}
+                          status: resolved
+                          comment: Pull request ${steps.readPrStateBeforeReview.outputs.stdout} for ${steps.loadTicket.result.reference} was already MERGED before this review cycle started. The AI engineering run has nothing left to do - the ticket is resolved, and nothing was re-published or re-gated.
+                    - id: setPublishStateMergedBeforeReview
+                      name: Record the merged lifecycle state
+                      type: set_variable
+                      dependsOn: resolveTicketMergedBeforeReview
+                      config:
+                        action: set
+                        key: publishState
+                        value: merged
+                    # The guard is NOT a terminator (a condition step is a sibling of the rest
+                    # of reportBranch's body), so this arm deliberately does only what must
+                    # happen BEFORE the run's single terminal path, and leaves the terminal
+                    # writers to the exhausted arm: runStatus from readExhaustedRunStatus,
+                    # prState from readExhaustedPrState, the workspace note from
+                    # readExhaustedNoteMode (which closes it, with PR_URL threaded through), and
+                    # one comment/notification. Closing the note here as well produced TWO
+                    # closes, the second of which rewrote `## Pull request` to 'Not opened.'.
+                    - id: settleReviewLoopMergedBeforeReview
+                      name: Stop the review loop for a merged pull request
+                      type: set_variable
+                      dependsOn: setPublishStateMergedBeforeReview
+                      config:
+                        action: set
+                        key: reviewLoopSettled
+                        value: "true"
+                    - id: setReviewEntryTerminalMerged
+                      name: Record why the run terminated before review
+                      type: set_variable
+                      dependsOn: settleReviewLoopMergedBeforeReview
+                      config:
+                        action: set
+                        key: reviewEntryTerminal
+                        value: merged
+                    - id: mergedBeforeReviewLog
+                      name: Log the merged-before-review termination
+                      type: log
+                      dependsOn: setReviewEntryTerminalMerged
+                      config:
+                        level: info
+                        message: Pull request for ${steps.loadTicket.result.reference} was already
+                          MERGED before review cycle ${variables.reviewCycle}. The publish arm is
+                          vetoed (reviewEntryTerminal), so nothing is re-committed, re-pushed,
+                          re-created or re-gated; the terminal state comes from the exhausted arm.
+                  elseSteps:
+                    - id: prClosedBeforeReviewGate
+                      name: Was the pull request closed before this review cycle
+                      type: condition
+                      dependsOn: setPrStateBeforeReview
+                      config:
+                        condition: variables.prState === 'CLOSED'
+                        thenSteps:
+                          # A CLOSED pull request is terminal too, but it is NOT success: the
+                          # work was abandoned, so the ticket stays in_progress and a human
+                          # decides. The run records its own distinct reason and stops.
+                          - id: closedBeforeReviewComment
+                            name: Comment the closed pull request on the ticket
+                            type: service_invoke
+                            config:
+                              service: core.ReactorySupportWorkflowService@1.0.0
+                              method: addComment
+                              params:
+                                ticketId: ${steps.loadTicket.result.id}
+                                comment: The pull request for ${steps.loadTicket.result.reference} was CLOSED before review cycle ${variables.reviewCycle} started. The AI engineering run will not re-publish or re-review a closed pull request - the run terminates with reason 'pull_request_closed_before_review' and the ticket stays in_progress for a human decision.
+                          - id: setPublishStateClosedBeforeReview
+                            name: Record the closed lifecycle state
+                            type: set_variable
+                            dependsOn: closedBeforeReviewComment
+                            config:
+                              action: set
+                              key: publishState
+                              value: closed
+                          - id: setPrTerminalReasonClosedBeforeReview
+                            name: Record the closed terminal reason
+                            type: set_variable
+                            dependsOn: setPublishStateClosedBeforeReview
+                            config:
+                              action: set
+                              key: prTerminalReason
+                              value: pull_request_closed_before_review
+                          - id: settleReviewLoopClosedBeforeReview
+                            name: Stop the review loop for a closed pull request
+                            type: set_variable
+                            dependsOn: setPrTerminalReasonClosedBeforeReview
+                            config:
+                              action: set
+                              key: reviewLoopSettled
+                              value: "true"
+                          - id: setReviewEntryTerminalClosed
+                            name: Record why the run terminated before review
+                            type: set_variable
+                            dependsOn: settleReviewLoopClosedBeforeReview
+                            config:
+                              action: set
+                              key: reviewEntryTerminal
+                              value: closed
+                          - id: closedBeforeReviewLog
+                            name: Log the closed-before-review termination
+                            type: log
+                            dependsOn: setReviewEntryTerminalClosed
+                            config:
+                              level: warn
+                              message: Pull request for ${steps.loadTicket.result.reference} was
+                                CLOSED before review cycle ${variables.reviewCycle}. Nothing was
+                                re-published and no approval task was raised; the ticket stays
+                                in_progress with reason pull_request_closed_before_review.
               - id: reviewLoop
                 name: Review loop
                 type: while
-                dependsOn: prematurePublishGate
+                dependsOn: prMergedBeforeReviewGate
                 config:
                   condition: variables.reviewVerdict !== 'approved' &&
                     variables.runHalt !== 'true' &&
                     variables.reviewLoopSettled !== 'true' &&
+                    variables.reviewEntryTerminal === '' &&
                     Number(variables.reviewCycle) <
                     Number(variables.reviewCycleBound)
                   steps:
@@ -6266,8 +6558,12 @@ steps:
                 type: condition
                 dependsOn: reviewLoop
                 config:
+                  # A run that found its pull request already merged/closed before this
+                  # review cycle has nothing to confirm: running the confirmation review
+                  # would spend an agent turn on work that can no longer be published.
                   condition: variables.reviewVerdict === 'rejected' && variables.runHalt !== 'true'
                     && variables.confirmationReview !== 'true'
+                    && variables.reviewEntryTerminal === ''
                   thenSteps:
                     - id: assessConfirmationNeed
                       name: Did the engineer revise after the last review
@@ -6659,6 +6955,41 @@ steps:
 
                       const wt = String(process.env.WT || '').trim();
                       const dir = path.join(wt, '.ai-agent');
+
+                      // ── B1 veto (REACTORY-302016408/20261108/378847235) ──────────────
+                      // A run that discovered its pull request was already MERGED or CLOSED
+                      // before this review cycle re-derived publishable=true here, from the
+                      // accepted review of the cycle that opened the pull request - which is
+                      // why the incident's pass re-ran the whole publish tail. The work is
+                      // NOT re-reviewed and NOT published, and the recorded decision says so
+                      // instead of carrying the earlier approval forward.
+                      const terminal = String(process.env.TERMINAL || '').trim();
+                      if (terminal) {
+                        let runId = '';
+                        try {
+                          const identity = JSON.parse(fs.readFileSync(path.join(dir, 'run-identity.json'), 'utf8'));
+                          runId = identity && typeof identity.runId === 'string' ? identity.runId : '';
+                        } catch (e) { runId = ''; }
+                        const terminalDecision = {
+                          verdict: 'not_reviewed',
+                          outcome: 'terminal_before_review',
+                          publishable: false,
+                          blocking: 0,
+                          nonBlocking: 0,
+                          unstated: 0,
+                          basis: 'the pull request was already ' + terminal
+                            + ' before this review cycle started, so the work was neither re-reviewed nor re-published',
+                          parseFault: false,
+                          halted: String(process.env.HALT || '').trim() === 'true',
+                          attributable: true,
+                          decidedAt: new Date().toISOString(),
+                          runId: runId,
+                          ticketReference: String(process.env.REF || '').trim(),
+                        };
+                        try { fs.writeFileSync(path.join(dir, 'publish-decision.json'), JSON.stringify(terminalDecision, null, 2), 'utf8'); } catch (e) { /* best effort */ }
+                        process.stdout.write('false');
+                        process.exit(0);
+                      }
 
                       // >>> shared run identity (PROCESS-003, REACTORY-302016408/20261113/2279880544)
                       // Byte-identical in every step that reads or writes `.ai-agent/*.json` - pinned by a
@@ -7155,6 +7486,10 @@ steps:
                     # R6. The publish decision must be able to SEE a halt. Wired exactly as
                     # readReviewOutcomeNarrative wires it: HALT <- variables.runHalt.
                     HALT: ${variables.runHalt}
+                    # B1. And it must be able to SEE that the pull request was already
+                    # merged/closed before this cycle: such a run may not publish.
+                    TERMINAL: ${variables.reviewEntryTerminal}
+                    REF: ${steps.loadTicket.result.reference}
                   failOnError: false
                   output:
                     captureStdout: true
@@ -7290,7 +7625,18 @@ steps:
                 type: condition
                 dependsOn: readAcceptanceNarrative
                 config:
-                  condition: variables.publishable === 'true'
+                  # B1 (REACTORY-302016408/20261108/378847235). A condition step is NOT a
+                  # terminator: prMergedBeforeReviewGate/prClosedBeforeReviewGate are
+                  # SIBLINGS of the rest of this body, so after they run, execution still
+                  # falls through to here. `publishable` is re-derived by readPublishable
+                  # from the accepted review of the cycle that opened the pull request, so
+                  # without this veto a merged-before-review run re-enters
+                  # commit/push/create/observe and can re-push a branch that is behind a
+                  # merge. This is the only gate into the publish arm, so the veto lives
+                  # here; the already-truthful exhausted arm below then produces the
+                  # terminal state (runStatus from readExhaustedRunStatus, prState from
+                  # readExhaustedPrState, note mode from readExhaustedNoteMode).
+                  condition: variables.publishable === 'true' && variables.reviewEntryTerminal === ''
                   thenSteps:
                     - id: acceptedLog
                       name: Log accepted
@@ -8364,7 +8710,57 @@ steps:
 
                             let remote = '';
                             try { remote = run('git remote get-url origin').trim(); } catch (e) { remote = ''; }
-                            if (!remote) done({ ok: false, error: 'the worktree repository has no "origin" remote' });
+                            // REACTORY-302016408/20261108/378847235. The pull request state is read
+                            // LIVE, before anything is written to origin, and resolved in the SAME
+                            // order the shared reader uses: recorded number -> recorded url ->
+                            // branch. That order matters: a squash-merge DELETES the head branch, so
+                            // `gh pr view <branch>` resolves nothing and a branch-only preflight
+                            // would push the branch back into existence behind a merge. `null` is
+                            // impossible: an unreadable state is UNKNOWN and never OPEN.
+                            const cleanValue = (value) => {
+                              const text = String(value == null ? '' : value).trim();
+                              if (!text || text === 'undefined' || text === 'null' || text.indexOf('$' + '{') !== -1) return '';
+                              return text;
+                            };
+                            const livePrState = () => {
+                              const number = cleanValue(process.env.PR_NUMBER);
+                              const recordedUrl = cleanValue(process.env.PR_URL);
+                              const name = cleanValue(process.env.BRANCH) || branch;
+                              let target = '';
+                              let kind = '';
+                              if (/^[0-9]+$/.test(number)) { target = number; kind = 'number'; }
+                              else if (/^https?:\/\/\S+/.test(recordedUrl)) { target = recordedUrl; kind = 'url'; }
+                              else if (name) { target = name; kind = 'branch'; }
+                              if (!target) return { state: 'UNKNOWN', url: '', number: null, reason: 'no pull request number, url or branch was available to read' };
+                              const repo = cleanValue(process.env.PR_REPO || '');
+                              const repoArg = repo ? ' --repo "' + repo.replace(/["`$\\]/g, '') + '"' : '';
+                              try {
+                                const raw = run('gh pr view "' + target.replace(/["`$\\]/g, '') + '"' + repoArg + ' --json state,url,number');
+                                const d = JSON.parse(raw);
+                                const state = String(d.state || '').trim().toUpperCase();
+                                if (['OPEN', 'MERGED', 'CLOSED'].indexOf(state) === -1) {
+                                  return { state: 'UNKNOWN', url: '', number: null, reason: 'gh reported an unrecognised state: ' + state };
+                                }
+                                return { state: state, url: d.url || '', number: d.number == null ? null : d.number, target: target, readBy: kind };
+                              } catch (e) {
+                                const detail = [e && e.stderr ? String(e.stderr).trim() : '', e && e.message ? e.message : String(e)].filter(Boolean).join(' | ');
+                                if (kind === 'branch' && /no pull requests? found|no open pull requests|could not find pull request/i.test(detail)) {
+                                  return { state: 'NONE', url: '', number: null, target: target, readBy: kind };
+                                }
+                                return { state: 'UNKNOWN', url: '', number: null, target: target, readBy: kind, reason: detail.slice(0, 300) };
+                              }
+                            };
+
+                            // NEVER push to a branch whose pull request is already MERGED or CLOSED.
+                            // A second pass over the publish tail re-runs this step, and a
+                            // squash-merge DELETES the branch - so pushing recreated it behind an
+                            // already-merged pull request, and `gh pr create` then failed with no
+                            // state at all. That is how a finished run parked on a fresh approval
+                            // task (REACTORY-302016408/20261108/378847235).
+                            const live = livePrState();
+                            if (live.state === 'MERGED' || live.state === 'CLOSED') {
+                              done({ ok: true, pushed: false, skipped: true, state: live.state, prUrl: live.url || '', prNumber: live.number == null ? null : live.number, branch: branch, remote: remote, reason: 'the pull request for this branch is already ' + live.state + '; nothing was pushed' });
+                            }
 
                             try {
                               run('git push --set-upstream origin "' + branch + '"');
@@ -8373,13 +8769,15 @@ steps:
                                 e && e.stderr ? String(e.stderr).trim() : '',
                                 e && e.message ? e.message : String(e),
                               ].filter(Boolean).join(' | ');
-                              done({ ok: false, error: 'git push failed: ' + detail.slice(0, 1500), branch: branch, remote: remote });
+                              done({ ok: false, error: 'git push failed: ' + detail.slice(0, 1500), branch: branch, remote: remote, state: live.state, stateReason: live.reason || '' });
                             }
 
-                            done({ ok: true, branch: branch, remote: remote });
+                            done({ ok: true, branch: branch, remote: remote, pushed: true, state: live.state, prUrl: live.url || '', prNumber: live.number == null ? null : live.number });
                         env:
                           WT: ${steps.readWorktreePath.outputs.stdout}
                           BRANCH: ${steps.readBranch.outputs.stdout}
+                          PR_NUMBER: ${steps.readPrNumber.outputs.stdout}
+                          PR_URL: ${steps.readPrUrl.outputs.stdout}
                         failOnError: false
                         timeout: 600000
                         output:
@@ -8410,6 +8808,47 @@ steps:
                             const run = (cmd) => execSync(cmd, { cwd: wt, stdio: 'pipe' }).toString();
                             const tryRun = (cmd) => { try { return run(cmd).trim(); } catch (e) { return ''; } };
                             const done = (o) => { process.stdout.write(JSON.stringify(o)); process.exit(0); };
+
+                            // REACTORY-302016408/20261108/378847235. The pull request state is read
+                            // LIVE, before anything is written to origin, and resolved in the SAME
+                            // order the shared reader uses: recorded number -> recorded url ->
+                            // branch. That order matters: a squash-merge DELETES the head branch, so
+                            // `gh pr view <branch>` resolves nothing and a branch-only preflight
+                            // would push the branch back into existence behind a merge. `null` is
+                            // impossible: an unreadable state is UNKNOWN and never OPEN.
+                            const cleanValue = (value) => {
+                              const text = String(value == null ? '' : value).trim();
+                              if (!text || text === 'undefined' || text === 'null' || text.indexOf('$' + '{') !== -1) return '';
+                              return text;
+                            };
+                            const livePrState = () => {
+                              const number = cleanValue(process.env.PR_NUMBER);
+                              const recordedUrl = cleanValue(process.env.PR_URL);
+                              const name = cleanValue(process.env.BRANCH) || branch;
+                              let target = '';
+                              let kind = '';
+                              if (/^[0-9]+$/.test(number)) { target = number; kind = 'number'; }
+                              else if (/^https?:\/\/\S+/.test(recordedUrl)) { target = recordedUrl; kind = 'url'; }
+                              else if (name) { target = name; kind = 'branch'; }
+                              if (!target) return { state: 'UNKNOWN', url: '', number: null, reason: 'no pull request number, url or branch was available to read' };
+                              const repo = cleanValue(process.env.PR_REPO || '');
+                              const repoArg = repo ? ' --repo "' + repo.replace(/["`$\\]/g, '') + '"' : '';
+                              try {
+                                const raw = run('gh pr view "' + target.replace(/["`$\\]/g, '') + '"' + repoArg + ' --json state,url,number');
+                                const d = JSON.parse(raw);
+                                const state = String(d.state || '').trim().toUpperCase();
+                                if (['OPEN', 'MERGED', 'CLOSED'].indexOf(state) === -1) {
+                                  return { state: 'UNKNOWN', url: '', number: null, reason: 'gh reported an unrecognised state: ' + state };
+                                }
+                                return { state: state, url: d.url || '', number: d.number == null ? null : d.number, target: target, readBy: kind };
+                              } catch (e) {
+                                const detail = [e && e.stderr ? String(e.stderr).trim() : '', e && e.message ? e.message : String(e)].filter(Boolean).join(' | ');
+                                if (kind === 'branch' && /no pull requests? found|no open pull requests|could not find pull request/i.test(detail)) {
+                                  return { state: 'NONE', url: '', number: null, target: target, readBy: kind };
+                                }
+                                return { state: 'UNKNOWN', url: '', number: null, target: target, readBy: kind, reason: detail.slice(0, 300) };
+                              }
+                            };
 
                             // Base branch - origin/HEAD is authoritative, then gh, then master.
                             let base = '';
@@ -9232,6 +9671,19 @@ steps:
 
                             const title = (ref + (request ? ' - ' + request : '')).slice(0, 140);
                             const meta = { base: base, branch: branch, templateUsed: templateUsed, templatePath: templatePath, warnings: warnings, bodyPath: bodyFile };
+
+                            // REACTORY-302016408/20261108/378847235. `gh pr create` fails with
+                            // "No commits between ..." / "Head ref must be a branch" when a
+                            // squash-merge deleted the branch, and this step used to report that
+                            // failure with NO state field at all. The state was then defaulted to
+                            // OPEN downstream and a human gate was armed for a merge that had
+                            // already happened. A terminal pull request is not re-created: its LIVE
+                            // state is returned so the run can terminate honestly.
+                            const before = livePrState();
+                            if (before.state === 'MERGED' || before.state === 'CLOSED') {
+                              done(Object.assign({ ok: true, created: false, prUrl: before.url || '', prNumber: before.number == null ? null : before.number, state: before.state, stateReason: 'the pull request for this branch is already ' + before.state + ' and was not re-created' }, meta));
+                            }
+
                             let url = '';
                             try {
                               url = run('gh pr create --base "' + base + '" --head "' + branch + '" --title "' + title.replace(/["`$\\]/g, ' ') + '" --body-file "' + bodyFile + '"').trim();
@@ -9243,14 +9695,17 @@ steps:
 
                               // A pull request for this branch may already exist (run retry).
                               if (/already exists/i.test(detail)) {
-                                try {
-                                  const view = JSON.parse(run('gh pr view "' + branch + '" --json url,number,state,mergedAt'));
-                                  done(Object.assign({ ok: true, created: false, prUrl: view.url, prNumber: view.number, state: view.state }, meta));
-                                } catch (e2) {
-                                  done(Object.assign({ ok: false, error: 'pull request exists but could not be inspected - ' + String((e2 && e2.message) || e2) }, meta));
+                                const existing = livePrState();
+                                if (existing.state === 'OPEN' || existing.state === 'MERGED' || existing.state === 'CLOSED') {
+                                  done(Object.assign({ ok: true, created: false, prUrl: existing.url || '', prNumber: existing.number == null ? null : existing.number, state: existing.state }, meta));
                                 }
+                                done(Object.assign({ ok: false, error: 'a pull request exists for this branch but its state could not be read - ' + String(existing.reason || 'unknown reason'), state: 'UNKNOWN' }, meta));
                               }
-                              done(Object.assign({ ok: false, error: 'gh pr create failed: ' + detail.slice(0, 1500) }, meta));
+                              // EVERY failure arm carries the live state (requirement E). An
+                              // unreadable state is UNKNOWN - never OPEN - so the approval gate
+                              // can refuse to arm instead of inventing an open pull request.
+                              const afterFailure = livePrState();
+                              done(Object.assign({ ok: false, error: 'gh pr create failed: ' + detail.slice(0, 1500), state: afterFailure.state || 'UNKNOWN', stateReason: afterFailure.reason || '' }, meta));
                             }
 
                             // Normalise to a structured record rather than scraping the URL line.
@@ -9258,7 +9713,9 @@ steps:
                               const view = JSON.parse(run('gh pr view "' + branch + '" --json url,number,state,mergedAt'));
                               done(Object.assign({ ok: true, created: true, prUrl: view.url || url, prNumber: view.number, state: view.state }, meta));
                             } catch (e) {
-                              done(Object.assign({ ok: !!url, created: true, prUrl: url, prNumber: null, state: 'OPEN' }, meta));
+                              // The pull request WAS created (gh printed a url) but it could not
+                              // be read back. That is UNKNOWN, not OPEN.
+                              done(Object.assign({ ok: !!url, created: true, prUrl: url, prNumber: null, state: 'UNKNOWN', stateReason: 'the created pull request could not be read back: ' + String((e && e.message) || e).slice(0, 300) }, meta));
                             }
                         env:
                           WT: ${steps.readWorktreePath.outputs.stdout}
@@ -9269,6 +9726,10 @@ steps:
                           REVIEWER: ${input.reviewerId}
                           REQUEST_TYPE: ${steps.loadTicket.result.requestType}
                           TICKET_ID: ${steps.loadTicket.result.id}
+                          # B1/N2. The recorded identity first: a squash-merge deletes the head
+                          # branch, so a branch-only lookup cannot see the merged pull request.
+                          PR_NUMBER: ${steps.readPrNumber.outputs.stdout}
+                          PR_URL: ${steps.readPrUrl.outputs.stdout}
                         failOnError: false
                         timeout: 300000
                         output:
@@ -9384,7 +9845,11 @@ steps:
                                 - |
                                   const d = (() => { try { return JSON.parse(process.env.PR || '{}'); } catch (e) { return {}; } })();
                                   const state = String(d.state || '').trim().toUpperCase();
-                                  process.stdout.write(state || 'OPEN');
+                                  // REACTORY-302016408/20261108/378847235. NEVER fail open. An absent or
+                                  // unrecognised state is UNKNOWN, never OPEN: defaulting to OPEN here is
+                                  // what armed a human approval task for a pull request that had already
+                                  // been merged 29 minutes earlier.
+                                  process.stdout.write(['OPEN', 'MERGED', 'CLOSED'].indexOf(state) === -1 ? 'UNKNOWN' : state);
                               env:
                                 PR: ${steps.createPullRequest.outputs.stdout}
                               failOnError: false
@@ -13324,19 +13789,145 @@ steps:
                                 # exactly one human task.
                                 # An already-merged pull request must not raise an "Approve and merge" task
                                 # or start a merge poll; mergeOutcome below then resolves the ticket.
+                                # ── The approval gate reads the pull request state LIVE ───────
+                                # REACTORY-302016408/20261108/378847235. `variables.prState` is not
+                                # allowed to be a parse of cached step output: every cached value in
+                                # the run predates the merge that this gate must notice. The value
+                                # the gate consumes is the one THIS read produces, written to
+                                # `prState` by the two steps below and nowhere else at this point.
+                                - id: readPrStateForApproval
+                                  name: Read the pull request state live before approval
+                                  type: cli_command
+                                  dependsOn: setRunStatusCompleted
+                                  config:
+                                    command: node
+                                    args:
+                                      - -e
+                                      - *livePrStateScript
+                                    env:
+                                      WT: ${steps.readWorktreePath.outputs.stdout}
+                                      BRANCH: ${steps.readBranch.outputs.stdout}
+                                      PR_URL: ${steps.readPrUrl.outputs.stdout}
+                                      PR_NUMBER: ${steps.readPrNumber.outputs.stdout}
+                                    failOnError: false
+                                    output:
+                                      captureStdout: true
+
+                                - id: readPrStateForApprovalValue
+                                  name: Read the live pull request state token
+                                  type: cli_command
+                                  dependsOn: readPrStateForApproval
+                                  config:
+                                    command: node
+                                    args:
+                                      - -e
+                                      - |
+                                        const TOK = '$' + '{';
+                                        let record = {};
+                                        try { record = JSON.parse(process.env.RAW || '{}'); } catch (e) { record = {}; }
+                                        const state = String(record.state || '').trim().toUpperCase();
+                                        // The reader never invents a state: anything that is not an
+                                        // explicit gh answer is UNKNOWN, never OPEN.
+                                        process.stdout.write(['OPEN', 'MERGED', 'CLOSED', 'NONE', 'UNKNOWN'].indexOf(state) === -1 ? 'UNKNOWN' : state);
+                                    env:
+                                      RAW: ${steps.readPrStateForApproval.outputs.stdout}
+                                    failOnError: false
+                                    output:
+                                      captureStdout: true
+
+                                - id: setPrStateForApproval
+                                  name: Record the live pull request state observed before approval
+                                  type: set_variable
+                                  dependsOn: readPrStateForApprovalValue
+                                  config:
+                                    action: set
+                                    key: prState
+                                    source: step_output
+                                    sourcePath: readPrStateForApprovalValue.outputs.stdout
+
                                 - id: prMergePathGate
                                   name: Does the pull request still need a human merge
                                   type: condition
-                                  dependsOn: postPublishLifecycleGate
+                                  dependsOn: setPrStateForApproval
                                   config:
-                                    condition: variables.prState !== 'MERGED'
+                                    # OPEN is the ONLY state that arms a human gate. MERGED,
+                                    # CLOSED and an UNREADABLE state each take their own arm
+                                    # below and raise NO task - a gate that cannot be truthfully
+                                    # completed must never be raised.
+                                    condition: variables.prState === 'OPEN'
                                     thenSteps:
+                                    # ── One approval gate per run ──────────────────────────
+                                    # REACTORY-302016408/20261108/378847235. The engine re-finds a
+                                    # pending task by (instanceId, stepId), but a re-entry after the
+                                    # first gate returned could mint a SECOND task for the same run.
+                                    # The claim below is written BEFORE the task is created and is
+                                    # part of the run's own variables, so a later pass over this
+                                    # tail takes the 'reuse' arm and raises nothing. Nothing here
+                                    # fakes an approval: a reuse pass keeps OBSERVING the pull
+                                    # request (prApprovalOpen), and only a human can merge.
+                                    - id: claimPrApprovalGate
+                                      name: Decide whether this run has already asked for approval
+                                      type: condition
+                                      dependsOn: setPrStateForApproval
+                                      config:
+                                        condition: steps.resolveSignoff.stdout === 'true' && variables.prApproved !== 'true'
+                                        thenSteps:
+                                          - id: prApprovalClaimGate
+                                            name: Has this run already raised the approval task
+                                            type: condition
+                                            config:
+                                              condition: variables.prApprovalTaskClaimed === 'true'
+                                              thenSteps:
+                                                - id: setPrApprovalClaimReuse
+                                                  name: Record that the existing approval task is reused
+                                                  type: set_variable
+                                                  config:
+                                                    action: set
+                                                    key: prApprovalClaim
+                                                    value: reuse
+                                                - id: setPrApprovalOpenReuse
+                                                  name: Keep observing the pull request without a second task
+                                                  type: set_variable
+                                                  dependsOn: setPrApprovalClaimReuse
+                                                  config:
+                                                    action: set
+                                                    key: prApprovalOpen
+                                                    value: "true"
+                                                - id: prApprovalReuseLog
+                                                  name: Log the reused approval task
+                                                  type: log
+                                                  dependsOn: setPrApprovalOpenReuse
+                                                  config:
+                                                    level: warn
+                                                    message: An approval task for ${steps.loadTicket.result.reference}
+                                                      was already raised by this run - a SECOND one is not minted.
+                                                      The run keeps observing the pull request until a human merges
+                                                      it; no approval is assumed. (REACTORY-302016408/20261108/378847235)
+                                              elseSteps:
+                                                - id: setPrApprovalClaimNew
+                                                  name: Claim the approval gate for this pass
+                                                  type: set_variable
+                                                  config:
+                                                    action: set
+                                                    key: prApprovalClaim
+                                                    value: new
+                                                - id: setPrApprovalTaskClaimed
+                                                  name: Record that the approval task has been raised
+                                                  type: set_variable
+                                                  dependsOn: setPrApprovalClaimNew
+                                                  config:
+                                                    action: set
+                                                    key: prApprovalTaskClaimed
+                                                    value: "true"
+
                                     - id: prApprovalGate
                                       name: Pull request approval required
                                       type: condition
-                                      dependsOn: setRunStatusCompleted
+                                      dependsOn: claimPrApprovalGate
                                       config:
-                                        condition: steps.resolveSignoff.stdout === 'true'
+                                        # Not already approved, and NOT a second pass over a gate
+                                        # this run has already opened.
+                                        condition: steps.resolveSignoff.stdout === 'true' && variables.prApproved !== 'true' && variables.prApprovalClaim !== 'reuse'
                                         thenSteps:
                                           - id: prApproval
                                             name: Approve and merge pull request
@@ -13409,26 +14000,40 @@ steps:
                                                     level: warn
                                                     message: Pull request DECLINED for ${steps.loadTicket.result.reference} by ${steps.prApproval.outputs.completedByEmail} - no merge poll, ticket left in_progress.
                                         elseSteps:
-                                          - id: logNoSignoff
-                                            name: Log PR approval skipped
-                                            type: log
+                                          # prApprovalGate is false for THREE reasons now: signoff is
+                                          # not required, approval was ALREADY given, or this pass is
+                                          # REUSING the gate this run already opened. Only the first
+                                          # may record prApproved=true; the other two recording it is
+                                          # exactly the self-satisfied approval this workflow must
+                                          # never produce (REACTORY-302016408/20261107/1016269617).
+                                          - id: prSignoffBypassGate
+                                            name: Is human approval genuinely not required
+                                            type: condition
                                             config:
-                                              level: info
-                                              message: Human PR approval skipped for ${steps.loadTicket.result.reference} (requireSignoff=false) - polling for merge immediately.
-                                          - id: setPrApprovedNoSignoff
-                                            name: Record approval bypass
-                                            type: set_variable
-                                            dependsOn: logNoSignoff
-                                            config:
-                                              action: set
-                                              key: prApproved
-                                              value: 'true'
+                                              condition: steps.resolveSignoff.stdout !== 'true'
+                                              thenSteps:
+                                                - id: logNoSignoff
+                                                  name: Log PR approval skipped
+                                                  type: log
+                                                  config:
+                                                    level: info
+                                                    message: Human PR approval skipped for ${steps.loadTicket.result.reference} (requireSignoff=false) - polling for merge immediately.
+                                                - id: setPrApprovedNoSignoff
+                                                  name: Record approval bypass
+                                                  type: set_variable
+                                                  dependsOn: logNoSignoff
+                                                  config:
+                                                    action: set
+                                                    key: prApproved
+                                                    value: 'true'
                                     - id: pollMerge
                                       name: Poll pull request merge state
                                       type: while
                                       dependsOn: prApprovalGate
                                       config:
-                                        condition: variables.prApproved === 'true' && variables.prState !== 'MERGED' && variables.prState !== 'CLOSED' && Number(variables.prPollCount) < 20
+                                        # A reuse pass (prApprovalOpen) polls too: it must still
+                                        # notice a human merge, but it never claims an approval.
+                                        condition: (variables.prApproved === 'true' || variables.prApprovalOpen === 'true') && variables.prState === 'OPEN' && Number(variables.prPollCount) < 20
                                         steps:
                                           - id: pollWait
                                             name: Wait between merge polls
@@ -13515,6 +14120,167 @@ steps:
                                               key: prPollCount
                                               source: step_output
                                               sourcePath: bumpPoll.outputs.stdout
+                                    elseSteps:
+                                    # ── MERGED: nothing left to approve or poll ────────────
+                                    # mergeOutcome below resolves the ticket; this arm only
+                                    # records the lifecycle state and raises NO task.
+                                    - id: prMergedPathGate
+                                      name: Is the pull request already merged
+                                      type: condition
+                                      dependsOn: setPrStateForApproval
+                                      config:
+                                        condition: variables.prState === 'MERGED'
+                                        thenSteps:
+                                          - id: setPublishStateMergedAtApproval
+                                            name: Record the merged lifecycle state
+                                            type: set_variable
+                                            config:
+                                              action: set
+                                              key: publishState
+                                              value: merged
+                                          - id: prAlreadyMergedLog
+                                            name: Log that no approval is needed
+                                            type: log
+                                            dependsOn: setPublishStateMergedAtApproval
+                                            config:
+                                              level: info
+                                              message: Pull request for ${steps.loadTicket.result.reference}
+                                                is already MERGED (live read). No approval task was
+                                                raised and no merge poll started; the merge outcome
+                                                resolves the ticket. (REACTORY-302016408/20261108/378847235)
+                                        elseSteps:
+                                        - id: prClosedPathGate
+                                          name: Is the pull request already closed
+                                          type: condition
+                                          dependsOn: setPrStateForApproval
+                                          config:
+                                            condition: variables.prState === 'CLOSED'
+                                            thenSteps:
+                                              - id: prClosedAtApprovalComment
+                                                name: Comment the closed pull request on the ticket
+                                                type: service_invoke
+                                                config:
+                                                  service: core.ReactorySupportWorkflowService@1.0.0
+                                                  method: addComment
+                                                  params:
+                                                    ticketId: ${steps.loadTicket.result.id}
+                                                    comment: The pull request for ${steps.loadTicket.result.reference} is CLOSED. No approval task was raised - the run terminates with reason 'pull_request_closed' and the ticket stays in_progress for a human decision.
+                                              - id: setPublishStateClosedAtApproval
+                                                name: Record the closed lifecycle state
+                                                type: set_variable
+                                                dependsOn: prClosedAtApprovalComment
+                                                config:
+                                                  action: set
+                                                  key: publishState
+                                                  value: closed
+                                              - id: setPrTerminalReasonClosed
+                                                name: Record the closed terminal reason
+                                                type: set_variable
+                                                dependsOn: setPublishStateClosedAtApproval
+                                                config:
+                                                  action: set
+                                                  key: prTerminalReason
+                                                  value: pull_request_closed
+                                              - id: setRunStatusClosedAtApproval
+                                                name: Record the terminal run status
+                                                type: set_variable
+                                                dependsOn: setPrTerminalReasonClosed
+                                                config:
+                                                  action: set
+                                                  key: runStatus
+                                                  value: blocked
+                                              - id: prClosedAtApprovalLog
+                                                name: Log the closed termination
+                                                type: log
+                                                dependsOn: setRunStatusClosedAtApproval
+                                                config:
+                                                  level: warn
+                                                  message: Pull request for ${steps.loadTicket.result.reference}
+                                                    is CLOSED - no approval task was raised, no merge
+                                                    poll started. Reason 'pull_request_closed'.
+                                            elseSteps:
+                                            # ── UNKNOWN: can we even tell? ─────────────────────
+                                            # An unreadable state must NEVER arm a gate that can
+                                            # only be completed by pretending it was OPEN. Record
+                                            # the reason, raise NO task, and stop for a human.
+                                            - id: prStateUnknownPathGate
+                                              name: Was the pull request state readable at all
+                                              type: condition
+                                              dependsOn: setPrStateForApproval
+                                              config:
+                                                condition: variables.prState !== 'OPEN' && variables.prState !== 'MERGED' && variables.prState !== 'CLOSED'
+                                                thenSteps:
+                                                  - id: readPrStateForApprovalReason
+                                                    name: Read why the pull request state could not be read
+                                                    type: cli_command
+                                                    config:
+                                                      command: node
+                                                      args:
+                                                        - -e
+                                                        - |
+                                                          const TOK = '$' + '{';
+                                                          let record = {};
+                                                          try { record = JSON.parse(process.env.RAW || '{}'); } catch (e) { record = {}; }
+                                                          const clean = (value) => {
+                                                            const text = String(value == null ? '' : value).trim();
+                                                            if (!text || text === 'undefined' || text === 'null' || text.indexOf(TOK) !== -1) return '';
+                                                            return text;
+                                                          };
+                                                          // NONE is a legitimate answer ("there is no pull request
+                                                          // for this branch"), not an unreadable state: say which it is.
+                                                          if (String(record.state || '').trim().toUpperCase() === 'NONE') {
+                                                            process.stdout.write('no pull request exists for this branch, so there is nothing to approve or merge');
+                                                          } else {
+                                                            process.stdout.write(clean(record.reason) || 'the pull request state could not be read and no reason was recorded');
+                                                          }
+                                                      env:
+                                                        RAW: ${steps.readPrStateForApproval.outputs.stdout}
+                                                      failOnError: false
+                                                      output:
+                                                        captureStdout: true
+                                                  - id: prStateUnknownComment
+                                                    name: Comment that the pull request state could not be read
+                                                    type: service_invoke
+                                                    dependsOn: readPrStateForApprovalReason
+                                                    config:
+                                                      service: core.ReactorySupportWorkflowService@1.0.0
+                                                      method: addComment
+                                                      params:
+                                                        ticketId: ${steps.loadTicket.result.id}
+                                                        comment: The pull request state for ${steps.loadTicket.result.reference} could not be confirmed (${steps.readPrStateForApprovalReason.outputs.stdout}). No approval task was raised - a task whose only truthful action would be "it is already merged" must never be created. The run terminates with reason 'pull_request_state_unreadable'; the ticket stays in_progress and a human must check the pull request.
+                                                  - id: setPublishStateUnreadable
+                                                    name: Record that the merge state is unknown
+                                                    type: set_variable
+                                                    dependsOn: prStateUnknownComment
+                                                    config:
+                                                      action: set
+                                                      key: publishState
+                                                      value: unknown
+                                                  - id: setPrTerminalReasonUnreadable
+                                                    name: Record the unreadable terminal reason
+                                                    type: set_variable
+                                                    dependsOn: setPublishStateUnreadable
+                                                    config:
+                                                      action: set
+                                                      key: prTerminalReason
+                                                      value: pull_request_state_unreadable
+                                                  - id: setRunStatusUnreadable
+                                                    name: Record the terminal run status
+                                                    type: set_variable
+                                                    dependsOn: setPrTerminalReasonUnreadable
+                                                    config:
+                                                      action: set
+                                                      key: runStatus
+                                                      value: blocked
+                                                  - id: prStateUnknownLog
+                                                    name: Log the unreadable state
+                                                    type: log
+                                                    dependsOn: setRunStatusUnreadable
+                                                    config:
+                                                      level: error
+                                                      message: Pull request state UNREADABLE for
+                                                        ${steps.loadTicket.result.reference} - no approval
+                                                        task was raised. Reason 'pull_request_state_unreadable'.
                                 - id: mergeOutcome
                                   name: Merge outcome
                                   type: condition
@@ -13558,6 +14324,11 @@ steps:
                                         name: Why the pull request is not merged
                                         type: condition
                                         config:
+                                          # Only an approved run can time out waiting for a merge.
+                                          # A CLOSED or UNREADABLE state at the GATE has its own
+                                          # terminal arm and leaves prApproved false, so it never
+                                          # reaches this arm; an approved run whose pull request
+                                          # closes DURING polling keeps the follow-up task it had.
                                           condition: variables.prApproved === 'true'
                                           thenSteps:
                                             - id: mergeTimeoutComment
@@ -13609,7 +14380,7 @@ steps:
                                               type: log
                                               config:
                                                 level: warn
-                                                message: Merge polling skipped for ${steps.loadTicket.result.reference} - the pull request was not approved. Ticket left in_progress.
+                                                message: Merge polling skipped for ${steps.loadTicket.result.reference} - the pull request was not approved (state ${variables.prState}). Ticket left in_progress.
                               elseSteps:
 # If the loop exhausted its iteration cap the outcome is still `observing`,
 # and the blocked arm used to report it with no reason at all. Name it.
@@ -14139,7 +14910,15 @@ steps:
                             const outcome = String(decision.outcome || 'not_reviewed');
                             const halted = String(process.env.HALT || '') === 'true';
 
-                            if (outcome === 'review_unavailable' || verdict === 'review_unavailable') {
+                            // REACTORY-302016408/20261108/378847235. A run that stopped
+                            // because a LIVE read showed the pull request already merged or
+                            // closed is NOT a rejected run and NOT an unreviewable one.
+                            const terminal = String(process.env.TERMINAL || '').trim();
+                            if (terminal === 'merged') {
+                              process.stdout.write('ended because the pull request was already MERGED before this review cycle started. Nothing was re-published, no review cycle was run and no approval task was raised - the ticket is resolved.');
+                            } else if (terminal === 'closed') {
+                              process.stdout.write('ended because the pull request was CLOSED before this review cycle started. Nothing was re-published and no approval task was raised - the ticket stays in_progress for a human decision (reason pull_request_closed_before_review).');
+                            } else if (outcome === 'review_unavailable' || verdict === 'review_unavailable') {
                               process.stdout.write('COULD NOT BE REVIEWED - no review verdict could be captured, so the work was never judged. That is an operational fault in the AI pipeline, not a rejection of the work, and no review cycle was consumed.');
                             } else if (halted) {
                               process.stdout.write('was HALTED for a human: the reviewer rejected the work but no actionable finding could be resolved from review.json.');
@@ -14150,23 +14929,77 @@ steps:
                         env:
                           WT: ${steps.readWorktreePath.outputs.stdout}
                           HALT: ${variables.runHalt}
+                          TERMINAL: ${variables.reviewEntryTerminal}
                           CYCLES: ${variables.reviewCycle}
                         failOnError: false
                         output:
                           captureStdout: true
                           captureStderr: true
-                    - id: retainWorkspaceNoteExhausted
-                      name: Keep workspace note in progress
+                    # A merged pull request means the run SUCCEEDED: its note belongs in
+                    # complete/, not retained as blocked. A closed one stays in progress.
+                    - id: readExhaustedNoteMode
+                      name: Decide where the workspace note belongs
                       type: cli_command
                       dependsOn: readReviewOutcomeNarrative
                       config:
                         command: node
                         args:
                           - -e
+                          - |
+                            const terminal = String(process.env.TERMINAL || '').trim();
+                            process.stdout.write(terminal === 'merged' ? 'close' : 'retain');
+                        env:
+                          TERMINAL: ${variables.reviewEntryTerminal}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+
+                    # The ONE close on the merged-before-review path needs the pull request
+                    # url: the note script's close mode writes `## Pull request: <PR_URL ||
+                    # 'Not opened.'>`, and a SUCCESSFUL merged run must not record that its
+                    # pull request was never opened. Empty for every non-terminal run, so the
+                    # rejection/blocked paths keep their exact previous text.
+                    - id: readExhaustedNotePrUrl
+                      name: Read the pull request url for the workspace note
+                      type: cli_command
+                      dependsOn: readExhaustedNoteMode
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const TOK = '$' + '{';
+                            const clean = (value) => {
+                              const text = String(value == null ? '' : value).trim();
+                              if (!text || text === 'undefined' || text === 'null' || text.indexOf(TOK) !== -1) return '';
+                              return text;
+                            };
+                            const terminal = clean(process.env.TERMINAL);
+                            if (!terminal) { process.stdout.write(''); process.exit(0); }
+                            let live = {};
+                            try { live = JSON.parse(process.env.LIVE || '{}'); } catch (e) { live = {}; }
+                            process.stdout.write(clean(live.url) || clean(process.env.PR_URL));
+                        env:
+                          TERMINAL: ${variables.reviewEntryTerminal}
+                          LIVE: ${steps.readPrStateBeforeReview.outputs.stdout}
+                          PR_URL: ${steps.readPrUrl.outputs.stdout}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+
+                    - id: retainWorkspaceNoteExhausted
+                      name: Record the workspace note outcome
+                      type: cli_command
+                      dependsOn: readExhaustedNotePrUrl
+                      config:
+                        command: node
+                        args:
+                          - -e
                           - *workspaceNoteScript
                         env:
-                          MODE: retain
+                          MODE: ${steps.readExhaustedNoteMode.outputs.stdout}
                           NOTE_STATUS: blocked
+                          PR_URL: ${steps.readExhaustedNotePrUrl.outputs.stdout}
                           REASON: The run did not publish. See the ticket comment for whether the reviewer rejected the work or the work could not be reviewed at all.
                           WT: ${steps.readWorktreePath.outputs.stdout}
                           REF: ${steps.loadTicket.result.reference}
@@ -14208,10 +15041,35 @@ steps:
                               message: "AI run ${steps.readReviewOutcomeNarrative.outputs.stdout}
                                 (verdict: ${variables.reviewVerdict}, cycles:
                                 ${variables.reviewCycle})."
+                          - id: readExhaustedCommentTail
+                            name: Describe what happens next to the ticket
+                            type: cli_command
+                            dependsOn: exhaustedLog
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - |
+                                  const terminal = String(process.env.TERMINAL || '').trim();
+                                  const branch = String(process.env.BRANCH || '').trim();
+                                  if (terminal === 'merged') {
+                                    process.stdout.write('The pull request had already been merged, so nothing was re-published and no approval task was raised - this run has no further work to do.');
+                                  } else if (terminal === 'closed') {
+                                    process.stdout.write('The pull request had already been closed, so nothing was re-published and no approval task was raised. Work in progress remains on branch ' + branch + '; a human decides what happens next (the SLA escalation workflow will also pick this up).');
+                                  } else {
+                                    process.stdout.write('Work in progress remains on branch ' + branch + '. Human review required - the SLA escalation workflow will also pick this up. This comment distinguishes a reviewer rejection from a run that could not be reviewed.');
+                                  }
+                              env:
+                                TERMINAL: ${variables.reviewEntryTerminal}
+                                BRANCH: ${steps.readBranch.outputs.stdout}
+                              failOnError: false
+                              output:
+                                captureStdout: true
+
                           - id: exhaustedComment
                             name: Comment exhaustion on ticket
                             type: service_invoke
-                            dependsOn: exhaustedLog
+                            dependsOn: readExhaustedCommentTail
                             config:
                               service: core.ReactorySupportWorkflowService@1.0.0
                               method: addComment
@@ -14220,36 +15078,69 @@ steps:
                                 comment: "AI engineering run
                                   ${steps.readReviewOutcomeNarrative.outputs.stdout} after
                                   ${variables.reviewCycle} review cycle(s) (last verdict:
-                                  ${variables.reviewVerdict}). Work in progress remains on
-                                  branch ${steps.readBranch.outputs.stdout}. Human review
-                                  required - the SLA escalation workflow will also pick this
-                                  up. This comment distinguishes a reviewer rejection from a
-                                  run that could not be reviewed."
+                                  ${variables.reviewVerdict}). ${steps.readExhaustedCommentTail.outputs.stdout}"
+                          # Exactly ONE notification for every non-publish terminal path. A
+                          # merged-before-review run RESOLVED the ticket, so it announces
+                          # ticket.resolved; everything else remains a comment notification.
+                          - id: readExhaustedNotifyEvent
+                            name: Decide which notification this termination raises
+                            type: cli_command
+                            dependsOn: exhaustedComment
+                            config:
+                              command: node
+                              args:
+                                - -e
+                                - |
+                                  const terminal = String(process.env.TERMINAL || '').trim();
+                                  process.stdout.write(terminal === 'merged' ? 'ticket.resolved' : 'ticket.comment.added');
+                              env:
+                                TERMINAL: ${variables.reviewEntryTerminal}
+                              failOnError: false
+                              output:
+                                captureStdout: true
                           - id: exhaustedNotify
                             name: Notify exhaustion
                             type: service_invoke
-                            dependsOn: exhaustedComment
+                            dependsOn: readExhaustedNotifyEvent
                             config:
                               service: core.ReactorySupportWorkflowService@1.0.0
                               method: notify
                               params:
-                                event: ticket.comment.added
+                                event: ${steps.readExhaustedNotifyEvent.outputs.stdout}
                                 ticketId: ${steps.loadTicket.result.id}
                                 extra:
-                                  reason: AI engineering run ended without publishing (verdict
-                                    ${variables.reviewVerdict}).
+                                  reason: ${steps.readExhaustedCommentTail.outputs.stdout}
 
                     # Terminal state on the exhaustion and halt paths too. These used to be
                     # left at runStatus=pending / prState=unknown / prApproved=false, so a
                     # finished run reported itself as still in flight.
-                    - id: setPrStateNotOpenedExhausted
-                      name: Record that no pull request was opened
-                      type: set_variable
+                    - id: readExhaustedPrState
+                      name: Read the pull request state to record
+                      type: cli_command
                       dependsOn: haltedGate
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            const terminal = String(process.env.TERMINAL || '').trim();
+                            if (terminal === 'merged') process.stdout.write('MERGED');
+                            else if (terminal === 'closed') process.stdout.write('CLOSED');
+                            else process.stdout.write('NOT_OPENED');
+                        env:
+                          TERMINAL: ${variables.reviewEntryTerminal}
+                        failOnError: false
+                        output:
+                          captureStdout: true
+                    - id: setPrStateNotOpenedExhausted
+                      name: Record the pull request state
+                      type: set_variable
+                      dependsOn: readExhaustedPrState
                       config:
                         action: set
                         key: prState
-                        value: NOT_OPENED
+                        source: step_output
+                        sourcePath: readExhaustedPrState.outputs.stdout
                     - id: setPrApprovedFalseExhausted
                       name: Record that no pull request was approved
                       type: set_variable
@@ -14258,14 +15149,34 @@ steps:
                         action: set
                         key: prApproved
                         value: "false"
+                    - id: readExhaustedRunStatus
+                      name: Read the terminal run status
+                      type: cli_command
+                      dependsOn: setPrApprovedFalseExhausted
+                      config:
+                        command: node
+                        args:
+                          - -e
+                          - |
+                            // A pull request that was already MERGED before review is a
+                            // COMPLETED run: reporting it as blocked would tell the
+                            // programme reconciler the work failed when it landed.
+                            const terminal = String(process.env.TERMINAL || '').trim();
+                            process.stdout.write(terminal === 'merged' ? 'completed' : 'blocked');
+                        env:
+                          TERMINAL: ${variables.reviewEntryTerminal}
+                        failOnError: false
+                        output:
+                          captureStdout: true
                     - id: setRunStatusExhausted
                       name: Record the terminal run status
                       type: set_variable
-                      dependsOn: setPrApprovedFalseExhausted
+                      dependsOn: readExhaustedRunStatus
                       config:
                         action: set
                         key: runStatus
-                        value: blocked
+                        source: step_output
+                        sourcePath: readExhaustedRunStatus.outputs.stdout
 
                     # A capture failure that happened in the CONFIRMATION pass never reaches
                     # the in-loop halt branch, so raise the human task here as well. A run
