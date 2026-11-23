@@ -1633,8 +1633,25 @@ describe('core.ProcessAITicket revision integrity and post-publication loop (PRO
     // The WAIT arm (thenSteps) never hands work back to the engineer, and it
     // never claims a human-only policy. The elseSteps legitimately contains the
     // mergeable gate, which is a different arm.
-    const waitArm = (byId('postPublishPendingGate').config!.thenSteps || []).map((step: IStep) => step.id);
+    // The pending arm is now branched by CAUSE (REACTORY-302016408/20261114/787370442 B):
+    // "no required check scheduled yet" has its own window, and the check-wait
+    // budget lives under the running/verification branch. Collect the arm's
+    // DESCENDANTS, so the assertions cover every branch rather than only the
+    // first level - the wait must remain a bounded wait in all of them.
+    const waitArm: string[] = [];
+    const collectArm = (steps: IStep[]): void => {
+      (steps || []).forEach((step) => {
+        waitArm.push(step.id);
+        const config = step.config || {};
+        ['thenSteps', 'elseSteps', 'steps'].forEach((key) => {
+          if (Array.isArray(config[key])) collectArm(config[key] as IStep[]);
+        });
+      });
+    };
+    collectArm((byId('postPublishPendingGate').config!.thenSteps || []) as IStep[]);
     expect(waitArm).toContain('postPublishWaitBudgetGate');
+    expect(waitArm).toContain('postPublishSchedulingBudgetGate');
+    expect(waitArm).toContain('postPublishWait');
     expect(waitArm).not.toContain('postPublishHandBack');
     expect(waitArm).not.toContain('setPostPublishHumanBlocked');
     expect(waitArm).not.toContain('postPublishMergeableGate');

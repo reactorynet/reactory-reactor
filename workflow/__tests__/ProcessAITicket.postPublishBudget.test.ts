@@ -135,10 +135,17 @@ const publishedRepo = (): string => {
 const COMMIT_SHA = 'eac38992b6f8c1a1b1a1b1a1b1a1b1a1b1a1b1a1';
 
 /**
- * The observation the run actually recorded: GitHub reported BLOCKED with
- * REVIEW_REQUIRED, and the only finding was an `unverifiable_commit` that GitHub's
- * ASYNCHRONOUS signature verification had not yet settled (the false positive of
- * REACTORY-302016408/20261114/787370442).
+ * The observation the run recorded: GitHub reported BLOCKED with REVIEW_REQUIRED
+ * and one `unverifiable_commit` finding.
+ *
+ * The FIXTURE USES A SETTLED REASON (`no_user`), deliberately. The original run's
+ * finding carried `reason unknown`, which means GitHub's ASYNCHRONOUS verification
+ * had not checked the commit yet - a not-yet-settled verdict, not a failure. The
+ * classifier no longer emits `unverifiable_commit` for that state at all
+ * (REACTORY-302016408/20261114/787370442 Defect A), so a fixture using `unknown`
+ * would describe an input the observation can no longer produce. `no_user` is the
+ * genuine SPEECH-010 shape and keeps these budget/park tests testing what they
+ * were written for: a real, actionably-unverifiable commit.
  */
 const reviewRequiredObservation = (overrides: Record<string, any> = {}): Record<string, any> =>
   Object.assign(
@@ -155,7 +162,9 @@ const reviewRequiredObservation = (overrides: Record<string, any> = {}): Record<
           id: 'commit:eac38992b6f8',
           kind: 'unverifiable_commit',
           sha: COMMIT_SHA,
-          body: 'GitHub reports verified:false (reason unknown) for commit eac38992b6f8',
+          settled: true,
+          verificationReason: 'no_user',
+          body: 'GitHub reports verified:false with a SETTLED reason "no_user" for commit eac38992b6f8',
           fixable: true,
         },
       ],
@@ -1092,9 +1101,12 @@ describe('ProcessAITicket post-publication budget (REACTORY-302016408/20261118/1
             checkRuns: { check_runs: [] },
             commits: [
               {
+                // The shape /pulls/{n}/commits returns: the verdict is NESTED.
                 sha: sh('git rev-parse HEAD', dir),
-                verification: { verified: true, reason: 'valid' },
-                commit: { committer: { email: 'owner@example.com' } },
+                commit: {
+                  committer: { email: 'owner@example.com' },
+                  verification: { verified: true, reason: 'valid' },
+                },
               },
             ],
             protection: null,
@@ -1273,7 +1285,9 @@ describe('ProcessAITicket post-publication budget (REACTORY-302016408/20261118/1
                 id: 'commit:eac38992b6f8',
                 kind: 'unverifiable_commit',
                 sha: COMMIT_SHA,
-                body: 'GitHub reports verified:false (reason unknown) for commit eac38992b6f8',
+                settled: true,
+                verificationReason: 'no_user',
+                body: 'GitHub reports verified:false with a SETTLED reason "no_user" for commit eac38992b6f8',
                 fixable: true,
               },
             ],

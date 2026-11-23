@@ -560,13 +560,48 @@ steps:
       key: postPublishWaitBound
       value: 6
 
+  # ── CI-scheduling wait (REACTORY-302016408/20261114/787370442 Defect B) ──
+  # SEPARATE from the check-wait budget above. The first observation after the
+  # pull request is opened runs BEFORE CI has scheduled anything (the recorded
+  # run observed 16 seconds before the CI run started), so "no checks scheduled
+  # yet" needs its own, wider, shorter-interval window. 20 x 15s = 5 minutes.
+  - id: seedPostPublishSchedulingWaitCount
+    name: Seed CI-scheduling wait count
+    type: set_variable
+    dependsOn: seedPostPublishWaitBound
+    config:
+      action: set
+      key: postPublishSchedulingWaitCount
+      value: 0
+
+  - id: seedPostPublishSchedulingWaitBound
+    name: Seed CI-scheduling wait bound
+    type: set_variable
+    dependsOn: seedPostPublishSchedulingWaitCount
+    config:
+      action: set
+      key: postPublishSchedulingWaitBound
+      value: 20
+
+  # Whether ANY check conclusion has been evaluated across the whole observation
+  # loop. 'none' at a terminal point means the run never saw a CI verdict at all,
+  # so its terminal reason must say that instead of naming an exhausted budget.
+  - id: seedPostPublishCiCoverage
+    name: Seed CI observation coverage
+    type: set_variable
+    dependsOn: seedPostPublishSchedulingWaitBound
+    config:
+      action: set
+      key: postPublishCiCoverage
+      value: unknown
+
   # How many times a cycle with NOTHING TO FIX may re-observe before the run
   # stops. A dismiss-everything cycle makes no commit, so it is not a fix and
   # must not consume the fix budget - but it must not spin either.
   - id: seedPostPublishReobserveCount
     name: Seed no-fix re-observe count
     type: set_variable
-    dependsOn: seedPostPublishWaitBound
+    dependsOn: seedPostPublishCiCoverage
     config:
       action: set
       key: postPublishReobserveCount
@@ -9365,6 +9400,28 @@ steps:
                               source: step_output
                               sourcePath: readCreatedPrState.outputs.stdout
 
+                          # ── Let GitHub settle BEFORE the first judgement ────────
+                          # Two independent asynchronous processes start at the push:
+                          #   * GitHub verifies commit signatures (verified:false
+                          #     reason "unknown" until it settles - ~seconds), and
+                          #   * CI is scheduled (the recorded run observed 16 SECONDS
+                          #     before its CI run even started).
+                          # Judging either in that gap produced a phantom
+                          # unverifiable_commit and zero check conclusions
+                          # (REACTORY-302016408/20261114/787370442). One short
+                          # bounded wait here removes the common case; the loop's
+                          # own scheduling/settle waits cover the rest.
+                          - id: postPublishInitialSettleDelay
+                            name: Let GitHub settle signatures and CI scheduling
+                            type: delay
+                            dependsOn: setPrStateOpened
+                            config:
+                              duration: 20000
+                              message: >-
+                                The pull request was just published. GitHub verifies commit
+                                signatures asynchronously and schedules CI after the fact, so
+                                nothing is judged for 20 seconds.
+
                           # ══ POST-PUBLICATION OBSERVATION (PROCESS-002 B/C/D) ══════
                           # Every PR in this programme needed manual work between
                           # "PR opened" and "human can merge it": CodeQL review
@@ -9397,7 +9454,7 @@ steps:
                           - id: postPublishLoop
                             name: Observe the published pull request
                             type: while
-                            dependsOn: setPrStateOpened
+                            dependsOn: postPublishInitialSettleDelay
                             config:
                               # Termination is owned by the body: every arm sets
                               # postPublishContinue=false, or fixes and increments the
@@ -9405,13 +9462,22 @@ steps:
                               # is a hard backstop against a defect in that logic.
                               condition: variables.postPublishContinue === 'true'
                               # Worst case with the seeded budgets, counted in ITERATIONS:
+                              #  BOTH wait counts (postPublishSchedulingWaitCount and
+                              #  postPublishWaitCount) are reset for EVERY re-published head, so
+                              #  the worst case is not one scheduling window but one per cycle:
                               #    1 initial observation
-                              #  + 6 check waits          (postPublishWaitBound)
-                              #  + 2 fix cycles           (maxPostPublishFixCycles)
-                              #  + 3 no-fix re-observes   (postPublishReobserveBound)
+                              #  + 3 x (20 CI-scheduling waits + 6 check waits)   = 78
+                              #      (the initial head plus maxPostPublishFixCycles = 2 re-publishes)
+                              #  + 2 fix cycles            (maxPostPublishFixCycles)
+                              #  + 3 no-fix re-observes    (postPublishReobserveBound)
                               # + 40 awaiting-action polls (postPublishAwaitBound)
                               #  + 1 final observation
-                              #  = 53.
+                              #  = 125.
+                              #
+                              # NOTE: YamlFlowBuilder's `.while` does NOT enforce maxIterations
+                              # (found on #78), so the cap below is documentation of the intended
+                              # bound, not a runtime gate. The real bounds are the counters above,
+                              # each of which every terminal path decrements or exhausts.
                               #
                               # The awaiting window is sized from the incident that produced this fix: the
                               # review on PR #74 arrived 1h56m after publication, so the poll is 40 x 180s
@@ -9419,7 +9485,7 @@ steps:
                               # The cap must sit ABOVE that total or the window is not actually usable -
                               # and the old cap of 12 sat INSIDE the OLD check-wait budget, so a legitimate
                               # run could hit the cap and fall into the blocked arm with no reason recorded.
-                              maxIterations: 70
+                              maxIterations: 130
                               steps:
                                 # ── Bounded poll while only a HUMAN ACTION is awaited ──
                                 # A review that has not been written yet, or required checks that
@@ -9698,6 +9764,21 @@ steps:
                                           const commits = apiGet('repos/' + repo + '/pulls/' + prNumber + '/commits', 'the pull request commits');
                                           // check-runs legitimately answers {total_count: 0}; NULL means the call failed.
                                           const checkPayload = head ? apiGet('repos/' + repo + '/commits/' + head + '/check-runs', 'the check runs') : { check_runs: [] };
+                                          // ── CI-expectation evidence (REACTORY-302016408/20261114/787370442 R1) ──
+                                          // Classic branch protection lists required_status_checks on NONE of the
+                                          // reactorynet repositories (they require reviews and signatures only),
+                                          // so "required checks" alone can never tell this workflow that a
+                                          // repository has CI. express-server's five failing checks - the very
+                                          // incident this ticket is about - are not required in GitHub's sense.
+                                          // The BASE TIP's check runs are the evidence that does exist: they are
+                                          // the check NAMES a pull request is expected to produce. Rulesets are
+                                          // read too, because ruleset-required checks do not appear in classic
+                                          // protection. Both are OPTIONAL reads: a 404/null means 'no evidence',
+                                          // never a failed observation.
+                                          const baseCheckPayload = base
+                                            ? tryJson('gh api --paginate "repos/' + repo + '/commits/' + base + '/check-runs?per_page=100"')
+                                            : null;
+                                          const rules = base ? tryJson('gh api "repos/' + repo + '/rules/branches/' + base + '"') : null;
 
                                           // Branch protection and code scanning 404 on a repository that does not
                                           // configure them, so they stay OPTIONAL. Code scanning is read ONCE - used to
@@ -9717,6 +9798,8 @@ steps:
                                             reviews: reviews || [],
                                             reviewThreads: { nodes: threadNodes },
                                             checkRuns: checkPayload,
+                                            baseTipCheckRuns: baseCheckPayload,
+                                            rules: rules,
                                             commits: commits || [],
                                             protection: protection,
                                             codeScanning: alerts,
@@ -9836,16 +9919,35 @@ steps:
                                         // agent-actionable. Classifying a queued/in_progress required check
                                         // as a branch-protection policy ended the run before CI had even
                                         // finished, on any repository with required status checks.
+                                        // ── CI observation coverage (REACTORY-302016408/20261114/787370442 B) ──
+                                        // The run that produced this ticket observed the pull request
+                                        // inside the gap between "PR opened" and "checks scheduled": every
+                                        // check was pending, ZERO conclusions had been evaluated, and the
+                                        // run still reported a terminal reason ("fix budget exhausted")
+                                        // instead of "CI never concluded". The three states below are
+                                        // therefore DISTINCT, not two:
+                                        //   not_scheduled -> no check run exists yet
+                                        //   running       -> check run(s) exist, none terminal yet
+                                        //   finished      -> at least one conclusion exists and nothing runs
                                         const PENDING_STATUSES = ['queued', 'in_progress', 'requested', 'waiting', 'pending'];
+                                        const TERMINAL_CONCLUSIONS = ['success', 'failure', 'neutral', 'cancelled', 'timed_out', 'action_required', 'skipped', 'stale'];
                                         const pendingChecks = [];
+                                        const terminalConclusions = [];
                                         checkRuns.forEach((check) => {
                                           const conclusion = String(check.conclusion || '').toLowerCase();
                                           const status = String(check.status || '').toLowerCase();
-                                          const unfinished = !conclusion || PENDING_STATUSES.indexOf(status) !== -1;
+                                          const unfinished = !conclusion
+                                            || PENDING_STATUSES.indexOf(status) !== -1
+                                            || TERMINAL_CONCLUSIONS.indexOf(conclusion) === -1;
                                           if (unfinished) {
                                             pendingChecks.push({ name: String(check.name || ''), status: status || 'unknown' });
                                             return;
                                           }
+                                          terminalConclusions.push({
+                                            name: String(check.name || ''),
+                                            conclusion: conclusion,
+                                            app: String(((check.app || {}).slug) || ''),
+                                          });
                                           if (['failure', 'timed_out', 'cancelled', 'action_required'].indexOf(conclusion) === -1) return;
                                           findings.push({
                                             id: 'check:' + String(check.name || check.id || 'check'),
@@ -9857,6 +9959,100 @@ steps:
                                             fixable: true,
                                           });
                                         });
+                                        // ── "Is CI expected?" (REACTORY-302016408/20261114/787370442 R1) ──
+                                        // Classic branch protection lists required_status_checks on NONE of
+                                        // the reactorynet repositories, so gating on required checks alone
+                                        // made "CI not scheduled yet" undetectable in production: a
+                                        // pre-CI observation classified CLEAN and the run ended on the
+                                        // success arm having read zero check conclusions.
+                                        //
+                                        // Expected names therefore come from every source that exists:
+                                        //   1. classic protection required_status_checks (contexts + checks)
+                                        //   2. RULESET-required checks (repos/{r}/rules/branches/{b}) - these
+                                        //      never appear in classic protection
+                                        //   3. the BASE TIP's own check runs - concrete evidence that this
+                                        //      repository runs CI per commit, and the only real source of
+                                        //      the check NAMES a pull request is expected to produce
+                                        //   4. a .github/workflows/* declaring a pull_request trigger
+                                        //   5. check runs already present on this head
+                                        const dedupe = (names) => names.filter((name, index) => name && names.indexOf(name) === index);
+                                        const requiredCheckNames = dedupe((() => {
+                                          const names = [];
+                                          const required = (protection && protection.required_status_checks) || null;
+                                          if (required) {
+                                            if (Array.isArray(required.contexts)) required.contexts.forEach((context) => names.push(String(context)));
+                                            if (Array.isArray(required.checks)) required.checks.forEach((entry) => { if (entry && entry.context) names.push(String(entry.context)); });
+                                          }
+                                          // Ruleset-required checks. `rules/branches/{b}` returns an array of
+                                          // rules; only a required_status_checks rule names contexts.
+                                          (Array.isArray(raw.rules) ? raw.rules : []).forEach((rule) => {
+                                            if (!rule || String(rule.type || '') !== 'required_status_checks') return;
+                                            const params = rule.parameters || {};
+                                            (Array.isArray(params.required_status_checks) ? params.required_status_checks : []).forEach((entry) => {
+                                              if (entry && entry.context) names.push(String(entry.context));
+                                            });
+                                          });
+                                          return names;
+                                        })());
+                                        // Names seen on the base tip (or supplied by a fixture). This is the
+                                        // evidence these repositories actually have.
+                                        const baseTipCheckRuns = (() => {
+                                          const payload = raw.baseTipCheckRuns;
+                                          if (!payload) return [];
+                                          if (Array.isArray(payload)) return payload;
+                                          return Array.isArray(payload.check_runs) ? payload.check_runs : [];
+                                        })();
+                                        const baseTipCheckNames = dedupe(baseTipCheckRuns.map((check) => String((check && check.name) || '')));
+                                        // A pull_request-triggered workflow in THIS worktree. Cheap, local, and
+                                        // true even when the base tip predates the workflow.
+                                        const workflowTriggersOnPullRequest = (() => {
+                                          try {
+                                            const dir = path.join(wt, '.github', 'workflows');
+                                            if (!fs.existsSync(dir)) return false;
+                                            return fs.readdirSync(dir).filter((name) => /\.ya?ml$/i.test(name)).some((name) => {
+                                              try {
+                                                const text = fs.readFileSync(path.join(dir, name), 'utf8');
+                                                return /^\s*pull_request(_target)?\s*:/m.test(text)
+                                                  || /^\s*on\s*:\s*\[?[^\n]*pull_request/m.test(text);
+                                              } catch (e) { return false; }
+                                            });
+                                          } catch (e) { return false; }
+                                        })();
+                                        const scheduledCheckNames = dedupe(checkRuns.map((check) => String((check && check.name) || '')));
+                                        const expectedCheckNames = dedupe(requiredCheckNames.concat(baseTipCheckNames));
+                                        const missingExpectedNames = expectedCheckNames.filter((name) => scheduledCheckNames.indexOf(name) === -1);
+                                        const missingRequiredNames = requiredCheckNames.filter((name) => scheduledCheckNames.indexOf(name) === -1);
+                                        const ciExpectedEvidence = [];
+                                        if (requiredCheckNames.length > 0) ciExpectedEvidence.push('required status check(s): ' + requiredCheckNames.slice(0, 8).join(', '));
+                                        if (baseTipCheckNames.length > 0) ciExpectedEvidence.push('base tip ' + (base || '(unknown)') + ' has check run(s): ' + baseTipCheckNames.slice(0, 8).join(', '));
+                                        if (workflowTriggersOnPullRequest) ciExpectedEvidence.push('.github/workflows declares a pull_request trigger');
+                                        if (checkRuns.length > 0) ciExpectedEvidence.push('this head already has ' + checkRuns.length + ' check run(s)');
+                                        const checksExpected = ciExpectedEvidence.length > 0;
+                                        // An Actions conclusion is what proves the REAL CI ran. GitGuardian and
+                                        // the CodeQL summary run finish in 1-2 s, so a head can look "finished"
+                                        // before the Actions jobs have even been created.
+                                        const actionsConclusions = terminalConclusions.filter((entry) => entry.app === 'github-actions');
+                                        // NOT READ, deliberately: the legacy commit-STATUSES API
+                                        // (repos/{r}/commits/{sha}/status). A required context reported as
+                                        // a status rather than a check run would look "never scheduled".
+                                        // No reactorynet repository uses statuses (commits/{sha}/status is
+                                        // empty on the heads this was verified against), and reading it
+                                        // here would add a request per observation for no signal. If a
+                                        // status-only CI is ever adopted, this is the place to add it.
+                                        // Nothing has been created yet for this head.
+                                        const checksNotScheduled = checksExpected && checkRuns.length === 0;
+                                        // Something exists, but expected NAMES are missing and no Actions
+                                        // workflow has concluded: the Actions jobs have not been created.
+                                        // (A name that only ever runs on the default branch - Dependabot,
+                                        // a master-only `analysis` job - cannot keep this true once an
+                                        // Actions conclusion has landed, which is what stops it blocking.)
+                                        const ciSettling = checksExpected
+                                          && !checksNotScheduled
+                                          && missingExpectedNames.length > 0
+                                          && actionsConclusions.length === 0;
+                                        const checksState = checkRuns.length === 0
+                                          ? 'not_scheduled'
+                                          : ((pendingChecks.length === 0 && !ciSettling) ? 'finished' : 'running');
 
                                         // Code-scanning alerts. The alert NUMBER is what the dismiss
                                         // API needs, and a review thread does not carry one, so the
@@ -9904,19 +10100,121 @@ steps:
                                           });
                                         });
 
+                                        // ── Commit-signature verification (REACTORY-302016408/20261114/787370442 A) ──
+                                        // THE PAYLOAD SHAPE IS THE CONTRACT. This loop reads
+                                        // /repos/{repo}/pulls/{n}/commits, which returns REST COMMIT OBJECTS:
+                                        //   { sha, commit: { author, committer, message, tree,
+                                        //                   verification: { verified, reason, verified_at } },
+                                        //     author, committer, parents, ... }
+                                        // The verdict is nested at `commit.commit.verification`. There is NO
+                                        // top-level `commit.verification` on this endpoint - reading it yields
+                                        // `{}` for EVERY commit, so `verified === true` is never seen and the
+                                        // reason silently defaults to 'unknown'. That wrong read is the root
+                                        // cause of PR #133's phantom "verified:false (reason unknown)" on a
+                                        // commit GitHub reports verified:true/valid. Verified live against
+                                        // PR #85: `.[0] | keys` = [author, comments_url, commit, committer,
+                                        // html_url, node_id, parents, sha, url] and `has("verification")` false.
+                                        //
+                                        // A missing/empty verification object is NOT "verified": it is "no
+                                        // verdict observed", which is the WAIT state below - never a finding
+                                        // and never a rewrite.
                                         let requiredSignatures = false;
                                         if (protection && protection.required_signatures) {
                                           requiredSignatures = protection.required_signatures.enabled === true;
                                         }
+                                        // ── Which signature verdicts may drive a rewrite (R2) ────────────
+                                        // `unknown` is NOT a reason GitHub returns: it was this pipeline's
+                                        // own default for the field it failed to read (the wrong-JSON-path
+                                        // defect above). GitHub's documented `verification.reason` values
+                                        // are expired_key, not_signing_key, gpgverify_error,
+                                        // gpgverify_unavailable, unsigned, unknown_signature_type, no_user,
+                                        // unverified_email, bad_email, unknown_key, malformed_signature,
+                                        // invalid, valid - plus ocsp_pending in the schema enum.
+                                        //
+                                        // Two of those are TRANSIENT, not verdicts: gpgverify_unavailable
+                                        // ("the signature verification service is currently unavailable")
+                                        // and gpgverify_error ("an error communicating with the signature
+                                        // verification service") - and ocsp_pending is "not resolved yet".
+                                        // Treating every unrecognised non-empty reason as settled meant a
+                                        // GitHub verification OUTAGE drove a force-rewrite of published
+                                        // history, defeating this ticket's own invariant.
+                                        //
+                                        // So SETTLED FAILURE is an explicit allow-list. Anything else -
+                                        // empty, unknown, a transient reason, or a reason we have never
+                                        // heard of - WAITS, because waiting is recoverable and rewriting
+                                        // published history is not.
+                                        const SETTLED_FAILURE_REASONS = [
+                                          'unsigned',
+                                          'no_user',
+                                          'unverified_email',
+                                          'bad_email',
+                                          'unknown_key',
+                                          'expired_key',
+                                          'not_signing_key',
+                                          'invalid',
+                                          'malformed_signature',
+                                          'unknown_signature_type',
+                                        ];
+                                        const TRANSIENT_VERIFICATION_REASONS = [
+                                          '',
+                                          'unknown',
+                                          'gpgverify_unavailable',
+                                          'gpgverify_error',
+                                          'ocsp_pending',
+                                        ];
+                                        const isSettledFailureReason = (reason) => {
+                                          const normalised = String(reason || '').trim().toLowerCase();
+                                          return SETTLED_FAILURE_REASONS.indexOf(normalised) !== -1;
+                                        };
+                                        const isTransientVerificationReason = (reason) => {
+                                          const normalised = String(reason || '').trim().toLowerCase();
+                                          return TRANSIENT_VERIFICATION_REASONS.indexOf(normalised) !== -1;
+                                        };
                                         const unverifiableCommits = [];
+                                        const pendingVerifications = [];
                                         commits.forEach((commit) => {
-                                          const verification = commit.verification || {};
+                                          const verification = ((commit.commit || {}).verification) || {};
                                           if (verification.verified === true) return;
+                                          const sha = String(commit.sha || '');
+                                          const shortSha = sha.slice(0, 12);
+                                          const reason = String(verification.reason || '').trim().toLowerCase();
+                                          const committerEmail = String(((commit.commit || {}).committer || {}).email || 'unknown');
+                                          if (!isSettledFailureReason(reason)) {
+                                            // NOT A VERDICT. Either nothing was read (empty), a transient
+                                            // GitHub failure (gpgverify_*), a not-yet-resolved OCSP check,
+                                            // or a reason this workflow does not recognise. A distinct
+                                            // kind, never fixable, and never part of repairNeeded: the
+                                            // only correct action is to observe again after a settle delay.
+                                            const transient = isTransientVerificationReason(reason);
+                                            pendingVerifications.push({
+                                              sha: sha,
+                                              reason: reason || 'none-reported',
+                                              status: transient ? 'transient' : 'not_yet_verified',
+                                            });
+                                            findings.push({
+                                              id: 'commit-pending:' + shortSha,
+                                              kind: 'commit_verification_pending',
+                                              sha: sha,
+                                              settled: false,
+                                              transient: transient,
+                                              verificationReason: reason || 'none-reported',
+                                              body: 'GitHub has not returned a SETTLED signature verdict for commit ' + shortSha
+                                                + ' (verification.reason "' + (reason || 'none-reported') + '"; '
+                                                + (transient
+                                                  ? 'a transient verification state, not a failed signature'
+                                                  : 'no verdict yet, or a reason this workflow does not treat as final')
+                                                + '). Nothing is rewritten; the pull request is re-observed after a settle delay.',
+                                              fixable: false,
+                                            });
+                                            return;
+                                          }
                                           unverifiableCommits.push({
-                                            id: 'commit:' + String(commit.sha || '').slice(0, 12),
+                                            id: 'commit:' + shortSha,
                                             kind: 'unverifiable_commit',
-                                            sha: String(commit.sha || ''),
-                                            body: 'GitHub reports verified:false (reason ' + String(verification.reason || 'unknown') + ') for commit ' + String(commit.sha || '').slice(0, 12) + ' committed by ' + String(((commit.commit || {}).committer || {}).email || 'unknown'),
+                                            sha: sha,
+                                            settled: true,
+                                            verificationReason: reason,
+                                            body: 'GitHub reports verified:false with a SETTLED reason "' + reason + '" for commit ' + shortSha + ' committed by ' + committerEmail + ' (checked and failed, not awaiting verification)',
                                             // Fixable ONLY when a signing identity is configured: the
                                             // pipeline can re-create the commit with the key-owner
                                             // committer. With no key, no agent can fix it.
@@ -9955,8 +10253,19 @@ steps:
                                         // human review. They must never be read as a policy a human has to
                                         // change, or every PR against a repository with required status
                                         // checks ends blocked before CI completes.
-                                        const awaitingChecks = pendingChecks.length > 0;
-                                        const awaitingAnything = awaitingReview || awaitingChecks;
+                                        // Checks that have not finished, required checks that have not been
+                                        // SCHEDULED yet, and a head whose Actions jobs have not been
+                                        // CREATED yet are all a WAIT. The recorded run fell into the
+                                        // second and third: it observed 16 seconds before CI started, so
+                                        // zero conclusions existed and it judged a pull request nobody
+                                        // had CI evidence for. R1: because no reactorynet repository
+                                        // declares required checks, `checksNotScheduled` alone was always
+                                        // false there and the run reached the success arm with no CI read.
+                                        const awaitingChecks = pendingChecks.length > 0 || checksNotScheduled || ciSettling;
+                                        // A not-yet-settled signature is also a WAIT: it is not a verdict
+                                        // and must never be a finding or a block on its own.
+                                        const awaitingVerification = pendingVerifications.length > 0;
+                                        const awaitingAnything = awaitingReview || awaitingChecks || awaitingVerification;
                                         // Only a BLOCKED state with NO fixable finding, NO pending check and
                                         // NO awaited review may claim a human-only policy block.
                                         if (mergeStateStatus === 'BLOCKED' && fixable.length === 0 && humanOnly.length === 0 && !awaitingAnything) {
@@ -9983,11 +10292,27 @@ steps:
                                         } else if (fixable.length > 0) {
                                           classification = 'fixable';
                                           reason = String(fixable.length) + ' agent-fixable finding(s): ' + fixable.map((finding) => finding.kind).filter((kind, i, list) => list.indexOf(kind) === i).join(', ');
-                                        } else if (pendingChecks.length > 0) {
-                                          // Checks are still RUNNING: neither an agent-fixable
-                                          // finding nor a human policy problem. Wait and re-observe.
+                                        } else if (awaitingChecks || awaitingVerification) {
+                                          // Neither an agent-fixable finding nor a human policy
+                                          // problem: the evidence to judge has not arrived yet. Wait
+                                          // and re-observe. The reason NAMES which evidence is missing,
+                                          // so a terminal report can distinguish the causes instead of
+                                          // blaming a fix budget.
                                           classification = 'pending';
-                                          reason = String(pendingChecks.length) + ' check(s) still running (' + pendingChecks.map((check) => check.name + ':' + check.status).join(', ') + '); mergeStateStatus ' + (mergeStateStatus || 'unknown') + '. Waiting for them to finish before judging the pull request.';
+                                          const waitParts = [];
+                                          if (pendingChecks.length > 0) {
+                                            waitParts.push(String(pendingChecks.length) + ' check(s) still running (' + pendingChecks.map((check) => check.name + ':' + check.status).join(', ') + ')');
+                                          }
+                                          if (checksNotScheduled) {
+                                            waitParts.push('0 check(s) have been scheduled yet, but CI is expected here (' + ciExpectedEvidence.join('; ') + ')');
+                                          }
+                                          if (ciSettling) {
+                                            waitParts.push('the Actions jobs have not been created yet: ' + String(missingExpectedNames.length) + ' expected check(s) missing (' + missingExpectedNames.slice(0, 8).join(', ') + '), and no Actions check has concluded');
+                                          }
+                                          if (awaitingVerification) {
+                                            waitParts.push(String(pendingVerifications.length) + ' commit signature verdict(s) not yet settled by GitHub (' + pendingVerifications.map((entry) => String(entry.sha || '').slice(0, 12) + ':' + entry.reason).join(', ') + ')');
+                                          }
+                                          reason = waitParts.join('; ') + '; mergeStateStatus ' + (mergeStateStatus || 'unknown') + ', check state ' + checksState + ', ' + String(terminalConclusions.length) + ' check conclusion(s) evaluated. Waiting for the evidence before judging the pull request.';
                                         } else {
                                           classification = 'clean';
                                           reason = 'no agent-fixable finding: mergeStateStatus ' + (mergeStateStatus || 'unknown') + ', reviewDecision ' + (reviewDecision || 'none');
@@ -10012,14 +10337,37 @@ steps:
                                           // An unverifiable published commit this run can repair with the key owner.
                                           // The repair does not depend on the reviewer's verdict: it is a signing
                                           // fault, not a code change, so a no_action verdict must not hide it.
-                                          repairNeeded: findings.some((finding) => finding.kind === 'unverifiable_commit' && finding.fixable === true),
+                                          // REQUIRES a SETTLED, actionable reason: `unknown` means "not checked
+                                          // yet", and a rewrite of published history on that basis is the
+                                          // destructive false positive this ticket exists to remove.
+                                          repairNeeded: findings.some((finding) => finding.kind === 'unverifiable_commit' && finding.fixable === true && finding.settled !== false),
                                           pendingChecks: pendingChecks,
+                                          pendingVerifications: pendingVerifications,
                                           awaitingChecks: awaitingChecks,
+                                          awaitingVerification: awaitingVerification,
+                                          checks: {
+                                            state: checksState,
+                                            expected: checksExpected,
+                                            expectedEvidence: ciExpectedEvidence,
+                                            expectedNames: expectedCheckNames,
+                                            missingExpectedNames: missingExpectedNames,
+                                            notScheduled: checksNotScheduled,
+                                            settling: ciSettling,
+                                            actionsConclusions: actionsConclusions.length,
+                                            scheduled: checkRuns.length,
+                                            scheduledNames: scheduledCheckNames,
+                                            required: requiredCheckNames.length,
+                                            requiredNames: requiredCheckNames,
+                                            missingRequiredNames: missingRequiredNames,
+                                            pending: pendingChecks.length,
+                                            conclusionsEvaluated: terminalConclusions.length,
+                                            conclusions: terminalConclusions,
+                                          },
                                           unattributedAlerts: unattributedAlerts,
                                           state: classification,
                                           reason: reason,
                                           findings: findings,
-                                          counts: { total: findings.length, fixable: fixable.length, humanOnly: humanOnly.length, staleReviews: staleReviews.length, pendingChecks: pendingChecks.length },
+                                          counts: { total: findings.length, fixable: fixable.length, humanOnly: humanOnly.length, staleReviews: staleReviews.length, pendingChecks: pendingChecks.length, pendingVerifications: pendingVerifications.length, conclusionsEvaluated: terminalConclusions.length },
                                           checkedAt: new Date().toISOString(),
                                         });
                                     env:
@@ -10071,6 +10419,150 @@ steps:
                                     source: step_output
                                     sourcePath: readPostPublishObservation.outputs.stdout
 
+                                # ── Why is this iteration waiting? ──────────────────────────
+                                # A 'pending' observation has three distinct causes and they
+                                # must not share a wait (REACTORY-302016408/20261114/787370442 B):
+                                #   not_scheduled -> required checks exist but NONE is scheduled
+                                #                    yet (the first observation after PR creation)
+                                #   verification -> a commit signature verdict has not settled
+                                #   running       -> checks exist and are still running
+                                # Recorded as a VARIABLE so every downstream condition reads
+                                # the same decision.
+                                - id: readPostPublishWaitCause
+                                  name: Read why this observation is waiting
+                                  type: cli_command
+                                  dependsOn: setPostPublishState
+                                  config:
+                                    command: node
+                                    args:
+                                      - -e
+                                      - |
+                                        const fs = require('fs');
+                                        const path = require('path');
+                                        const wt = String(process.env.WT || '').trim();
+                                        let observation = {};
+                                        try { observation = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'post-publish-observation.json'), 'utf8')) || {}; } catch (e) { observation = {}; }
+                                        const checks = observation.checks || {};
+                                        const counts = observation.counts || {};
+                                        const state = String(observation.state || '').trim();
+                                        const scheduled = Number(checks.scheduled == null ? 0 : checks.scheduled) || 0;
+                                        const expected = checks.expected === true;
+                                        const pendingVerifications = Number(counts.pendingVerifications == null ? 0 : counts.pendingVerifications) || 0;
+                                        const pendingChecks = Number(counts.pendingChecks == null ? 0 : counts.pendingChecks) || 0;
+                                        let cause = '';
+                                        if (state === 'pending') {
+                                          // ORDER MATTERS. A head with nothing scheduled yet is a
+                                          // SCHEDULING wait (CI has not been created), even if a
+                                          // signature is also unsettled. Once anything is scheduled, an
+                                          // unsettled signature with NO pending check is a SIGNATURE wait -
+                                          // not "checks still running", which is what the old rule said
+                                          // once the checks had in fact finished (R3(b)).
+                                          if (scheduled === 0 && expected) cause = 'not_scheduled';
+                                          else if (pendingVerifications > 0 && pendingChecks === 0) cause = 'verification';
+                                          else cause = 'running';
+                                        }
+                                        process.stdout.write(cause);
+                                    env:
+                                      WT: ${steps.readWorktreePath.outputs.stdout}
+                                    failOnError: false
+                                    output:
+                                      captureStdout: true
+
+                                - id: setPostPublishWaitCause
+                                  name: Record why this observation is waiting
+                                  type: set_variable
+                                  dependsOn: readPostPublishWaitCause
+                                  config:
+                                    action: set
+                                    key: postPublishWaitCause
+                                    source: step_output
+                                    sourcePath: readPostPublishWaitCause.outputs.stdout
+
+                                # ── CI observation coverage, accumulated over the loop ─────
+                                # Records whether ANY check conclusion has been evaluated
+                                # across every observation so far. A terminal point that
+                                # finds 'none' must report "never observed CI", never "fix
+                                # budget exhausted" (REACTORY-302016408/20261114/787370442 B).
+                                - id: recordPostPublishCoverage
+                                  name: Record whether any CI conclusion has been observed
+                                  type: cli_command
+                                  dependsOn: setPostPublishWaitCause
+                                  config:
+                                    command: node
+                                    args:
+                                      - -e
+                                      - |
+                                        const fs = require('fs');
+                                        const path = require('path');
+                                        const wt = String(process.env.WT || '').trim();
+                                        const dir = path.join(wt, '.ai-agent');
+                                        const readJson = (name) => {
+                                          try { return JSON.parse(fs.readFileSync(path.join(dir, name), 'utf8')); } catch (e) { return null; }
+                                        };
+                                        const observation = readJson('post-publish-observation.json');
+                                        const checks = (observation && observation.checks) || {};
+                                        const counts = (observation && observation.counts) || {};
+                                        const number = (value) => { const n = Number(value == null ? 0 : value); return Number.isFinite(n) ? n : 0; };
+                                        const scheduled = number(checks.scheduled);
+                                        const required = number(checks.required);
+                                        const conclusions = number(checks.conclusionsEvaluated == null ? counts.conclusionsEvaluated : checks.conclusionsEvaluated);
+                                        // CI is EXPECTED on this pull request (R1/R3(a)). Persisted, so the
+                                        // terminal reporting can tell "we never read the CI that exists"
+                                        // from "this repository has no CI at all" - the second must name
+                                        // the fix budget, not a phantom CI failure.
+                                        const ciExpected = checks.expected === true;
+                                        // NB2: the record is keyed by the HEAD it describes. Both wait
+                                        // counters reset per re-published head, so coverage must too: a
+                                        // conclusion seen on the PREVIOUS head must not make a fixed head
+                                        // look covered. A reused worktree inherits a record for a
+                                        // different head, which this also discards.
+                                        const headSha = String((observation && observation.headSha) || '');
+                                        const stored = readJson('post-publish-ci-coverage.json') || {};
+                                        const sameHead = !!headSha && String(stored.headSha || '') === headSha;
+                                        const previous = sameHead ? stored : {};
+                                        const record = {
+                                          headSha: headSha || null,
+                                          observations: number(previous.observations) + (observation ? 1 : 0),
+                                          anyConclusionEvaluated: previous.anyConclusionEvaluated === true || conclusions > 0,
+                                          conclusionsEvaluated: Math.max(number(previous.conclusionsEvaluated), conclusions),
+                                          anyChecksScheduled: previous.anyChecksScheduled === true || scheduled > 0,
+                                          requiredChecks: Math.max(number(previous.requiredChecks), required),
+                                          // `expected` is OR-ed across observations for THIS head: once we
+                                          // have evidence that CI is expected, a later observation cannot
+                                          // un-expect it.
+                                          expected: previous.expected === true || ciExpected,
+                                          lastChecksState: String(checks.state || 'unknown'),
+                                          lastScheduledChecks: scheduled,
+                                          lastPendingChecks: number(counts.pendingChecks),
+                                          lastPendingVerifications: number(counts.pendingVerifications),
+                                          lastCiExpectedEvidence: Array.isArray(checks.expectedEvidence) ? checks.expectedEvidence : [],
+                                          lastObservedAt: observation && observation.checkedAt ? String(observation.checkedAt) : null,
+                                          generatedAt: new Date().toISOString(),
+                                        };
+                                        try {
+                                          fs.mkdirSync(dir, { recursive: true });
+                                          fs.writeFileSync(path.join(dir, 'post-publish-ci-coverage.json'), JSON.stringify(record, null, 2), 'utf8');
+                                        } catch (e) { /* best effort */ }
+                                        // R3(a): `none` means "CI was expected and no conclusion was ever
+                                        // read". A repository with no CI reports `not_expected`, so the
+                                        // never-observed wording can never be produced for it.
+                                        process.stdout.write(record.anyConclusionEvaluated ? 'some' : (record.expected ? 'none' : 'not_expected'));
+                                    env:
+                                      WT: ${steps.readWorktreePath.outputs.stdout}
+                                    failOnError: false
+                                    output:
+                                      captureStdout: true
+
+                                - id: setPostPublishCiCoverage
+                                  name: Record the CI observation coverage
+                                  type: set_variable
+                                  dependsOn: recordPostPublishCoverage
+                                  config:
+                                    action: set
+                                    key: postPublishCiCoverage
+                                    source: step_output
+                                    sourcePath: recordPostPublishCoverage.outputs.stdout
+
                                 # Whether an unverifiable PUBLISHED commit can be repaired
                                 # with the key owner. That is a signing fault, not a code
                                 # change, so it must be actionable even when the reviewer
@@ -10090,8 +10582,14 @@ steps:
                                         let record = {};
                                         try { record = JSON.parse(fs.readFileSync(path.join(wt, '.ai-agent', 'post-publish-observation.json'), 'utf8')) || {}; } catch (e) { record = {}; }
                                         const findings = Array.isArray(record.findings) ? record.findings : [];
+                                        // A settled verdict is REQUIRED. `unknown` means GitHub has not
+                                        // checked the signature yet, and a history rewrite on that basis
+                                        // is the destructive false positive this ticket removes.
+                                        const settledUnverifiable = (finding) => finding.kind === 'unverifiable_commit'
+                                          && finding.fixable === true
+                                          && finding.settled !== false;
                                         const needed = record.repairNeeded === true
-                                          || findings.some((finding) => finding.kind === 'unverifiable_commit' && finding.fixable === true);
+                                          || findings.some(settledUnverifiable);
                                         process.stdout.write(needed ? 'true' : 'false');
                                     env:
                                       WT: ${steps.readWorktreePath.outputs.stdout}
@@ -11272,7 +11770,7 @@ steps:
                                                                       const tryRun = (cmd) => { try { return execSync(cmd, { cwd: wt, stdio: ['ignore', 'pipe', 'pipe'] }).toString().trim(); } catch (e) { return ''; } };
                                                                       const observation = readJson('post-publish-observation.json') || {};
                                                                       const findings = Array.isArray(observation.findings) ? observation.findings : [];
-                                                                      const needsRepair = findings.some((finding) => finding.kind === 'unverifiable_commit' && finding.fixable === true);
+                                                                      const needsRepair = findings.some((finding) => finding.kind === 'unverifiable_commit' && finding.fixable === true && finding.settled !== false);
                                                                       if (!needsRepair) { process.stdout.write(''); process.exit(0); }
 
                                                                       // The base the pull request targets - NOT the published tip.
@@ -11798,6 +12296,33 @@ steps:
                                                                               key: postPublishWaitCount
                                                                               value: 0
 
+                                                                          - id: resetPostPublishSchedulingWaitCount
+                                                                            name: Give the new head a fresh CI-scheduling budget
+                                                                            type: set_variable
+                                                                            dependsOn: resetPostPublishWaitCount
+                                                                            config:
+                                                                              action: set
+                                                                              key: postPublishSchedulingWaitCount
+                                                                              value: 0
+
+                                                                          # ── Let GitHub settle AFTER the push, before judging ─────────
+                                                                          # The push restarts BOTH asynchronous clocks: signature
+                                                                          # verification (verified:false reason "unknown") and CI
+                                                                          # scheduling. Judging them in that window is what produced the
+                                                                          # phantom unverifiable_commit and the zero-conclusion CI
+                                                                          # observation (REACTORY-302016408/20261114/787370442). The wait
+                                                                          # is short and bounded; it is not a fix and spends no budget.
+                                                                          - id: postPublishRepublishSettleDelay
+                                                                            name: Let GitHub settle after the re-publish
+                                                                            type: delay
+                                                                            dependsOn: resetPostPublishSchedulingWaitCount
+                                                                            config:
+                                                                              duration: 20000
+                                                                              message: >-
+                                                                                The fix reached origin. Signatures are verified and CI is scheduled
+                                                                                asynchronously, so the pull request is observed again in 20 seconds
+                                                                                rather than judged mid-flight.
+
                                                                           # ── Close the review threads whose FIX just landed ─────────────
                                                                           # A thread the reviewer judged ADDRESSED (fixed, not dismissed) can
                                                                           # only be closed once this cycle's commit exists on origin. This step
@@ -12132,17 +12657,48 @@ steps:
                                                         awaited human action, so the run polls for it instead of
                                                         reporting ${steps.readPrUrl.outputs.stdout} unmergeable.
                                                 elseSteps:
-                                                  - id: setPostPublishExhausted
-                                                    name: Record an exhausted post-publication fix budget
-                                                    type: set_variable
+                                                  # The budget is spent AND nothing actionable remains to
+                                                  # await. Before recording "exhausted", ask whether the
+                                                  # run ever observed a CI conclusion at all. If it did
+                                                  # not, the budget is not the reason a human should be
+                                                  # pointed at: failing checks may exist and were never
+                                                  # read (REACTORY-302016408/20261114/787370442 Defect B).
+                                                  - id: postPublishExhaustedCoverageGate
+                                                    name: Did the run ever observe a CI conclusion
+                                                    type: condition
                                                     config:
-                                                      action: set
-                                                      key: postPublishOutcome
-                                                      value: exhausted
+                                                      condition: variables.postPublishCiCoverage === 'none'
+                                                      thenSteps:
+                                                        - id: setPostPublishExhaustedUnobserved
+                                                          name: Record that CI was never read to a conclusion
+                                                          type: set_variable
+                                                          config:
+                                                            action: set
+                                                            key: postPublishOutcome
+                                                            value: checks_unobserved
+                                                        - id: setPostPublishExhaustedUnobservedReason
+                                                          name: Record the never-observed CI cause
+                                                          type: set_variable
+                                                          dependsOn: setPostPublishExhaustedUnobserved
+                                                          config:
+                                                            action: set
+                                                            key: postPublishReason
+                                                            value: the run ended WITHOUT OBSERVING ANY CI CONCLUSION -
+                                                              no check run reached a terminal conclusion while the pull request was
+                                                              observed, so failing checks may exist and were never read. The fix
+                                                              budget is not the reported cause - CI never produced a verdict.
+                                                      elseSteps:
+                                                        - id: setPostPublishExhausted
+                                                          name: Record an exhausted post-publication fix budget
+                                                          type: set_variable
+                                                          config:
+                                                            action: set
+                                                            key: postPublishOutcome
+                                                            value: exhausted
                                                   - id: setPostPublishExhaustedContinue
                                                     name: Stop the loop when the budget is exhausted
                                                     type: set_variable
-                                                    dependsOn: setPostPublishExhausted
+                                                    dependsOn: postPublishExhaustedCoverageGate
                                                     config:
                                                       action: set
                                                       key: postPublishContinue
@@ -12251,76 +12807,219 @@ steps:
                                                     value: "false"
                                               elseSteps:
                                               - id: postPublishPendingGate
-                                                name: Are required checks still running
+                                                name: Is the evidence needed to judge still arriving
                                                 type: condition
                                                 dependsOn: setPostPublishState
                                                 config:
                                                   condition: variables.postPublishState === 'pending'
+                                                  # A 'pending' observation has three causes with DIFFERENT
+                                                  # waits and different terminal reasons
+                                                  # (REACTORY-302016408/20261114/787370442 Defect B):
+                                                  #   1. no required check scheduled yet -> 20 x 15s
+                                                  #   2. a signature verdict has not settled -> 6 x 60s
+                                                  #   3. checks running                       -> 6 x 60s
                                                   thenSteps:
-                                                    - id: postPublishWaitBudgetGate
-                                                      name: Is there check-wait budget left
+                                                    # ── 1. Checks not scheduled yet ───────────────────
+                                                    # The recorded run observed the PR 16 seconds before CI
+                                                    # started. "No check run exists" is not "checks pass"
+                                                    # and it is not a policy block: it is a SCHEDULING GAP
+                                                    # with its own, wider, shorter-interval window.
+                                                    - id: postPublishSchedulingGate
+                                                      name: Have any required checks been scheduled yet
                                                       type: condition
                                                       config:
-                                                        condition: Number(variables.postPublishWaitCount) < Number(variables.postPublishWaitBound)
+                                                        condition: variables.postPublishWaitCause === 'not_scheduled'
                                                         thenSteps:
-                                                          - id: postPublishWait
-                                                            name: Wait for the running checks
-                                                            type: delay
+                                                          - id: postPublishSchedulingBudgetGate
+                                                            name: Is there CI-scheduling wait budget left
+                                                            type: condition
                                                             config:
-                                                              duration: 60000
-                                                              message: Checks are still running on the pull request - waiting one
-                                                                minute before observing again.
-                                                          - id: bumpPostPublishWait
-                                                            name: Count the check wait
-                                                            type: cli_command
-                                                            dependsOn: postPublishWait
-                                                            config:
-                                                              command: node
-                                                              args:
-                                                                - -e
-                                                                - |
-                                                                  const n = Number(String(process.env.N || '0').trim());
-                                                                  process.stdout.write(String((Number.isFinite(n) ? n : 0) + 1));
-                                                              env:
-                                                                N: ${variables.postPublishWaitCount}
-                                                              failOnError: true
-                                                              output:
-                                                                captureStdout: true
-                                                          - id: setPostPublishWaitCount
-                                                            name: Record the check wait
-                                                            type: set_variable
-                                                            dependsOn: bumpPostPublishWait
-                                                            config:
-                                                              action: set
-                                                              key: postPublishWaitCount
-                                                              source: step_output
-                                                              sourcePath: bumpPostPublishWait.outputs.stdout
+                                                              condition: Number(variables.postPublishSchedulingWaitCount) < Number(variables.postPublishSchedulingWaitBound)
+                                                              thenSteps:
+                                                                - id: postPublishSchedulingWait
+                                                                  name: Wait for CI to be scheduled
+                                                                  type: delay
+                                                                  config:
+                                                                    duration: 15000
+                                                                    message: >-
+                                                                      The pull request is published but none of its required checks has been
+                                                                      scheduled yet - waiting 15 seconds before observing again.
+                                                                - id: bumpPostPublishSchedulingWait
+                                                                  name: Count the CI-scheduling wait
+                                                                  type: cli_command
+                                                                  dependsOn: postPublishSchedulingWait
+                                                                  config:
+                                                                    command: node
+                                                                    args:
+                                                                      - -e
+                                                                      - |
+                                                                        const n = Number(String(process.env.N || '0').trim());
+                                                                        process.stdout.write(String((Number.isFinite(n) ? n : 0) + 1));
+                                                                    env:
+                                                                      N: ${variables.postPublishSchedulingWaitCount}
+                                                                    failOnError: true
+                                                                    output:
+                                                                      captureStdout: true
+                                                                - id: setPostPublishSchedulingWaitCount
+                                                                  name: Record the CI-scheduling wait
+                                                                  type: set_variable
+                                                                  dependsOn: bumpPostPublishSchedulingWait
+                                                                  config:
+                                                                    action: set
+                                                                    key: postPublishSchedulingWaitCount
+                                                                    source: step_output
+                                                                    sourcePath: bumpPostPublishSchedulingWait.outputs.stdout
+                                                              elseSteps:
+                                                                # The bounded window for "checks not yet scheduled"
+                                                                # expired. The run must say it never saw CI, not
+                                                                # blame a fix budget it never spent on CI.
+                                                                - id: setPostPublishSchedulingUnobserved
+                                                                  name: Record that CI was never scheduled
+                                                                  type: set_variable
+                                                                  config:
+                                                                    action: set
+                                                                    key: postPublishOutcome
+                                                                    value: checks_unobserved
+                                                                - id: setPostPublishSchedulingUnobservedReason
+                                                                  name: Record that no CI conclusion was ever observed
+                                                                  type: set_variable
+                                                                  dependsOn: setPostPublishSchedulingUnobserved
+                                                                  config:
+                                                                    action: set
+                                                                    key: postPublishReason
+                                                                    value: the run ended WITHOUT OBSERVING ANY CI CONCLUSION - required
+                                                                      checks exist for this pull request but none was scheduled while the run
+                                                                      observed, so failing checks may exist and were never read. This is NOT
+                                                                      an exhausted fix budget; CI never produced a verdict to act on.
+                                                                - id: setPostPublishSchedulingUnobservedContinue
+                                                                  name: Stop waiting for CI that was never scheduled
+                                                                  type: set_variable
+                                                                  dependsOn: setPostPublishSchedulingUnobservedReason
+                                                                  config:
+                                                                    action: set
+                                                                    key: postPublishContinue
+                                                                    value: "false"
                                                         elseSteps:
-                                                          - id: setPostPublishPendingExhausted
-                                                            name: Record that the checks never finished in budget
-                                                            type: set_variable
+                                                          # ── 2/3. Checks running, or a signature verdict unsettled ──
+                                                          - id: postPublishWaitBudgetGate
+                                                            name: Is there check-wait budget left
+                                                            type: condition
                                                             config:
-                                                              action: set
-                                                              key: postPublishOutcome
-                                                              value: awaiting_human
-                                                          - id: setPostPublishPendingExhaustedReason
-                                                            name: Record why the run stopped waiting
-                                                            type: set_variable
-                                                            dependsOn: setPostPublishPendingExhausted
-                                                            config:
-                                                              action: set
-                                                              key: postPublishReason
-                                                              value: the pull request is published and no agent-fixable finding remains,
-                                                                but its required checks had still not finished after the wait budget - a
-                                                                human must let CI finish and re-check
-                                                          - id: setPostPublishPendingExhaustedContinue
-                                                            name: Stop waiting
-                                                            type: set_variable
-                                                            dependsOn: setPostPublishPendingExhaustedReason
-                                                            config:
-                                                              action: set
-                                                              key: postPublishContinue
-                                                              value: "false"
+                                                              condition: Number(variables.postPublishWaitCount) < Number(variables.postPublishWaitBound)
+                                                              thenSteps:
+                                                                - id: postPublishWait
+                                                                  name: Wait for the running checks
+                                                                  type: delay
+                                                                  config:
+                                                                    duration: 60000
+                                                                    message: Checks are still running on the pull request - waiting one
+                                                                      minute before observing again.
+                                                                - id: bumpPostPublishWait
+                                                                  name: Count the check wait
+                                                                  type: cli_command
+                                                                  dependsOn: postPublishWait
+                                                                  config:
+                                                                    command: node
+                                                                    args:
+                                                                      - -e
+                                                                      - |
+                                                                        const n = Number(String(process.env.N || '0').trim());
+                                                                        process.stdout.write(String((Number.isFinite(n) ? n : 0) + 1));
+                                                                    env:
+                                                                      N: ${variables.postPublishWaitCount}
+                                                                    failOnError: true
+                                                                    output:
+                                                                      captureStdout: true
+                                                                - id: setPostPublishWaitCount
+                                                                  name: Record the check wait
+                                                                  type: set_variable
+                                                                  dependsOn: bumpPostPublishWait
+                                                                  config:
+                                                                    action: set
+                                                                    key: postPublishWaitCount
+                                                                    source: step_output
+                                                                    sourcePath: bumpPostPublishWait.outputs.stdout
+                                                              elseSteps:
+                                                                # Terminal cause is NAMED, not assumed. Three distinct
+                                                                # reasons for stopping, and only one of them is CI.
+                                                                - id: postPublishUnsettledTerminalGate
+                                                                  name: Did the signature verdict never settle
+                                                                  type: condition
+                                                                  config:
+                                                                    condition: variables.postPublishWaitCause === 'verification'
+                                                                    thenSteps:
+                                                                      - id: setPostPublishVerificationUnsettled
+                                                                        name: Record an unsettled signature verdict
+                                                                        type: set_variable
+                                                                        config:
+                                                                          action: set
+                                                                          key: postPublishOutcome
+                                                                          # BLOCKED, not awaiting_human: a signature GitHub never settled
+                                                                          # cannot be approved past on a signature-protected branch, so
+                                                                          # raising an "approve and merge" task would be wrong (R3(b)).
+                                                                          value: blocked_human
+                                                                      - id: setPostPublishVerificationUnsettledReason
+                                                                        name: Record that the signature verdict never settled
+                                                                        type: set_variable
+                                                                        dependsOn: setPostPublishVerificationUnsettled
+                                                                        config:
+                                                                          action: set
+                                                                          key: postPublishReason
+                                                                          value: the pull request is published and no agent-fixable finding
+                                                                            remains, but GitHub never settled its asynchronous signature verdict for the
+                                                                            published commit(s) within the wait budget - a human must re-check the commit
+                                                                            signature. This is not a failed signature and nothing was rewritten.
+                                                                    elseSteps:
+                                                                      - id: postPublishCoverageTerminalGate
+                                                                        name: Did the run ever observe a CI conclusion
+                                                                        type: condition
+                                                                        config:
+                                                                          condition: variables.postPublishCiCoverage === 'none'
+                                                                          thenSteps:
+                                                                            - id: setPostPublishChecksUnobserved
+                                                                              name: Record that no CI conclusion was ever observed
+                                                                              type: set_variable
+                                                                              config:
+                                                                                action: set
+                                                                                key: postPublishOutcome
+                                                                                value: checks_unobserved
+                                                                            - id: setPostPublishChecksUnobservedReason
+                                                                              name: Record that CI was never read to a conclusion
+                                                                              type: set_variable
+                                                                              dependsOn: setPostPublishChecksUnobserved
+                                                                              config:
+                                                                                action: set
+                                                                                key: postPublishReason
+                                                                                value: the run ended WITHOUT OBSERVING ANY CI CONCLUSION - checks
+                                                                                  were scheduled but none reached a terminal conclusion while the run
+                                                                                  observed, so failing checks may exist and were never read. This is NOT
+                                                                                  an exhausted fix budget.
+                                                                          elseSteps:
+                                                                            - id: setPostPublishPendingExhausted
+                                                                              name: Record that the checks never finished in budget
+                                                                              type: set_variable
+                                                                              config:
+                                                                                action: set
+                                                                                key: postPublishOutcome
+                                                                                value: awaiting_human
+                                                                            - id: setPostPublishPendingExhaustedReason
+                                                                              name: Record why the run stopped waiting
+                                                                              type: set_variable
+                                                                              dependsOn: setPostPublishPendingExhausted
+                                                                              config:
+                                                                                action: set
+                                                                                key: postPublishReason
+                                                                                value: the pull request is published and no agent-fixable finding
+                                                                                  remains, but its required checks had still not finished after the wait
+                                                                                  budget - a human must let CI finish and re-check
+                                                                - id: setPostPublishPendingExhaustedContinue
+                                                                  name: Stop waiting
+                                                                  type: set_variable
+                                                                  dependsOn: postPublishUnsettledTerminalGate
+                                                                  config:
+                                                                    action: set
+                                                                    key: postPublishContinue
+                                                                    value: "false"
                                                   elseSteps:
                                                     - id: postPublishMergeableGate
                                                       name: Was the pull request observed mergeable
@@ -12954,11 +13653,34 @@ steps:
                                         const log = readJson('post-publish-log.json');
                                         const cycles = Array.isArray(log) ? log.length : 0;
 
+                                        // ── CI observation coverage ────────────────────────────────────────────
+                                        // "Zero check conclusions evaluated" is a DIFFERENT terminal cause from
+                                        // "the fix budget ran out", and the recorded run reported the second
+                                        // while suffering the first (REACTORY-302016408/20261114/787370442 B).
+                                        // The coverage record is accumulated by recordPostPublishCoverage over
+                                        // every observation, so a single early observation cannot hide a later
+                                        // conclusion (or the absence of any).
+                                        const coverage = readJson('post-publish-ci-coverage.json') || {};
+                                        const numberOr0 = (value) => { const n = Number(value == null ? 0 : value); return Number.isFinite(n) ? n : 0; };
+                                        const conclusionsEvaluated = numberOr0(coverage.conclusionsEvaluated);
+                                        const requiredChecks = numberOr0(coverage.requiredChecks);
+                                        const scheduledChecks = numberOr0(coverage.lastScheduledChecks);
+                                        // R3(a): `expected` is persisted by recordPostPublishCoverage, which
+                                        // derives it from base-tip check runs, rulesets, required contexts and
+                                        // .github/workflows. Re-deriving it here from requiredChecks alone
+                                        // was false on every reactorynet repository (none declares required
+                                        // checks), so a CI-less repository was told CI failures might hide.
+                                        const ciExpected = coverage.expected === true;
+                                        const expectedEvidence = Array.isArray(coverage.lastCiExpectedEvidence) ? coverage.lastCiExpectedEvidence : [];
+
                                         const outcome = String(process.env.OUTCOME || '').trim();
                                         const recorded = String(process.env.REASON || '').trim();
                                         const prUrl = String(process.env.PR_URL || '').trim();
                                         const bound = String(process.env.BOUND || '').trim();
                                         const awaited = String(process.env.AWAITED || '').trim();
+                                        // Named ONCE, after every input it reads is defined.
+                                        const neverObservedCi = outcome === 'checks_unobserved'
+                                          || (conclusionsEvaluated === 0 && ciExpected);
 
                                         // ── ONE decision, ONE implementation ─────────────────────────────────────────
                                         // The awaited-or-outstanding verdict is computed by readPostPublishExhaustionVerdict
@@ -13028,6 +13750,11 @@ steps:
                                         }
                                         if (recorded) {
                                           lines.push('Reason: ' + recorded + '.');
+                                        } else if (neverObservedCi) {
+                                          // Distinct cause, distinct wording. The recorded run told a
+                                          // human "fix budget exhausted" when five checks were failing at
+                                          // yarn install and NOT ONE conclusion had been read.
+                                          lines.push('Reason: the run ended WITHOUT OBSERVING ANY CI CONCLUSION after ' + String(numberOr0(coverage.observations)) + ' observation(s) and ' + String(conclusionsEvaluated) + ' check conclusion(s) evaluated (' + String(scheduledChecks) + ' scheduled at the last observation; CI expected because ' + (expectedEvidence.join('; ') || 'this repository reports CI for its base branch') + '), so failing checks may exist and were never read. This is NOT an exhausted fix budget - CI never produced a verdict to act on.');
                                         } else if (heading === 'AWAITING HUMAN') {
                                           lines.push('Reason: the block is an awaited HUMAN action (review decision ' + reviewDecision + ') - not a code change. Only a human can supply it, so the run polled for it' + (awaited ? ' ' + awaited + ' time(s)' : '') + ' and then stopped observing rather than reporting the pull request as unmergeable.');
                                         } else if (outcome === 'exhausted') {
@@ -13037,6 +13764,11 @@ steps:
                                         }
                                         lines.push('');
                                         lines.push('Last observed merge state: ' + String(observation.mergeStateStatus || 'unknown') + ' (review decision ' + reviewDecision + ').');
+                                        // The CI coverage is stated explicitly, so a human can tell
+                                        // "checks passed/ran" from "CI was never seen at all".
+                                        if (ciExpected || conclusionsEvaluated > 0) {
+                                          lines.push('CI observed: ' + String(numberOr0(coverage.observations)) + ' observation(s), ' + String(conclusionsEvaluated) + ' check conclusion(s) evaluated' + (requiredChecks > 0 ? ', ' + String(requiredChecks) + ' required check(s)' : '') + (coverage.lastChecksState ? ', last check state ' + String(coverage.lastChecksState) : '') + '.');
+                                        }
                                         lines.push('');
                                         if (actionable.length > 0) {
                                           lines.push('Outstanding findings:');
@@ -13183,13 +13915,19 @@ steps:
                                         };
                                         const park = readJson('post-publish-park.json') || {};
                                         const verdict = readJson('post-publish-exhaustion.json') || {};
+                                        const coverage = readJson('post-publish-ci-coverage.json') || {};
                                         const outcome = String(process.env.OUTCOME || '').trim();
                                         const pr = String(process.env.PR_URL || '').trim() || 'the pull request';
                                         const awaited = String(verdict.reviewDecision || 'none');
                                         // The task must not say "not mergeable" about a pull request the
                                         // long comment on the ticket calls AWAITING HUMAN. Two wordings,
                                         // one decision: the same verdict the loop consulted.
-                                        if (outcome === 'awaiting_review' || verdict.verdict === 'awaiting') {
+                                        // A run that never evaluated a CI conclusion must say so here
+                                        // too: "fix cycles" would point a human at the wrong cause
+                                        // (REACTORY-302016408/20261114/787370442 Defect B).
+                                        if (outcome === 'checks_unobserved') {
+                                          process.stdout.write('Pull request ' + pr + ' is open but not mergeable - human action required. The run ended WITHOUT OBSERVING ANY CI CONCLUSION: ' + String(coverage.conclusionsEvaluated == null ? 0 : coverage.conclusionsEvaluated) + ' check conclusion(s) were evaluated over ' + String(coverage.observations == null ? 0 : coverage.observations) + ' observation(s)' + (Number(coverage.requiredChecks) > 0 ? ', with ' + String(coverage.requiredChecks) + ' required check(s) configured' : '') + ', so failing checks may exist and were never read. This is not an exhausted fix budget. Complete this task to resume the run.');
+                                        } else if (outcome === 'awaiting_review' || verdict.verdict === 'awaiting') {
                                           process.stdout.write('Pull request ' + pr + ' is published and everything an agent can act on is done - it is awaiting a HUMAN action (review decision ' + awaited + '). The run observed it ' + String(park.awaitPolls == null ? 0 : park.awaitPolls) + ' time(s) at 3-minute intervals and then stopped observing. Complete this task to resume the run.');
                                         } else {
                                           process.stdout.write('Pull request ' + pr + ' is open but not mergeable - human action required. The run stopped observing after ' + String(park.awaitPolls == null ? 0 : park.awaitPolls) + ' awaiting-action poll(s) and ' + String(park.fixCycles == null ? 0 : park.fixCycles) + ' fix cycle(s); the outstanding findings are on the ticket. Complete this task to resume the run.');
