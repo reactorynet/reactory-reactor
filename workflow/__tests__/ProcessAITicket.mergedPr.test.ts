@@ -1126,3 +1126,158 @@ describe('ProcessAITicket approval gate read tolerates a transient gh failure (r
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REVIEW ROUND 2 (REACTORY-302016408/20261108/378847235)
+//
+// R3: the "carries this run's work" discriminator must apply ONLY to a BRANCH
+// target. A recorded number/url came from this run's own createPullRequest, so a
+// human rebasing/force-pushing that PR must not make it look like a predecessor's
+// pull request (which produced "no pull request exists" for a MERGED PR).
+//
+// R4: the round-1 discriminator existed in three copies but only the anchor was
+// tested - removing the pushBranch or createPullRequest copy left the suite green.
+// These tests drive the SHIPPED pushBranch and createPullRequest scripts against a
+// stale-PR stub, so a future edit cannot quietly restore the round-1 blocker.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('ProcessAITicket approval read: own PR by number is never stale (review R3)', () => {
+  it('reports MERGED for a recorded NUMBER whose head no longer contains local HEAD', () => {
+    const { dir, base } = repo();
+    try {
+      // Our own PR, rebased by a human: its head is NOT a descendant of local HEAD.
+      const rebased = JSON.stringify({
+        state: 'MERGED',
+        mergedAt: '2026-11-08T05:26:58Z',
+        url: 'https://github.com/reactor/pr/27',
+        number: 27,
+        headRefOid: base,
+      });
+      const out = runJson(
+        scriptOf('readPrStateForApproval'),
+        withGh(dir, { WT: dir, BRANCH: 'feature/test', PR_URL: '', PR_NUMBER: '27' }, { GH_VIEW_JSON: rebased }),
+        dir,
+      );
+      // A number is this run's own PR by construction: never downgraded to NONE.
+      expect(out.state).toBe('MERGED');
+      expect(out.readBy).toBe('number');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('reports CLOSED for a recorded NUMBER rather than NONE', () => {
+    const { dir, base } = repo();
+    try {
+      const closed = JSON.stringify({ state: 'CLOSED', url: 'https://github.com/reactor/pr/27', number: 27, headRefOid: base });
+      const out = runJson(
+        scriptOf('readPrStateForApproval'),
+        withGh(dir, { WT: dir, BRANCH: 'feature/test', PR_URL: '', PR_NUMBER: '27' }, { GH_VIEW_JSON: closed }),
+        dir,
+      );
+      expect(out.state).toBe('CLOSED');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
+
+describe('ProcessAITicket pushBranch/createPullRequest share the stale-PR rule (review R4)', () => {
+  /**
+   * A gh stub that answers a BRANCH target with the supplied (stale) JSON, and - once
+   * `gh pr create` has been called - answers the branch with the NEW pull request.
+   * That is what real gh does after a create: the branch gains an OPEN PR, so a
+   * later `pr view <branch>` returns the new one, not the predecessor.
+   */
+  const branchGh = (dir: string, json: string, marker: string): string => {
+    const bin = path.join(dir, '.branch-bin');
+    fs.mkdirSync(bin, { recursive: true });
+    const payload = path.join(dir, '.branch-payload.json');
+    const created = path.join(dir, '.created-payload.json');
+    fs.writeFileSync(payload, json, 'utf8');
+    fs.writeFileSync(created, JSON.stringify({ state: 'OPEN', url: 'https://github.com/reactor/pull/999', number: 999, headRefOid: 'deadbeef' }), 'utf8');
+    fs.writeFileSync(
+      path.join(bin, 'gh'),
+      [
+        '#!/bin/sh',
+        'if [ "$1" = "pr" ] && [ "$2" = "view" ]; then',
+        '  if [ -f "' + marker + '" ]; then cat "' + created + '"; else cat "' + payload + '"; fi',
+        '  exit 0',
+        'fi',
+        'if [ "$1" = "pr" ] && [ "$2" = "create" ]; then',
+        '  echo "create" >> "' + marker + '"',
+        '  echo "https://github.com/reactor/pull/999"',
+        '  exit 0',
+        'fi',
+        'if [ "$1" = "repo" ]; then echo master; exit 0; fi',
+        'exit 1',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    fs.chmodSync(path.join(bin, 'gh'), 0o755);
+    return bin + ':' + process.env.PATH;
+  };
+
+  it('pushBranch PUSHES when the branch carries a stale CLOSED pull request (R4)', () => {
+    const { dir, base } = repo();
+    try {
+      const stale = JSON.stringify({ state: 'CLOSED', url: 'https://github.com/reactor/pr/26', number: 26, headRefOid: base });
+      const out = runJson(
+        scriptOf('pushBranch'),
+        { PATH: branchGh(dir, stale, path.join(dir, '.mk1')), WT: dir, BRANCH: 'feature/test' },
+        dir,
+      );
+      // Removing the discriminator from this copy made it skip the push.
+      expect(out.pushed).toBe(true);
+      expect(out.state).toBe('NONE');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('pushBranch SKIPS the push when the stale pull request carries this run (control)', () => {
+    const { dir, head } = repo();
+    try {
+      const ours = JSON.stringify({ state: 'MERGED', url: 'https://github.com/reactor/pr/108', number: 108, headRefOid: head });
+      const out = runJson(
+        scriptOf('pushBranch'),
+        { PATH: branchGh(dir, ours, path.join(dir, '.mk2')), WT: dir, BRANCH: 'feature/test' },
+        dir,
+      );
+      expect(out.pushed).toBe(false);
+      expect(out.skipped).toBe(true);
+      expect(out.state).toBe('MERGED');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('createPullRequest CREATES a pull request when the branch carries a stale CLOSED one (R4)', () => {
+    const { dir, base } = repo();
+    try {
+      const marker = path.join(dir, '.create-marker');
+      const stale = JSON.stringify({ state: 'CLOSED', url: 'https://github.com/reactor/pr/26', number: 26, headRefOid: base });
+      const out = runJson(
+        scriptOf('createPullRequest'),
+        {
+          PATH: branchGh(dir, stale, marker),
+          WT: dir,
+          BRANCH: 'feature/test',
+          REF: 'REF-1',
+          REQUEST: 'do the thing',
+          CYCLES: '1',
+          REVIEWER: 'QualityQuinn',
+          REQUEST_TYPE: 'bug',
+          TICKET_ID: 't1',
+        },
+        dir,
+      );
+      // The round-1 blocker reappeared here silently: created:false + the OLD pr url.
+      expect(out.created).toBe(true);
+      expect(String(out.prUrl)).toContain('/pull/999');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});

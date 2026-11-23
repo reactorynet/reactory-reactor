@@ -3925,7 +3925,16 @@ steps:
                                                 if (['OPEN', 'MERGED', 'CLOSED'].indexOf(state) === -1) {
                                                   done({ ok: false, state: 'UNKNOWN', exists: false, target: target, readBy: kind, reason: 'gh reported an unrecognised pull request state: ' + String(raw).slice(0, 200) });
                                                 }
-                                                if ((state === 'MERGED' || state === 'CLOSED') && !carriesThisRun(d.headRefOid)) {
+                                                // R3 (review round 2). The discriminator applies ONLY to a BRANCH
+                                            // target. A recorded number/url came from THIS run's own
+                                            // createPullRequest, so it is this run's pull request by construction
+                                            // and needs no "is this mine?" test. Testing it anyway was wrong: if a
+                                            // human rebases or force-pushes that PR before merging (GitHub's
+                                            // "Update with rebase", a conflict rebase, a force-push), the local
+                                            // HEAD is no longer an ancestor of headRefOid, the read answered NONE,
+                                            // and the gate reported "no pull request exists" for a PR that was
+                                            // MERGED - the finished-run-misreports-itself class this PR removes.
+                                            if (kind === 'branch' && (state === 'MERGED' || state === 'CLOSED') && !carriesThisRun(d.headRefOid)) {
                                                   done({ ok: true, state: 'NONE', exists: false, target: target, readBy: kind, stalePr: { state: state, number: d.number == null ? null : d.number, headRefOid: String(d.headRefOid || '') }, reason: 'the ' + state + ' pull request on this branch does not carry this run work, so a fresh one must be published' });
                                                 }
                                                 done({ ok: true, state: state, exists: true, mergedAt: d.mergedAt || null, url: d.url || '', number: d.number == null ? null : d.number, headRefOid: String(d.headRefOid || ''), target: target, readBy: kind });
@@ -3937,7 +3946,10 @@ steps:
                                                   done({ ok: true, state: 'NONE', exists: false, target: target, readBy: kind });
                                                 }
                                                 lastDetail = detail;
-                                                if (attempt < ATTEMPTS - 1) nap(250 * (attempt + 1));
+                                                // Seconds-scale backoff (not sub-second): a GitHub secondary
+                                                // rate limit asks for tens of seconds, and the happy path never
+                                                // pays it because a parsed state short-circuits on attempt 0.
+                                                if (attempt < ATTEMPTS - 1) nap(attempt === 0 ? 2000 : 5000);
                                               }
                                             }
                                             // Never fail open. An absent/unreadable state is UNKNOWN, and the
@@ -8780,7 +8792,10 @@ steps:
                                 const prHead = String(d.headRefOid || '').trim();
                                 let carries = true;
                                 if (prHead) { try { run('git merge-base --is-ancestor HEAD ' + prHead); } catch (e) { carries = false; } }
-                                if ((state === 'MERGED' || state === 'CLOSED') && !carries) {
+                                // R3 (review round 2): discriminator applies ONLY to a BRANCH target.
+                                // A recorded number/url is this run's own PR by construction, so a
+                                // rebase/force-push of it must not be read as a predecessor.
+                                if (kind === 'branch' && (state === 'MERGED' || state === 'CLOSED') && !carries) {
                                   return { state: 'NONE', url: '', number: null, target: target, readBy: kind, stalePr: { state: state, number: d.number == null ? null : d.number, headRefOid: prHead }, reason: 'the ' + state + ' pull request on this branch does not carry this run work, so a fresh one must be published' };
                                 }
                                 return { state: state, url: d.url || '', number: d.number == null ? null : d.number, target: target, readBy: kind };
@@ -8890,7 +8905,10 @@ steps:
                                 const prHead = String(d.headRefOid || '').trim();
                                 let carries = true;
                                 if (prHead) { try { run('git merge-base --is-ancestor HEAD ' + prHead); } catch (e) { carries = false; } }
-                                if ((state === 'MERGED' || state === 'CLOSED') && !carries) {
+                                // R3 (review round 2): discriminator applies ONLY to a BRANCH target.
+                                // A recorded number/url is this run's own PR by construction, so a
+                                // rebase/force-push of it must not be read as a predecessor.
+                                if (kind === 'branch' && (state === 'MERGED' || state === 'CLOSED') && !carries) {
                                   return { state: 'NONE', url: '', number: null, target: target, readBy: kind, stalePr: { state: state, number: d.number == null ? null : d.number, headRefOid: prHead }, reason: 'the ' + state + ' pull request on this branch does not carry this run work, so a fresh one must be published' };
                                 }
                                 return { state: state, url: d.url || '', number: d.number == null ? null : d.number, target: target, readBy: kind };
