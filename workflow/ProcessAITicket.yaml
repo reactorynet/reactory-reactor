@@ -3893,25 +3893,56 @@ steps:
                                             }
 
                                             const repoArg = repo ? ' --repo ' + quote(repo) : '';
-                                            try {
-                                              const raw = run('gh pr view ' + quote(target) + repoArg + ' --json state,mergedAt,url,number');
-                                              const d = JSON.parse(raw);
-                                              const state = String(d.state || '').trim().toUpperCase();
-                                              if (['OPEN', 'MERGED', 'CLOSED'].indexOf(state) === -1) {
-                                                done({ ok: false, state: 'UNKNOWN', exists: false, target: target, readBy: kind, reason: 'gh reported an unrecognised pull request state: ' + String(raw).slice(0, 200) });
+                                            // R1 (REACTORY-302016408/20261108/378847235, review round 1). A
+                                            // branch is keyed on the TICKET REFERENCE, so one ticket maps to
+                                            // exactly one branch and an EARLIER dispatch's pull request lives
+                                            // on it. `gh pr view <branch>` returns that earlier PR once it is
+                                            // closed or merged, so a re-dispatch of the same ticket read its
+                                            // PREDECESSOR's verdict: it terminated (or resolved the ticket)
+                                            // without ever publishing its own work. A terminal PR is therefore
+                                            // honoured only when it actually CARRIES this run's work - every
+                                            // commit on the local HEAD must already be in what that PR's head
+                                            // carried. Otherwise the branch has new commits and the run must
+                                            // publish a fresh pull request (the #26 -> #27 precedent).
+                                            const carriesThisRun = (headRefOid) => {
+                                              const head = String(headRefOid || '').trim();
+                                              if (!head) return true;
+                                              try { run('git merge-base --is-ancestor HEAD ' + head); return true; }
+                                              catch (e) { return false; }
+                                            };
+                                            // R2. A single transient `gh` failure must not turn a publishable
+                                            // run into a taskless block, so retry with backoff before
+                                            // answering UNKNOWN. A definitive "no pull request found"
+                                            // short-circuits, and a parsed state short-circuits.
+                                            const nap = (ms) => { try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); } catch (e) { /* ignore */ } };
+                                            const ATTEMPTS = 3;
+                                            let lastDetail = '';
+                                            for (let attempt = 0; attempt < ATTEMPTS; attempt += 1) {
+                                              try {
+                                                const raw = run('gh pr view ' + quote(target) + repoArg + ' --json state,mergedAt,url,number,headRefOid');
+                                                const d = JSON.parse(raw);
+                                                const state = String(d.state || '').trim().toUpperCase();
+                                                if (['OPEN', 'MERGED', 'CLOSED'].indexOf(state) === -1) {
+                                                  done({ ok: false, state: 'UNKNOWN', exists: false, target: target, readBy: kind, reason: 'gh reported an unrecognised pull request state: ' + String(raw).slice(0, 200) });
+                                                }
+                                                if ((state === 'MERGED' || state === 'CLOSED') && !carriesThisRun(d.headRefOid)) {
+                                                  done({ ok: true, state: 'NONE', exists: false, target: target, readBy: kind, stalePr: { state: state, number: d.number == null ? null : d.number, headRefOid: String(d.headRefOid || '') }, reason: 'the ' + state + ' pull request on this branch does not carry this run work, so a fresh one must be published' });
+                                                }
+                                                done({ ok: true, state: state, exists: true, mergedAt: d.mergedAt || null, url: d.url || '', number: d.number == null ? null : d.number, headRefOid: String(d.headRefOid || ''), target: target, readBy: kind });
+                                              } catch (e) {
+                                                const detail = [e && e.stderr ? String(e.stderr).trim() : '', e && e.message ? e.message : String(e)].filter(Boolean).join(' | ');
+                                                // A branch with no pull request is a legitimate answer on a first
+                                                // publication - it is NOT an unreadable state, and it is not retried.
+                                                if (kind === 'branch' && /no pull requests? found|no open pull requests|could not find pull request/i.test(detail)) {
+                                                  done({ ok: true, state: 'NONE', exists: false, target: target, readBy: kind });
+                                                }
+                                                lastDetail = detail;
+                                                if (attempt < ATTEMPTS - 1) nap(250 * (attempt + 1));
                                               }
-                                              done({ ok: true, state: state, exists: true, mergedAt: d.mergedAt || null, url: d.url || '', number: d.number == null ? null : d.number, target: target, readBy: kind });
-                                            } catch (e) {
-                                              const detail = [e && e.stderr ? String(e.stderr).trim() : '', e && e.message ? e.message : String(e)].filter(Boolean).join(' | ');
-                                              // A branch with no pull request is a legitimate answer on a first
-                                              // publication - it is NOT an unreadable state.
-                                              if (kind === 'branch' && /no pull requests? found|no open pull requests|could not find pull request/i.test(detail)) {
-                                                done({ ok: true, state: 'NONE', exists: false, target: target, readBy: kind });
-                                              }
-                                              // Never fail open. An absent/unreadable state is UNKNOWN, and the
-                                              // approval gate refuses to arm a human task on it.
-                                              done({ ok: false, state: 'UNKNOWN', exists: false, target: target, readBy: kind, reason: 'the pull request state could not be read: ' + detail.slice(0, 500) });
                                             }
+                                            // Never fail open. An absent/unreadable state is UNKNOWN, and the
+                                            // approval gate refuses to arm a human task on it.
+                                            done({ ok: false, state: 'UNKNOWN', exists: false, target: target, readBy: kind, reason: 'the pull request state could not be read after ' + ATTEMPTS + ' attempt(s): ' + lastDetail.slice(0, 500) });
                   env:
                     WT: ${steps.readWorktreePath.outputs.stdout}
                     BRANCH: ${steps.readBranch.outputs.stdout}
@@ -8735,11 +8766,22 @@ steps:
                               const repo = cleanValue(process.env.PR_REPO || '');
                               const repoArg = repo ? ' --repo "' + repo.replace(/["`$\\]/g, '') + '"' : '';
                               try {
-                                const raw = run('gh pr view "' + target.replace(/["`$\\]/g, '') + '"' + repoArg + ' --json state,url,number');
+                                const raw = run('gh pr view "' + target.replace(/["`$\\]/g, '') + '"' + repoArg + ' --json state,url,number,headRefOid');
                                 const d = JSON.parse(raw);
                                 const state = String(d.state || '').trim().toUpperCase();
                                 if (['OPEN', 'MERGED', 'CLOSED'].indexOf(state) === -1) {
                                   return { state: 'UNKNOWN', url: '', number: null, reason: 'gh reported an unrecognised state: ' + state };
+                                }
+                                // R1 (REACTORY-302016408/20261108/378847235). A branch is keyed on the
+                                // ticket reference, so an EARLIER dispatch's pull request lives on it and
+                                // `gh pr view <branch>` returns that one once it is closed or merged.
+                                // Terminal is honoured only when it carries THIS run's work: every commit
+                                // on the local HEAD must already be in what that PR's head carried.
+                                const prHead = String(d.headRefOid || '').trim();
+                                let carries = true;
+                                if (prHead) { try { run('git merge-base --is-ancestor HEAD ' + prHead); } catch (e) { carries = false; } }
+                                if ((state === 'MERGED' || state === 'CLOSED') && !carries) {
+                                  return { state: 'NONE', url: '', number: null, target: target, readBy: kind, stalePr: { state: state, number: d.number == null ? null : d.number, headRefOid: prHead }, reason: 'the ' + state + ' pull request on this branch does not carry this run work, so a fresh one must be published' };
                                 }
                                 return { state: state, url: d.url || '', number: d.number == null ? null : d.number, target: target, readBy: kind };
                               } catch (e) {
@@ -8834,11 +8876,22 @@ steps:
                               const repo = cleanValue(process.env.PR_REPO || '');
                               const repoArg = repo ? ' --repo "' + repo.replace(/["`$\\]/g, '') + '"' : '';
                               try {
-                                const raw = run('gh pr view "' + target.replace(/["`$\\]/g, '') + '"' + repoArg + ' --json state,url,number');
+                                const raw = run('gh pr view "' + target.replace(/["`$\\]/g, '') + '"' + repoArg + ' --json state,url,number,headRefOid');
                                 const d = JSON.parse(raw);
                                 const state = String(d.state || '').trim().toUpperCase();
                                 if (['OPEN', 'MERGED', 'CLOSED'].indexOf(state) === -1) {
                                   return { state: 'UNKNOWN', url: '', number: null, reason: 'gh reported an unrecognised state: ' + state };
+                                }
+                                // R1 (REACTORY-302016408/20261108/378847235). A branch is keyed on the
+                                // ticket reference, so an EARLIER dispatch's pull request lives on it and
+                                // `gh pr view <branch>` returns that one once it is closed or merged.
+                                // Terminal is honoured only when it carries THIS run's work: every commit
+                                // on the local HEAD must already be in what that PR's head carried.
+                                const prHead = String(d.headRefOid || '').trim();
+                                let carries = true;
+                                if (prHead) { try { run('git merge-base --is-ancestor HEAD ' + prHead); } catch (e) { carries = false; } }
+                                if ((state === 'MERGED' || state === 'CLOSED') && !carries) {
+                                  return { state: 'NONE', url: '', number: null, target: target, readBy: kind, stalePr: { state: state, number: d.number == null ? null : d.number, headRefOid: prHead }, reason: 'the ' + state + ' pull request on this branch does not carry this run work, so a fresh one must be published' };
                                 }
                                 return { state: state, url: d.url || '', number: d.number == null ? null : d.number, target: target, readBy: kind };
                               } catch (e) {
@@ -13856,15 +13909,23 @@ steps:
                                     # completed must never be raised.
                                     condition: variables.prState === 'OPEN'
                                     thenSteps:
-                                    # ── One approval gate per run ──────────────────────────
-                                    # REACTORY-302016408/20261108/378847235. The engine re-finds a
-                                    # pending task by (instanceId, stepId), but a re-entry after the
-                                    # first gate returned could mint a SECOND task for the same run.
-                                    # The claim below is written BEFORE the task is created and is
-                                    # part of the run's own variables, so a later pass over this
-                                    # tail takes the 'reuse' arm and raises nothing. Nothing here
-                                    # fakes an approval: a reuse pass keeps OBSERVING the pull
-                                    # request (prApprovalOpen), and only a human can merge.
+                                    # ── One approval gate per run (DEFENSIVE) ──────────────
+                                    # REACTORY-302016408/20261108/378847235. HONEST SCOPE (review N1):
+                                    # the body is LINEAR - this gate sits under no `while` - so within
+                                    # one instance it is evaluated ONCE and the 'reuse' arm is not
+                                    # expected to fire. Post-publication fixes go through
+                                    # republishCommit/republishPush inside postPublishLoop, NOT back
+                                    # through reportBranch, so they do not re-enter here either.
+                                    #
+                                    # It is kept as belt-and-braces: it costs nothing and it makes the
+                                    # invariant explicit if a later revision ever loops this tail.
+                                    # The re-entry that ACTUALLY matters is a NEW instance (a
+                                    # re-dispatch), and that is handled by the live state read plus
+                                    # the MERGED/CLOSED arms above - not by this claim.
+                                    #
+                                    # Nothing here fakes an approval: a reuse pass only ever keeps
+                                    # OBSERVING the pull request (prApprovalOpen), and only a human
+                                    # can merge.
                                     - id: claimPrApprovalGate
                                       name: Decide whether this run has already asked for approval
                                       type: condition

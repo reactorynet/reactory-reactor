@@ -966,3 +966,163 @@ describe('ProcessAITicket review entry after the pull request merged', () => {
     expect(narrative('')).toContain('NOT accepted');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REVIEW ROUND 1 (REACTORY-302016408/20261108/378847235)
+//
+// R1: a branch is keyed on the TICKET REFERENCE, so an EARLIER dispatch's pull
+// request lives on it and `gh pr view <branch>` returns that one once it is closed
+// or merged. A terminal answer is therefore honoured only when it CARRIES this
+// run's work (the local HEAD is an ancestor of the PR's head). Without this, a
+// re-dispatch of a ticket whose PR was closed/merged could never publish again.
+//
+// R2: the approval-gate read must tolerate a transient gh failure instead of
+// turning a publishable run into a taskless block.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** A gh stub that FAILS the first `pr view` call and succeeds afterwards. */
+const flakyGh = (dir: string, json: string): string => {
+  const bin = path.join(dir, '.flaky-bin');
+  fs.mkdirSync(bin, { recursive: true });
+  const counter = path.join(dir, '.gh-calls');
+  const payload = path.join(dir, '.gh-payload.json');
+  fs.writeFileSync(payload, json, 'utf8');
+  fs.writeFileSync(
+    path.join(bin, 'gh'),
+    [
+      '#!/bin/sh',
+      'if [ "$1" = "pr" ] && [ "$2" = "view" ]; then',
+      '  n=0',
+      '  [ -f "' + counter + '" ] && n=$(cat "' + counter + '")',
+      '  n=$((n+1))',
+      '  echo "$n" > "' + counter + '"',
+      '  if [ "$n" -le 1 ]; then',
+      '    echo "HTTP 502: bad gateway" >&2',
+      '    exit 1',
+      '  fi',
+      '  cat "' + payload + '"',
+      '  exit 0',
+      'fi',
+      'if [ "$1" = "repo" ]; then echo master; exit 0; fi',
+      'exit 1',
+      '',
+    ].join('\n'),
+    'utf8',
+  );
+  fs.chmodSync(path.join(bin, 'gh'), 0o755);
+  return bin + ':' + process.env.PATH;
+};
+
+describe('ProcessAITicket stale pull request on a ticket branch (review R1)', () => {
+  const readEnv = (dir: string): Record<string, string> => ({
+    WT: dir,
+    BRANCH: 'feature/test',
+    PR_URL: '',
+    PR_NUMBER: '',
+  });
+
+  it('publishes a fresh pull request when an EARLIER dispatch MERGED pull request does not carry this run', () => {
+    const { dir, base, head } = repo();
+    try {
+      // The PR on this branch merged an OLDER commit; the local branch has moved on.
+      expect(head).not.toBe(base);
+      const earlier = JSON.stringify({
+        state: 'MERGED',
+        mergedAt: '2026-10-24T08:48:00Z',
+        url: 'https://github.com/reactor/pr/26',
+        number: 26,
+        headRefOid: base,
+      });
+      const out = runJson(
+        scriptOf('readPrStateBeforeReview'),
+        withGh(dir, readEnv(dir), { GH_BRANCH_VIEW_JSON: earlier }),
+        dir,
+      );
+      // NOT terminal: the run must publish its own work (the #26 -> #27 precedent).
+      expect(out.ok).toBe(true);
+      expect(out.state).toBe('NONE');
+      expect(out.stalePr && out.stalePr.state).toBe('MERGED');
+      expect(String(out.reason)).toContain('does not carry this run work');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('publishes a fresh pull request when an EARLIER dispatch CLOSED pull request does not carry this run', () => {
+    const { dir, base } = repo();
+    try {
+      const earlier = JSON.stringify({ state: 'CLOSED', url: 'https://github.com/reactor/pr/73', number: 73, headRefOid: base });
+      const out = runJson(
+        scriptOf('readPrStateBeforeReview'),
+        withGh(dir, readEnv(dir), { GH_BRANCH_VIEW_JSON: earlier }),
+        dir,
+      );
+      expect(out.state).toBe('NONE');
+      expect(out.stalePr && out.stalePr.state).toBe('CLOSED');
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('STILL treats a MERGED pull request as terminal when it carries this run s head', () => {
+    const { dir, head } = repo();
+    try {
+      const sameRun = JSON.stringify({
+        state: 'MERGED',
+        mergedAt: '2026-11-08T05:26:58Z',
+        url: 'https://github.com/reactor/pr/108',
+        number: 108,
+        headRefOid: head,
+      });
+      const out = runJson(
+        scriptOf('readPrStateBeforeReview'),
+        withGh(dir, readEnv(dir), { GH_BRANCH_VIEW_JSON: sameRun }),
+        dir,
+      );
+      // The incident shape must stay terminal: express-server#108's head WAS the local HEAD.
+      expect(out.state).toBe('MERGED');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
+
+describe('ProcessAITicket approval gate read tolerates a transient gh failure (review R2)', () => {
+  it('retries and returns the real state instead of UNKNOWN on a single failure', () => {
+    const { dir, head } = repo();
+    try {
+      const openJson = JSON.stringify({
+        state: 'OPEN',
+        url: 'https://github.com/reactor/pr/1',
+        number: 1,
+        headRefOid: head,
+      });
+      const out = runJson(
+        scriptOf('readPrStateForApproval'),
+        { PATH: flakyGh(dir, openJson), WT: dir, BRANCH: 'feature/test', PR_URL: '', PR_NUMBER: '' },
+        dir,
+      );
+      // One transient failure must NOT become a taskless block.
+      expect(out.state).toBe('OPEN');
+      expect(Number(fs.readFileSync(path.join(dir, '.gh-calls'), 'utf8').trim())).toBeGreaterThan(1);
+    } finally {
+      removeDir(dir);
+    }
+  });
+
+  it('still answers UNKNOWN when every attempt fails', () => {
+    const { dir } = repo();
+    try {
+      // A NUMBER target (not a branch): a branch with no pull request legitimately answers
+      // NONE, so only a recorded number exercises the "every attempt failed" path.
+      const out = runJson(
+        scriptOf('readPrStateForApproval'),
+        withGh(dir, { WT: dir, BRANCH: 'feature/test', PR_URL: '', PR_NUMBER: '123' }, { GH_VIEW_EXIT: '1', GH_VIEW_ERR: 'HTTP 502: bad gateway' }),
+        dir,
+      );
+      expect(out.state).toBe('UNKNOWN');
+    } finally {
+      removeDir(dir);
+    }
+  });
+});
