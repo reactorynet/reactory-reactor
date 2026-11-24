@@ -192,7 +192,18 @@ describe('core.ProcessAITicket ticket status transitions', () => {
     const writes = all
       .filter(({ step }) => step.config && step.config.method === 'updateStatus')
       .map(({ step }) => `${step.id}:${step.config.params.status}`);
-    expect(writes.sort()).toEqual(['markInProgress:in_progress', 'resolveTicket:resolved']);
+    // REACTORY-302016408/20261108/378847235 adds ONE further resolve: the run that
+    // finds its pull request already MERGED before the review cycle starts has nothing
+    // left to do, and must resolve the ticket rather than leave it in_progress.
+    expect(writes.sort()).toEqual([
+      'markInProgress:in_progress',
+      'resolveTicket:resolved',
+      'resolveTicketMergedBeforeReview:resolved',
+    ]);
+
+    const mergedResolve = all.find((n) => n.step.id === 'resolveTicketMergedBeforeReview')!;
+    expect(mergedResolve.trail).toContain('prMergedBeforeReviewGate');
+    expect(mergedResolve.trail).toContain('reportBranch');
   });
 });
 
@@ -299,9 +310,17 @@ describe('core.ProcessAITicket commit hygiene', () => {
     // review.json were already in the branch and reached the pull request. An
     // agent that only wrote a report would also look dirty and yield an empty
     // commit. The step must untrack them and still commit.
+    //
+    // PROCESS-003 changed HOW the step decides: "the branch added .ai-agent"
+    // (`git diff <base>..HEAD -- .ai-agent`) is now distinguished from "the BASE
+    // tracks .ai-agent and this run merely checked it out". The first is repaired
+    // by recording the removal; the second is reset out of the index so the commit
+    // publishes NO .ai-agent change at all. Both are asserted here.
     const script = String(byId('commitChanges').config.args[1]);
-    expect(script).toContain('git ls-files .ai-agent');
+    expect(script).toContain('git diff --name-only ');
+    expect(script).toContain('..HEAD -- .ai-agent');
     expect(script).toContain('git rm -r --cached');
+    expect(script).toContain("git reset -q -- .ai-agent");
     expect(script).toContain('!dirty.trim() && !internal');
   });
 
@@ -471,10 +490,22 @@ describe('core.ProcessAITicket PR template contract', () => {
 describe('core.ProcessAITicket workspace note lifecycle', () => {
   it('runs one note script in five modes, so the lifecycle cannot drift', () => {
     const modes = ['open', 'verify', 'reopen', 'close', 'retain'];
+    // The merged-before-review path no longer closes the note itself: the ONE close is
+    // retainWorkspaceNoteExhausted (MODE sourced from readExhaustedNoteMode) with PR_URL
+    // threaded through, so a merged run's note does not say 'Not opened.'.
     const steps = ['openWorkspaceNote', 'verifyWorkspaceNote', 'reopenWorkspaceNote', 'closeWorkspaceNote', 'retainWorkspaceNoteExhausted', 'retainWorkspaceNoteBlocked'];
     const scripts = steps.map((id) => String(byId(id).config.args[1]));
     steps.forEach((id, index) => {
-      expect(modes).toContain(byId(id).config.env.MODE);
+      const mode = String(byId(id).config.env.MODE);
+      if (id === 'retainWorkspaceNoteExhausted') {
+        // The exhausted arm decides close-vs-retain from the termination reason: a pull
+        // request that had already MERGED is a completed run and its note belongs in
+        // complete/. It still uses the ONE script.
+        expect(mode).toBe('${steps.readExhaustedNoteMode.outputs.stdout}');
+        expect(String(byId('readExhaustedNoteMode').config.args[1])).toContain("'close' : 'retain'");
+      } else {
+        expect(modes).toContain(mode);
+      }
       if (index > 0) expect(scripts[index]).toBe(scripts[0]);
     });
   });
@@ -487,10 +518,25 @@ describe('core.ProcessAITicket workspace note lifecycle', () => {
     expect(byId('closeWorkspaceNote').config.env.PR_URL).toContain('steps.readPrUrl');
   });
 
+  it('closes the merged note exactly once, with the pull request url', () => {
+    // B1/N1: one close, and it carries the url, so `## Pull request` is not rewritten
+    // to 'Not opened.' for a run whose pull request merged.
+    expect(all.map((n) => n.step.id)).not.toContain('closeWorkspaceNoteMergedBeforeReview');
+    expect(byId('retainWorkspaceNoteExhausted').config.env.PR_URL).toBe('${steps.readExhaustedNotePrUrl.outputs.stdout}');
+    expect(byId('readExhaustedNotePrUrl').config.env.LIVE).toBe('${steps.readPrStateBeforeReview.outputs.stdout}');
+    const urlScript = String(byId('readExhaustedNotePrUrl').config.args[1]);
+    // 'close' mode is chosen for a merged run, and this is the url it writes.
+    expect(String(byId('readExhaustedNoteMode').config.args[1])).toContain("terminal === 'merged' ? 'close' : 'retain'");
+    expect(urlScript).toContain('live.url');
+  });
+
   it('keeps the note in progress on rejection, blocked and failed runs', () => {
     expect(byId('reopenWorkspaceNote').config.env.MODE).toBe('reopen');
     expect(indexOf('reopenWorkspaceNote')).toBeLessThan(indexOf('handBack'));
-    expect(byId('retainWorkspaceNoteExhausted').config.env.MODE).toBe('retain');
+    // A rejected/failed run retains the note (readExhaustedNoteMode emits 'retain');
+    // only an already-merged pull request moves it to complete/.
+    expect(byId('retainWorkspaceNoteExhausted').config.env.MODE).toBe('${steps.readExhaustedNoteMode.outputs.stdout}');
+    expect(String(byId('readExhaustedNoteMode').config.args[1])).toContain("terminal === 'merged' ? 'close' : 'retain'");
     expect(byId('retainWorkspaceNoteBlocked').config.env.MODE).toBe('retain');
   });
 
@@ -765,7 +811,9 @@ describe('core.ProcessAITicket exit condition contracts (REACTORY-302016408)', (
   });
 
   it('gates publication on the publish decision, not on an approved verdict alone', () => {
-    expect(byId('outcome').config.condition).toBe("variables.publishable === 'true'");
+    // The publish decision is the gate - AND the run must not have ended before the
+    // review cycle (B1, REACTORY-302016408/20261108/378847235).
+    expect(byId('outcome').config.condition).toBe("variables.publishable === 'true' && variables.reviewEntryTerminal === ''");
     expect(String(byId('outcome').config.condition)).not.toContain("reviewVerdict === 'approved'");
 
     const script = String(byId('readPublishable').config.args[1]);
@@ -829,7 +877,9 @@ describe('core.ProcessAITicket exit condition contracts (REACTORY-302016408)', (
     const EXITS: Array<{ id: string; value: string; trail: string[] }> = [
       { id: 'setRunStatusCompleted', value: 'completed', trail: ['reportBranch', 'outcome', 'prPublishedGate'] },
       { id: 'setRunStatusPublishFailed', value: 'failed', trail: ['reportBranch', 'outcome', 'prPublishedGate'] },
-      { id: 'setRunStatusExhausted', value: 'blocked', trail: ['reportBranch', 'outcome'] },
+      // setRunStatusExhausted is sourced from readExhaustedRunStatus: 'completed' when a
+      // live read showed the pull request already merged before review, 'blocked'
+      // otherwise. Asserted separately below.
       { id: 'setRunStatusUnavailable', value: 'blocked', trail: ['reportBranch', 'reviewLoop'] },
       { id: 'setRunStatusBlocked', value: 'blocked', trail: ['reportBranch'] },
       { id: 'setRunStatusNoTicket', value: 'blocked', trail: ['ticketGuard'] },
@@ -842,7 +892,8 @@ describe('core.ProcessAITicket exit condition contracts (REACTORY-302016408)', (
     });
 
     const PR_STATE_EXITS: Array<{ id: string; trail: string[] }> = [
-      { id: 'setPrStateNotOpenedExhausted', trail: ['reportBranch', 'outcome'] },
+      // setPrStateNotOpenedExhausted is sourced from readExhaustedPrState (MERGED /
+      // CLOSED / NOT_OPENED); see the sourced-writer assertions below.
       { id: 'setPrStateNotOpenedBlocked', trail: ['reportBranch'] },
       { id: 'setPrStatePublishFailed', trail: ['reportBranch', 'outcome', 'prPublishedGate'] },
       { id: 'setPrStateNoTicket', trail: ['ticketGuard'] },
@@ -853,6 +904,26 @@ describe('core.ProcessAITicket exit condition contracts (REACTORY-302016408)', (
       const trail = trailOf(exit.id);
       exit.trail.forEach((parent) => expect(trail).toContain(parent));
     });
+
+    // B1: the publish arm is vetoed for a run that ended before review. `outcome` is the
+    // ONLY gate into it, and readPublishable refuses to re-derive an approval.
+    expect(String(byId('outcome').config!.condition)).toBe(
+      "variables.publishable === 'true' && variables.reviewEntryTerminal === ''",
+    );
+    expect(byId('readPublishable').config!.env.TERMINAL).toBe('${variables.reviewEntryTerminal}');
+    expect(String(byId('readPublishable').config!.args[1])).toContain('terminal_before_review');
+    expect(String(byId('confirmationReviewGate').config!.condition)).toContain("variables.reviewEntryTerminal === ''");
+
+    // Sourced terminal writers: the value is derived from the run's own reason, never a
+    // constant, so an already-merged pull request cannot be reported as blocked.
+    expect(byId('setRunStatusExhausted').config.sourcePath).toBe('readExhaustedRunStatus.outputs.stdout');
+    expect(byId('setPrStateNotOpenedExhausted').config.sourcePath).toBe('readExhaustedPrState.outputs.stdout');
+    const runStatusReader = String(byId('readExhaustedRunStatus').config.args[1]);
+    expect(runStatusReader).toContain("terminal === 'merged' ? 'completed' : 'blocked'");
+    const prStateReader = String(byId('readExhaustedPrState').config.args[1]);
+    expect(prStateReader).toContain("process.stdout.write('MERGED')");
+    expect(prStateReader).toContain("process.stdout.write('CLOSED')");
+    expect(prStateReader).toContain("process.stdout.write('NOT_OPENED')");
 
     // A run that opened a pull request records the state the create call returned.
     expect(byId('setPrStateOpened').config.sourcePath).toBe('readCreatedPrState.outputs.stdout');
@@ -880,7 +951,12 @@ describe('core.ProcessAITicket exit condition contracts (REACTORY-302016408)', (
 
     // The check runs BEFORE the review, so the reviewer is told, not protected from it.
     expect(indexOf('detectPrematurePublish')).toBeLessThan(indexOf('reviewLoop'));
-    expect(byId('reviewLoop').dependsOn).toBe('prematurePublishGate');
+    // The review loop is ordered after the premature-publish report AND after the live
+    // merged/closed guard (REACTORY-302016408/20261108/378847235): a review cycle must
+    // not start for a pull request that is already terminal.
+    expect(byId('reviewLoop').dependsOn).toBe('prMergedBeforeReviewGate');
+    expect(indexOf('prematurePublishGate')).toBeLessThan(indexOf('prMergedBeforeReviewGate'));
+    expect(indexOf('prMergedBeforeReviewGate')).toBeLessThan(indexOf('reviewLoop'));
     expect(String(byId('review').config.message)).toContain('steps.readPrematurePublishSummary');
   });
 
@@ -1625,8 +1701,25 @@ describe('core.ProcessAITicket revision integrity and post-publication loop (PRO
     // The WAIT arm (thenSteps) never hands work back to the engineer, and it
     // never claims a human-only policy. The elseSteps legitimately contains the
     // mergeable gate, which is a different arm.
-    const waitArm = (byId('postPublishPendingGate').config!.thenSteps || []).map((step: IStep) => step.id);
+    // The pending arm is now branched by CAUSE (REACTORY-302016408/20261114/787370442 B):
+    // "no required check scheduled yet" has its own window, and the check-wait
+    // budget lives under the running/verification branch. Collect the arm's
+    // DESCENDANTS, so the assertions cover every branch rather than only the
+    // first level - the wait must remain a bounded wait in all of them.
+    const waitArm: string[] = [];
+    const collectArm = (steps: IStep[]): void => {
+      (steps || []).forEach((step) => {
+        waitArm.push(step.id);
+        const config = step.config || {};
+        ['thenSteps', 'elseSteps', 'steps'].forEach((key) => {
+          if (Array.isArray(config[key])) collectArm(config[key] as IStep[]);
+        });
+      });
+    };
+    collectArm((byId('postPublishPendingGate').config!.thenSteps || []) as IStep[]);
     expect(waitArm).toContain('postPublishWaitBudgetGate');
+    expect(waitArm).toContain('postPublishSchedulingBudgetGate');
+    expect(waitArm).toContain('postPublishWait');
     expect(waitArm).not.toContain('postPublishHandBack');
     expect(waitArm).not.toContain('setPostPublishHumanBlocked');
     expect(waitArm).not.toContain('postPublishMergeableGate');
@@ -1811,8 +1904,23 @@ describe('core.ProcessAITicket revision integrity and post-publication loop (PRO
     expect(trailOf('prApprovalGate')).toContain('prMergePathGate');
     expect(trailOf('pollMerge')).toContain('postPublishOutcomeGate');
     expect(trailOf('pollMerge')).toContain('prMergePathGate');
-    // An already-merged PR skips the approval/poll path entirely.
-    expect(String(byId('prMergePathGate').config!.condition)).toBe("variables.prState !== 'MERGED'");
+    // Only an OPEN pull request arms the human approval gate. MERGED, CLOSED and an
+    // unreadable state each take their own arm below and raise NO task.
+    expect(String(byId('prMergePathGate').config!.condition)).toBe("variables.prState === 'OPEN'");
+    const nonOpenArms = (byId('prMergePathGate').config!.elseSteps || []).map((step: IStep) => step.id);
+    expect(nonOpenArms).toEqual(['prMergedPathGate']);
+    expect((byId('prMergedPathGate').config!.elseSteps || []).map((step: IStep) => step.id)).toEqual(['prClosedPathGate']);
+    expect((byId('prClosedPathGate').config!.elseSteps || []).map((step: IStep) => step.id)).toEqual(['prStateUnknownPathGate']);
+    // No approval task lives anywhere under the non-OPEN arms.
+    ['prMergedPathGate', 'prClosedPathGate', 'prStateUnknownPathGate'].forEach((id) => {
+      expect(descendants(id)).not.toContain('prApproval');
+      expect(descendants(id)).not.toContain('mergeTimeoutTask');
+    });
+    // The gate consumes the value the LIVE read wrote immediately before it.
+    expect(byId('prMergePathGate').dependsOn).toBe('setPrStateForApproval');
+    expect(byId('setPrStateForApproval').config!.sourcePath).toBe('readPrStateForApprovalValue.outputs.stdout');
+    expect(String(byId('readPrStateForApproval').config!.args[1])).toContain('gh pr view');
+    expect(String(byId('readPrStateForApproval').config!.args[1])).toContain('UNKNOWN');
   });
 
   it('keeps every new step inside a config scope and reachable from the publish branch', () => {
