@@ -1515,7 +1515,17 @@ describe('ProcessAITicket exit condition after the last permitted review (REACTO
 
   const writeRunStatus = (dir: string, status: string): void => {
     fs.mkdirSync(path.join(dir, '.ai-agent'), { recursive: true });
-    fs.writeFileSync(path.join(dir, '.ai-agent', 'run-status.json'), JSON.stringify({ status }), 'utf8');
+    // The pipeline's own record carries this run's identity (PROCESS-003 B.1) and a reader
+    // refuses an unattributed status, so a fixture that plays the pipeline's part must write
+    // what the pipeline writes: run-status.json stamped with the window's runId.
+    let identity: any = null;
+    try { identity = JSON.parse(fs.readFileSync(path.join(dir, '.ai-agent', 'run-identity.json'), 'utf8')); } catch (e) { identity = null; }
+    const record = Object.assign(
+      {},
+      identity && identity.runId ? { runId: String(identity.runId), ticketReference: String(identity.ticketReference || '') } : {},
+      { status },
+    );
+    fs.writeFileSync(path.join(dir, '.ai-agent', 'run-status.json'), JSON.stringify(record), 'utf8');
   };
 
   const decisionOf = (dir: string): any =>
@@ -3059,7 +3069,12 @@ describe('ProcessAITicket gates publication on the commit it actually made (D1c)
     // commit. It therefore must not consult commitCount at all.
     expect(scriptOf('readPublishable')).not.toContain('commitCount');
     expect(scriptOf('readPublishable')).not.toContain('rev-list');
-    expect(String(byId('outcome').config?.condition)).toBe("variables.publishable === 'true'");
+    // The publish decision is the gate, AND the run must not have ended before the review
+    // cycle (B1, REACTORY-302016408/20261108/378847235): a merged/closed pre-review run
+    // must not re-enter the commit/push/create chain.
+    expect(String(byId('outcome').config?.condition)).toBe(
+      "variables.publishable === 'true' && variables.reviewEntryTerminal === ''",
+    );
   });
 
   it('blocks the publish path on a genuine commit failure, naming the worktree', () => {
@@ -4031,7 +4046,7 @@ describe('ProcessAITicket post-publication observation loop (PROCESS-002 B/C)', 
       },
     },
     checkRuns: { check_runs: [] },
-    commits: [{ sha: 'abc123def4567890', verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+    commits: [{ sha: 'abc123def4567890', commit: { committer: { email: 'owner@example.com' }, verification: { verified: true, reason: 'valid' } } }],
     protection: { required_signatures: { enabled: false } },
   });
 
@@ -4183,7 +4198,7 @@ describe('ProcessAITicket post-publication observation loop (PROCESS-002 B/C)', 
             data: { repository: { pullRequest: { reviewThreads: { nodes: [{ id: 'THREAD_1', isResolved: true, path: 'src/work.ts', line: 12, comments: { nodes: [] } }] } } } },
           },
           checkRuns: { check_runs: [] },
-          commits: [{ sha: commit.sha, verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+          commits: [{ sha: commit.sha, commit: { committer: { email: 'owner@example.com' }, verification: { verified: true, reason: 'valid' } } }],
           protection: null,
         }),
         'utf8',
@@ -4210,8 +4225,7 @@ describe('ProcessAITicket post-publication observation loop (PROCESS-002 B/C)', 
       payload.commits = [
         {
           sha: 'b46bcd6f00d',
-          verification: { verified: false, reason: 'no_user' },
-          commit: { committer: { email: 'reactor@reactory.net' } },
+          commit: { committer: { email: 'reactor@reactory.net' }, verification: { verified: false, reason: 'no_user' } },
         },
       ];
       // No signing identity in this worktree (initRepo sets commit.gpgsign false).
@@ -4241,8 +4255,7 @@ describe('ProcessAITicket post-publication observation loop (PROCESS-002 B/C)', 
       payload.commits = [
         {
           sha: 'b46bcd6f00d',
-          verification: { verified: false, reason: 'no_user' },
-          commit: { committer: { email: 'reactor@reactory.net' } },
+          commit: { committer: { email: 'reactor@reactory.net' }, verification: { verified: false, reason: 'no_user' } },
         },
       ];
       const observation = observe(dir, writeObservationFixture(dir, payload));
@@ -4294,7 +4307,7 @@ describe('ProcessAITicket post-publication observation loop (PROCESS-002 B/C)', 
           },
         },
         checkRuns: { check_runs: [{ name: 'codeql', conclusion: 'failure', output: { summary: 'analysis failed' } }] },
-        commits: [{ sha: 'abc123def4567890', verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+        commits: [{ sha: 'abc123def4567890', commit: { committer: { email: 'owner@example.com' }, verification: { verified: true, reason: 'valid' } } }],
         protection: null,
       });
       observe(dir, fixture);
@@ -4617,8 +4630,8 @@ describe('ProcessAITicket post-publication loop convergence (PROCESS-002 round 2
           reviewThreads: { data: { repository: { pullRequest: { reviewThreads: { nodes: [] } } } } },
           checkRuns: { check_runs: [] },
           commits: [
-            { sha: sh('git rev-parse HEAD~1', dir), verification: { verified: false, reason: 'no_user' }, commit: { committer: { email: 'reactor@reactory.net' } } },
-            { sha: observed, verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } },
+            { sha: sh('git rev-parse HEAD~1', dir), commit: { committer: { email: 'reactor@reactory.net' }, verification: { verified: false, reason: 'no_user' } } },
+            { sha: observed, commit: { committer: { email: 'owner@example.com' }, verification: { verified: true, reason: 'valid' } } },
           ],
           protection: { required_signatures: { enabled: true } },
         }),
@@ -5559,7 +5572,7 @@ describe('ProcessAITicket post-publication convergence (PROCESS-002 round 4)', (
           data: { repository: { pullRequest: { reviewThreads: { nodes: [Object.assign({}, thread, { isResolved: true })] } } } },
         },
         checkRuns: { check_runs: [] },
-        commits: [{ sha: commit.sha, verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+        commits: [{ sha: commit.sha, commit: { committer: { email: 'owner@example.com' }, verification: { verified: true, reason: 'valid' } } }],
         protection: null,
         repo: 'reactorynet/demo',
       });
@@ -5682,7 +5695,7 @@ describe('ProcessAITicket post-publication convergence (PROCESS-002 round 4)', (
           data: { repository: { pullRequest: { reviewThreads: { nodes: [Object.assign({}, thread, { isResolved: true })] } } } },
         },
         checkRuns: { check_runs: [] },
-        commits: [{ sha: head, verification: { verified: true }, commit: { committer: { email: 'owner@example.com' } } }],
+        commits: [{ sha: head, commit: { committer: { email: 'owner@example.com' }, verification: { verified: true, reason: 'valid' } } }],
         protection: null,
         repo: 'reactorynet/demo',
       });
@@ -5969,8 +5982,9 @@ describe('ProcessAITicket PR #53 review findings', () => {
       expect(String(byId('postPublishMergedGate').config!.condition)).toBe("variables.postPublishState === 'merged'");
       expect(String(byId('setPostPublishMerged').config!.value)).toBe('merged');
       expect(String(byId('setPostPublishMergedState').config!.value)).toBe('MERGED');
-      // ...and the approval/merge-poll path is skipped for it.
-      expect(String(byId('prMergePathGate').config!.condition)).toBe("variables.prState !== 'MERGED'");
+      // ...and the approval/merge-poll path is skipped for it. The gate now arms on
+      // OPEN only, so MERGED takes its own terminal arm (REACTORY-302016408/20261108/378847235).
+      expect(String(byId('prMergePathGate').config!.condition)).toBe("variables.prState === 'OPEN'");
     } finally {
       removeDir(dir);
     }
@@ -6060,5 +6074,328 @@ describe('ProcessAITicket PR #53 review findings', () => {
     expect(scopedCalls).toBe(1);
     expect(observe).toContain('const scopedAlerts = tryJson');
     expect(observe).toContain('let alertsRefScoped = scopedAlerts !== null');
+  });
+});
+
+/**
+ * PROCESS-003 — REACTORY-302016408/20261113/2279880544.
+ *
+ * `.ai-agent/` is the pipeline's own scratch directory, and a REPOSITORY CAN TRACK IT.
+ * SPEECH-005's pull request #21 committed 11 files of it, so the SPEECH-006 worktree created
+ * from that merge contained SPEECH-005's `review-normalised.json` with
+ * `"verdict": "approved"` - a fresh run presenting another ticket's approval, and a publish
+ * gate that reads it would skip the reviewer entirely.
+ *
+ * Three defences are pinned here, and each of them fails on the pre-fix workflow:
+ *   1. a fresh worktree starts with an EMPTY .ai-agent, even when the base tracks it;
+ *   2. the published commit carries NO .ai-agent path;
+ *   3. run scratch state staged for publication is UNSTAGED (never committed), and a verdict
+ *      captured for a DIFFERENT run is treated as absent rather than as this run's answer.
+ *
+ * PR #80 review, R1 and R2, added two guards on the guards: the pipeline must not manufacture
+ * the work it publishes (.gitignore), and recovering from staged scratch must not be reported as
+ * a publication outcome. Both are pinned below, and both failed before the review fixes.
+ */
+describe('ProcessAITicket never inherits or publishes .ai-agent (PROCESS-003)', () => {
+  const prepareScript = scriptOf('prepareWorktree');
+  const commitScript = scriptOf('commitChanges');
+  const publishableScript = scriptOf('readPublishable');
+  const verdictScript = scriptOf('readVerdict');
+  const captureScript = scriptOf('captureReview');
+  const readinessScript = scriptOf('readPublishReadiness');
+
+  /** readPublishReadiness consumes the commit step's stdout plus the branch name. */
+  const readiness = (wt: string, commit: any): string =>
+    runScript(readinessScript, { WT: wt, BRANCH: sh('git branch --show-current', wt), COMMIT: JSON.stringify(commit) }, wt);
+
+  const scratchDir = (dir: string): string => path.join(dir, '.ai-agent');
+  const readJsonFile = (file: string): any => JSON.parse(fs.readFileSync(file, 'utf8'));
+
+  const prepare = (cwd: string, ref: string): any =>
+    runJson(prepareScript, { CWD: cwd, REF: ref, REQUEST_TYPE: 'bug', TASK_TYPE: 'feature' }, cwd);
+
+  /**
+   * The contaminated shape: a repository whose default branch TRACKS `.ai-agent`, which is
+   * how reactory-speech-service looked after e84201a.
+   */
+  const repoWithTrackedScratch = (options: { gitignore?: string } = {}): { root: string; repo: string } => {
+    const root = tempDir('pa-scratch-');
+    const remote = path.join(root, 'origin.git');
+    sh('git init -q --bare -b master "' + remote + '"', root);
+
+    const seed = path.join(root, 'seed');
+    fs.mkdirSync(seed, { recursive: true });
+    initRepo(seed);
+    // R1's precondition: a tracked .gitignore that does NOT ignore .ai-agent/. Most
+    // repositories look like this, and the pipeline used to append the rule to it.
+    if (options.gitignore !== undefined) {
+      fs.writeFileSync(path.join(seed, '.gitignore'), options.gitignore, 'utf8');
+    }
+    fs.mkdirSync(path.join(seed, '.ai-agent'), { recursive: true });
+    fs.writeFileSync(
+      path.join(seed, '.ai-agent', 'review-normalised.json'),
+      JSON.stringify({ verdict: 'approved', findingsResolved: true, runId: 'a-different-run' }),
+      'utf8',
+    );
+    fs.writeFileSync(
+      path.join(seed, '.ai-agent', 'run-status.json'),
+      JSON.stringify({ status: 'completed', runId: 'a-different-run' }),
+      'utf8',
+    );
+    sh('git add -A && git commit -qm "previous run committed its own scratch state"', seed);
+    sh('git remote add origin "' + remote + '"', seed);
+    sh('git push -q origin master', seed);
+
+    const repo = path.join(root, 'repo');
+    sh('git clone -q "' + remote + '" "' + repo + '"', root);
+    sh('git config user.email test@example.com', repo);
+    sh('git config user.name Test', repo);
+    sh('git config commit.gpgsign false', repo);
+    return { root, repo };
+  };
+
+  it('starts a fresh worktree with an EMPTY .ai-agent even when the base branch tracks it', () => {
+    const ctx = repoWithTrackedScratch();
+    try {
+      // The base really does track the directory: this is the defect's precondition.
+      expect(sh('git ls-files .ai-agent', ctx.repo).split('\n').filter(Boolean).length).toBe(2);
+
+      const out = prepare(ctx.repo, 'REACTORY-1/20260101/1');
+
+      // A.1: nothing inherited survives - only this run's own identity is present.
+      expect(fs.readdirSync(scratchDir(out.worktreePath))).toEqual(['run-identity.json']);
+      expect(fs.existsSync(path.join(scratchDir(out.worktreePath), 'review-normalised.json'))).toBe(false);
+      expect(out.scratch.inheritedFiles).toBe(2);
+      expect(out.scratch.inheritedTracked).toBe(2);
+      // B.1: the identity is minted once, recorded on the run, and written into the worktree.
+      const identity = readJsonFile(path.join(scratchDir(out.worktreePath), 'run-identity.json'));
+      expect(identity.runId).toBe(out.runId);
+      expect(identity.runId).toMatch(/^[0-9a-f]{32}$/);
+      // The inheritance is reported rather than silently cleaned.
+      expect(out.warnings.join(' ')).toMatch(/inherited \.ai-agent/);
+    } finally {
+      removeDir(ctx.root);
+    }
+  });
+
+  it('publishes NO .ai-agent change for work committed in that worktree', () => {
+    const ctx = repoWithTrackedScratch();
+    try {
+      const out = prepare(ctx.repo, 'REACTORY-1/20260101/2');
+      const wt = out.worktreePath;
+      fs.writeFileSync(path.join(wt, 'work.txt'), 'the actual change\n', 'utf8');
+
+      const result = runJson(commitScript, { WT: wt, REF: 'REACTORY-1/20260101/2' }, wt);
+
+      expect(result.committed).toBe(true);
+      const files = sh('git show --name-only --pretty=format: HEAD', wt).split('\n').filter(Boolean);
+      expect(files).toContain('work.txt');
+      // Neither this run's artefacts nor a deletion of the inherited ones reach the branch.
+      expect(files.join(' ')).not.toContain('.ai-agent');
+    } finally {
+      removeDir(ctx.root);
+    }
+  });
+
+  it('never manufactures the work it publishes: no engineer change means no commit (R1)', () => {
+    // PR #80 review, R1. prepareWorktree used to APPEND ".ai-agent/" to a tracked .gitignore
+    // before the engineer started. commitChanges decides "worktree clean" from
+    // `git status --porcelain -- . ":(exclude).ai-agent"`, which then showed ` M .gitignore`,
+    // so a run whose engineer produced nothing committed a .gitignore-only change and
+    // published it - instead of stopping at "worktree clean" the way master does.
+    const ctx = repoWithTrackedScratch({ gitignore: 'node_modules/\n' });
+    try {
+      const out = prepare(ctx.repo, 'REACTORY-1/20260101/5');
+      const wt = out.worktreePath;
+
+      // The rule was REPORTED, not written: the file is byte-identical to the base.
+      expect(sh('cat .gitignore', wt)).toBe('node_modules/');
+      expect(out.scratch.gitignoreIgnores).toBe(false);
+      expect(out.warnings.join(' ')).toMatch(/does not ignore \.ai-agent/);
+      // And the worktree is clean, so nothing of the pipeline's own doing is 'work'.
+      expect(sh('git status --porcelain -- . ":(exclude).ai-agent"', wt)).toBe('');
+
+      const result = runJson(commitScript, { WT: wt, REF: 'REACTORY-1/20260101/5' }, wt);
+
+      expect(result.committed).toBe(false);
+      expect(result.reason).toBe('worktree clean');
+      expect(sh('git rev-list --count origin/master..HEAD', wt)).toBe('0');
+      // And the publication gate agrees there is nothing to publish.
+      expect(readiness(wt, result)).toBe('blocked');
+    } finally {
+      removeDir(ctx.root);
+    }
+  });
+
+  it('treats the ignore rule as a recommendation, not a rewrite', () => {
+    const ctx = repoWithTrackedScratch({ gitignore: 'node_modules/\n' });
+    try {
+      const out = prepare(ctx.repo, 'REACTORY-1/20260101/6');
+      // git check-ignore is authoritative: an equivalent spelling is recognised rather than
+      // duplicated, and a per-clone exclude counts too (PR #80 review, nit 4).
+      sh('printf "**/.ai-agent/\\n" >> .gitignore && git add -A && git commit -qm ignore', out.worktreePath);
+      const again = prepare(ctx.repo, 'REACTORY-1/20260101/6');
+      expect(again.scratch.gitignoreIgnores).toBe(true);
+      expect(again.warnings.join(' ')).not.toMatch(/does not ignore \.ai-agent/);
+      expect(sh('grep -c "ai-agent" .gitignore', out.worktreePath)).toBe('1');
+    } finally {
+      removeDir(ctx.root);
+    }
+  });
+
+  it('unstages run scratch state instead of failing the publication, and never commits it (R2)', () => {
+    // PR #80 review, R2. This used to exit 1 with reason "run scratch state staged". That
+    // refused a state the code below already neutralises, and it broke publication twice over:
+    // readPublishReadiness classifies a failed commit with /fail/i.test(reason), which that
+    // reason does not match, so with 0 commits ahead the operator was told "there was nothing
+    // to publish" while the work sat uncommitted - and on the re-publish path (1+ ahead) the
+    // cycle was cleared to push an unchanged tip and accounted as a published fix.
+    // A repository with NO .gitignore is the trigger: the engineer's `git add -A` stages the
+    // pipeline's own directory.
+    const ctx = repoWithTrackedScratch();
+    try {
+      const out = prepare(ctx.repo, 'REACTORY-1/20260101/3');
+      const wt = out.worktreePath;
+      fs.writeFileSync(path.join(wt, '.ai-agent', 'report.json'), '{"status":"completed"}\n', 'utf8');
+      fs.writeFileSync(path.join(wt, 'fix.txt'), 'the actual fix\n', 'utf8');
+      sh('git add -A', wt);
+      expect(sh('git diff --cached --name-only', wt)).toContain('.ai-agent/report.json');
+
+      // First publication: 0 commits ahead.
+      const first = runJson(commitScript, { WT: wt, REF: 'REACTORY-1/20260101/3' }, wt);
+
+      expect(first.committed).toBe(true);
+      // The scratch is REPORTED (evidence + warning) rather than silently dropped...
+      expect(String(first.scratchUnstaged || []).toString()).toContain('.ai-agent/report.json');
+      const evidence = readJsonFile(path.join(scratchDir(wt), 'scratch-unstaged.json'));
+      expect(evidence.reason).toBe('run scratch state staged');
+      expect(evidence.unstaged.join(' ')).toContain('.ai-agent/report.json');
+      expect(String(evidence.message)).toMatch(/gitignore/);
+      // ...and the real work is COMMITTED, without any scratch alongside it.
+      const firstFiles = sh('git show --name-only --pretty=format: HEAD', wt).split('\n').filter(Boolean);
+      expect(firstFiles).toContain('fix.txt');
+      expect(firstFiles.join(' ')).not.toContain('.ai-agent');
+      expect(sh('git rev-list --count origin/master..HEAD', wt)).toBe('1');
+
+      // The gate the old refusal lied to: a commit exists, and it carries the work.
+      expect(readiness(wt, first)).toBe('ok');
+      expect(readJsonFile(path.join(scratchDir(wt), 'publish-readiness.json')).commitsAhead).toBe(1);
+
+      // Re-publish path: already 1 ahead, another fix plus staged scratch again.
+      fs.writeFileSync(path.join(wt, 'fix2.txt'), 'the second fix\n', 'utf8');
+      fs.writeFileSync(path.join(wt, '.ai-agent', 'post-publish-findings.json'), '{"cycle":1}\n', 'utf8');
+      sh('git add -A', wt);
+      const second = runJson(commitScript, { WT: wt, REF: 'REACTORY-1/20260101/3' }, wt);
+
+      expect(second.committed).toBe(true);
+      expect(sh('git show --name-only --pretty=format: HEAD', wt)).toContain('fix2.txt');
+      expect(sh('git rev-list --count origin/master..HEAD', wt)).toBe('2');
+      // The decisive assertion: the branch diff carries NO .ai-agent path at all, in either
+      // commit, so 'ok' can never mean "pushed a tip whose fix was never committed".
+      expect(sh('git diff --name-only origin/master..HEAD', wt)).not.toContain('.ai-agent');
+      expect(readiness(wt, second)).toBe('ok');
+      expect(readJsonFile(path.join(scratchDir(wt), 'publish-readiness.json')).commitsAhead).toBe(2);
+    } finally {
+      removeDir(ctx.root);
+    }
+  });
+
+  it('does not honour an APPROVED verdict captured for a different run', () => {
+    const own = repoWithWork();
+    const other = repoWithWork();
+    try {
+      // A complete, pipeline-accepted approval in its own run.
+      writeReport(own, { status: 'completed', summary: 'done', changes: [{ file: 'a.ts', description: 'd' }] });
+      writeReview(own, { verdict: 'approved', summary: 'looks good' });
+      // captureReview writes the review-normalised.json side-car, exactly as a real run does.
+      expect(runJson(captureScript, { WT: own }, own).verdict).toBe('approved');
+      expect(runScript(verdictScript, { WT: own }, own)).toBe('approved');
+      expect(runScript(publishableScript, { WT: own }, own)).toBe('true');
+
+      // The same four artefacts in a run that never reviewed anything - exactly what a
+      // worktree created from a branch that tracks .ai-agent inherits.
+      openReviewWindow(other);
+      const otherIdentity = readJsonFile(path.join(scratchDir(other), 'run-identity.json'));
+      ['review.json', 'review-window.json', 'review-accepted.json', 'review-normalised.json'].forEach((name) => {
+        fs.copyFileSync(path.join(scratchDir(own), name), path.join(scratchDir(other), name));
+      });
+
+      const copied = readJsonFile(path.join(scratchDir(other), 'review-normalised.json'));
+      expect(copied.verdict).toBe('approved');
+      expect(copied.runId).not.toBe(otherIdentity.runId);
+
+      // B.2: a foreign runId is ABSENT, so the run falls through to "never reviewed" and the
+      // reviewer runs again. A mismatch is never read as an approval.
+      expect(runScript(verdictScript, { WT: other }, other)).toBe('review_unavailable');
+      expect(runScript(publishableScript, { WT: other }, other)).toBe('false');
+      const decision = readJsonFile(path.join(scratchDir(other), 'publish-decision.json'));
+      expect(decision.outcome).toBe('review_unavailable');
+      expect(decision.publishable).toBe(false);
+    } finally {
+      removeDir(own);
+      removeDir(other);
+    }
+  });
+
+  it('keeps one run-provenance guard, byte-identical, in every step that touches .ai-agent', () => {
+    const open = '// >>> shared run identity';
+    const close = '// <<< shared run identity';
+    const holders = all.filter((step) => String(((step.config || {}).args || [])[1] || '').includes(open));
+
+    // prepareWorktree, prepareReview, stampReview, captureReview, readVerdict, readPublishable,
+    // the two loop gates, the hand-back brief, the two narratives, readReportStatus, the
+    // confirmation gate and the workspace note.
+    expect(holders.length).toBeGreaterThanOrEqual(14);
+
+    const blocks = holders.map((step) => {
+      const script = String(step.config.args[1]);
+      const start = script.indexOf(open);
+      const end = script.indexOf(close, start);
+      expect(end).toBeGreaterThan(start);
+      return script.slice(start, end + close.length)
+        .split('\n')
+        .map((line) => line.trim())
+        .join('\n');
+    });
+    blocks.forEach((block) => expect(block).toBe(blocks[0]));
+
+    // And the decision-bearing readers actually go through it.
+    ['readVerdict', 'readPublishable', 'readFindingsGate', 'readRequiredWork', 'readReportStatus'].forEach((id) => {
+      expect(String(byId(id).config.args[1])).toContain('readRunArtefact');
+    });
+  });
+
+  it('never lets a re-dispatched ticket in a REUSED worktree inherit the previous approval', () => {
+    const ctx = repoWithTrackedScratch();
+    try {
+      const ref = 'REACTORY-1/20260101/4';
+      const first = prepare(ctx.repo, ref);
+      const wt = first.worktreePath;
+      const previous = readJsonFile(path.join(scratchDir(wt), 'run-identity.json')).runId;
+
+      // The first dispatch reviewed and approved its own work.
+      writeReport(wt, { status: 'completed', summary: 'done', changes: [{ file: 'work.txt', description: 'd' }] });
+      writeReview(wt, { verdict: 'approved', summary: 'looks good' });
+      expect(runJson(captureScript, { WT: wt }, wt).verdict).toBe('approved');
+      expect(runScript(verdictScript, { WT: wt }, wt)).toBe('approved');
+
+      // The SAME ticket is dispatched again - the worktree path is keyed on the ticket, so
+      // the second run lands in it with the first run's approval on disk. Its own report
+      // must survive (nothing is deleted), but the approval must not answer for it.
+      const second = prepare(ctx.repo, ref);
+      expect(second.worktreePath).toBe(wt);
+      expect(fs.existsSync(path.join(scratchDir(wt), 'review-normalised.json'))).toBe(true);
+      expect(second.runId).not.toBe(previous);
+      expect(second.scratch.rotatedFrom).toBe(previous);
+      expect(second.scratch.cleared).toBe(false);
+      expect(second.warnings.join(' ')).toMatch(/carried run identity/);
+
+      // B.2: the previous dispatch's approval is now a foreign artefact, so the run has to
+      // review again instead of publishing on it.
+      expect(runScript(verdictScript, { WT: wt }, wt)).toBe('review_unavailable');
+      expect(runScript(publishableScript, { WT: wt }, wt)).toBe('false');
+    } finally {
+      removeDir(ctx.root);
+    }
   });
 });
