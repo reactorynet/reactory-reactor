@@ -56,14 +56,21 @@ const ProjectDocumentationWidget: ReactorProjectDocumentationWidget = (props) =>
     }
   }, [content, url]);
 
-  return (    
-    <Box sx={{ padding: 2 }}>      
+  return (
+    <Box sx={{ padding: 2 }}>
       <Paper elevation={3} sx={{ padding: 2 }}>
-        <Box display="flex" alignItems="center" mb={2}>
+        <Box
+          sx={{
+            display: "flex",
+            alignItems: "center",
+            mb: 2
+          }}>
           {createdBy && (
             <Avatar src={createdBy.avatar} alt={`${createdBy.firstName} ${createdBy.lastName}`} />
           )}
-          <Box ml={2}>
+          <Box sx={{
+            ml: 2
+          }}>
             <Typography variant="h6">{title}</Typography>
             <Typography variant="subtitle1" color="textSecondary">
               Created by {createdBy ? `${createdBy.firstName} ${createdBy.lastName}` : 'Unknown'} on {new Date(created).toLocaleDateString()}

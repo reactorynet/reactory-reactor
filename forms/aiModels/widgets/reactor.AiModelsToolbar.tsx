@@ -180,19 +180,21 @@ const AiModelsToolbar = (props: AiModelsToolbarProps) => {
             onChange={(event: any) => setSearchInput(event.target.value)}
             onKeyPress={handleKeyPress}
             sx={{ flex: 1, minWidth: 240 }}
-            InputProps={{
-              startAdornment: SearchIcon && (
-                <InputAdornment position="start">
-                  <SearchIcon />
-                </InputAdornment>
-              ),
-              endAdornment: searchInput && ClearIcon && (
-                <InputAdornment position="end">
-                  <IconButton size="small" onClick={handleClearSearch}>
-                    <ClearIcon />
-                  </IconButton>
-                </InputAdornment>
-              ),
+            slotProps={{
+              input: {
+                startAdornment: SearchIcon && (
+                  <InputAdornment position="start">
+                    <SearchIcon />
+                  </InputAdornment>
+                ),
+                endAdornment: searchInput && ClearIcon && (
+                  <InputAdornment position="end">
+                    <IconButton size="small" onClick={handleClearSearch}>
+                      <ClearIcon />
+                    </IconButton>
+                  </InputAdornment>
+                ),
+              }
             }}
           />
           <Button variant="outlined" onClick={handleSearch} startIcon={SearchIcon && <SearchIcon />}>
