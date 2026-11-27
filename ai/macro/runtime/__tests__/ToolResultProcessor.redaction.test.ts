@@ -345,3 +345,128 @@ describe('ToolResultProcessor — string payloads and the depth ceiling', () => 
     expect(serialised).toContain('[DEPTH-LIMIT]');
   });
 });
+describe('ToolResultProcessor — nested strings, detached results and auth headers', () => {
+  it('redacts credentials inside a JSON string nested in data (graphql format: string)', () => {
+    const rawResult = {
+      success: true,
+      data: {
+        result: JSON.stringify({ user: { email: 'ada@example.com', password: 'pbkdf2$1$a$b' } }),
+      },
+    };
+
+    const processed = ToolResultProcessor.process('queryGQL', {}, rawResult, undefined, undefined, {
+      maxOutputSize: 20000,
+    });
+
+    const nested = JSON.parse(processed.result.data.result);
+    expect(nested.user.email).toBe('ada@example.com');
+    expect(nested.user.password).toBe(ToolResultProcessor.REDACTED);
+    expect(JSON.stringify(processed.result)).not.toContain('pbkdf2');
+  });
+
+  it('scrubs credentials from free text nested in data (shell stdout)', () => {
+    const rawResult = {
+      success: true,
+      data: {
+        stdout: 'clientSecret=abc123\nauthorization: Bearer live-token\nstatus: ok',
+        exitCode: 0,
+      },
+    };
+
+    const processed = ToolResultProcessor.process('shell', {}, rawResult, undefined, undefined, {
+      maxOutputSize: 20000,
+    });
+
+    const stdout: string = processed.result.data.stdout;
+    expect(stdout).not.toContain('abc123');
+    expect(stdout).not.toContain('live-token');
+    expect(stdout).toContain('authorization: Bearer [REDACTED]');
+    expect(stdout).toContain('status: ok');
+    expect(processed.result.data.exitCode).toBe(0);
+  });
+
+  it('returns a clean nested JSON string byte-for-byte', () => {
+    // Re-serialising would round the integer and drop the spacing.
+    const original = '{ "id": 12345678901234567890, "name": "kept" }';
+    const processed = ToolResultProcessor.process(
+      'queryGQL',
+      {},
+      { success: true, data: { result: original } },
+      undefined,
+      undefined,
+      { maxOutputSize: 20000 }
+    );
+
+    expect(processed.result.data.result).toBe(original);
+  });
+
+  it('passes file content through verbatim so a read-edit-write round trip is lossless', () => {
+    const source = "const client = new Client({ apiKey: config.apiKey, token: 't' });\n";
+    const processed = ToolResultProcessor.process(
+      'ReadFile',
+      { path: 'client.ts' },
+      { success: true, data: { content: source, metadata: { size: source.length } } },
+      undefined,
+      undefined,
+      { maxOutputSize: 20000 }
+    );
+
+    expect(processed.result.data.content).toBe(source);
+  });
+
+  it('does not modify the objects it was given (state tool returns live references)', () => {
+    const persona = { name: 'reactor', config: { apiKey: 'sk-live-key', model: 'm' } };
+    const vars = { notes: 'password: hunter2', items: [{ secret: 's3cr3t' }] };
+    const rawResult = { success: true, data: { persona, vars } };
+
+    const processed = ToolResultProcessor.process('state', {}, rawResult, undefined, undefined, {
+      maxOutputSize: 20000,
+    });
+
+    // The result is redacted...
+    expect(processed.result.data.persona.config.apiKey).toBe(ToolResultProcessor.REDACTED);
+    expect(processed.result.data.vars.items[0].secret).toBe(ToolResultProcessor.REDACTED);
+    expect(processed.result.data.vars.notes).not.toContain('hunter2');
+    expect(processed.result.data.persona).not.toBe(persona);
+
+    // ...and the live session objects are untouched.
+    expect(persona.config.apiKey).toBe('sk-live-key');
+    expect(vars.notes).toBe('password: hunter2');
+    expect(vars.items[0].secret).toBe('s3cr3t');
+    expect(rawResult.data.persona).toBe(persona);
+  });
+
+  it('keeps the serialised form of a class instance with toJSON', () => {
+    class Money {
+      constructor(public amount: number, public currency: string) {}
+      toJSON() {
+        return `${this.amount} ${this.currency}`;
+      }
+    }
+
+    const redacted = ToolResultProcessor.redactSensitive({ price: new Money(5, 'USD') });
+    expect(JSON.stringify(redacted)).toBe('{"price":"5 USD"}');
+  });
+
+  it.each([
+    ['authorization: Bearer live-token', 'authorization: Bearer [REDACTED]', 'live-token'],
+    ['Authorization: Basic dXNlcjpwYXNz', 'Authorization: Basic [REDACTED]', 'dXNlcjpwYXNz'],
+    ['proxy-authorization=bearer abc.def.ghi', 'proxy-authorization=bearer [REDACTED]', 'abc.def.ghi'],
+    [
+      'curl -H "Authorization: Bearer live-token" https://api',
+      'curl -H "Authorization: Bearer [REDACTED]" https://api',
+      'live-token',
+    ],
+  ])('redacts the credential after an auth scheme: %s', (input, expected, secret) => {
+    const scrubbed = ToolResultProcessor.redactSensitiveText(input);
+    expect(scrubbed).toBe(expected);
+    expect(scrubbed).not.toContain(secret);
+  });
+
+  it('still redacts a single-word authorization value and leaves benign schemes alone', () => {
+    expect(ToolResultProcessor.redactSensitiveText('authorization=abc123')).toBe(
+      'authorization=[REDACTED]'
+    );
+    expect(ToolResultProcessor.redactSensitiveText('kind: Token holder')).toBe('kind: Token holder');
+  });
+});

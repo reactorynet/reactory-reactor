@@ -111,6 +111,17 @@ export class ToolResultProcessor {
     'setcookie',
   ]);
 
+  /**
+   * Field names whose **string** values are passed through verbatim by the walk.
+   *
+   * `content` is the file text returned by ReadFile and ReadChatFile. The textual
+   * scrub is a heuristic (`apiKey: config.apiKey` in source code is not a credential),
+   * and an agent that reads a file, edits it and writes it back must see the bytes
+   * that are on disk, or it would write the redaction marker into the file. Key-based
+   * redaction still applies inside these values when they are objects.
+   */
+  private static readonly VERBATIM_TEXT_KEYS: ReadonlySet<string> = new Set(['content']);
+
   /** Normalise a field name for comparison (case and punctuation insensitive). */
   private static normaliseKey(key: string): string {
     return String(key).replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
@@ -125,12 +136,18 @@ export class ToolResultProcessor {
    * Deep-walk a tool result and replace credential values with the redaction marker.
    *
    * Applied to the whole result, which covers the three surfaces a macro returns:
-   * `data` (the payload), `metadata` and the echoed `params`. It is deliberately
-   * key-based and in place: the shape is preserved (the key survives, its value becomes
-   * the marker) so existing consumers and renders keep working, and nothing that was
-   * not already a credential changes identity. Arrays and nested objects are walked.
+   * `data` (the payload), `metadata` and the echoed `params`. The shape is preserved
+   * (the key survives, its value becomes the marker) so existing consumers and renders
+   * keep working. Arrays and nested objects are walked.
    *
    * Safety properties:
+   *  - **Detached**: the result is a copy; the input is never modified. Tools such as
+   *    `state` return live objects (`state.persona`, `state.vars`) by reference, and
+   *    redacting those in place would overwrite the session's own configuration.
+   *  - **Nested strings**: string leaves go through {@link redactSensitiveText}, so a
+   *    JSON document carried as a string (`data.result` from graphql) or free text
+   *    (`data.stdout` from shell) is scrubbed like a top-level string result. Values
+   *    under {@link VERBATIM_TEXT_KEYS} are the exception.
    *  - **Cycles**: a repeated object reference becomes the circular marker; the walk
    *    terminates and `JSON.stringify` still succeeds downstream.
    *  - **Very large objects**: traversal is bounded in depth, so it is O(nodes) time
@@ -145,9 +162,26 @@ export class ToolResultProcessor {
     return ToolResultProcessor.redactNode(value, 0, new WeakSet<object>()) as T;
   }
 
-  private static redactNode(value: any, depth: number, seen: WeakSet<object>): any {
+  private static redactNode(
+    value: any,
+    depth: number,
+    seen: WeakSet<object>,
+    key?: string
+  ): any {
     if (value === null || value === undefined) return value;
+    if (typeof value === 'string') {
+      if (
+        key !== undefined &&
+        ToolResultProcessor.VERBATIM_TEXT_KEYS.has(ToolResultProcessor.normaliseKey(key))
+      ) {
+        return value;
+      }
+      return ToolResultProcessor.redactSensitiveText(value);
+    }
     if (typeof value !== 'object') return value;
+    // Map and Set have no own enumerable keys and serialise to `{}`; they were never
+    // walked, so they are returned as they are rather than rebuilt as plain objects.
+    if (value instanceof Map || value instanceof Set) return value;
 
     // Values whose JSON form is already scalar/safe - do not walk their internals.
     if (value instanceof Date) return value;
@@ -178,22 +212,32 @@ export class ToolResultProcessor {
         return ToolResultProcessor.DEPTH_LIMIT;
       }
 
+      // Build detached copies: the caller's objects are never written to.
       if (Array.isArray(node)) {
+        const copy = new Array(node.length);
         for (let index = 0; index < node.length; index += 1) {
-          node[index] = ToolResultProcessor.redactNode(node[index], depth + 1, seen);
+          // Elements inherit the array's key, so `content: [...]` stays verbatim too.
+          copy[index] = ToolResultProcessor.redactNode(node[index], depth + 1, seen, key);
         }
-        return node;
+        return copy;
       }
 
-      for (const key of Object.keys(node)) {
-        if (ToolResultProcessor.isSensitiveKey(key)) {
-          node[key] = ToolResultProcessor.REDACTED;
-          continue;
-        }
-        node[key] = ToolResultProcessor.redactNode(node[key], depth + 1, seen);
+      // Same prototype, so a `toJSON` (and therefore the serialised form) is kept.
+      // Properties are defined rather than assigned, so no inherited setter runs.
+      const copy = Object.create(Object.getPrototypeOf(node));
+      for (const childKey of Object.keys(node)) {
+        const childValue = ToolResultProcessor.isSensitiveKey(childKey)
+          ? ToolResultProcessor.REDACTED
+          : ToolResultProcessor.redactNode(node[childKey], depth + 1, seen, childKey);
+        Object.defineProperty(copy, childKey, {
+          value: childValue,
+          enumerable: true,
+          writable: true,
+          configurable: true,
+        });
       }
 
-      return node;
+      return copy;
     } finally {
       seen.delete(node);
     }
@@ -203,18 +247,32 @@ export class ToolResultProcessor {
    * Matches a `key: value` / `key=value` pair in free text, so credential material can
    * be found in a payload that is not structured JSON (shell output, a rendered table,
    * `util.inspect` output, an HTML snippet).
+   *
+   * The value alternatives are tried in order: a quoted string, an HTTP auth scheme
+   * followed by its credential (`Bearer <token>`, `Basic <base64>`), then a single
+   * unquoted word. Without the scheme alternative, `authorization: Bearer live-token`
+   * matched only `Bearer`, and the token itself was left in the text.
    */
   private static readonly CREDENTIAL_TEXT_PATTERN =
-    /("?[A-Za-z0-9_.-]+"?\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|[^\s,;\]})]+)/g;
+    /("?[A-Za-z0-9_.-]+"?\s*[:=]\s*)("[^"\n]*"|'[^'\n]*'|(?:Bearer|Basic|Digest|Token|Negotiate|NTLM)[ \t]+[^\s,;\]})"']+|[^\s,;\]})]+)/gi;
+
+  /** An HTTP auth scheme at the start of a matched value, kept when the value is redacted. */
+  private static readonly AUTH_SCHEME_PREFIX = /^(?:Bearer|Basic|Digest|Token|Negotiate|NTLM)[ \t]+/i;
 
   /** A PBKDF2 password hash is recognisable by its algorithm prefix, wherever it sits. */
   private static readonly CREDENTIAL_VALUE_PATTERN = /pbkdf2\S*/gi;
 
-  /** Textual replacement keeps the value quoted when it was quoted. */
+  /**
+   * Textual replacement keeps the value quoted when it was quoted, and keeps the auth
+   * scheme (`Bearer [REDACTED]`) so the text still says what kind of credential it was.
+   */
   private static redactTextPair(_match: string, prefix: string, rawValue: string): string {
     const name = prefix.replace(/["'\s:=]/g, '');
     const leaf = name.split('.').pop() || name;
     if (!ToolResultProcessor.isSensitiveKey(leaf)) return _match;
+
+    const scheme = rawValue.match(ToolResultProcessor.AUTH_SCHEME_PREFIX);
+    if (scheme) return `${prefix}${scheme[0]}${ToolResultProcessor.REDACTED}`;
 
     const first = rawValue.charAt(0);
     const quote = first === '"' || first === "'" ? first : '';
@@ -247,7 +305,11 @@ export class ToolResultProcessor {
         if (parsed !== null && typeof parsed === 'object') {
           const redacted = ToolResultProcessor.redactSensitive(parsed);
           const indentMatch = value.match(/\n([ \t]+)\S/);
-          return JSON.stringify(redacted, null, indentMatch ? indentMatch[1] : undefined);
+          const indent = indentMatch ? indentMatch[1] : undefined;
+          const serialised = JSON.stringify(redacted, null, indent);
+          // Nothing was redacted: return the original text, so a clean document is not
+          // reformatted and large integers are not rounded by the parse.
+          return serialised === JSON.stringify(parsed, null, indent) ? value : serialised;
         }
       } catch {
         // Not JSON: fall through to the textual scrub rather than persisting it raw.
